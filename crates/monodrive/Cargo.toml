@@ -27,3 +27,11 @@ gpui_apple = { package = "gpui-pre-apple", version = "=0.3.9" }
 
 [dev-dependencies]
 tempfile = "3"
+# GPUI's Criterion benchmarks: `#[gpui::bench]` and the headless Metal renderer.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["bench"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["font-kit", "runtime_shaders", "bench-support"] }
+
+[[bench]]
+name = "scrolling"
+harness = false
