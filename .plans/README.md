@@ -2,6 +2,36 @@
 
 Reviewed against the code on 2026-10-29. These are local implementation plans, not a claim that proposed features exist. This revision authorizes planning only.
 
+## Tracker
+
+Update a plan's row when its work lands on `main`.
+
+| Plan | Status | Commits |
+|---|---|---|
+| 01 Performance baseline | Done | |
+| 02 Selection | Done | |
+| 03 File operations | Planned | |
+| 04 Editing commands | Planned | |
+| 05 Context menu | Planned | |
+| 06 Quick Look | Planned | |
+| 07 Places, drives and NAS | Planned | |
+| 08 Tabs and panes | Planned | |
+| 09 Drag and drop | Planned | |
+| 10 Open With and Get Info | Planned | |
+| 11 Search | Planned | |
+| 12 Batch rename | Planned | |
+| 13 Archives | Planned | |
+| 14 Remote locations | Planned | |
+| 15 File and folder comparison | Planned | |
+| 16 Offline catalogs | Planned | |
+| 17 Storage inspection | Planned | |
+| 18 Cloud storage | Planned | |
+| 19 More views | Planned | |
+| 20 Browsing workspaces | Planned | |
+| 21 Extensions | Planned | |
+| 22 Worktree management | Planned | |
+| 23 Agent features | Later | |
+
 ## Current state
 
 - List and grid views, sorting, hidden files, thumbnails, folder tree, navigation history, Go to Folder, command palette, settings, and FSEvents updates exist.
