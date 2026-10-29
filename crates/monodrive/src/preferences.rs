@@ -19,7 +19,8 @@ pub enum Theme {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WindowSize {
-    /// 60% of the screen each way, centered, as Raycast's Reasonable Size.
+    /// 60% of the screen each way, at most 1025 × 900, centered, as
+    /// Tinycast's Reasonable Size.
     Reasonable,
     /// 90% of the screen each way, centered.
     AlmostFull,

@@ -626,7 +626,9 @@ impl SettingsView {
                 None,
                 vec![row(
                     "Default size",
-                    Some("Reasonable is 60% of the screen and Almost Full 90%, centered."),
+                    Some(
+                        "Reasonable is 60% of the screen, up to 1025 × 900, and Almost Full 90%, centered.",
+                    ),
                     self.focusable(
                         "window-size",
                         true,
