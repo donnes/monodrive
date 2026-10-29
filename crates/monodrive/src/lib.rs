@@ -11,6 +11,8 @@ mod goto;
 mod palette;
 mod palettes;
 pub mod preferences;
+#[cfg(feature = "profile")]
+mod profile;
 mod settings;
 mod text_field;
 mod theme;
@@ -34,6 +36,8 @@ pub fn run(folder: Option<PathBuf>) {
     gpui::Application::with_platform(platform)
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
+            #[cfg(feature = "profile")]
+            profile::start(cx);
             preferences::init(cx);
             commands::apply(cx);
             // A changed shortcut rebuilds the keymap and the menu bar; Show
@@ -122,6 +126,8 @@ pub fn run(folder: Option<PathBuf>) {
                     view.update(cx, |browser, cx| browser.track_frame(window, cx));
                     window.activate_window();
                     window.on_next_frame(|_, cx| commands::menus_ready(cx));
+                    #[cfg(feature = "profile")]
+                    profile::on_launch(&view, window, cx);
                     view
                 },
             )

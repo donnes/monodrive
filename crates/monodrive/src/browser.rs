@@ -288,6 +288,11 @@ impl Browser {
         browser
     }
 
+    /// A listing or search is on its way.
+    pub fn is_listing(&self) -> bool {
+        self.listing
+    }
+
     fn folder(&self) -> &Path {
         &self.history[self.at]
     }
