@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Rebuilds Monodrive and relaunches it on the same folder whenever its
+# source changes. A build that fails leaves the last app running.
+#
+#   scripts/dev [folder]
+#
+# It stops only the app it started, by the PID it recorded, and that app
+# goes too when you press Ctrl-C. Needs watchexec (`brew install watchexec`).
+set -euo pipefail
+# A relative folder means from where you ran this, so resolve it first.
+[[ ${1:-} == --relaunch ]] || folder=$(cd "${1:-$HOME}" && pwd)
+cd "$(dirname "$0")/.."
+
+pid_file=target/dev.pid
+app=target/debug/Monodrive.app/Contents/MacOS/monodrive
+
+# A process's start time, which tells it apart from a later one that
+# reuses its PID.
+started() {
+  ps -o lstart= -p "$1" 2>/dev/null | xargs
+}
+
+# Stops the app this script started, if it's still that app.
+stop() {
+  [[ -f $pid_file ]] || return 0
+  read -r pid when < "$pid_file"
+  if [[ -n $when && $(started "$pid") == "$when" ]]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+}
+
+# watchexec calls back here on every change.
+if [[ ${1:-} == --relaunch ]]; then
+  scripts/bundle >/dev/null || exit 0
+  stop
+  "$app" "$2" > target/dev.log 2>&1 &
+  echo "$! $(started $!)" > "$pid_file"
+  echo "Monodrive is running as $!; its output goes to target/dev.log."
+  exit 0
+fi
+
+command -v watchexec >/dev/null || {
+  echo "scripts/dev needs watchexec: brew install watchexec" >&2
+  exit 1
+}
+trap stop EXIT
+# A save during a build runs once more after it, rather than being lost.
+# No shell in between, so a folder with spaces stays one argument.
+watchexec --watch crates --watch Cargo.toml --exts rs,toml --debounce 300ms \
+  --on-busy-update=queue --shell=none -- scripts/dev --relaunch "$folder"

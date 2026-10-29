@@ -6,7 +6,6 @@ cd "$(dirname "$0")/.."
 
 PROJECT=assets/prod/app-icon.icon
 UNIVERSAL=assets/prod/monodrive-universal-1024.png
-MACOS=assets/prod/monodrive-macos-1024.png
 DESIGN_GENERATION=26
 
 check=false
@@ -77,10 +76,9 @@ if $check; then
     echo "$UNIVERSAL is stale. Run scripts/icons." >&2
     exit 1
   fi
-  echo "$UNIVERSAL matches $PROJECT. Icon Composer can't check $MACOS from the command line."
+  echo "$UNIVERSAL matches $PROJECT."
   exit 0
 fi
 
 mv "$scratch/universal.png" "$UNIVERSAL"
 echo "Wrote $UNIVERSAL with $tool."
-echo "The macOS icon is exported by hand. If $PROJECT changed, export $MACOS again; see assets/README.md."
