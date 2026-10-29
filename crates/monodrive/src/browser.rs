@@ -7,6 +7,7 @@ use crate::file_icons;
 use crate::goto::{GotoEvent, GotoView};
 use crate::palette::{PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, View, WorkspaceStyle};
+use crate::selection::Selection;
 use crate::settings::{self, SettingsView};
 use crate::text_field::{self, TextField};
 use crate::theme::{self, accent, content, icon, icon_button, on_accent, section_label};
@@ -15,11 +16,11 @@ use crate::traffic_lights;
 use chrono::{DateTime, Local};
 use gpui::RenderImage;
 use gpui::{
-    Action, App, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
-    FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Keystroke, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollStrategy, Task, UniformListScrollHandle,
-    Window, WindowAppearance, WindowControlArea, actions, canvas, div, prelude::*, px,
-    uniform_list,
+    Action, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
+    FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollStrategy,
+    ScrollWheelEvent, Task, UniformListScrollHandle, Window, WindowAppearance, WindowControlArea,
+    actions, canvas, div, prelude::*, px, uniform_list,
 };
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::{Index, Progress, Status};
@@ -40,6 +41,11 @@ actions!(
         SelectNext,
         SelectFirst,
         SelectLast,
+        ExtendPrevious,
+        ExtendNext,
+        ExtendLeft,
+        ExtendRight,
+        DeselectAll,
         ScrollToTop,
         ScrollToBottom,
         ExpandFolder,
@@ -94,6 +100,15 @@ pub fn bind(cx: &mut App) {
         // ← is a key handler on the list instead of a binding, since it
         // needs to know whether the key is held (see `Browser::collapse`).
         KeyBinding::new("right", ExpandFolder, Some("FileList")),
+        // ⇧ with the arrows grows the selection, as in Finder; ← and → do
+        // only in the grid, where they move sideways.
+        KeyBinding::new("shift-up", ExtendPrevious, Some("FileList")),
+        KeyBinding::new("shift-down", ExtendNext, Some("FileList")),
+        KeyBinding::new("shift-left", ExtendLeft, Some("FileList")),
+        KeyBinding::new("shift-right", ExtendRight, Some("FileList")),
+        // Select All is one action, as in AppKit: the search field selects
+        // its text, the list its entries.
+        KeyBinding::new("cmd-a", text_field::SelectAll, Some("FileList")),
         // Home, End and the page keys scroll without moving the selection,
         // as on macOS; the search field keeps them for its caret.
         KeyBinding::new("home", ScrollToTop, Some("FileList")),
@@ -185,7 +200,7 @@ pub struct Browser {
     error: Option<String>,
     /// The trimmed search text; empty while showing the folder.
     query: String,
-    selected: Option<usize>,
+    selection: Selection,
     scroll: UniformListScrollHandle,
     /// The listing or search in flight. Replacing it drops the stale one.
     loading: Task<()>,
@@ -208,6 +223,13 @@ pub struct Browser {
     /// While dragging the sidebar's edge: the sidebar's width less the
     /// pointer's x at the press, so the edge stays under the pointer.
     resizing_sidebar: Option<f32>,
+    /// A rectangle being dragged over the listing to select.
+    marquee: Option<Marquee>,
+    /// A rectangle was just dragged. GPUI still reports a click when it
+    /// ends on the entry it began on; this says it was a drag.
+    swept: bool,
+    /// Where the listing was laid out last frame, in the window.
+    list_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl Browser {
@@ -234,7 +256,7 @@ impl Browser {
                 this.rebuild();
                 // The other layout put it somewhere else; the grid shows it
                 // once it knows how many fit across.
-                this.reveal_pending = this.selected.is_some();
+                this.reveal_pending = this.selection.cursor().is_some();
             }
             cx.notify();
         })
@@ -273,7 +295,7 @@ impl Browser {
             _changes: Task::ready(()),
             error: None,
             query: String::new(),
-            selected: None,
+            selection: Selection::default(),
             scroll: UniformListScrollHandle::new(),
             loading: Task::ready(()),
             show_hidden: cx.global::<Preferences>().show_hidden,
@@ -286,6 +308,9 @@ impl Browser {
             _index_watch: Task::ready(()),
             index_hovered: false,
             resizing_sidebar: None,
+            marquee: None,
+            swept: false,
+            list_bounds: Rc::default(),
         };
         browser.reload(cx);
         browser
@@ -398,7 +423,6 @@ impl Browser {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.listing = false;
-                let kept = this.selected_path();
                 match result {
                     Ok((root, children, watch)) => {
                         this.root = root;
@@ -417,14 +441,16 @@ impl Browser {
                 // Search selects its best hit so Enter opens it. A folder
                 // selects the one just left, else keeps its selection.
                 let left = this.reselect.take();
-                this.selected = if this.query.is_empty() {
-                    left.or(kept)
-                        .and_then(|path| this.entries.iter().position(|e| e.path == path))
+                let first = if this.query.is_empty() {
+                    left.and_then(|path| this.entries.iter().position(|e| e.path == path))
                 } else {
                     (!this.entries.is_empty()).then_some(0)
                 };
+                if let Some(ix) = first {
+                    this.selection.select(&this.entries[ix]);
+                }
                 // A refresh leaves the view where it was.
-                match this.selected {
+                match this.cursor_ix() {
                     _ if quiet => {}
                     Some(ix) => this.reveal(ix, ScrollStrategy::Center),
                     None => this.scroll.scroll_to_item(0, ScrollStrategy::Top),
@@ -491,8 +517,9 @@ impl Browser {
         }));
     }
 
-    fn selected_path(&self) -> Option<PathBuf> {
-        Some(self.entries.get(self.selected?)?.path.clone())
+    /// The row the keys move from.
+    fn cursor_ix(&self) -> Option<usize> {
+        self.selection.cursor_ix(&self.entries)
     }
 
     /// Lays the tree out as rows, keeping the selection on the same entry.
@@ -502,17 +529,16 @@ impl Browser {
 
     /// `rebuild`; `follow` scrolls to the selection if rows moved it.
     fn relayout(&mut self, follow: bool) {
-        let kept = self.selected_path();
+        let before = self.cursor_ix();
         let rows = if self.query.is_empty() && self.view == View::List {
             flatten(&self.root, &self.children, &self.expanded)
         } else {
             self.root.iter().cloned().map(|entry| (entry, 0)).collect()
         };
-        let before = self.selected;
         (self.entries, self.depths) = rows.into_iter().unzip();
-        self.selected = kept.and_then(|path| self.entries.iter().position(|e| e.path == path));
+        self.selection.retain(&self.entries);
         // Rows opening above the selection push it down; keep it in view.
-        if let Some(ix) = self.selected.filter(|ix| follow && Some(*ix) != before) {
+        if let Some(ix) = self.cursor_ix().filter(|ix| follow && Some(*ix) != before) {
             self.reveal(ix, ScrollStrategy::Nearest);
         }
     }
@@ -525,12 +551,11 @@ impl Browser {
         if self.expanded.remove(&path) {
             self.expanding.remove(&path);
             self.watch.folders.remove(&path);
-            let inside = self.selected_path().is_some_and(|p| p.starts_with(&path));
-            self.rebuild();
             // A selection inside the closed folder moves to it, as in Finder.
-            if inside {
-                self.selected = self.entries.iter().position(|e| e.path == path);
+            if let Some(folder) = self.entries.iter().find(|e| e.path == path) {
+                self.selection.fold(folder);
             }
+            self.rebuild();
             cx.notify();
             return;
         }
@@ -563,12 +588,12 @@ impl Browser {
     /// → opens the selected folder in place, or steps into it if it's open.
     fn expand(&mut self, cx: &mut Context<Self>) {
         if self.view == View::Grid {
-            return self.select(Move::By(1), cx);
+            return self.select(Move::By(1), false, cx);
         }
         if !self.query.is_empty() || self.listing {
             return;
         }
-        let Some(ix) = self.selected else { return };
+        let Some(ix) = self.cursor_ix() else { return };
         match tree_step(&self.depths, ix, Arrow::Right, self.is_open_folder(ix)) {
             TreeStep::Toggle => self.toggle_folder(self.entries[ix].path.clone(), cx),
             TreeStep::Select(to) => self.select_row(to, cx),
@@ -586,18 +611,19 @@ impl Browser {
         }
         cx.stop_propagation();
         if self.view == View::Grid {
-            return self.select(Move::By(-1), cx);
+            return self.select(Move::By(-1), false, cx);
         }
         if !self.query.is_empty() || self.listing {
             return;
         }
-        let step = match self.selected {
+        let cursor = self.cursor_ix();
+        let step = match cursor {
             Some(ix) => tree_step(&self.depths, ix, Arrow::Left, self.is_open_folder(ix)),
             None => TreeStep::Up,
         };
         match step {
             TreeStep::Toggle => {
-                if let Some(ix) = self.selected {
+                if let Some(ix) = cursor {
                     self.toggle_folder(self.entries[ix].path.clone(), cx)
                 }
             }
@@ -671,7 +697,7 @@ impl Browser {
 
     fn take_pending_reveal(&mut self) {
         if std::mem::take(&mut self.reveal_pending)
-            && let Some(ix) = self.selected
+            && let Some(ix) = self.cursor_ix()
         {
             self.reveal(ix, ScrollStrategy::Center);
         }
@@ -683,9 +709,286 @@ impl Browser {
     }
 
     fn select_row(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.selected = Some(ix);
+        let Some(entry) = self.entries.get(ix) else {
+            return;
+        };
+        self.selection.select(entry);
         self.reveal(ix, ScrollStrategy::Nearest);
         cx.notify();
+    }
+
+    /// A click on row `ix`: ⌘ toggles it, ⇧ selects the range from the
+    /// anchor, and a plain click selects it alone. A double click opens.
+    fn click_entry(
+        &mut self,
+        ix: usize,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The end of a dragged rectangle, whichever GPUI reports first.
+        if std::mem::take(&mut self.swept) || self.marquee.as_ref().is_some_and(|m| m.dragging) {
+            return;
+        }
+        let Some(entry) = self.entries.get(ix) else {
+            return;
+        };
+        self.focus_list(window, cx);
+        let modifiers = event.modifiers();
+        if modifiers.platform {
+            self.selection.toggle(entry);
+        } else if modifiers.shift {
+            self.selection.extend(&self.entries, ix);
+        } else {
+            self.selection.select(entry);
+            if event.click_count() == 2 {
+                self.open_selection(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A point in the window as a point in the listing, measured from the
+    /// top left of all its rows, scrolled or not.
+    fn listing_point(&self, point: Point<Pixels>) -> Point<Pixels> {
+        let offset = self.scroll.0.borrow().base_handle.offset();
+        point - self.list_bounds.get().origin - offset
+    }
+
+    /// The rows a rectangle in listing coordinates touches, in order.
+    fn rows_in(&self, rect: Bounds<Pixels>, cx: &App) -> Vec<usize> {
+        let len = self.entries.len();
+        // The list's padding, then in the grid each row's too.
+        let (top, bottom) = (rect.top().as_f32() - 4., rect.bottom().as_f32() - 4.);
+        match self.view {
+            View::List => {
+                let height = cx.global::<Preferences>().row_size.metrics().0;
+                span(top, bottom, height, len).collect()
+            }
+            View::Grid => {
+                let across = self.across;
+                let height = grid_cell(self.grid_icon).1;
+                let (left, right) = (rect.left().as_f32() - 8., rect.right().as_f32() - 8.);
+                let columns = span(left, right, self.cell_width, across);
+                span(top, bottom, height, len.div_ceil(across))
+                    .flat_map(|row| columns.clone().map(move |column| row * across + column))
+                    .filter(|ix| *ix < len)
+                    .collect()
+            }
+        }
+    }
+
+    /// Follows the pointer while a rectangle is dragged.
+    fn drag_marquee(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(marquee) = self.marquee.as_mut() else {
+            return;
+        };
+        marquee.pointer = position;
+        self.sweep_marquee(cx);
+        self.auto_scroll(window, cx);
+    }
+
+    /// Selects what the rectangle covers, from where it began to the
+    /// pointer, once the pointer has travelled a few points.
+    fn sweep_marquee(&mut self, cx: &mut Context<Self>) {
+        let Some(pointer) = self.marquee.as_ref().map(|m| m.pointer) else {
+            return;
+        };
+        let at = self.listing_point(pointer);
+        let Some(marquee) = self.marquee.as_mut() else {
+            return;
+        };
+        marquee.end = at;
+        let travel = at - marquee.start;
+        if !marquee.dragging && travel.x.abs().max(travel.y.abs()) > px(3.) {
+            marquee.dragging = true;
+            self.selection.begin_sweep(marquee.additive);
+        }
+        if !marquee.dragging {
+            return;
+        }
+        let rect = Bounds::from_corners(marquee.start.min(&at), marquee.start.max(&at));
+        let hit = self.rows_in(rect, cx);
+        self.selection.sweep(&self.entries, &hit);
+        cx.notify();
+    }
+
+    /// Past the listing's top or bottom, a drag scrolls it a step a frame,
+    /// faster the further out the pointer is, until the pointer comes back,
+    /// the listing can't go further, or the button comes up.
+    fn auto_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(marquee) = self.marquee.as_mut().filter(|m| m.dragging && !m.scrolling) else {
+            return;
+        };
+        let bounds = self.list_bounds.get();
+        let y = marquee.pointer.y;
+        let over = if y < bounds.top() {
+            y - bounds.top()
+        } else if y > bounds.bottom() {
+            y - bounds.bottom()
+        } else {
+            return;
+        };
+        let step = px((over.as_f32() / 4.).clamp(-40., 40.));
+        {
+            let scroll = &self.scroll.0.borrow().base_handle;
+            let before = scroll.offset();
+            // Offsets run negative as the list scrolls down.
+            let mut offset = before;
+            offset.y = (offset.y - step).clamp(-scroll.max_offset().y, px(0.));
+            if offset == before {
+                return;
+            }
+            scroll.set_offset(offset);
+        }
+        marquee.scrolling = true;
+        let this = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = this.update(cx, |this, cx| this.scroll_tick(window, cx));
+        });
+        cx.notify();
+    }
+
+    /// The frame an auto-scroll step waited on: the rows under the
+    /// rectangle have moved, so sweep again, then take the next step.
+    fn scroll_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(marquee) = self.marquee.as_mut() {
+            marquee.scrolling = false;
+        }
+        self.sweep_marquee(cx);
+        self.auto_scroll(window, cx);
+    }
+
+    /// The button's up: a drag keeps what it covered, and a click on no
+    /// entry, without ⌘ or ⇧, lets go of the selection, as in Finder.
+    /// Clicks on entries select through `click_entry`.
+    fn end_marquee(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(marquee) = self.marquee.take() else {
+            return;
+        };
+        self.swept = marquee.dragging;
+        if marquee.dragging {
+            self.selection.end_sweep();
+        } else {
+            let at = self.listing_point(position);
+            let on_entry = !self.rows_in(Bounds::from_corners(at, at), cx).is_empty();
+            if !on_entry && !(modifiers.platform || modifiers.shift) {
+                self.selection.clear();
+            }
+        }
+        cx.notify();
+    }
+
+    /// The rectangle, drawn over the listing where it is now.
+    fn marquee_overlay(&self) -> Option<impl IntoElement + use<>> {
+        let marquee = self.marquee.as_ref().filter(|m| m.dragging)?;
+        let offset = self.scroll.0.borrow().base_handle.offset();
+        let corner = marquee.start.min(&marquee.end) + offset;
+        let size = marquee.end - marquee.start;
+        Some(
+            div()
+                .absolute()
+                .left(corner.x)
+                .top(corner.y)
+                .w(size.x.abs())
+                .h(size.y.abs())
+                .rounded(px(2.))
+                .bg(accent().opacity(0.15))
+                .border_1()
+                .border_color(accent().opacity(0.6)),
+        )
+    }
+
+    /// Follows a rectangle's drag through the window, as `sidebar_drag`
+    /// does, so it keeps up when the pointer leaves the listing.
+    fn marquee_drag(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let this = cx.weak_entity();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let moved = this.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        let _ = moved
+                            .update(cx, |this, cx| this.drag_marquee(event.position, window, cx));
+                    }
+                });
+                // A trackpad scroll mid-drag moves the rows under the
+                // rectangle; sweep again once the list has scrolled.
+                let scrolled = this.clone();
+                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, window, _| {
+                    if phase == DispatchPhase::Bubble {
+                        let scrolled = scrolled.clone();
+                        window.on_next_frame(move |_, cx| {
+                            let _ = scrolled.update(cx, |this, cx| this.sweep_marquee(cx));
+                        });
+                    }
+                });
+                let released = this.clone();
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                        let _ = released.update(cx, |this, cx| {
+                            this.end_marquee(event.position, event.modifiers, cx)
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// Opens what's selected: a lone folder goes in, and files open in
+    /// their apps. Several folders at once would need tabs or windows. Past
+    /// `OPEN_WITHOUT_ASKING` files it asks first, as Finder does, so ⌘A then
+    /// ↩ can't launch a whole folder.
+    fn open_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = self.selection.in_order(&self.entries);
+        if let [only] = chosen.as_slice() {
+            let ix = self.entries.iter().position(|e| e.path == only.path);
+            if let Some(ix) = ix {
+                self.open(ix, cx);
+            }
+            return;
+        }
+        let files: Vec<PathBuf> = chosen
+            .into_iter()
+            .filter(|entry| entry.kind != Kind::Dir)
+            .map(|entry| entry.path.clone())
+            .collect();
+        if files.len() <= OPEN_WITHOUT_ASKING {
+            for file in &files {
+                cx.open_with_system(file);
+            }
+            return;
+        }
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &format!("Open {} files?", files.len()),
+            Some("Each opens in its app."),
+            &["Open", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |_, cx| {
+            if answer.await == Ok(0) {
+                cx.update(|cx| {
+                    for file in &files {
+                        cx.open_with_system(file);
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     /// Starts the index with the window, as Spacedrive does, so it's ready
@@ -859,21 +1162,30 @@ impl Browser {
         }
     }
 
-    fn select(&mut self, step: Move, cx: &mut Context<Self>) {
-        let next = moved(self.selected, self.entries.len(), step);
-        // A held arrow at either end repaints nothing.
-        if next == self.selected {
+    /// Moves the cursor a `step`, selecting what it lands on, or with ⇧
+    /// (`extend`) the range from the anchor to it.
+    fn select(&mut self, step: Move, extend: bool, cx: &mut Context<Self>) {
+        let cursor = self.cursor_ix();
+        let Some(next) = moved(cursor, self.entries.len(), step) else {
+            return;
+        };
+        // A held arrow at either end repaints nothing, once the entry there
+        // is all that's selected.
+        let alone = self.selection.len() == 1 && self.selection.contains(&self.entries[next].path);
+        if !extend && Some(next) == cursor && alone {
             return;
         }
-        self.selected = next;
-        if let Some(ix) = next {
-            self.reveal(ix, ScrollStrategy::Nearest);
+        if extend {
+            self.selection.extend(&self.entries, next);
+        } else {
+            self.selection.select(&self.entries[next]);
         }
+        self.reveal(next, ScrollStrategy::Nearest);
         cx.notify();
     }
 
     /// ↑ and ↓: a row of the list, or of the grid.
-    fn select_vertically(&mut self, down: bool, cx: &mut Context<Self>) {
+    fn select_vertically(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
         let step = match (self.view, down) {
             (View::List, true) => Move::Next,
             (View::List, false) => Move::Previous,
@@ -882,7 +1194,7 @@ impl Browser {
                 Move::By(if down { across } else { -across })
             }
         };
-        self.select(step, cx);
+        self.select(step, extend, cx);
     }
 
     /// Scrolls a page, leaving the selection where it is.
@@ -1134,14 +1446,20 @@ impl Browser {
         cx.notify();
     }
 
-    /// Copies the selected item's full path, or the folder's, ready to paste
-    /// into an agent's prompt or a terminal.
+    /// Copies the selected paths, one per line in the order shown, or the
+    /// folder's, ready to paste into an agent's prompt or a terminal.
     fn copy_path(&self, cx: &mut Context<Self>) {
-        let path = self
-            .selected
-            .and_then(|ix| self.entries.get(ix))
-            .map_or_else(|| self.folder().to_path_buf(), |entry| entry.path.clone());
-        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+        let chosen = self.selection.in_order(&self.entries);
+        let text = if chosen.is_empty() {
+            self.folder().display().to_string()
+        } else {
+            let paths: Vec<String> = chosen
+                .iter()
+                .map(|e| e.path.display().to_string())
+                .collect();
+            paths.join("\n")
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
     /// The folder's path as clickable steps, from the disk to here.
@@ -1262,7 +1580,7 @@ impl Browser {
                     .on_action(cx.listener(|this, _: &FocusList, window, cx| {
                         this.focus_list(window, cx);
                         // Arrive somewhere the arrows can go on from.
-                        if this.selected.is_none() && !this.entries.is_empty() {
+                        if this.selection.is_empty() && !this.entries.is_empty() {
                             this.select_row(0, cx);
                         }
                     }))
@@ -1406,9 +1724,18 @@ impl Browser {
     }
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = match self.root.len() {
-            1 => "1 item".to_string(),
-            n => format!("{n} items"),
+        // As Finder's status bar: what's selected and the size of its files.
+        let count = match (self.selection.len(), self.entries.len()) {
+            (0, 1) => "1 item".to_string(),
+            (0, n) => format!("{n} items"),
+            (chosen, _) => match self.selection.size() {
+                0 => format!("{chosen} of {} selected", self.entries.len()),
+                size => format!(
+                    "{chosen} of {} selected, {}",
+                    self.entries.len(),
+                    format_bytes(size)
+                ),
+            },
         };
         div()
             .h(px(theme::TITLE_BAR_HEIGHT))
@@ -1473,7 +1800,7 @@ impl Browser {
                 let cells =
                     (row * across..((row + 1) * across).min(self.entries.len())).map(|ix| {
                         let entry = &self.entries[ix];
-                        let selected = self.selected == Some(ix);
+                        let selected = self.selection.contains(&entry.path);
                         let picture = (thumbs_on
                             && entry.kind == Kind::File
                             && thumbnails::is_picture(&entry.path))
@@ -1544,12 +1871,7 @@ impl Browser {
                                     )),
                             )
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                this.focus_list(window, cx);
-                                this.selected = Some(ix);
-                                if event.click_count() == 2 {
-                                    this.open(ix, cx);
-                                }
-                                cx.notify();
+                                this.click_entry(ix, event, window, cx)
                             }))
                     });
                 div().flex().px_1().children(cells).into_any_element()
@@ -1573,7 +1895,7 @@ impl Browser {
         range
             .filter_map(|ix| {
                 let entry = self.entries.get(ix)?;
-                let selected = self.selected == Some(ix);
+                let selected = self.selection.contains(&entry.path);
                 let depth = self.depths.get(ix).copied().unwrap_or(0);
                 let open = self.is_open_folder(ix);
                 let parent = searching
@@ -1644,12 +1966,7 @@ impl Browser {
                                 .child(entry.kind_label()),
                         )
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            this.focus_list(window, cx);
-                            this.selected = Some(ix);
-                            if event.click_count() == 2 {
-                                this.open(ix, cx);
-                            }
-                            cx.notify();
+                            this.click_entry(ix, event, window, cx)
                         }))
                         .into_any_element(),
                 )
@@ -1815,11 +2132,59 @@ impl Render for Browser {
             .on_key_down(cx.listener(Self::collapse))
             .on_action(cx.listener(|this, _: &PageUp, _, cx| this.page(false, cx)))
             .on_action(cx.listener(|this, _: &PageDown, _, cx| this.page(true, cx)))
+            .on_action(cx.listener(|this, _: &ExtendPrevious, _, cx| {
+                this.select_vertically(false, true, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ExtendNext, _, cx| this.select_vertically(true, true, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| {
+                if this.view == View::Grid {
+                    this.select(Move::By(-1), true, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ExtendRight, _, cx| {
+                if this.view == View::Grid {
+                    this.select(Move::By(1), true, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &text_field::SelectAll, _, cx| {
+                this.selection.select_all(&this.entries);
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.focus_list(window, cx);
+                    this.swept = false;
+                    let at = this.listing_point(event.position);
+                    this.marquee = Some(Marquee {
+                        start: at,
+                        end: at,
+                        pointer: event.position,
+                        additive: event.modifiers.platform || event.modifiers.shift,
+                        dragging: false,
+                        scrolling: false,
+                    });
+                    cx.notify();
+                }),
+            )
+            .relative()
+            // The rectangle stays inside the listing.
+            .overflow_hidden()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(list);
+            .child(list)
+            .child({
+                let bounds = self.list_bounds.clone();
+                canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
+                    .absolute()
+                    .size_full()
+            })
+            .children(self.marquee_overlay())
+            .when(self.marquee.is_some(), |d| d.child(self.marquee_drag(cx)));
         div()
             // The sheet takes the keys while it is open.
             .when(!sheet, |d| d.key_context("Browser"))
@@ -1834,16 +2199,18 @@ impl Render for Browser {
                         }
                     }))
                     .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| {
-                        this.select_vertically(false, cx)
+                        this.select_vertically(false, false, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &SelectNext, _, cx| {
+                        this.select_vertically(true, false, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &SelectFirst, _, cx| {
+                        this.select(Move::First, false, cx)
                     }))
                     .on_action(
-                        cx.listener(|this, _: &SelectNext, _, cx| this.select_vertically(true, cx)),
-                    )
-                    .on_action(
-                        cx.listener(|this, _: &SelectFirst, _, cx| this.select(Move::First, cx)),
-                    )
-                    .on_action(
-                        cx.listener(|this, _: &SelectLast, _, cx| this.select(Move::Last, cx)),
+                        cx.listener(|this, _: &SelectLast, _, cx| {
+                            this.select(Move::Last, false, cx)
+                        }),
                     )
                     .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
                         window.focus_next(cx);
@@ -1871,10 +2238,8 @@ impl Render for Browser {
                     .on_action(cx.listener(|this, _: &GoComputer, window, cx| {
                         this.go("/".into(), window, cx)
                     }))
-                    .on_action(cx.listener(|this, _: &OpenSelected, _, cx| {
-                        if let Some(ix) = this.selected {
-                            this.open(ix, cx);
-                        }
+                    .on_action(cx.listener(|this, _: &OpenSelected, window, cx| {
+                        this.open_selection(window, cx)
                     }))
                     .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                         this.search.update(cx, |field, cx| {
@@ -1882,11 +2247,19 @@ impl Render for Browser {
                             field.select_all(&text_field::SelectAll, window, cx);
                         });
                     }))
+                    // Esc leaves search first, then lets go of the selection.
                     .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
-                        if !this.query.is_empty() {
+                        if this.query.is_empty() {
+                            this.selection.clear();
+                            cx.notify();
+                        } else {
                             this.show_folder(cx);
                         }
                         this.focus_list(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &DeselectAll, _, cx| {
+                        this.selection.clear();
+                        cx.notify();
                     }))
             })
             .on_action(
@@ -2180,6 +2553,35 @@ fn real(dir: &Path) -> PathBuf {
     dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
 }
 
+/// More files than this at once ask before opening.
+const OPEN_WITHOUT_ASKING: usize = 20;
+
+/// A rectangle dragged over the listing to select what it touches. Its
+/// corners are in listing coordinates, so scrolling mid-drag keeps the
+/// start where it was.
+struct Marquee {
+    start: Point<Pixels>,
+    end: Point<Pixels>,
+    /// The pointer in the window, to sweep again when the listing scrolls.
+    pointer: Point<Pixels>,
+    /// ⌘ or ⇧ was held: the drag adds to what's selected.
+    additive: bool,
+    /// Past a few points of travel; a click until then.
+    dragging: bool,
+    /// An auto-scroll step waits on the next frame.
+    scrolling: bool,
+}
+
+/// The cells `step` apart from 0, of `count`, that `from..=to` overlaps.
+fn span(from: f32, to: f32, step: f32, count: usize) -> std::ops::Range<usize> {
+    if to < 0. || count == 0 || step <= 0. {
+        return 0..0;
+    }
+    let first = ((from.max(0.) / step) as usize).min(count);
+    let last = ((to / step) as usize).min(count - 1);
+    first..(last + 1).max(first)
+}
+
 /// What on disk the listing follows, in FSEvents' real paths.
 #[derive(Default)]
 struct Watch {
@@ -2351,9 +2753,14 @@ fn format_size(entry: &Entry) -> String {
     if entry.kind != Kind::File {
         return "--".into();
     }
-    let bytes = entry.size as f64;
-    match entry.size {
-        0..1_000 => format!("{} bytes", entry.size),
+    format_bytes(entry.size)
+}
+
+/// Finder's decimal units.
+fn format_bytes(size: u64) -> String {
+    let bytes = size as f64;
+    match size {
+        0..1_000 => format!("{size} bytes"),
         1_000..1_000_000 => format!("{:.0} KB", bytes / 1e3),
         1_000_000..1_000_000_000 => format!("{:.1} MB", bytes / 1e6),
         _ => format!("{:.2} GB", bytes / 1e9),
@@ -2388,10 +2795,7 @@ mod tests {
 
     /// The rows shown, folders inside open folders indented, and the
     /// selected row.
-    fn shown(
-        browser: &Entity<Browser>,
-        cx: &mut VisualTestContext,
-    ) -> (Vec<String>, Option<String>) {
+    fn shown(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> (Vec<String>, Vec<String>) {
         browser.read_with(cx, |browser, _| {
             let rows = browser
                 .entries
@@ -2399,7 +2803,12 @@ mod tests {
                 .zip(&browser.depths)
                 .map(|(entry, depth)| format!("{}{}", "  ".repeat(*depth), entry.name))
                 .collect();
-            let selected = browser.selected.map(|ix| browser.entries[ix].name.clone());
+            let selected = browser
+                .selection
+                .in_order(&browser.entries)
+                .into_iter()
+                .map(|entry| entry.name.clone())
+                .collect();
             (rows, selected)
         })
     }
@@ -2431,7 +2840,7 @@ mod tests {
         let (browser, cx) = browse(&project, cx);
         assert_eq!(
             shown(&browser, cx),
-            (vec!["docs".into(), "zeta".into(), "a.txt".into()], None)
+            (vec!["docs".into(), "zeta".into(), "a.txt".into()], vec![])
         );
         press(cx, "down enter");
         assert_eq!(shown(&browser, cx).0, ["inner.md"]);
@@ -2440,7 +2849,7 @@ mod tests {
             shown(&browser, cx),
             (
                 vec!["docs".into(), "zeta".into(), "a.txt".into()],
-                Some("docs".into())
+                vec!["docs".into()]
             )
         );
     }
@@ -2459,25 +2868,240 @@ mod tests {
                     "zeta".into(),
                     "a.txt".into()
                 ],
-                Some("docs".into())
+                vec!["docs".into()]
             )
         );
         press(cx, "right");
-        assert_eq!(shown(&browser, cx).1.as_deref(), Some("inner.md"));
+        assert_eq!(shown(&browser, cx).1, ["inner.md"]);
         press(cx, "left left");
         assert_eq!(
             shown(&browser, cx),
             (
                 vec!["docs".into(), "zeta".into(), "a.txt".into()],
-                Some("docs".into())
+                vec!["docs".into()]
             )
         );
         // At the top, ← goes up to the enclosing folder with this one selected.
         press(cx, "left");
         assert_eq!(
             shown(&browser, cx),
-            (vec!["project".into()], Some("project".into()))
+            (vec!["project".into()], vec!["project".into()])
         );
+    }
+
+    /// `a.txt` to `d.txt`, each bigger than the last, so sorting by size,
+    /// biggest first, reverses them.
+    fn sized() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("sized");
+        std::fs::create_dir(&folder).unwrap();
+        for (name, size) in [("a.txt", 1), ("b.txt", 20), ("c.txt", 300), ("d.txt", 4000)] {
+            std::fs::write(folder.join(name), vec![b'x'; size]).unwrap();
+        }
+        (dir, folder)
+    }
+
+    /// The middle of list row `ix` in the window, as the last frame laid out.
+    fn row(browser: &Entity<Browser>, ix: usize, cx: &mut VisualTestContext) -> Point<Pixels> {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        browser.read_with(cx, |browser, cx| {
+            let height = cx.global::<Preferences>().row_size.metrics().0;
+            browser.list_bounds.get().origin
+                + gpui::point(px(60.), px(4. + height * (ix as f32 + 0.5)))
+        })
+    }
+
+    fn with(modifiers: &str) -> Modifiers {
+        Modifiers {
+            platform: modifiers.contains("cmd"),
+            shift: modifiers.contains("shift"),
+            ..Modifiers::default()
+        }
+    }
+
+    #[gpui::test]
+    fn clicks_build_a_selection_that_outlives_a_sort_and_a_refresh(cx: &mut TestAppContext) {
+        let (_dir, folder) = sized();
+        let (browser, cx) = browse(&folder, cx);
+        let at = row(&browser, 0, cx);
+        cx.simulate_click(at, with(""));
+        let at = row(&browser, 2, cx);
+        cx.simulate_click(at, with("shift"));
+        assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "c.txt"]);
+        let at = row(&browser, 1, cx);
+        cx.simulate_click(at, with("cmd"));
+        assert_eq!(shown(&browser, cx).1, ["a.txt", "c.txt"]);
+        // Sorted by size, the same files stay selected in their new order.
+        press(cx, "ctrl-alt-cmd-3");
+        assert_eq!(
+            shown(&browser, cx),
+            (
+                vec![
+                    "d.txt".into(),
+                    "c.txt".into(),
+                    "b.txt".into(),
+                    "a.txt".into()
+                ],
+                vec!["c.txt".into(), "a.txt".into()]
+            )
+        );
+        // A refresh after the disk changes keeps it too.
+        std::fs::write(folder.join("e.txt"), "").unwrap();
+        browser.update(cx, |browser, cx| browser.list(true, cx));
+        cx.run_until_parked();
+        assert_eq!(shown(&browser, cx).0.len(), 5);
+        assert_eq!(shown(&browser, cx).1, ["c.txt", "a.txt"]);
+        assert_eq!(
+            browser.read_with(cx, |browser, _| browser.selection.size()),
+            301
+        );
+        press(cx, "escape");
+        assert!(shown(&browser, cx).1.is_empty());
+    }
+
+    #[gpui::test]
+    fn shift_arrows_extend_and_select_all_and_deselect_all(cx: &mut TestAppContext) {
+        let (_dir, folder) = sized();
+        let (browser, cx) = browse(&folder, cx);
+        press(cx, "down shift-down shift-down");
+        assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "c.txt"]);
+        press(cx, "shift-up");
+        assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt"]);
+        // A plain arrow goes back to one.
+        press(cx, "down");
+        assert_eq!(shown(&browser, cx).1, ["c.txt"]);
+        press(cx, "cmd-a");
+        assert_eq!(shown(&browser, cx).1.len(), 4);
+        press(cx, "cmd-alt-a");
+        assert!(shown(&browser, cx).1.is_empty());
+        // The cursor can sit at the end on an entry that isn't selected;
+        // ↓ there still selects it.
+        let (first, last) = (row(&browser, 0, cx), row(&browser, 3, cx));
+        cx.simulate_click(first, with(""));
+        cx.simulate_click(last, with("cmd"));
+        cx.simulate_click(last, with("cmd"));
+        assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+        press(cx, "down");
+        assert_eq!(shown(&browser, cx).1, ["d.txt"]);
+    }
+
+    #[gpui::test]
+    fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
+        let (_dir, folder) = sized();
+        let (browser, cx) = browse(&folder, cx);
+        let (from, to) = (row(&browser, 0, cx), row(&browser, 2, cx));
+        cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+        cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+        cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+        assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "c.txt"]);
+        // A click on empty space below the rows lets go of it.
+        let below = row(&browser, 6, cx);
+        cx.simulate_click(below, with(""));
+        assert!(shown(&browser, cx).1.is_empty());
+        // ⌘ adds a drag to what was selected.
+        let last = row(&browser, 3, cx);
+        cx.simulate_click(last, with(""));
+        let (from, to) = (row(&browser, 0, cx), row(&browser, 1, cx));
+        cx.simulate_mouse_down(from, MouseButton::Left, with("cmd"));
+        cx.simulate_mouse_move(to, MouseButton::Left, with("cmd"));
+        cx.simulate_mouse_up(to, MouseButton::Left, with("cmd"));
+        assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "d.txt"]);
+        // A drag that ends on the row it began on is a drag, not a click
+        // that would toggle that row back out.
+        let start = row(&browser, 2, cx);
+        let end = start + gpui::point(px(80.), px(0.));
+        cx.simulate_mouse_down(start, MouseButton::Left, with("cmd"));
+        cx.simulate_mouse_move(end, MouseButton::Left, with("cmd"));
+        cx.simulate_mouse_up(end, MouseButton::Left, with("cmd"));
+        assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "c.txt", "d.txt"]);
+        // In the grid it takes the cells it covers, not whole rows.
+        press(cx, "cmd-2");
+        let cell = |ix: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            browser.read_with(cx, |browser, _| {
+                let height = grid_cell(browser.grid_icon).1;
+                assert!(browser.across >= 4, "the four files fit in one row");
+                browser.list_bounds.get().origin
+                    + gpui::point(
+                        px(8. + browser.cell_width * (ix as f32 + 0.5)),
+                        px(4. + height * 0.5),
+                    )
+            })
+        };
+        let (from, to) = (cell(1, cx), cell(2, cx));
+        cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+        cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+        cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+        assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
+    }
+
+    #[gpui::test]
+    fn closing_a_folder_keeps_what_was_selected_beside_it(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down right right");
+        let a = row(&browser, 3, cx);
+        cx.simulate_click(a, with("cmd"));
+        assert_eq!(shown(&browser, cx).1, ["inner.md", "a.txt"]);
+        browser.update(cx, |browser, cx| {
+            browser.toggle_folder(project.join("docs"), cx)
+        });
+        assert_eq!(shown(&browser, cx).1, ["docs", "a.txt"]);
+    }
+
+    #[gpui::test]
+    fn opening_many_files_asks_first(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let many = dir.path().join("many");
+        std::fs::create_dir(&many).unwrap();
+        for ix in 0..=OPEN_WITHOUT_ASKING {
+            std::fs::write(many.join(format!("{ix:02}.txt")), "").unwrap();
+        }
+        let (_browser, cx) = browse(&many, cx);
+        press(cx, "cmd-a enter");
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+    }
+
+    #[gpui::test]
+    fn a_drag_past_the_bottom_scrolls_and_keeps_selecting(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let tall = dir.path().join("tall");
+        std::fs::create_dir(&tall).unwrap();
+        for ix in 0..200 {
+            std::fs::write(tall.join(format!("{ix:03}.txt")), "").unwrap();
+        }
+        let (browser, cx) = browse(&tall, cx);
+        let start = row(&browser, 0, cx);
+        let below = browser.read_with(cx, |browser, _| browser.list_bounds.get().bottom_left())
+            + gpui::point(px(60.), px(80.));
+        cx.simulate_mouse_down(start, MouseButton::Left, with(""));
+        cx.simulate_mouse_move(below, MouseButton::Left, with(""));
+        let first = shown(&browser, cx).1.len();
+        // The test platform draws no frames on its own; deliver the ones
+        // auto-scroll waits on.
+        for _ in 0..20 {
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+        }
+        let scrolled = shown(&browser, cx).1.len();
+        cx.simulate_mouse_up(below, MouseButton::Left, with(""));
+        assert!(
+            scrolled > first,
+            "{first} rows, then {scrolled} after scrolling"
+        );
+        assert_eq!(shown(&browser, cx).1.len(), scrolled);
+    }
+
+    #[test]
+    fn a_span_counts_the_cells_it_overlaps() {
+        assert_eq!(span(0., 10., 28., 5), 0..1);
+        assert_eq!(span(27., 29., 28., 5), 0..2);
+        assert_eq!(span(-50., 500., 28., 5), 0..5);
+        // Past the last cell, or above the first, it touches nothing.
+        assert_eq!(span(200., 300., 28., 5), 5..5);
+        assert_eq!(span(-20., -5., 28., 5), 0..0);
     }
 
     #[gpui::test]

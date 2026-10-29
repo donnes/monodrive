@@ -6,8 +6,8 @@
 //! not commands: they stay with the views that own them and can't be rebound.
 
 use crate::browser::{
-    Back, CopyPath, EnclosingFolder, FocusSearch, Forward, GoApplications, GoComputer, GoDesktop,
-    GoDocuments, GoDownloads, GoHome, GoToFolder, OpenSelected, OpenSettings, ResetZoom,
+    Back, CopyPath, DeselectAll, EnclosingFolder, FocusSearch, Forward, GoApplications, GoComputer,
+    GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, OpenSelected, OpenSettings, ResetZoom,
     ReverseSort, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles, ViewAsGrid,
     ViewAsList, ZoomIn, ZoomOut,
 };
@@ -41,15 +41,17 @@ pub type Shortcuts = HashMap<String, Option<String>>;
 pub enum Group {
     App,
     File,
+    Edit,
     Go,
     View,
     Window,
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [
+    pub const ALL: [Group; 6] = [
         Group::App,
         Group::File,
+        Group::Edit,
         Group::Go,
         Group::View,
         Group::Window,
@@ -59,6 +61,7 @@ impl Group {
         match self {
             Group::App => "Monodrive",
             Group::File => "File",
+            Group::Edit => "Edit",
             Group::Go => "Go",
             Group::View => "View",
             Group::Window => "Window",
@@ -143,6 +146,9 @@ pub fn all() -> Vec<Command> {
         ),
         command("Copy Path", File, &["cmd-alt-c"], BROWSER, || {
             Box::new(CopyPath)
+        }),
+        command("Deselect All", Edit, &["cmd-alt-a"], BROWSER, || {
+            Box::new(DeselectAll)
         }),
         command("Back", Go, &["cmd-["], BROWSER, || Box::new(Back)),
         command("Forward", Go, &["cmd-]"], BROWSER, || Box::new(Forward)),
@@ -452,7 +458,10 @@ fn install_menus(cx: &mut App) {
                 MenuItem::os_action("Copy", text_field::Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", text_field::Paste, OsAction::Paste),
                 MenuItem::os_action("Select All", text_field::SelectAll, OsAction::SelectAll),
-            ],
+            ]
+            .into_iter()
+            .chain(items(Group::Edit))
+            .collect(),
             disabled: false,
         },
         menu(Group::Go, items(Group::Go)),

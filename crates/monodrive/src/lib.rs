@@ -13,6 +13,7 @@ mod palettes;
 pub mod preferences;
 #[cfg(feature = "profile")]
 mod profile;
+mod selection;
 mod settings;
 mod text_field;
 mod theme;

@@ -37,7 +37,7 @@ impl Entry {
     }
 
     /// Its size as listed: only files have one.
-    fn listed_size(&self) -> u64 {
+    pub fn listed_size(&self) -> u64 {
         if self.kind == Kind::File {
             self.size
         } else {
