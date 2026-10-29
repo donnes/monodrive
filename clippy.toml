@@ -1,0 +1,9 @@
+# Guardrails from AGENTS.md that clippy can enforce. A call that's truly
+# needed gets `#[expect(clippy::disallowed_methods, reason = "...")]`.
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "Nothing blocks the UI thread, and tests wait on events, not time." },
+    { path = "std::fs::remove_file", reason = "The disk is the user's: move files to the Trash through the file operations service." },
+    { path = "std::fs::remove_dir", reason = "The disk is the user's: move files to the Trash through the file operations service." },
+    { path = "std::fs::remove_dir_all", reason = "The disk is the user's: move files to the Trash through the file operations service." },
+    { path = "monodrive_core::index::Index::start", reason = "Starting the index can crawl the whole disk. Only the app's launch, a search and the MCP server start it; tests and benchmarks never do." },
+]

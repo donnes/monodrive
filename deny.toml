@@ -1,0 +1,28 @@
+# What CI lets into the dependency graph (cargo-deny). Monodrive ships
+# publicly under MIT, so every dependency's license must allow that.
+[graph]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+all-features = true
+
+[licenses]
+# MPL-2.0's copyleft covers only its own files, which we don't change.
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "Zlib", "Unicode-3.0", "MPL-2.0"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+deny = [
+    # GPUI's screen capture: MIT on crates.io, but its published license adds
+    # restrictions. vendor/ patches it out; keep it out.
+    { crate = "zed-scap", reason = "license restrictions beyond its MIT metadata" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/noahdunnagan/fsearch"]
+
+[advisories]
+# Vulnerabilities fail; an unmaintained crate deep in GPUI's graph doesn't,
+# unless we depend on it directly.
+unmaintained = "workspace"

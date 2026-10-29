@@ -195,6 +195,10 @@ impl Server {
         }
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "each agent session's server starts the index on its first search"
+    )]
     fn index(&mut self) -> Result<&Index, String> {
         self.index
             .get_or_insert_with(Index::start)

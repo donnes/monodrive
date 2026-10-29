@@ -24,3 +24,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check
 
+  deny:
+    name: Dependencies and licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2

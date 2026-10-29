@@ -64,6 +64,7 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 - Extend an existing test before adding one. Test at the lowest layer that fails without the change.
 - A bug fix's test must fail before the fix, for the reason the bug describes. Purely visual fixes get before and after screenshots instead of tests.
 - No sleeps, polling loops or wall-clock assertions in tests.
+- `clippy.toml` enforces what it can of the rules above: no sleeps, no deleting files, and `Index::start` only where an `#[expect]` says why. CI also runs cargo-deny (`deny.toml`), so a new dependency's license must be on its allowlist.
 - Speed has budgets in `docs/performance.md`. Run the benchmarks it lists when a change touches listing, sorting, the browser's rendering or launch, and compare against the last run.
 - Visual changes get one look in the real app. Ask before using computer use or screen capture.
 

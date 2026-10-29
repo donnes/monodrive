@@ -362,6 +362,10 @@ impl Browser {
         let open: Vec<PathBuf> = self.expanded.iter().cloned().collect();
         let work = cx.background_executor().spawn(async move {
             if !query.is_empty() {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "a search before launch started the index starts it"
+                )]
                 let hits = match index.get_or_init(Index::start) {
                     Ok(index) => index.find(&query, SEARCH_LIMIT),
                     Err(e) => Err(e.clone()),
@@ -688,6 +692,10 @@ impl Browser {
     pub fn start_index(&mut self, cx: &mut Context<Self>) {
         let index = self.index.clone();
         self._index_watch = cx.spawn(async move |this, cx| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the app starts the index at launch"
+            )]
             let started = cx.background_executor().spawn({
                 let index = index.clone();
                 async move { index.get_or_init(Index::start).is_ok() }

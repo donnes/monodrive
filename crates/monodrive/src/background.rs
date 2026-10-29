@@ -440,6 +440,7 @@ mod tests {
             .save(&source)
             .unwrap();
         let imported = import_image(&source, &directory.path().join("backgrounds")).unwrap();
+        #[expect(clippy::disallowed_methods, reason = "the test's own temp file")]
         std::fs::remove_file(source).unwrap();
         assert_eq!(read_image(&imported).unwrap().dimensions(), (12, 8));
 
