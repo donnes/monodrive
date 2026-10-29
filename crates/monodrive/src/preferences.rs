@@ -4,7 +4,7 @@
 use crate::background::{Effect, Scope};
 use gpui::{App, Global, Task};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,8 +255,12 @@ pub fn load() -> Preferences {
         .unwrap_or_default()
 }
 
-fn save(prefs: &Preferences) {
-    let Some(path) = path() else { return };
+/// Where preferences are saved. `init` sets it; without it, as in tests
+/// and benchmarks, changes stay in memory and never touch the user's file.
+struct Store(PathBuf);
+impl Global for Store {}
+
+fn save(path: &Path, prefs: &Preferences) {
     let Ok(json) = serde_json::to_vec_pretty(prefs) else {
         return;
     };
@@ -278,10 +282,13 @@ const SAVE_DELAY: Duration = Duration::from_millis(300);
 
 pub fn init(cx: &mut App) {
     cx.set_global(load());
+    let Some(path) = path() else { return };
+    cx.set_global(Store(path));
     // A save still waiting when the app quits would be lost.
     cx.on_app_quit(|cx| {
         let prefs = cx.global::<Preferences>().clone();
-        async move { save(&prefs) }
+        let path = cx.global::<Store>().0.clone();
+        async move { save(&path, &prefs) }
     })
     .detach();
 }
@@ -295,11 +302,14 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Preferences)) {
         return;
     }
     cx.set_global(prefs.clone());
+    let Some(path) = cx.try_global::<Store>().map(|store| store.0.clone()) else {
+        return;
+    };
     let timer = cx.background_executor().timer(SAVE_DELAY);
     // Replacing the pending save drops it, so only the last change is written.
     let task = cx.background_executor().spawn(async move {
         timer.await;
-        save(&prefs);
+        save(&path, &prefs);
     });
     cx.set_global(PendingSave(task));
 }
