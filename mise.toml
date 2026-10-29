@@ -1,0 +1,4 @@
+# Tools this project's scripts need. `mise install` here installs them.
+[tools]
+# scripts/dev rebuilds and relaunches the app on save through it.
+watchexec = "2.8.0"

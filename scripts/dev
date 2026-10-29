@@ -5,7 +5,7 @@
 #   scripts/dev [folder]
 #
 # It stops only the app it started, by the PID it recorded, and that app
-# goes too when you press Ctrl-C. Needs watchexec (`brew install watchexec`).
+# goes too when you press Ctrl-C. Needs watchexec, which mise.toml pins.
 set -euo pipefail
 # A relative folder means from where you ran this, so resolve it first.
 [[ ${1:-} == --relaunch ]] || folder=$(cd "${1:-$HOME}" && pwd)
@@ -41,7 +41,7 @@ if [[ ${1:-} == --relaunch ]]; then
 fi
 
 command -v watchexec >/dev/null || {
-  echo "scripts/dev needs watchexec: brew install watchexec" >&2
+  echo "scripts/dev needs watchexec. mise.toml pins it: run \`mise trust && mise install\` here." >&2
   exit 1
 }
 trap stop EXIT
