@@ -8,6 +8,8 @@ Don't edit the PNGs by hand.
 
 ## The macOS icon
 
+The app itself needs no export: `scripts/bundle` compiles `prod/app-icon.icon` with `actool` into the bundle's `Assets.car` and `.icns`. The PNG below is only for places outside the app that want the shaped macOS icon as an image.
+
 Icon Composer's command-line exporter has no `macOS pre-Tahoe` preset, and its plain `macOS` export is full bleed, so `scripts/icons` leaves `prod/monodrive-macos-1024.png` alone. After changing the project, open it in Icon Composer and export with exactly these settings:
 
 - Platform: `macOS pre-Tahoe`

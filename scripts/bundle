@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Builds Monodrive and wraps it in Monodrive.app with the app icon, so macOS
+# shows it in the Dock and Finder. Doesn't launch it.
+#
+#   scripts/bundle             target/debug/Monodrive.app
+#   scripts/bundle --release   target/release/Monodrive.app
+#
+# Run Contents/MacOS/monodrive directly to keep its PID, so you stop only
+# the process you started.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+profile=debug
+build=()
+case "${1:-}" in
+  "") ;;
+  --release) profile=release; build=(--release) ;;
+  *) echo "usage: scripts/bundle [--release]" >&2; exit 2 ;;
+esac
+
+cargo build -p monodrive ${build[@]+"${build[@]}"}
+
+version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+app="target/$profile/Monodrive.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+# Replace the binary's inode, so macOS doesn't reuse an older signature cache.
+cp "target/$profile/monodrive" "$app/Contents/MacOS/monodrive.next"
+mv -f "$app/Contents/MacOS/monodrive.next" "$app/Contents/MacOS/monodrive"
+
+# macOS 26 draws the Liquid Glass icon from Assets.car; the .icns covers
+# older releases. Both compile from the Icon Composer project.
+icon=$(mktemp -d "target/bundle-icon.XXXXXX")
+trap 'rm -r "$icon"' EXIT
+xcrun actool assets/prod/app-icon.icon \
+  --compile "$icon" \
+  --platform macosx \
+  --minimum-deployment-target 14.0 \
+  --app-icon app-icon \
+  --output-partial-info-plist "$icon/icon.plist" >/dev/null
+# actool exits 0 without writing an icon when it can't read the project.
+if [[ ! -f "$icon/Assets.car" || ! -f "$icon/app-icon.icns" ]]; then
+  echo "actool wrote no app icon; compiling an Icon Composer project takes Xcode 26 or newer" >&2
+  exit 1
+fi
+mv -f "$icon/Assets.car" "$icon/app-icon.icns" "$app/Contents/Resources/"
+
+cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>monodrive</string>
+<key>CFBundleIdentifier</key><string>dev.donnes.monodrive</string>
+<key>CFBundleName</key><string>Monodrive</string>
+<key>CFBundleDisplayName</key><string>Monodrive</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>$version</string>
+<key>CFBundleVersion</key><string>$version</string>
+<key>CFBundleIconFile</key><string>app-icon</string>
+<key>CFBundleIconName</key><string>app-icon</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+PLIST
+
+codesign --force --sign - "$app"
+echo "$app"

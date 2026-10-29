@@ -53,6 +53,7 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 ## Running
 
 - `cargo run -p monodrive` opens the window on your home folder; `cargo run -p monodrive -- <folder>` opens another.
+- `scripts/bundle` builds `target/debug/Monodrive.app` with the app icon, so the Dock and Finder show it. Run `target/debug/Monodrive.app/Contents/MacOS/monodrive` to launch it and keep its PID.
 - `cargo run -p monodrive -- mcp` runs the MCP server on stdio. To try it with an agent, build first and register the binary, for example `claude mcp add monodrive -- <repo>/target/debug/monodrive mcp`.
 - Opening the window starts the index. See rule 3 before running the app on a machine without one.
 
