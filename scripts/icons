@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Exports the app icon's PNGs from its Icon Composer project. `--check`
+# verifies they match the project without writing. See assets/README.md.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PROJECT=assets/prod/app-icon.icon
+UNIVERSAL=assets/prod/monodrive-universal-1024.png
+MACOS=assets/prod/monodrive-macos-1024.png
+DESIGN_GENERATION=26
+
+check=false
+case "${1:-}" in
+  "") ;;
+  --check) check=true ;;
+  *) echo "usage: scripts/icons [--check]" >&2; exit 2 ;;
+esac
+
+# Prints "<bundle-version> <path>" for an ictool that can export design
+# generation 26, which takes Icon Composer 2 or newer.
+probe() {
+  local version short bundle
+  [[ -x "$1" ]] || return 1
+  version=$("$1" --version 2>/dev/null) || return 1
+  short=$(plutil -extract short-bundle-version raw -o - - <<<"$version") || return 1
+  bundle=$(plutil -extract bundle-version raw -o - - <<<"$version") || return 1
+  (( ${short%%.*} >= 2 )) || return 1
+  echo "$bundle $1"
+}
+
+# ICON_COMPOSER_TOOL wins; otherwise the newest Icon Composer in Xcode or
+# installed on its own.
+resolve_tool() {
+  if [[ -n "${ICON_COMPOSER_TOOL:-}" ]]; then
+    probe "$ICON_COMPOSER_TOOL" >/dev/null || {
+      echo "ICON_COMPOSER_TOOL isn't Icon Composer 2 or newer's ictool: $ICON_COMPOSER_TOOL" >&2
+      exit 1
+    }
+    echo "$ICON_COMPOSER_TOOL"
+    return
+  fi
+  local executable="Icon Composer.app/Contents/Executables/ictool"
+  local candidates=("/Applications/$executable")
+  local developer
+  if developer=$(xcode-select -p 2>/dev/null); then
+    candidates+=("${developer%/Contents/Developer}/Contents/Applications/$executable")
+  fi
+  for xcode in /Applications/Xcode*.app; do
+    candidates+=("$xcode/Contents/Applications/$executable")
+  done
+  local newest
+  newest=$(for tool in "${candidates[@]}"; do probe "$tool" || true; done | sort -rn | head -1)
+  if [[ -z "$newest" ]]; then
+    echo "No Icon Composer 2 or newer found. Install Xcode 26 or Icon Composer, or set ICON_COMPOSER_TOOL to its ictool." >&2
+    exit 1
+  fi
+  echo "${newest#* }"
+}
+
+tool=$(resolve_tool)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/monodrive-icons.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+
+# The full-bleed square for anywhere other than the macOS Dock: README,
+# website, and a Linux build later.
+"$tool" "$PROJECT" --export-image --output-file "$scratch/universal.png" \
+  --platform iOS --rendition Default --width 1024 --height 1024 --scale 1 \
+  --design-generation "$DESIGN_GENERATION" >/dev/null
+size=$(sips -g pixelWidth -g pixelHeight "$scratch/universal.png" | awk '/pixel/ { printf "%s ", $2 }')
+if [[ "$size" != "1024 1024 " ]]; then
+  echo "Icon Composer exported ${size% }, expected 1024 1024." >&2
+  exit 1
+fi
+
+if $check; then
+  if ! cmp -s "$scratch/universal.png" "$UNIVERSAL"; then
+    echo "$UNIVERSAL is stale. Run scripts/icons." >&2
+    exit 1
+  fi
+  echo "$UNIVERSAL matches $PROJECT. Icon Composer can't check $MACOS from the command line."
+  exit 0
+fi
+
+mv "$scratch/universal.png" "$UNIVERSAL"
+echo "Wrote $UNIVERSAL with $tool."
+echo "The macOS icon is exported by hand. If $PROJECT changed, export $MACOS again; see assets/README.md."

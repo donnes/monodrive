@@ -1,0 +1,20 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1024" height="1024" rx="80" fill="black"/>
+  <rect x="172" y="242" width="120" height="120" fill="white" fill-opacity="1.0"/>
+  <rect x="312" y="242" width="120" height="120" fill="white" fill-opacity="0.89"/>
+  <rect x="172" y="382" width="120" height="120" fill="white" fill-opacity="0.89"/>
+  <rect x="312" y="382" width="120" height="120" fill="white" fill-opacity="0.77"/>
+  <rect x="452" y="382" width="120" height="120" fill="white" fill-opacity="0.66"/>
+  <rect x="592" y="382" width="120" height="120" fill="white" fill-opacity="0.54"/>
+  <rect x="732" y="382" width="120" height="120" fill="white" fill-opacity="0.43"/>
+  <rect x="172" y="522" width="120" height="120" fill="white" fill-opacity="0.77"/>
+  <rect x="312" y="522" width="120" height="120" fill="white" fill-opacity="0.66"/>
+  <rect x="452" y="522" width="120" height="120" fill="white" fill-opacity="0.54"/>
+  <rect x="592" y="522" width="120" height="120" fill="white" fill-opacity="0.43"/>
+  <rect x="732" y="522" width="120" height="120" fill="white" fill-opacity="0.31"/>
+  <rect x="172" y="662" width="120" height="120" fill="white" fill-opacity="0.66"/>
+  <rect x="312" y="662" width="120" height="120" fill="white" fill-opacity="0.54"/>
+  <rect x="452" y="662" width="120" height="120" fill="white" fill-opacity="0.43"/>
+  <rect x="592" y="662" width="120" height="120" fill="white" fill-opacity="0.31"/>
+  <rect x="732" y="662" width="120" height="120" fill="white" fill-opacity="0.2"/>
+</svg>
