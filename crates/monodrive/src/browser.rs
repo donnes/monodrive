@@ -2288,6 +2288,132 @@ fn format_size(entry: &Entry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    /// A browser on `folder` with the app's keys and default preferences,
+    /// focused on its list. Type navigation keys only: a printable key
+    /// starts a search, and a search starts the whole-disk index.
+    fn browse<'a>(
+        folder: &Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Browser>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(Preferences::default());
+            commands::apply(cx);
+        });
+        let folder = folder.to_path_buf();
+        let (browser, cx) = cx.add_window_view(|_, cx| Browser::new(folder, cx));
+        cx.update(|window, cx| {
+            let list = browser.read(cx).list_focus.clone();
+            window.focus(&list, cx);
+        });
+        cx.run_until_parked();
+        (browser, cx)
+    }
+
+    /// The rows shown, folders inside open folders indented, and the
+    /// selected row.
+    fn shown(
+        browser: &Entity<Browser>,
+        cx: &mut VisualTestContext,
+    ) -> (Vec<String>, Option<String>) {
+        browser.read_with(cx, |browser, _| {
+            let rows = browser
+                .entries
+                .iter()
+                .zip(&browser.depths)
+                .map(|(entry, depth)| format!("{}{}", "  ".repeat(*depth), entry.name))
+                .collect();
+            let selected = browser.selected.map(|ix| browser.entries[ix].name.clone());
+            (rows, selected)
+        })
+    }
+
+    fn press(cx: &mut VisualTestContext, keys: &str) {
+        for key in keys.split(' ') {
+            cx.simulate_keystrokes(key);
+            cx.run_until_parked();
+        }
+    }
+
+    /// `project/` holding `docs/` (with `inner.md`), `zeta/`, `a.txt` and
+    /// the hidden `.env`. It sits in a temp folder, since tempfile's own
+    /// folders are hidden and wouldn't list in their parent.
+    fn folder() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        std::fs::write(project.join("docs/inner.md"), "").unwrap();
+        std::fs::create_dir(project.join("zeta")).unwrap();
+        std::fs::write(project.join("a.txt"), "").unwrap();
+        std::fs::write(project.join(".env"), "").unwrap();
+        (dir, project)
+    }
+
+    #[gpui::test]
+    fn enter_opens_a_folder_and_back_returns_with_it_selected(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let (browser, cx) = browse(&project, cx);
+        assert_eq!(
+            shown(&browser, cx),
+            (vec!["docs".into(), "zeta".into(), "a.txt".into()], None)
+        );
+        press(cx, "down enter");
+        assert_eq!(shown(&browser, cx).0, ["inner.md"]);
+        press(cx, "cmd-[");
+        assert_eq!(
+            shown(&browser, cx),
+            (
+                vec!["docs".into(), "zeta".into(), "a.txt".into()],
+                Some("docs".into())
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn arrows_walk_a_folder_open_in_place_and_out_of_it(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down right");
+        assert_eq!(
+            shown(&browser, cx),
+            (
+                vec![
+                    "docs".into(),
+                    "  inner.md".into(),
+                    "zeta".into(),
+                    "a.txt".into()
+                ],
+                Some("docs".into())
+            )
+        );
+        press(cx, "right");
+        assert_eq!(shown(&browser, cx).1.as_deref(), Some("inner.md"));
+        press(cx, "left left");
+        assert_eq!(
+            shown(&browser, cx),
+            (
+                vec!["docs".into(), "zeta".into(), "a.txt".into()],
+                Some("docs".into())
+            )
+        );
+        // At the top, ← goes up to the enclosing folder with this one selected.
+        press(cx, "left");
+        assert_eq!(
+            shown(&browser, cx),
+            (vec!["project".into()], Some("project".into()))
+        );
+    }
+
+    #[gpui::test]
+    fn show_hidden_files_lists_dotfiles_and_hides_them_again(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "cmd->");
+        assert_eq!(shown(&browser, cx).0, ["docs", "zeta", ".env", "a.txt"]);
+        press(cx, "cmd->");
+        assert_eq!(shown(&browser, cx).0, ["docs", "zeta", "a.txt"]);
+    }
 
     #[test]
     fn arrows_step_and_stop_at_the_ends() {

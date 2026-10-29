@@ -63,6 +63,7 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 - Test behavior that can break: MCP protocol handling, argument decoding, path handling, listing and sorting rules, and the logic a bug fix changed. Skip tests for what types already guarantee, layout, copy text and wiring.
 - Extend an existing test before adding one. Test at the lowest layer that fails without the change.
 - A bug fix's test must fail before the fix, for the reason the bug describes. Purely visual fixes get before and after screenshots instead of tests.
+- View behavior gets a `#[gpui::test]` that drives the real `Browser` with keystrokes over a temp folder; `browse` in `browser.rs`'s tests sets one up. Press navigation keys only: a printable key starts a search, and a search starts the index.
 - No sleeps, polling loops or wall-clock assertions in tests.
 - `clippy.toml` enforces what it can of the rules above: no sleeps, no deleting files, and `Index::start` only where an `#[expect]` says why. CI also runs cargo-deny (`deny.toml`), so a new dependency's license must be on its allowlist.
 - Speed has budgets in `docs/performance.md`. Run the benchmarks it lists when a change touches listing, sorting, the browser's rendering or launch, and compare against the last run.
