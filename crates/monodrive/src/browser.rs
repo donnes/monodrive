@@ -157,11 +157,15 @@ pub struct Browser {
     /// List or grid, and the grid's icon size, as the preferences last said.
     view: View,
     grid_icon: u32,
-    /// The grid's width as last laid out, for how many fit across.
-    grid_width: Rc<Cell<f32>>,
-    /// How many cells fit across, settled once per frame so the row count,
-    /// the cells and scrolling agree.
+    /// The window's width less the sidebar and the grid, as last laid out:
+    /// the margins around the grid, which stay put as the window resizes but
+    /// differ by workspace style. `None` until the grid is first drawn, when
+    /// `pane_margins` stands in.
+    grid_inset: Rc<Cell<Option<(WorkspaceStyle, f32)>>>,
+    /// How many cells fit across and how wide each is, settled once per
+    /// frame so the row count, the cells and scrolling agree.
     across: usize,
+    cell_width: f32,
     /// Scroll to the selection once the layout settles (after a view switch).
     reveal_pending: bool,
     /// Every thumbnail asked for and not yet given back, loaded or not.
@@ -231,8 +235,6 @@ impl Browser {
                 // The other layout put it somewhere else; the grid shows it
                 // once it knows how many fit across.
                 this.reveal_pending = this.selected.is_some();
-                // Measured afresh: the window may have changed meanwhile.
-                this.grid_width.set(0.);
             }
             cx.notify();
         })
@@ -259,8 +261,9 @@ impl Browser {
             watch: Watch::default(),
             view: cx.global::<Preferences>().view,
             grid_icon: cx.global::<Preferences>().grid_icon,
-            grid_width: Rc::default(),
+            grid_inset: Rc::default(),
             across: 1,
+            cell_width: grid_cell(cx.global::<Preferences>().grid_icon).0,
             reveal_pending: false,
             thumbs: HashMap::new(),
             drawn: HashSet::new(),
@@ -1202,9 +1205,9 @@ impl Browser {
 
     fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut shown = places().into_iter().enumerate();
-        let cursor = self
-            .sidebar_focus
-            .is_focused(window)
+        // A click focuses the sidebar too; only keys move its cursor, so
+        // only they show it.
+        let cursor = (self.sidebar_focus.is_focused(window) && window.last_input_was_keyboard())
             .then_some(self.sidebar_cursor);
         let focused = self.search.focus_handle(cx).is_focused(window);
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
@@ -1371,9 +1374,13 @@ impl Browser {
         let selected = self.query.is_empty() && self.folder() == path;
         div()
             .id(label)
-            // The sidebar's keyboard cursor, while it has focus.
-            .when(cursor == Some(ix), |d| {
-                d.border_1().border_color(accent().opacity(0.7))
+            // The sidebar's keyboard cursor. The border is always there, so
+            // showing it doesn't shift the row.
+            .border_1()
+            .border_color(if cursor == Some(ix) {
+                accent().opacity(0.7)
+            } else {
+                gpui::transparent_black()
             })
             .role(gpui::Role::Button)
             .aria_label(label)
@@ -1455,7 +1462,7 @@ impl Browser {
         let prefs = cx.global::<Preferences>();
         let (side, thumbs_on) = (prefs.grid_icon as f32, prefs.thumbnails);
         let label = prefs.grid_label.metrics().2;
-        let (cell, height) = grid_cell(prefs.grid_icon);
+        let (cell, height) = (self.cell_width, grid_cell(prefs.grid_icon).1);
         let across = self.across;
         let active =
             self.list_focus.is_focused(window) || self.search.focus_handle(cx).is_focused(window);
@@ -1702,13 +1709,24 @@ impl Render for Browser {
                 .child(error.clone())
                 .into_any_element(),
             None if self.view == View::Grid => {
-                let width = self.grid_width.clone();
                 let icon = self.grid_icon;
-                self.across = columns(width.get(), icon);
-                // Measured at least once, so the row is right.
-                if width.get() > 0. {
-                    self.take_pending_reveal();
-                }
+                let prefs = cx.global::<Preferences>();
+                let (style, sidebar) = (
+                    prefs.workspace_style,
+                    sidebar_width(prefs.sidebar_width, window),
+                );
+                let inset = self.grid_inset.clone();
+                // The grid's width this frame, from the window's, so a resize
+                // lays out the right columns now rather than a frame late. The
+                // margins beside it are as last measured, or before that, as
+                // the pane draws them.
+                let margins = inset
+                    .get()
+                    .filter(|(measured, _)| *measured == style)
+                    .map_or(pane_margins(style), |(_, margins)| margins);
+                let wide = window.viewport_size().width.as_f32() - sidebar - margins;
+                (self.across, self.cell_width) = grid_layout(wide, icon);
+                self.take_pending_reveal();
                 let rows = self.entries.len().div_ceil(self.across);
                 div()
                     .relative()
@@ -1719,17 +1737,16 @@ impl Render for Browser {
                     .child(
                         canvas(
                             move |bounds, window, _| {
-                                let wide = bounds.size.width.as_f32();
-                                // A first measurement or a new count of cells
-                                // across lays out again, so rows, cells and a
-                                // pending reveal use the real width. GPUI
-                                // ignores a refresh while drawing, so it waits
-                                // for the next frame.
-                                let fresh = width.get() == 0.;
-                                if fresh || columns(wide, icon) != columns(width.get(), icon) {
+                                let measured = bounds.size.width.as_f32();
+                                // A width the estimate missed (the interface
+                                // zoomed) lays out again. GPUI ignores a
+                                // refresh while drawing, so it waits for the
+                                // next frame.
+                                if (wide - measured).abs() > 0.5 {
                                     window.on_next_frame(|window, _| window.refresh());
                                 }
-                                width.set(wide);
+                                let viewport = window.viewport_size().width.as_f32();
+                                inset.set(Some((style, viewport - sidebar - measured)));
                             },
                             |_, _, _, _| {},
                         )
@@ -2004,10 +2021,26 @@ enum Sheet {
     Goto(Entity<GotoView>),
 }
 
-/// How many grid cells of icons `icon` points fit across `width`.
-fn columns(width: f32, icon: u32) -> usize {
-    let (cell, _) = grid_cell(icon);
-    ((width - 8.) / cell).floor().max(1.) as usize
+/// The pane's margin and borders across, as `render` draws them: Rounded's
+/// card has `mr_2` and a border each side, Boxy's pane a left border. Only
+/// the grid's first frame relies on these; after that it measures.
+fn pane_margins(style: WorkspaceStyle) -> f32 {
+    match style {
+        WorkspaceStyle::Rounded => 8. + 2.,
+        WorkspaceStyle::Boxy => 1.,
+    }
+}
+
+/// The grid's padding across: the list's and each row's, both sides.
+const GRID_PADDING: f32 = 16.;
+
+/// How many cells fit across a grid `width` wide, and how wide each is. The
+/// room left over is shared out, as in Finder, rather than left at the right.
+fn grid_layout(width: f32, icon: u32) -> (usize, f32) {
+    let least = grid_cell(icon).0;
+    let room = (width - GRID_PADDING).max(0.);
+    let across = (room / least).floor().max(1.) as usize;
+    (across, (room / across as f32).max(least))
 }
 
 /// A grid cell's width and height for icons `icon` points across: room for
