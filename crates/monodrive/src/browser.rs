@@ -1489,8 +1489,12 @@ impl Browser {
                             image
                         });
                         let art = match picture {
+                            // A square box: without one, `img` takes the
+                            // picture's own shape, and a tall one spills
+                            // onto its name.
                             Some(image) => gpui::img(image)
                                 .size(px(side))
+                                .aspect_square()
                                 .object_fit(gpui::ObjectFit::Contain)
                                 .rounded(px(4.))
                                 .into_any_element(),
@@ -1520,7 +1524,6 @@ impl Browser {
                                     .rounded(px(5.))
                                     .text_size(px(label))
                                     .text_center()
-                                    .line_clamp(2)
                                     .map(|d| {
                                         if selected {
                                             d.bg(if active { accent() } else { content(0.15) })
@@ -1533,7 +1536,12 @@ impl Browser {
                                             d
                                         }
                                     })
-                                    .child(entry.name.clone()),
+                                    .children(grid_name(
+                                        &entry.name,
+                                        px(cell - 18.),
+                                        px(label),
+                                        window,
+                                    )),
                             )
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 this.focus_list(window, cx);
@@ -2019,6 +2027,40 @@ enum Sheet {
     Settings(Entity<SettingsView>),
     Palette(Entity<PaletteView>),
     Goto(Entity<GotoView>),
+}
+
+/// A grid cell's name in at most two lines, as Finder sets it: the first
+/// breaks where it would wrap, at a word when it can, and the rest is cut
+/// in the middle, so the start and the extension both show.
+fn grid_name(
+    name: &str,
+    width: gpui::Pixels,
+    size: gpui::Pixels,
+    window: &Window,
+) -> Vec<gpui::Div> {
+    let line = |text: &str| {
+        div()
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .child(text.to_owned())
+    };
+    let mut wrapper = window
+        .text_system()
+        .line_wrapper(gpui::font(theme::UI_FONT), size);
+    let wrap = wrapper
+        .wrap_line(
+            &[gpui::LineFragment::text(name)],
+            width,
+            gpui::IndentAdjustment::NoIndent,
+        )
+        .next();
+    match wrap {
+        Some(boundary) if boundary.ix < name.len() => vec![
+            line(name[..boundary.ix].trim_end()),
+            line(&name[boundary.ix..]).text_ellipsis_middle(),
+        ],
+        _ => vec![line(name)],
+    }
 }
 
 /// The pane's margin and borders across, as `render` draws them: Rounded's
