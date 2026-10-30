@@ -144,31 +144,38 @@ impl Search {
         .to_string())
     }
 
-    /// What `stored` kept, ready to type and run again. Words beside a
-    /// `contains:` pick files by name, which only the token can say, so that
-    /// stays as it's written.
+    /// What `stored` kept, ready to type and run again: plain words where
+    /// they'd mean the same, or else as it's written. Words beside a
+    /// `contains:` pick files by name, and a phrase can read as a filter, and
+    /// only the token can say those.
     pub fn from_stored(query: &str, scope: Scope) -> Search {
-        let mut search = Search {
-            text: query.into(),
-            looks: Looks::Names,
-            scope,
+        let Some(parsed) = Query::parse(query).ok().filter(|q| q.contains().is_some()) else {
+            return Search {
+                text: query.into(),
+                looks: Looks::Names,
+                scope,
+            };
         };
-        if let Ok(parsed) = Query::parse(query)
-            && parsed.contains().is_some()
-            && !parsed.terms.iter().any(|t| matches!(t, Term::Word(_)))
-        {
-            search.looks = Looks::Contents;
-            search.text = parsed
-                .terms
-                .iter()
-                .map(|term| match term {
-                    Term::Contains(text) => text.clone(),
-                    other => other.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
+        let contents = |text: String| Search {
+            text,
+            looks: Looks::Contents,
+            scope: scope.clone(),
+        };
+        let words = parsed
+            .terms
+            .iter()
+            .map(|term| match term {
+                Term::Contains(text) => text.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (plain, written) = (contents(words), contents(query.into()));
+        if plain.parts() == written.parts() {
+            plain
+        } else {
+            written
         }
-        search
     }
 
     /// The text to look for inside files, if this looks inside files and has
@@ -819,6 +826,22 @@ mod tests {
             contents("size:big").stored().unwrap_err(),
             "size:big: give a size such as >10mb, <=1gb or 1mb..10mb"
         );
+    }
+
+    #[test]
+    fn a_phrase_that_reads_as_more_than_words_reopens_as_the_same_search() {
+        for (stored, phrase) in [
+            ("contains:\"fix in:~/Work\"", "fix in:~/Work"),
+            ("contains:size:big", "size:big"),
+            ("contains:\"two  spaces\"", "two  spaces"),
+        ] {
+            let back = Search::from_stored(stored, Scope::Everywhere);
+            assert_eq!(back.looks, Looks::Contents, "{stored}");
+            let (pattern, filters) = back.parts().unwrap();
+            assert_eq!(pattern.as_deref(), Some(phrase), "{stored}");
+            assert_eq!(filters, Query::default(), "{stored}");
+            assert_eq!(back.stored().as_deref(), Ok(stored));
+        }
     }
 
     #[test]

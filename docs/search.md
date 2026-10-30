@@ -28,4 +28,4 @@ The window runs a `search::Search`: the text typed, whether it looks at names or
 
 ## Kept searches
 
-Saved searches and recent searches live in `places.json` and hold a query, so a kept content search is stored with `contains:`, which `Search::stored` writes and `Search::from_stored` reads back. Saved searches have MCP tools. Recent ones are the window's own record, of results that stayed on screen for 2 seconds, so a step on the way to typing something isn't kept, and no tool reads them.
+Saved searches and recent searches live in `places.json` and hold a query, so a kept content search is stored with `contains:`, which `Search::stored` writes and `Search::from_stored` reads back, to plain words where those mean the same and as written where they don't, such as a phrase that reads as a filter. Saved searches have MCP tools. Recent ones are the window's own record, of results that stayed on screen for 2 seconds, so a step on the way to typing something isn't kept, and no tool reads them.

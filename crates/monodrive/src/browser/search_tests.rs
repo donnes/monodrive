@@ -2,6 +2,7 @@
 //! place of the index, which nothing here starts, and `Store` is a temp
 //! folder's.
 
+use super::drag_tests::carry;
 use super::places_tests::{Fake, World, world};
 use super::searches::{CONTENT_SETTLE, REMEMBER_AFTER};
 use super::tests::*;
@@ -276,4 +277,89 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     assert!(menu_open(&browser, cx));
     press(cx, "escape");
     assert!(!menu_open(&browser, cx));
+}
+
+/// Protects a line standing for its file: pressing a line under a file that
+/// isn't selected drags that file, where a rectangle would otherwise start.
+#[gpui::test]
+fn dragging_a_line_drags_its_file_though_it_is_not_selected(cx: &mut TestAppContext) {
+    let world = world(Vec::new(), cx);
+    answer(
+        &world.fake,
+        "todo",
+        vec![
+            hit("a.rs", &[(3, "todo one"), (9, "todo two")]),
+            hit("b.rs", &[(1, "todo three")]),
+        ],
+    );
+    let folder = world.dir.path().join("here");
+    std::fs::create_dir(&folder).unwrap();
+    let (browser, cx) = browse(&folder, cx);
+    run(&browser, contents("todo"), cx);
+    land(cx);
+    assert_eq!(shown(&browser, cx).1, ["a.rs"]);
+
+    // a.rs, its two lines, b.rs, then b.rs's line.
+    let (first, line) = (row(&browser, 0, cx), row(&browser, 4, cx));
+    carry(line, first, "", cx);
+    assert!(browser.read_with(cx, |b, _| b.drag.active()));
+    assert_eq!(shown(&browser, cx).1, ["b.rs"]);
+    press(cx, "escape");
+    cx.simulate_mouse_up(first, MouseButton::Left, with(""));
+
+    // ⌘ adds it, as on a file's own row.
+    press(cx, "up");
+    assert_eq!(shown(&browser, cx).1, ["a.rs"]);
+    carry(line, first, "cmd", cx);
+    assert!(browser.read_with(cx, |b, _| b.drag.active()));
+    assert_eq!(shown(&browser, cx).1, ["a.rs", "b.rs"]);
+    press(cx, "escape");
+    cx.simulate_mouse_up(first, MouseButton::Left, with("cmd"));
+}
+
+/// Protects acting on what's seen: the keys bring the row they land on into
+/// view, so Enter, R and ⌫ never act on a search out of sight.
+#[gpui::test]
+fn the_keys_scroll_the_menu_to_the_row_they_land_on(cx: &mut TestAppContext) {
+    let world = world(Vec::new(), cx);
+    for n in 0..40 {
+        let saved = SavedSearch {
+            name: format!("Saved {n}"),
+            query: format!("q{n}"),
+            scope: Where::Everywhere,
+        };
+        world.store.save_search(saved, None).unwrap();
+    }
+    let folder = world.dir.path().join("here");
+    std::fs::create_dir(&folder).unwrap();
+    let (browser, cx) = browse(&folder, cx);
+    press(cx, "cmd-shift-s");
+
+    let in_view = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let row = cx.debug_bounds(selector).unwrap();
+        let shown = browser.read_with(cx, |b, cx| match &b.sheet {
+            Some(Sheet::Searches(view)) => view.read(cx).scroll.bounds(),
+            _ => panic!("the menu is open"),
+        });
+        row.top() >= shown.top() && row.bottom() <= shown.bottom()
+    };
+    // Names, Contents and This Folder, then down to the last saved search.
+    assert!(!in_view("saved-search-39", cx));
+    for _ in 0..43 {
+        press(cx, "down");
+    }
+    assert!(in_view("saved-search-39", cx));
+    // Round to the top, then round to the bottom.
+    press(cx, "down");
+    assert!(in_view("search-names-0", cx));
+    press(cx, "up");
+    assert!(in_view("saved-search-39", cx));
+    // What's in view is what ⌫ removes.
+    press(cx, "backspace");
+    let left = world.store.searches().unwrap();
+    assert_eq!(left.len(), 39);
+    assert!(left.iter().all(|saved| saved.name != "Saved 39"));
+    press(cx, "escape");
 }

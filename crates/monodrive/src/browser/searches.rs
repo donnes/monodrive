@@ -19,7 +19,8 @@ use crate::theme::{self, accent, content, danger, icon, on_accent, row_icon_butt
 use gpui::{
     Action, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Role,
-    SharedString, Stateful, StyledText, Task, Window, canvas, div, point, prelude::*, px,
+    ScrollHandle, SharedString, Stateful, StyledText, Task, Window, canvas, div, point, prelude::*,
+    px,
 };
 use monodrive_core::index::{Found, Hit, LineMatch};
 use monodrive_core::paths;
@@ -340,11 +341,9 @@ impl Pane {
                 this.click_entry(ix, event, window, cx)
             }));
         let row = Self::context_target(row, ix, cx);
-        Some(if selected {
-            Self::grab(row, ix, cx)
-        } else {
-            row
-        })
+        // Any part of a line drags its file, selected or not: it stands for
+        // the file, and has no empty part of its own to start a rectangle.
+        Some(Self::grab(row, ix, cx))
     }
 
     /// What a row of entry `ix` is filled with: the selection, or a stripe
@@ -428,6 +427,10 @@ pub(super) struct SearchMenu {
     store: Option<Store>,
     kept: Kept,
     active: Option<Item>,
+    /// The rows' scroll position, which the keys move to keep `active` in view.
+    pub(super) scroll: ScrollHandle,
+    /// The keys moved `active`, so the next frame brings it into view.
+    reveal: bool,
     naming: Option<Naming>,
     /// Why the last change didn't happen.
     error: Option<String>,
@@ -458,6 +461,8 @@ impl SearchMenu {
             store,
             kept: Kept::default(),
             active: None,
+            scroll: ScrollHandle::new(),
+            reveal: false,
             naming: None,
             error: None,
             _reading: Task::ready(()),
@@ -567,6 +572,7 @@ impl SearchMenu {
             (Some(at), false) => (at + len - 1) % len,
         };
         self.active = Some(items[next]);
+        self.reveal = true;
         cx.notify();
     }
 
@@ -895,10 +901,12 @@ impl Render for SearchMenu {
                 .max(px(MENU_MARGIN)),
             anchor.bottom() + px(4.),
         );
-        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        // Each child of the scrolling rows, with the row the keys can land on.
+        let mut rows: Vec<(Option<Item>, gpui::AnyElement)> = Vec::new();
         let contents = self.current.looks == Looks::Contents;
         let keys = |action: &dyn Action, cx: &App| commands::shortcut_label(action.name(), cx);
-        rows.push(
+        rows.push((
+            Some(Item::Looks(Looks::Names)),
             self.check_row(
                 "search-names",
                 "Search Names".into(),
@@ -908,9 +916,10 @@ impl Render for SearchMenu {
                 cx,
             )
             .into_any_element(),
-        );
+        ));
         let contents_keys = keys(&SearchContents, cx);
-        rows.push(
+        rows.push((
+            Some(Item::Looks(Looks::Contents)),
             self.check_row(
                 "search-contents",
                 "Search File Contents".into(),
@@ -920,13 +929,14 @@ impl Render for SearchMenu {
                 cx,
             )
             .into_any_element(),
-        );
+        ));
         let this_folder = match &self.current.scope {
             Where::Everywhere => format!("Search Only {}", self.folder),
             Where::Folder(folder) => format!("Search Only {}", folder_name(folder)),
         };
         let folder_keys = keys(&SearchThisFolder, cx);
-        rows.push(
+        rows.push((
+            Some(Item::ThisFolder),
             self.check_row(
                 "search-this-folder",
                 this_folder,
@@ -936,36 +946,42 @@ impl Render for SearchMenu {
                 cx,
             )
             .into_any_element(),
-        );
+        ));
         if self.store.is_some() {
             let renaming = self.naming.as_ref().and_then(|n| n.renaming.clone());
             if !self.kept.saved.is_empty() || self.can_save() || self.naming.is_some() {
-                rows.push(theme::section_label("Saved").into_any_element());
+                rows.push((None, theme::section_label("Saved").into_any_element()));
             }
             for (ix, saved) in self.kept.saved.iter().enumerate() {
-                match &self.naming {
+                let row = match &self.naming {
                     Some(naming) if renaming.as_ref() == Some(&saved.name) => {
-                        rows.push(self.name_row(naming).into_any_element())
+                        self.name_row(naming).into_any_element()
                     }
-                    _ => rows.push(self.saved_row(ix, saved, cx).into_any_element()),
-                }
+                    _ => self.saved_row(ix, saved, cx).into_any_element(),
+                };
+                rows.push((Some(Item::Saved(ix)), row));
             }
             match &self.naming {
                 Some(naming) if naming.renaming.is_none() => {
-                    rows.push(self.name_row(naming).into_any_element())
+                    rows.push((Some(Item::Save), self.name_row(naming).into_any_element()))
                 }
-                _ if self.can_save() => rows.push(
+                _ if self.can_save() => rows.push((
+                    Some(Item::Save),
                     self.command_row("save-search", "Save Search…", Item::Save, cx)
                         .into_any_element(),
-                ),
+                )),
                 _ => {}
             }
             if !self.kept.recent.is_empty() {
-                rows.push(theme::section_label("Recent").into_any_element());
+                rows.push((None, theme::section_label("Recent").into_any_element()));
                 for (ix, recent) in self.kept.recent.iter().enumerate() {
-                    rows.push(self.recent_row(ix, recent, cx).into_any_element());
+                    rows.push((
+                        Some(Item::Recent(ix)),
+                        self.recent_row(ix, recent, cx).into_any_element(),
+                    ));
                 }
-                rows.push(
+                rows.push((
+                    Some(Item::ClearRecents),
                     self.command_row(
                         "clear-recent-searches",
                         "Clear Recent Searches",
@@ -973,11 +989,21 @@ impl Render for SearchMenu {
                         cx,
                     )
                     .into_any_element(),
-                );
+                ));
             }
         }
         if self.naming.is_none() {
-            rows.extend(self.error_line().map(IntoElement::into_any_element));
+            rows.extend(
+                self.error_line()
+                    .map(|line| (None, line.into_any_element())),
+            );
+        }
+        if std::mem::take(&mut self.reveal)
+            && let Some(at) = rows
+                .iter()
+                .position(|(item, _)| item.is_some() && *item == self.active)
+        {
+            self.scroll.scroll_to_item(at);
         }
         div()
             .id("search-menu-layer")
@@ -1040,9 +1066,10 @@ impl Render for SearchMenu {
                             .min_h_0()
                             .p_1()
                             .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
                             .flex()
                             .flex_col()
-                            .children(rows),
+                            .children(rows.into_iter().map(|(_, row)| row)),
                     )
                     .child(div().relative().child(self.footer())),
             )
