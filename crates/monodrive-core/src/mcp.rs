@@ -1362,14 +1362,23 @@ fn compared(comparison: &Comparison, limit: usize, read: Option<bool>, timeout: 
                 compare::kind_name(r.kind)
             ),
             (Status::Unknown(why), ..) => format!(" ({why})"),
-            _ if entry.not_downloaded() => " (not downloaded)".into(),
             _ => match entry.newer() {
                 Some(Newer::Left) => " (left newer)".into(),
                 Some(Newer::Right) => " (right newer)".into(),
                 None => String::new(),
             },
         };
-        let _ = writeln!(out, "{detail}");
+        let cloud = |side: &Option<compare::Side>| {
+            side.as_ref()
+                .is_some_and(|side| !side.availability.is_local())
+        };
+        let cloud = match (cloud(&entry.left), cloud(&entry.right)) {
+            (true, true) => " (not downloaded)",
+            (true, false) => " (left not downloaded)",
+            (false, true) => " (right not downloaded)",
+            (false, false) => "",
+        };
+        let _ = writeln!(out, "{detail}{cloud}");
     }
     if shown.len() > limit {
         let _ = writeln!(out, "({} more; pass a larger limit)", shown.len() - limit);
@@ -2605,6 +2614,37 @@ mod tests {
             "{}",
             folder_size(dir.path(), &size, 10)
         );
+
+        let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+        for (side, name, text) in [
+            (&left, "only.txt", "a"),
+            (&left, "sizes.txt", "a"),
+            (&right, "sizes.txt", "abc"),
+            (&left, "clash", "a"),
+        ] {
+            std::fs::create_dir_all(side).unwrap();
+            std::fs::write(side.join(name), text).unwrap();
+        }
+        std::fs::create_dir(right.join("clash")).unwrap();
+        let mut comparison =
+            compare::compare(&left, &right, &compare::Progress::default(), None).unwrap();
+        for entry in &mut comparison.entries {
+            match entry.path.to_str() {
+                Some("only.txt" | "sizes.txt") => &mut entry.left,
+                _ => &mut entry.right,
+            }
+            .as_mut()
+            .unwrap()
+            .availability = cloud::Availability::Placeholder;
+        }
+        let shown = compared(&comparison, 10, None, 10);
+        for line in [
+            "type conflict: clash (file on the left, folder on the right) (right not downloaded)",
+            "only left: only.txt (left not downloaded)",
+            "differs: sizes.txt (left not downloaded)",
+        ] {
+            assert!(shown.lines().any(|shown| shown == line), "{shown}");
+        }
 
         let mut server = server();
         let reply = call(

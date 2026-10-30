@@ -250,13 +250,6 @@ impl Spec {
             } => {
                 absolute([archive, into].into_iter())?;
                 let id = ids(std::slice::from_ref(archive))?[0];
-                // Opening a placeholder here would hold the owner while it
-                // downloads.
-                if std::fs::symlink_metadata(archive)
-                    .is_ok_and(|meta| !cloud::Availability::of(&meta).is_local())
-                {
-                    return Err(cloud::not_downloaded(archive));
-                }
                 let items = Archive::open(archive)?.plan(entries, disk::free(into).ok())?;
                 Ok(Self {
                     kind: Kind::Extract,

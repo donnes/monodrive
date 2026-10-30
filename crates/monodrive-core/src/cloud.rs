@@ -58,6 +58,60 @@ pub fn not_downloaded(path: &Path) -> String {
     format!("{} isn't downloaded. Download it first.", path.display())
 }
 
+/// Refuses to open `path` for reading when what it leads to is a
+/// placeholder; opening follows links. When it can't be found, opening it
+/// says why.
+pub fn refuse_placeholder(path: &Path) -> Result<(), String> {
+    std::fs::metadata(path).map_or(Ok(()), |meta| readable(path, Availability::of(&meta)))
+}
+
+fn readable(path: &Path, availability: Availability) -> Result<(), String> {
+    match availability {
+        Availability::Local => Ok(()),
+        _ => Err(not_downloaded(path)),
+    }
+}
+
+/// Reading `path` failed with `e`: as `not_downloaded` when `without_downloads`
+/// stopped it from downloading.
+pub fn read_error(path: &Path, e: &std::io::Error) -> String {
+    if e.raw_os_error() == Some(libc::EDEADLK) {
+        not_downloaded(path)
+    } else {
+        format!("{}: {e}", path.display())
+    }
+}
+
+// IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES and IOPOL_SCOPE_THREAD from
+// <sys/resource.h>, which libc doesn't export.
+const MATERIALIZE: libc::c_int = 3;
+const THREAD: libc::c_int = 1;
+const MATERIALIZE_OFF: libc::c_int = 1;
+
+unsafe extern "C" {
+    fn getiopolicy_np(iotype: libc::c_int, scope: libc::c_int) -> libc::c_int;
+    fn setiopolicy_np(iotype: libc::c_int, scope: libc::c_int, policy: libc::c_int) -> libc::c_int;
+}
+
+/// Runs `f` with this thread's reads of placeholders failing with `EDEADLK`
+/// instead of downloading, then puts the thread's policy back, in case the
+/// file became a placeholder after it was checked.
+pub fn without_downloads<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(libc::c_int);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if self.0 >= 0 {
+                // SAFETY: a plain system call on this thread.
+                unsafe { setiopolicy_np(MATERIALIZE, THREAD, self.0) };
+            }
+        }
+    }
+    // SAFETY: plain system calls on this thread.
+    let _restore = Restore(unsafe { getiopolicy_np(MATERIALIZE, THREAD) });
+    unsafe { setiopolicy_np(MATERIALIZE, THREAD, MATERIALIZE_OFF) };
+    f()
+}
+
 /// Refuses `path` when it or anything in it is a placeholder, for work that
 /// reads contents, such as a copy. Links aren't followed, and a placeholder
 /// folder isn't listed. Folders that can't be read are left to that work.
@@ -224,5 +278,27 @@ mod tests {
         let meta = std::fs::symlink_metadata(dir.path().join("a.txt")).unwrap();
         assert_eq!(Availability::of(&meta), Availability::Local);
         assert_eq!(refuse_placeholders(dir.path()), Ok(()));
+    }
+
+    #[test]
+    fn reading_refuses_what_isnt_downloaded_and_says_so_when_macos_stops_it() {
+        let path = Path::new("/x/photo.jpg");
+        let refused = Err("/x/photo.jpg isn't downloaded. Download it first.".to_string());
+        assert_eq!(readable(path, Availability::Placeholder), refused);
+        assert_eq!(readable(path, Availability::Downloading), refused);
+        assert_eq!(readable(path, Availability::Unknown), refused);
+        assert_eq!(readable(path, Availability::Local), Ok(()));
+        let stopped = std::io::Error::from_raw_os_error(libc::EDEADLK);
+        assert_eq!(Err(read_error(path, &stopped)), refused);
+        let gone = std::io::Error::from_raw_os_error(libc::ENOENT);
+        assert_eq!(
+            read_error(path, &gone),
+            "/x/photo.jpg: No such file or directory (os error 2)"
+        );
+
+        let policy = || unsafe { getiopolicy_np(MATERIALIZE, THREAD) };
+        let before = policy();
+        assert_eq!(without_downloads(policy), MATERIALIZE_OFF);
+        assert_eq!(policy(), before);
     }
 }

@@ -491,7 +491,7 @@ fn same_bytes(
     deadline: Option<Instant>,
 ) -> Option<Status> {
     let open = |path: &Path, side: &Side| -> Result<File, String> {
-        let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let file = File::open(path).map_err(|e| cloud::read_error(path, &e))?;
         unchanged(&file, path, side, "since the comparison; compare again")?;
         Ok(file)
     };
@@ -541,7 +541,7 @@ fn fill(file: &mut File, buffer: &mut [u8], path: &Path) -> Result<usize, String
             Ok(0) => break,
             Ok(n) => filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(format!("{}: {e}", path.display())),
+            Err(e) => return Err(cloud::read_error(path, &e)),
         }
     }
     Ok(filled)
@@ -742,7 +742,12 @@ pub fn diff(left: &Path, right: &Path, context: usize) -> Result<TextDiff, Strin
 }
 
 fn text(path: &Path) -> Result<String, String> {
-    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+    cloud::refuse_placeholder(path)?;
+    cloud::without_downloads(|| read_text(path))
+}
+
+fn read_text(path: &Path) -> Result<String, String> {
+    let fail = |e: std::io::Error| cloud::read_error(path, &e);
     let file = File::open(path).map_err(fail)?;
     let meta = file.metadata().map_err(fail)?;
     if !meta.is_file() {

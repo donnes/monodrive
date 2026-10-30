@@ -141,8 +141,13 @@ impl Archive {
     /// `MAX_ENTRIES` of it. Nothing is extracted, and nothing is allocated
     /// by the sizes the archive claims.
     pub fn open(path: &Path) -> Result<Self, String> {
+        crate::cloud::refuse_placeholder(path)?;
+        crate::cloud::without_downloads(|| Self::read_central(path))
+    }
+
+    fn read_central(path: &Path) -> Result<Self, String> {
         let at = |why: String| format!("{}: {why}", path.display());
-        let mut file = File::open(path).map_err(|e| at(e.to_string()))?;
+        let mut file = File::open(path).map_err(|e| crate::cloud::read_error(path, &e))?;
         let len = file.metadata().map_err(|e| at(e.to_string()))?.len();
         let end = find_end(&mut file, len).map_err(at)?;
         let mut reader = BufReader::with_capacity(CHUNK, file);
@@ -344,7 +349,10 @@ impl Archive {
         let base = CString::new(base.as_bytes()).map_err(|e| e.to_string())?;
         let mut writer = Writer {
             archive: self,
-            file: File::open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?,
+            file: {
+                crate::cloud::refuse_placeholder(&self.path)?;
+                File::open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?
+            },
             buffer: vec![0; CHUNK],
             cancel,
             done,

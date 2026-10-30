@@ -553,7 +553,7 @@ fn digest(
     progress: &Progress,
     deadline: Option<Instant>,
 ) -> Result<Result<Hashed, String>, Stop> {
-    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+    let fail = |e: std::io::Error| crate::cloud::read_error(path, &e);
     let changed = || format!("{} changed since the scan; scan again.", path.display());
     let size = file.usage.bytes;
     let whole = whole || size <= 3 * SAMPLE;
