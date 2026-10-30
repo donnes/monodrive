@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 
 /// The rule being edited and what it comes to for the selection.
 pub(super) struct BatchRename {
+    /// Which opening of the bar this is. An Apply's answer only belongs to
+    /// the one that sent it.
+    session: u64,
     /// The selected paths, in the order shown: numbers count in this order.
     pub(super) paths: Vec<PathBuf>,
     /// Where it was opened. Going anywhere else leaves it.
@@ -39,8 +42,12 @@ pub(super) struct BatchRename {
     /// The rule or the selection changed since `previewing` began, so what
     /// it finds is dropped and it runs again.
     again: bool,
-    /// Sent to the owner and not yet answered.
-    sending: bool,
+    /// Sent to the owner and not yet answered. Until then the rule, the
+    /// selection and the preview stay as they were sent.
+    pub(super) sending: bool,
+    /// Holds the keys while the fields are frozen and aren't drawn, so they
+    /// reach nothing.
+    keys: FocusHandle,
     /// Why the owner refused the last Apply.
     pub(super) error: Option<String>,
     _edits: [Subscription; 4],
@@ -117,7 +124,9 @@ impl BatchRename {
 
     /// Where the keys go in the bar: the rule's first field.
     pub(super) fn first_field(&self, cx: &App) -> FocusHandle {
-        if self.numbering {
+        if self.sending {
+            self.keys.clone()
+        } else if self.numbering {
             self.name.focus_handle(cx)
         } else {
             self.find.focus_handle(cx)
@@ -134,8 +143,11 @@ impl BatchRename {
             .any(|field| field.focus_handle(cx).is_focused(window))
     }
 
-    fn has_keys(&self, window: &Window, cx: &App) -> bool {
-        self.field_has_keys(window, cx) || self.stops.values().any(|s| s.is_focused(window))
+    /// Whether the keys are anywhere in the bar.
+    pub(super) fn has_keys(&self, window: &Window, cx: &App) -> bool {
+        self.keys.is_focused(window)
+            || self.field_has_keys(window, cx)
+            || self.stops.values().any(|s| s.is_focused(window))
     }
 
     fn stop(&mut self, id: &'static str, control: Stateful<Div>, cx: &App) -> Stateful<Div> {
@@ -172,6 +184,9 @@ impl BatchRename {
 
     /// What it comes to, and whether that's a problem.
     fn status(&self, cx: &App) -> (String, bool) {
+        if self.sending {
+            return ("Renaming…".into(), false);
+        }
         if let Some(why) = &self.error {
             return (why.clone(), true);
         }
@@ -207,6 +222,11 @@ impl Pane {
         (stop.folder.clone(), stop.recents, self.query.clone())
     }
 
+    /// An Apply is waiting on the owner: nothing here may change under it.
+    pub(super) fn batch_sending(&self) -> bool {
+        self.batch.as_ref().is_some_and(|b| b.sending)
+    }
+
     /// Rename with several selected: the bar, with nothing changed yet.
     pub(super) fn start_batch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut field = |label: &'static str, placeholder: &'static str| {
@@ -224,7 +244,10 @@ impl Pane {
         let (with, with_edits) = field("Replace With", "Replace With");
         let (name, name_edits) = field("Name", "Name");
         let (start, start_edits) = field("Start At", "Start At 1");
+        self.batch_sessions += 1;
         let batch = BatchRename {
+            session: self.batch_sessions,
+            keys: cx.focus_handle(),
             paths: self.chosen(),
             place: self.place_now(),
             numbering: false,
@@ -275,7 +298,7 @@ impl Pane {
 
     /// Works the plan out off the UI thread, as the disk may have to be walked.
     pub(super) fn preview_batch(&mut self, cx: &mut Context<Self>) {
-        let Some(batch) = &mut self.batch else {
+        let Some(batch) = self.batch.as_mut().filter(|b| !b.sending) else {
             return;
         };
         if batch.previewing.is_some() {
@@ -323,7 +346,11 @@ impl Pane {
             return;
         }
         let chosen = self.chosen();
-        if let Some(batch) = self.batch.as_mut().filter(|b| b.paths != chosen) {
+        if let Some(batch) = self
+            .batch
+            .as_mut()
+            .filter(|b| !b.sending && b.paths != chosen)
+        {
             batch.paths = chosen;
             batch.error = None;
             self.preview_batch(cx);
@@ -333,7 +360,7 @@ impl Pane {
     /// Apply: what's on screen, as long as it's still what the owner works
     /// out. `skip` renames the rows without a problem, which only the button
     /// that says so asks for.
-    pub(super) fn apply_batch(&mut self, skip: bool, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn apply_batch(&mut self, skip: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(batch) = self.batch.as_ref().filter(|b| !b.sending) else {
             return;
         };
@@ -352,6 +379,7 @@ impl Pane {
             preview: Some(preview.plan.fingerprint()),
             skip_problems: skip,
         };
+        let session = batch.session;
         let sent = with_owner(
             window,
             cx,
@@ -359,22 +387,33 @@ impl Pane {
                 let outcome = owner.submit(Origin::Window, request.clone())?;
                 Ok((request, outcome))
             },
-            |this, done, window, cx| this.batch_applied(done, window, cx),
+            move |this, done, window, cx| this.batch_applied(session, done, window, cx),
         );
         if let Some(batch) = &mut self.batch {
             batch.sending = sent;
             batch.error = None;
+            if sent {
+                window.focus(&batch.keys, cx);
+            }
         }
+        cx.notify();
     }
 
     /// A refusal stays, with the reason and the disk as it is now. Anything
-    /// else is done: the bar goes, and the toast says how it went.
+    /// else is done: the bar goes, and the toast says how it went. If this bar
+    /// has closed since it sent this, only the toast is left to do, and a bar
+    /// opened since stays as it is.
     fn batch_applied(
         &mut self,
+        session: u64,
         done: Result<(Request, Outcome), String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let same = self.batch.as_ref().is_some_and(|b| b.session == session);
+        if !same {
+            return self.settle(done, false, cx);
+        }
         if let Some(batch) = &mut self.batch {
             batch.sending = false;
             if let Err(why) = &done {
@@ -384,6 +423,9 @@ impl Pane {
                     Some(first) => format!("{first}."),
                     None => first.to_string(),
                 });
+                if batch.keys.is_focused(window) {
+                    window.focus(&batch.first_field(cx), cx);
+                }
                 return self.preview_batch(cx);
             }
         }
@@ -418,6 +460,11 @@ impl Pane {
         change: fn(&mut BatchRename),
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
+        if self.batch_sending() {
+            return Some(
+                text_button(id, label, ButtonLook::Disabled).when(on, |d| d.bg(content(0.14))),
+            );
+        }
         let look = if on {
             ButtonLook::Secondary
         } else {
@@ -445,6 +492,8 @@ impl Pane {
     ) -> Option<impl IntoElement + use<>> {
         let covered = self.chrome.covered;
         let batch = self.batch.as_ref()?;
+        let sending = batch.sending;
+        let stops_on = !covered && !sending;
         let (numbering, match_case, whole_name, number_first) = (
             batch.numbering,
             batch.match_case,
@@ -452,10 +501,10 @@ impl Pane {
             batch.number_first,
         );
         for field in batch.fields() {
-            field.focus_handle(cx).tab_stop(!covered);
+            field.focus_handle(cx).tab_stop(stops_on);
         }
         for stop in batch.stops.values() {
-            stop.clone().tab_stop(!covered);
+            stop.clone().tab_stop(stops_on);
         }
         let bad_start = numbering && batch.rule(cx).is_err();
         let box_for = |field: &Entity<TextField>, bad: bool| {
@@ -469,7 +518,22 @@ impl Pane {
             })
             .h(px(theme::FIELD_HEIGHT))
             .px_2()
-            .child(div().flex_1().min_w_0().child(field.clone()))
+            .map(|d| {
+                if sending {
+                    // What was sent, which no key or press can reach.
+                    d.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(theme::TEXT_TITLE))
+                            .text_color(content(0.65))
+                            .child(field.read(cx).text().to_string()),
+                    )
+                } else {
+                    d.child(div().flex_1().min_w_0().child(field.clone()))
+                }
+            })
         };
         let fields = if numbering {
             div()
@@ -495,7 +559,9 @@ impl Pane {
             .filter(|_| !bad_start && !batch.sending);
         let renames = ready.map_or(0, |preview| preview.renames);
         let problems = ready.map_or(0, |preview| preview.problems);
-        let label = if problems > 0 && renames > 0 {
+        let label = if sending {
+            "Applying…".to_string()
+        } else if problems > 0 && renames > 0 {
             format!("Skip {problems} and Apply")
         } else {
             "Apply".to_string()
@@ -510,10 +576,15 @@ impl Pane {
         } else {
             text_button("batch-apply", label, ButtonLook::Disabled)
         };
-        let cancel = text_button("batch-cancel", "Cancel", ButtonLook::Secondary)
-            .debug_selector(|| "batch-cancel".into())
-            .on_click(cx.listener(|this, _, window, cx| this.end_batch(window, cx)));
-        let cancel = self.batch.as_mut()?.stop("batch-cancel", cancel, cx);
+        let cancel = if sending {
+            text_button("batch-cancel", "Cancel", ButtonLook::Disabled)
+        } else {
+            let cancel = text_button("batch-cancel", "Cancel", ButtonLook::Secondary)
+                .debug_selector(|| "batch-cancel".into())
+                .on_click(cx.listener(|this, _, window, cx| this.end_batch(window, cx)));
+            self.batch.as_mut()?.stop("batch-cancel", cancel, cx)
+        };
+        let keys = self.batch.as_ref()?.keys.clone();
         let replace = self.batch_pill(
             "batch-replace",
             "Replace",
@@ -557,6 +628,7 @@ impl Pane {
         Some(
             div()
                 .debug_selector(|| "batch-bar".into())
+                .track_focus(&keys)
                 .key_context("Rename")
                 .on_action(cx.listener(|this, _: &CommitRename, window, cx| {
                     // ↩ on a button is that button's.
@@ -594,7 +666,13 @@ impl Pane {
                         .text_size(px(theme::TEXT_SMALL))
                         .child(
                             div()
-                                .debug_selector(|| "batch-status".into())
+                                .debug_selector(move || {
+                                    if sending {
+                                        "batch-running".into()
+                                    } else {
+                                        "batch-status".into()
+                                    }
+                                })
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()

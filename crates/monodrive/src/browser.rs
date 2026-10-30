@@ -562,7 +562,11 @@ impl Browser {
         let Some(other) = self.tabs[self.active].other() else {
             return;
         };
-        if other.read(cx).list_focus.contains_focused(window, cx) {
+        let other = other.read(cx);
+        // The bar is the pane's too, though it's outside the list.
+        if other.list_focus.contains_focused(window, cx)
+            || other.batch.as_ref().is_some_and(|b| b.has_keys(window, cx))
+        {
             let tab = &mut self.tabs[self.active];
             tab.second_focused = !tab.second_focused;
             cx.defer_in(window, |this, _, cx| this.mirror_pane(cx));
@@ -1564,8 +1568,9 @@ impl Render for Browser {
                 }
             });
         }
-        // Only the sheet's controls take Tab while it's open.
-        let sheet = self.sheet_open();
+        // Only the sheet's controls take Tab while it's open. A batch waiting
+        // on the owner holds the commands the same way, so nothing moves under it.
+        let sheet = self.sheet_open() || self.pane().read(cx).batch_sending();
         let regions = !sheet;
         self.sidebar_focus.clone().tab_stop(regions);
         self.settings_focus.clone().tab_stop(regions);
@@ -1576,8 +1581,9 @@ impl Render for Browser {
             let chrome = self.chrome_for(&pane, width, cx);
             pane.update(cx, |pane, cx| {
                 pane.chrome = chrome;
-                pane.search.focus_handle(cx).tab_stop(regions);
-                pane.list_focus.clone().tab_stop(regions);
+                let stops = regions && !pane.batch_sending();
+                pane.search.focus_handle(cx).tab_stop(stops);
+                pane.list_focus.clone().tab_stop(stops);
             });
         }
         let (lone_folder, renaming, selected) = self.pane().clone().update(cx, |pane, _| {

@@ -227,6 +227,8 @@ pub struct Pane {
     pub(super) renaming: Option<Renaming>,
     /// Rename in the list: the bar, and the selected rows' new names.
     pub(super) batch: Option<BatchRename>,
+    /// How many times the bar has opened, which tells each opening apart.
+    pub(super) batch_sessions: u64,
     /// What's selected stays when the next listing lands, as it was put back.
     pub(super) keep_selection: bool,
     /// What a change made, to select once the listing that has it lands.
@@ -347,6 +349,7 @@ impl Pane {
             consented: false,
             renaming: None,
             batch: None,
+            batch_sessions: 0,
             keep_selection: false,
             select_after: Vec::new(),
             query: String::new(),
@@ -506,7 +509,7 @@ impl Pane {
     /// A Sort by command or a column title: this pane's order, and where the
     /// next tab starts.
     fn choose_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
-        if sort != self.sort {
+        if sort != self.sort && !self.batch_sending() {
             self.sort = sort;
             preferences::update(cx, |p| p.sort = sort);
             cx.emit(PaneEvent::Moved);
@@ -3708,6 +3711,10 @@ impl Render for Pane {
                     // The card's corners inside its border.
                     d.rounded(px(theme::RADIUS_CARD - 1.))
                 }))
+            })
+            // No press reaches the rows, titles or crumbs under a running Apply.
+            .when(self.batch_sending(), |d| {
+                d.child(div().absolute().size_full().occlude())
             })
     }
 }

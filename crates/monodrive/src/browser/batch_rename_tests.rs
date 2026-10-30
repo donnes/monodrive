@@ -314,3 +314,224 @@ fn an_out_of_date_preview_renames_nothing_and_stays_open(cx: &mut TestAppContext
     assert!(trip.join("IMG_a.jpg").exists() && trip.join("IMG_c.jpg").exists());
     release(owned, cx);
 }
+
+/// Sends Apply without running the executor, so the owner hasn't answered
+/// and the tests can look at the window while it waits.
+fn apply_unanswered(browser: &Entity<Browser>, cx: &mut VisualTestContext) {
+    let pane = browser.read_with(cx, |browser, _| browser.pane().clone());
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| pane.apply_batch(false, window, cx));
+    });
+}
+
+/// Draws a frame without running the executor.
+fn draw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+}
+
+/// Sends a key without running the executor.
+fn key_unanswered(cx: &mut VisualTestContext, key: &str, text: Option<&str>) {
+    let mut keystroke = gpui::Keystroke::parse(key).unwrap();
+    keystroke.key_char = text.map(str::to_string);
+    cx.update(|window, cx| {
+        window.dispatch_keystroke(keystroke, cx);
+    });
+}
+
+/// A press and release at `at` without running the executor.
+fn click_unanswered(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    let press = gpui::MouseDownEvent {
+        button: gpui::MouseButton::Left,
+        position: at,
+        modifiers: gpui::Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    };
+    let release = gpui::MouseUpEvent {
+        button: gpui::MouseButton::Left,
+        position: at,
+        modifiers: gpui::Modifiers::none(),
+        click_count: 1,
+    };
+    cx.update(|window, cx| {
+        window.dispatch_event(gpui::PlatformInput::MouseDown(press), cx);
+        window.dispatch_event(gpui::PlatformInput::MouseUp(release), cx);
+    });
+}
+
+fn rule_text(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> String {
+    in_pane(browser, cx, |pane, cx| {
+        let batch = pane.batch.as_ref().unwrap();
+        batch.find.read(cx).text().to_string()
+    })
+}
+
+/// What was submitted is what runs: until the owner answers, the rule, the
+/// selection and the preview stay as they were, and the bar says it's running.
+#[gpui::test]
+fn the_bar_and_the_list_hold_still_until_the_owner_answers(cx: &mut TestAppContext) {
+    let (_dir, trip) = trip();
+    let owned = own(cx);
+    let (browser, cx) = browse(&trip, cx);
+    press(cx, "down shift-down enter");
+    fill(&browser, cx, |b| &b.find, "IMG");
+    fill(&browser, cx, |b| &b.with, "New");
+    assert_eq!(names(&browser, cx), ["New_a.jpg", "New_b.jpg"]);
+    let third_row = in_pane(&browser, cx, |pane, _| {
+        pane.list_bounds.get().origin + gpui::point(gpui::px(120.), gpui::px(60.))
+    });
+    // The press lands on a row while nothing is running.
+    cx.simulate_click(third_row, gpui::Modifiers::none());
+    assert_eq!(shown(&browser, cx).1, ["IMG_c.jpg"]);
+    press(cx, "alt-up shift-down enter");
+    let selected = shown(&browser, cx).1;
+    assert_eq!(selected, ["IMG_a.jpg", "IMG_b.jpg"]);
+    assert_eq!(names(&browser, cx), ["New_a.jpg", "New_b.jpg"]);
+
+    apply_unanswered(&browser, cx);
+    draw(cx);
+    key_unanswered(cx, "x", Some("x"));
+    assert_eq!(rule_text(&browser, cx), "IMG", "typing reaches the rule");
+    key_unanswered(cx, "alt-down", None);
+    draw(cx);
+    click_unanswered(cx, third_row);
+    draw(cx);
+    assert_eq!(shown(&browser, cx).1, selected, "the selection moved");
+    assert!(
+        cx.debug_bounds("batch-running").is_some(),
+        "nothing says so"
+    );
+    assert_eq!(cx.debug_bounds("batch-cancel"), None, "Cancel looks live");
+    key_unanswered(cx, "escape", None);
+    assert!(in_bar(&browser, cx));
+    assert!(trip.join("IMG_a.jpg").exists());
+
+    cx.run_until_parked();
+    assert!(!in_bar(&browser, cx));
+    assert_eq!(on_disk(&trip), ["IMG_c.jpg", "New_a.jpg", "New_b.jpg"]);
+    release(owned, cx);
+}
+
+/// Submits a batch, goes to the parent folder while the owner hasn't
+/// answered, and opens a second batch there with a rule of its own.
+fn second_batch_over_an_unanswered_one(
+    browser: &Entity<Browser>,
+    trip: &Path,
+    cx: &mut VisualTestContext,
+    before_apply: impl FnOnce(),
+) {
+    press(cx, "cmd-a enter");
+    fill(browser, cx, |b| &b.find, "IMG");
+    fill(browser, cx, |b| &b.with, "New");
+    assert_eq!(names(browser, cx)[0], "New_a.jpg");
+    before_apply();
+    apply_unanswered(browser, cx);
+    let pane = browser.read_with(cx, |browser, _| browser.pane().clone());
+    let parent = trip.parent().unwrap().to_path_buf();
+    pane.update(cx, |pane, cx| pane.navigate(parent, cx));
+    draw(cx);
+    assert!(!in_bar(browser, cx), "going elsewhere closes the first");
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            let entries = pane.entries.clone();
+            pane.selection.select_all(&entries);
+            pane.start_batch(window, cx);
+        });
+    });
+    let find = in_pane(browser, cx, |pane, _| {
+        pane.batch.as_ref().unwrap().find.clone()
+    });
+    find.update(cx, |field, cx| field.set_text("second", 6..6, cx));
+    cx.run_until_parked();
+}
+
+/// A finished batch doesn't close one opened since, and its toast still says
+/// how it went.
+#[gpui::test]
+fn an_older_batchs_success_leaves_the_newer_one_open(cx: &mut TestAppContext) {
+    let (_dir, trip) = trip();
+    let owned = own(cx);
+    let (browser, cx) = browse(&trip, cx);
+    second_batch_over_an_unanswered_one(&browser, &trip, cx, || {});
+    assert!(in_bar(&browser, cx), "the second batch closed");
+    assert_eq!(rule_text(&browser, cx), "second");
+    assert_eq!(on_disk(&trip), ["New_a.jpg", "New_b.jpg", "New_c.jpg"]);
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Renamed 3 items".into(), false, true))
+    );
+    release(owned, cx);
+}
+
+/// A refused batch reports its refusal in a toast, not as the newer one's.
+#[gpui::test]
+fn an_older_batchs_refusal_is_not_the_newer_ones_error(cx: &mut TestAppContext) {
+    let (_dir, trip) = trip();
+    let owned = own(cx);
+    let (browser, cx) = browse(&trip, cx);
+    let taken = trip.join("New_b.jpg");
+    second_batch_over_an_unanswered_one(&browser, &trip, cx, || {
+        std::fs::write(taken, "taken since").unwrap()
+    });
+    assert!(in_bar(&browser, cx));
+    let error = in_pane(&browser, cx, |pane, _| {
+        pane.batch.as_ref().unwrap().error.clone()
+    });
+    assert_eq!(error, None, "the older refusal landed on the second batch");
+    let (said, failed, undo) = toast(&browser, cx).unwrap();
+    assert!(said.starts_with("Nothing was renamed"), "{said}");
+    assert!(failed && !undo);
+    assert!(trip.join("IMG_a.jpg").exists());
+    release(owned, cx);
+}
+
+/// Tab into the other pane's bar makes that pane the one commands act on, as
+/// it does arriving at that pane's list.
+#[gpui::test]
+fn tabbing_into_the_other_panes_bar_makes_it_the_active_pane(cx: &mut TestAppContext) {
+    let (_dir, trip) = trip();
+    let (browser, cx) = browse(&trip, cx);
+    press(cx, "cmd-alt-s");
+    let batched = browser.read_with(cx, |browser, _| browser.pane().clone());
+    press(cx, "cmd-a enter");
+    assert!(batched.read_with(cx, |pane, _| pane.batch.is_some()));
+    let other = browser.read_with(cx, |browser, cx| {
+        let tab = &browser.tabs[browser.active];
+        tab.panes()
+            .find(|pane| pane.entity_id() != batched.entity_id())
+            .unwrap()
+            .clone()
+            .read(cx)
+            .list_focus
+            .clone()
+    });
+    cx.update(|window, cx| window.focus(&other, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let active = browser.read_with(cx, |browser, _| browser.pane().clone());
+    assert_ne!(active.entity_id(), batched.entity_id());
+
+    // Round the window's Tab stops to the bar's Find field.
+    let find = batched.read_with(cx, |pane, cx| {
+        pane.batch.as_ref().unwrap().find.focus_handle(cx)
+    });
+    for _ in 0..20 {
+        if cx.update(|window, _| find.is_focused(window)) {
+            break;
+        }
+        press(cx, "tab");
+    }
+    assert!(cx.update(|window, _| find.is_focused(window)));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let active = browser.read_with(cx, |browser, _| browser.pane().clone());
+    assert_eq!(
+        active.entity_id(),
+        batched.entity_id(),
+        "the other pane stayed active"
+    );
+}
