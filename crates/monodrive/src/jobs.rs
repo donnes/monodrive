@@ -45,13 +45,12 @@ pub struct Jobs {
     /// job shows only if its latest run started since, so last week's
     /// failures don't.
     since: u64,
-    /// Runs (a job's id and when the run started) that failed and were
-    /// dismissed.
-    dismissed: HashSet<(u64, u64)>,
+    /// Runs, by id, that failed and were dismissed.
+    dismissed: HashSet<u64>,
     /// Finished runs on their way out of the list, each with its timer.
-    leaving: HashMap<(u64, u64), Task<()>>,
+    leaving: HashMap<u64, Task<()>>,
     /// Finished runs that have left it.
-    gone: HashSet<(u64, u64)>,
+    gone: HashSet<u64>,
     /// The window's own copies and moves, followed until they end.
     followed: HashSet<u64>,
     open: bool,
@@ -162,7 +161,7 @@ impl Jobs {
                     _ => {}
                 }
             }
-            let run = (id, job.started);
+            let run = job.run;
             let finished = matches!(job.state, State::Completed | State::Cancelled);
             if finished
                 && self.new_run(job)
@@ -196,7 +195,7 @@ impl Jobs {
     /// The jobs the ring and the popover show, newest first.
     fn shown(&self) -> impl Iterator<Item = &Job> {
         self.jobs.iter().filter(|job| {
-            let run = (job.id, job.started);
+            let run = job.run;
             match job.state {
                 State::Queued | State::Running | State::Waiting => true,
                 State::Failed | State::Interrupted => {
@@ -273,7 +272,7 @@ impl Jobs {
     }
 
     fn row(&self, job: &Job, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let (id, started) = (job.id, job.started);
+        let (id, run) = (job.id, job.run);
         let ours = job.origin == Origin::Window;
         let answer = |conflict| Request::Retry { job: id, conflict };
         let buttons: Vec<(&'static str, Request)> = match job.state {
@@ -364,7 +363,7 @@ impl Jobs {
                                 if label == "Cancel" {
                                     this.ask(Request::Cancel { job: id }, false, cx);
                                 } else {
-                                    this.dismissed.insert((id, started));
+                                    this.dismissed.insert(run);
                                     cx.notify();
                                 }
                             }))
@@ -558,6 +557,11 @@ mod tests {
     use monodrive_core::ops::Task as Item;
 
     fn job(id: u64, state: State, started: u64) -> Job {
+        run(id, id, state, started)
+    }
+
+    /// Run `run` of job `id`.
+    fn run(id: u64, run: u64, state: State, started: u64) -> Job {
         Job {
             id,
             title: "Copy".into(),
@@ -571,7 +575,8 @@ mod tests {
             bytes: 0,
             total_bytes: 0,
             started,
-            run: None,
+            run,
+            undoable: false,
         }
     }
 
@@ -596,6 +601,11 @@ mod tests {
         cx.executor().advance_clock(LINGER);
         assert!(shown(cx));
         take(vec![job(4, State::Completed, 150)], cx);
+        assert!(shown(cx));
+        cx.executor().advance_clock(LINGER);
+        assert!(!shown(cx));
+        // Continued in the same second, it's another run, with its own stay.
+        take(vec![run(4, 9, State::Completed, 150)], cx);
         assert!(shown(cx));
         cx.executor().advance_clock(LINGER);
         assert!(!shown(cx));

@@ -82,10 +82,13 @@ pub struct Job {
     /// When its latest run was queued, in seconds since 1970.
     #[serde(default)]
     pub started: u64,
-    /// The operation undo knows its latest run as, if that run changed
-    /// anything.
+    /// Its latest run's id, unique among runs and operations: the job's id,
+    /// then each continuation's. Undo knows the run by it.
     #[serde(default)]
-    pub run: Option<u64>,
+    pub run: u64,
+    /// The latest run has ended and changed something undo can reverse.
+    #[serde(default)]
+    pub undoable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,7 +268,8 @@ impl Entry {
             bytes: finished + live,
             total_bytes: self.work.iter().map(|work| work.bytes).sum(),
             started: self.started,
-            run: (!self.state.active() && !self.run_steps().is_empty()).then_some(self.run),
+            run: self.run,
+            undoable: !self.state.active() && !self.run_steps().is_empty(),
         }
     }
 }

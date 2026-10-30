@@ -2038,7 +2038,8 @@ impl Browser {
     /// A paste or Move Here finished: what it made is selected, if it's
     /// here, and a toast offers Undo.
     fn job_finished(&mut self, job: Job, cx: &mut Context<Self>) {
-        self.toast(jobs::title(&job), false, job.run, cx);
+        let undo = job.undoable.then_some(job.run);
+        self.toast(jobs::title(&job), false, undo, cx);
         if self.query.is_empty() && job.into == self.folder() {
             self.select_after = job
                 .tasks

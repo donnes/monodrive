@@ -918,7 +918,8 @@ mod tests {
             bytes: 10,
             total_bytes: 30,
             started: 0,
-            run: None,
+            run: 7,
+            undoable: false,
         };
         assert_eq!(
             describe(&job),
