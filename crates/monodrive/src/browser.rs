@@ -1,6 +1,7 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
+use crate::activity::{self, ActivityView};
 use crate::background::{Backdrop, Look};
 use crate::commands::{self, OpenPalette};
 use crate::file_icons;
@@ -83,6 +84,7 @@ actions!(
         ResetZoom,
         Undo,
         Redo,
+        ShowActivity,
     ]
 );
 
@@ -1352,6 +1354,24 @@ impl Browser {
         cx.notify();
     }
 
+    fn open_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Sheet::Activity(view)) = &self.sheet {
+            window.focus(&view.focus_handle(cx), cx);
+            return;
+        }
+        self.remember_focus(window, cx);
+        let view = cx.new(ActivityView::new);
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, _: &activity::Dismissed, window, cx| this.close_sheet(window, cx),
+        )
+        .detach();
+        window.focus(&view.focus_handle(cx), cx);
+        self.sheet = Some(Sheet::Activity(view));
+        cx.notify();
+    }
+
     fn open_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Sheet::Goto(view)) = &self.sheet {
             window.focus(&view.focus_handle(cx), cx);
@@ -2323,6 +2343,11 @@ impl Render for Browser {
                     cx.listener(|this, _: &GoToFolder, window, cx| this.open_goto(window, cx)),
                 )
                 .on_action(cx.listener(|this, _: &CopyPath, _, cx| this.copy_path(cx)))
+                .on_action(
+                    cx.listener(|this, _: &ShowActivity, window, cx| {
+                        this.open_activity(window, cx)
+                    }),
+                )
             })
             .on_action(|_: &ToggleHiddenFiles, _, cx| {
                 preferences::update(cx, |p| p.show_hidden = !p.show_hidden)
@@ -2425,6 +2450,7 @@ impl Render for Browser {
                 Sheet::Settings(view) => view.clone().into_any_element(),
                 Sheet::Palette(view) => view.clone().into_any_element(),
                 Sheet::Goto(view) => view.clone().into_any_element(),
+                Sheet::Activity(view) => view.clone().into_any_element(),
             }))
             // Last, so its window listeners run before any element's.
             .children(
@@ -2450,6 +2476,7 @@ enum Sheet {
     Settings(Entity<SettingsView>),
     Palette(Entity<PaletteView>),
     Goto(Entity<GotoView>),
+    Activity(Entity<ActivityView>),
 }
 
 /// A grid cell's name in at most two lines, as Finder sets it: the first
@@ -2807,7 +2834,7 @@ fn format_size(entry: &Entry) -> String {
 }
 
 /// Finder's decimal units.
-fn format_bytes(size: u64) -> String {
+pub fn format_bytes(size: u64) -> String {
     let bytes = size as f64;
     match size {
         0..1_000 => format!("{size} bytes"),

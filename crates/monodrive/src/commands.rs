@@ -8,11 +8,11 @@
 use crate::browser::{
     Back, CopyPath, DeselectAll, EnclosingFolder, FocusSearch, Forward, GoApplications, GoComputer,
     GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, OpenSelected, OpenSettings, Redo,
-    ResetZoom, ReverseSort, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
-    Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    ResetZoom, ReverseSort, ShowActivity, SortByKind, SortByModified, SortByName, SortBySize,
+    ToggleHiddenFiles, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
-use crate::{browser, goto, palette, settings, text_field};
+use crate::{activity, browser, goto, palette, settings, text_field};
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
     OsAction, actions,
@@ -241,6 +241,9 @@ pub fn all() -> Vec<Command> {
         command("Close Window", Window, &["cmd-w"], None, || {
             Box::new(CloseWindow)
         }),
+        separated(command("Activity", Window, &["cmd-alt-j"], None, || {
+            Box::new(ShowActivity)
+        })),
     ]
 }
 
@@ -365,6 +368,7 @@ pub fn apply(cx: &mut App) {
     settings::bind(cx);
     palette::bind(cx);
     goto::bind(cx);
+    activity::bind(cx);
     let mut bindings = Vec::new();
     for command in all() {
         let predicate = command

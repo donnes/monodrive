@@ -1,6 +1,7 @@
 //! The Monodrive app. `main.rs` decodes the command line; benchmarks build
 //! views from here.
 
+mod activity;
 pub mod assets;
 mod background;
 pub mod browser;

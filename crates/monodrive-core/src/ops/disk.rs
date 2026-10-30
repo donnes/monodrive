@@ -8,6 +8,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Which item a path holds. Renames, including into the Trash, keep it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,21 +120,126 @@ pub fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// How far a copy has got, and whether to stop it.
+pub struct Meter<'a> {
+    pub copied: &'a AtomicU64,
+    pub cancel: &'a AtomicBool,
+}
+
 /// Copies `from` to the new path `to`, folders whole, keeping metadata.
-/// Each file is an APFS clone where the volume supports it.
-pub fn duplicate(from: &Path, to: &Path) -> io::Result<()> {
+/// Each file is an APFS clone where the volume supports it. A `meter` sees
+/// the bytes copied so far and can stop the copy partway, leaving what's
+/// at `to` incomplete.
+pub fn copy(from: &Path, to: &Path, meter: Option<&Meter>) -> io::Result<()> {
+    struct Progress<'a> {
+        meter: &'a Meter<'a>,
+        /// Bytes in the files already finished.
+        done: u64,
+        current: u64,
+    }
+    extern "C" fn status(
+        what: libc::c_int,
+        stage: libc::c_int,
+        state: libc::copyfile_state_t,
+        _: *const libc::c_char,
+        _: *const libc::c_char,
+        context: *mut libc::c_void,
+    ) -> libc::c_int {
+        // SAFETY: `context` is the `Progress` below, alive for the copy.
+        let progress = unsafe { &mut *context.cast::<Progress>() };
+        if progress.meter.cancel.load(Ordering::Relaxed) {
+            return libc::COPYFILE_QUIT;
+        }
+        if what == libc::COPYFILE_COPY_DATA && stage == libc::COPYFILE_PROGRESS {
+            let mut copied: libc::off_t = 0;
+            // SAFETY: COPYFILE_STATE_COPIED writes one off_t.
+            unsafe {
+                libc::copyfile_state_get(
+                    state,
+                    libc::COPYFILE_STATE_COPIED as u32,
+                    (&raw mut copied).cast(),
+                )
+            };
+            progress.current = copied.max(0) as u64;
+        } else if what == libc::COPYFILE_RECURSE_FILE && stage == libc::COPYFILE_FINISH {
+            progress.done += progress.current;
+            progress.current = 0;
+        }
+        progress
+            .meter
+            .copied
+            .store(progress.done + progress.current, Ordering::Relaxed);
+        libc::COPYFILE_CONTINUE
+    }
     let (from, to) = (c_path(from)?, c_path(to)?);
     // COPYFILE_CLONE copies data, stat and extended attributes, never
     // replaces `to`, and copies links rather than what they point to. ACLs
     // need their own flag.
     let flags = libc::COPYFILE_CLONE | libc::COPYFILE_ACL | libc::COPYFILE_RECURSIVE;
-    // SAFETY: both are NUL-terminated paths that outlive the call, and a
-    // null state is allowed.
-    if unsafe { libc::copyfile(from.as_ptr(), to.as_ptr(), std::ptr::null_mut(), flags) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    let mut progress = meter.map(|meter| Progress {
+        meter,
+        done: 0,
+        current: 0,
+    });
+    // SAFETY: the state is freed below; the callback's context outlives
+    // the copy, and both paths are NUL-terminated and outlive the call.
+    unsafe {
+        let state = libc::copyfile_state_alloc();
+        if let Some(progress) = &mut progress {
+            let callback = status
+                as extern "C" fn(
+                    libc::c_int,
+                    libc::c_int,
+                    libc::copyfile_state_t,
+                    *const libc::c_char,
+                    *const libc::c_char,
+                    *mut libc::c_void,
+                ) -> libc::c_int;
+            libc::copyfile_state_set(
+                state,
+                libc::COPYFILE_STATE_STATUS_CB as u32,
+                callback as *const libc::c_void,
+            );
+            libc::copyfile_state_set(
+                state,
+                libc::COPYFILE_STATE_STATUS_CTX as u32,
+                std::ptr::from_mut(progress).cast(),
+            );
+        }
+        let copied = libc::copyfile(from.as_ptr(), to.as_ptr(), state, flags);
+        let error = io::Error::last_os_error();
+        libc::copyfile_state_free(state);
+        if copied == 0 { Ok(()) } else { Err(error) }
     }
+}
+
+/// How many items are inside `path`, and the bytes in its files: what a
+/// complete copy has the same of.
+pub fn tally(path: &Path) -> io::Result<(u64, u64)> {
+    let meta = std::fs::symlink_metadata(path)?;
+    let mut tally = (0, if meta.is_file() { meta.len() } else { 0 });
+    let mut folders = Vec::new();
+    if meta.is_dir() {
+        folders.push(path.to_path_buf());
+    }
+    while let Some(folder) = folders.pop() {
+        for item in std::fs::read_dir(&folder)? {
+            let item = item?;
+            let meta = item.metadata()?;
+            tally.0 += 1;
+            if meta.is_file() {
+                tally.1 += meta.len();
+            } else if meta.is_dir() {
+                folders.push(item.path());
+            }
+        }
+    }
+    Ok(tally)
+}
+
+/// The volume `path` is on.
+pub fn volume(path: &Path) -> io::Result<u64> {
+    std::fs::symlink_metadata(path).map(|meta| meta.dev())
 }
 
 /// Looks through the Trash of the volume `original` was on for the item

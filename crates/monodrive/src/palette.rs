@@ -222,11 +222,11 @@ pub fn overlay(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .bg(black(if theme::is_light() { 0.12 } else { 0.25 }))
 }
 
-/// A quick sheet's card: its text field on top, `body` below.
+/// A quick sheet's card: its text field, or a title, on top, `body` below.
 pub fn card(
     id: &'static str,
     label: &'static str,
-    field: Entity<TextField>,
+    header: impl IntoElement,
     body: impl IntoElement,
 ) -> impl IntoElement {
     div()
@@ -262,7 +262,7 @@ pub fn card(
                         .border_color(content(0.08))
                         .text_size(px(15.))
                         .font_weight(FontWeight::MEDIUM)
-                        .child(field),
+                        .child(header),
                 )
                 .child(div().p(px(6.)).child(body)),
         )

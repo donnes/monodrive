@@ -5,7 +5,7 @@
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, GrepMode, Index, Status};
-use crate::ops::{self, Origin, Request};
+use crate::ops::{self, Conflict, Done, Job, Origin, Request};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -101,6 +101,28 @@ enum ToolCall {
     },
     Undo {},
     Redo {},
+    Copy {
+        paths: Vec<String>,
+        into: String,
+        #[serde(default)]
+        conflict: Conflict,
+    },
+    Move {
+        paths: Vec<String>,
+        into: String,
+        #[serde(default)]
+        conflict: Conflict,
+    },
+    JobStatus {
+        job: Option<u64>,
+    },
+    CancelJob {
+        job: u64,
+    },
+    RetryJob {
+        job: u64,
+        conflict: Option<Conflict>,
+    },
 }
 
 fn folders_first() -> bool {
@@ -240,6 +262,39 @@ impl Server {
             }),
             ToolCall::Undo {} => self.change(Request::Undo),
             ToolCall::Redo {} => self.change(Request::Redo),
+            ToolCall::Copy {
+                paths,
+                into,
+                conflict,
+            } => self.queue(Request::Copy {
+                paths: expand(&paths),
+                into: expand_home(&into),
+                conflict,
+            }),
+            ToolCall::Move {
+                paths,
+                into,
+                conflict,
+            } => self.queue(Request::Move {
+                paths: expand(&paths),
+                into: expand_home(&into),
+                conflict,
+            }),
+            ToolCall::RetryJob { job, conflict } => self.queue(Request::Retry { job, conflict }),
+            ToolCall::CancelJob { job } => self
+                .submit(Request::Cancel { job })
+                .map(|_| format!("Cancelling job {job}; it keeps the items it finished.\n")),
+            ToolCall::JobStatus { job } => self.ops.jobs().and_then(|jobs| match job {
+                Some(id) => jobs
+                    .iter()
+                    .find(|job| job.id == id)
+                    .map(describe)
+                    .ok_or_else(|| format!("No job {id}.")),
+                None => Ok(jobs.iter().fold(String::new(), |mut out, job| {
+                    let _ = writeln!(out, "{}", summary(job));
+                    out
+                })),
+            }),
         };
         match text {
             Ok(text) if text.is_empty() => tool_text("No results.", false),
@@ -250,11 +305,21 @@ impl Server {
 
     /// Runs a change through the operation owner: each resulting path on
     /// its own line, and any item that failed with its reason.
-    fn change(&mut self, request: Request) -> Result<String, String> {
+    fn submit(&mut self, request: Request) -> Result<ops::Outcome, String> {
         let origin = Origin::Agent {
             client: self.client.clone(),
         };
-        let outcome = self.ops.submit(origin, request)?;
+        self.ops.submit(origin, request)
+    }
+
+    /// Queues a job and replies with its id at once; job_status follows it.
+    fn queue(&mut self, request: Request) -> Result<String, String> {
+        let outcome = self.submit(request)?;
+        Ok(format!("job {} queued\n", outcome.op))
+    }
+
+    fn change(&mut self, request: Request) -> Result<String, String> {
+        let outcome = self.submit(request)?;
         let mut out = String::new();
         if outcome.title.starts_with("Undo ") || outcome.title.starts_with("Redo ") {
             let _ = writeln!(out, "{}", outcome.title);
@@ -295,6 +360,38 @@ impl Server {
             .as_ref()
             .map_err(Clone::clone)
     }
+}
+
+/// One line: what a job is doing, how far it's got, and who asked.
+fn summary(job: &Job) -> String {
+    let done = job.tasks.iter().filter(|task| task.done.is_some()).count();
+    let by = match &job.origin {
+        Origin::Window => "the window".to_string(),
+        Origin::Agent { client: Some(name) } => format!("agent {name}"),
+        Origin::Agent { client: None } => "an agent".to_string(),
+    };
+    format!(
+        "job {} {} into {}: {}, {done} of {} items, {} of {} bytes, by {by}",
+        job.id,
+        job.title,
+        job.into.display(),
+        job.state.label(),
+        job.tasks.len(),
+        job.bytes,
+        job.total_bytes,
+    )
+}
+
+/// The summary, then each finished item: where it went, or why not.
+fn describe(job: &Job) -> String {
+    let mut out = format!("{}\n", summary(job));
+    for done in job.tasks.iter().filter_map(|task| task.done.as_ref()) {
+        let _ = match done {
+            Done::To(path) => writeln!(out, "{}", path.display()),
+            Done::Skipped(why) | Done::Failed(why) => writeln!(out, "{why}"),
+        };
+    }
+    out
 }
 
 fn expand(paths: &[String]) -> Vec<PathBuf> {
@@ -422,8 +519,77 @@ fn tools() -> Value {
             "name": "redo",
             "description": "Redo the last undone file change. Refuses if the files changed since.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "copy",
+            "description": "Copy files or folders into a folder, keeping metadata. Returns a job id at once; \
+    job_status follows it. conflict says what to do when a name is taken there.",
+            "inputSchema": transfer_schema()
+        },
+        {
+            "name": "move",
+            "description": "Move files or folders into a folder; across volumes it copies, checks the copy, \
+    then trashes the source. Returns a job id at once; job_status follows it.",
+            "inputSchema": transfer_schema()
+        },
+        {
+            "name": "job_status",
+            "description": "A copy or move job's state and progress, then each finished item's resulting \
+    path or error. Without job, one line per recent job.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"job": {"type": "integer"}}
+            }
+        },
+        {
+            "name": "cancel_job",
+            "description": "Stop a job after the item it's on. Finished items stay; undo reverses them.",
+            "inputSchema": job_schema()
+        },
+        {
+            "name": "retry_job",
+            "description": "Run again the items a stopped job didn't change, optionally with another \
+    conflict choice. Returns the new job's id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"job": {"type": "integer"}, "conflict": conflict_schema()},
+                "required": ["job"]
+            }
         }
     ])
+}
+
+fn conflict_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["stop", "skip", "keep_both", "replace"],
+        "default": "stop",
+        "description": "stop waits for a retry; replace trashes what's there first."
+    })
+}
+
+fn transfer_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Absolute; ~ is your home."
+            },
+            "into": {"type": "string", "description": "The folder they go into."},
+            "conflict": conflict_schema()
+        },
+        "required": ["paths", "into"]
+    })
+}
+
+fn job_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"job": {"type": "integer"}},
+        "required": ["job"]
+    })
 }
 
 fn path_schema() -> Value {
@@ -586,5 +752,75 @@ mod tests {
         assert!(text(&reply).starts_with("Agents can't"), "{reply}");
         drop(server);
         serving.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn copy_returns_a_job_id_at_once_and_job_status_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ops::Paths {
+            state: dir.path().join("state"),
+            settings: dir.path().join("settings.json"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let mut server = Server::new(ops::Client::new(paths, None));
+        let (file, into) = (dir.path().join("a.txt"), dir.path().join("into"));
+        std::fs::write(&file, "a").unwrap();
+        std::fs::create_dir(&into).unwrap();
+        let reply = call(
+            &mut server,
+            json!({"name": "copy", "arguments": {"paths": [file], "into": into}}),
+        );
+        assert_eq!(text(&reply), "job 1 queued\n");
+        let reply = call(
+            &mut server,
+            json!({"name": "job_status", "arguments": {"job": 1}}),
+        );
+        let first = format!("job 1 Copy into {}: ", into.display());
+        assert!(text(&reply).starts_with(&first), "{reply}");
+        for bad in [
+            json!({"name": "copy", "arguments": {"paths": [file], "into": into, "conflict": "merge"}}),
+            json!({"name": "cancel_job", "arguments": {}}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
+        // The owner outlives its last client until the job is done.
+        drop(server);
+        serving.join().unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(into.join("a.txt")).unwrap(), "a");
+    }
+
+    #[test]
+    fn a_jobs_status_lists_where_each_finished_item_went_or_why_not() {
+        let job = Job {
+            id: 7,
+            title: "Move".into(),
+            origin: Origin::Agent {
+                client: Some("claude-code".into()),
+            },
+            into: "/dest".into(),
+            state: ops::State::Waiting,
+            tasks: vec![
+                ops::Task {
+                    source: "/src/a".into(),
+                    done: Some(Done::To("/dest/a".into())),
+                },
+                ops::Task {
+                    source: "/src/b".into(),
+                    done: Some(Done::Failed("/dest/b already exists.".into())),
+                },
+                ops::Task {
+                    source: "/src/c".into(),
+                    done: None,
+                },
+            ],
+            bytes: 10,
+            total_bytes: 30,
+        };
+        assert_eq!(
+            describe(&job),
+            "job 7 Move into /dest: waiting, 2 of 3 items, 10 of 30 bytes, by agent claude-code\n\
+             /dest/a\n/dest/b already exists.\n"
+        );
     }
 }

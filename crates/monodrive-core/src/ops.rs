@@ -1,11 +1,14 @@
 //! File operations: move to Trash, put back, rename, new folder and file,
-//! duplicate, undo and redo. One owner process runs them for the window and
-//! every `monodrive mcp` server, so they share one journal and one undo
-//! history. docs/operations.md records why.
+//! duplicate, copy and move jobs, undo and redo. One owner process runs them
+//! for the window and every `monodrive mcp` server, so they share one
+//! journal, one list of jobs and one undo history. docs/operations.md
+//! records why.
 
 mod disk;
+mod jobs;
 mod owner;
 
+pub use jobs::{Conflict, Done, Job, State, Task};
 pub use owner::{Client, Owner, run_owner};
 
 use disk::{FileId, Stamp};
@@ -62,6 +65,30 @@ pub enum Request {
     Duplicate {
         paths: Vec<PathBuf>,
     },
+    /// Copies the items into a folder, as a job.
+    Copy {
+        paths: Vec<PathBuf>,
+        into: PathBuf,
+        #[serde(default)]
+        conflict: Conflict,
+    },
+    /// Moves the items into a folder, as a job.
+    Move {
+        paths: Vec<PathBuf>,
+        into: PathBuf,
+        #[serde(default)]
+        conflict: Conflict,
+    },
+    /// Runs again the items a finished job didn't change, with `conflict`
+    /// instead of the job's own when given.
+    Retry {
+        job: u64,
+        conflict: Option<Conflict>,
+    },
+    /// Stops a job after the item it's on, keeping what it finished.
+    Cancel {
+        job: u64,
+    },
     Undo,
     Redo,
 }
@@ -75,6 +102,10 @@ impl Request {
             Request::NewFolder { .. } => "New Folder",
             Request::NewFile { .. } => "New File",
             Request::Duplicate { .. } => "Duplicate",
+            Request::Copy { .. } => "Copy",
+            Request::Move { .. } => "Move",
+            Request::Retry { .. } => "Retry",
+            Request::Cancel { .. } => "Cancel",
             Request::Undo => "Undo",
             Request::Redo => "Redo",
         }
@@ -163,7 +194,9 @@ impl Step {
 
     /// Checks that the item can move to its `done` (or `undone`) spot: it's
     /// still where and what it was, and nothing is in its way.
-    fn ready(&self, done: bool) -> Result<PathBuf, String> {
+    /// Something in the way is fine if it's one of `leaving`, which move
+    /// first.
+    fn ready(&self, done: bool, leaving: &[FileId]) -> Result<PathBuf, String> {
         let here = self
             .here()
             .ok_or("Monodrive doesn't know where this item is.")?;
@@ -180,7 +213,7 @@ impl Step {
             ));
         }
         if let Spot::Path(to) = self.spot(done)
-            && disk::id(to).is_some_and(|there| there != self.id)
+            && disk::id(to).is_some_and(|there| there != self.id && !leaving.contains(&there))
         {
             return Err(format!("{} already exists.", to.display()));
         }
@@ -189,7 +222,7 @@ impl Step {
 
     /// Moves the item to its `done` (or `undone`) spot, checking first.
     fn shift(&mut self, done: bool) -> Result<PathBuf, String> {
-        let from = self.ready(done)?;
+        let from = self.ready(done, &[])?;
         let to = match self.spot(done) {
             Spot::Path(to) => {
                 disk::rename_new(&from, to).map_err(|e| format!("{}: {e}", from.display()))?;
@@ -276,6 +309,33 @@ enum Record {
         outcome: Outcome,
         steps: Vec<Step>,
     },
+    /// A copy or move job, accepted and queued.
+    Job {
+        op: u64,
+        submission: Submission,
+        spec: jobs::Spec,
+    },
+    /// One of a job's items as it stands: written before each change it
+    /// makes and after.
+    Work {
+        op: u64,
+        index: usize,
+        work: jobs::Work,
+    },
+    /// A job stopped; its changes join the undo history.
+    Finish { op: u64, state: State },
+}
+
+impl Record {
+    fn op(&self) -> u64 {
+        match self {
+            Record::Begin { op, .. }
+            | Record::End { op, .. }
+            | Record::Job { op, .. }
+            | Record::Work { op, .. }
+            | Record::Finish { op, .. } => *op,
+        }
+    }
 }
 
 struct Begun {
@@ -311,6 +371,8 @@ struct Engine {
     history: Vec<Undoable>,
     /// How many at the end of `history` are undone, for redo.
     undone: usize,
+    /// Copy and move jobs, oldest first.
+    jobs: Vec<jobs::Entry>,
 }
 
 impl Engine {
@@ -323,25 +385,22 @@ impl Engine {
         let mut unfinished: Vec<u64> = engine.begun.keys().copied().collect();
         unfinished.sort_unstable();
         let mut records = records;
-        for op in unfinished {
-            let end = engine.settle(op);
-            engine.write(&end)?;
-            engine.fold(&end);
-            records.push(end);
+        let mut settled: Vec<Record> = unfinished.into_iter().map(|op| engine.settle(op)).collect();
+        settled.extend(engine.settle_jobs());
+        for record in settled {
+            engine.write(&record)?;
+            engine.fold(&record);
+            records.push(record);
         }
         if engine.finished.len() > TRIM_AT {
             let mut ends: Vec<u64> = records
                 .iter()
-                .filter_map(|r| match r {
-                    Record::End { op, .. } => Some(*op),
-                    Record::Begin { .. } => None,
-                })
+                .filter(|r| matches!(r, Record::End { .. } | Record::Finish { .. }))
+                .map(Record::op)
                 .collect();
             ends.sort_unstable();
-            let first = ends[ends.len() - KEEP];
-            records.retain(|r| match r {
-                Record::Begin { op, .. } | Record::End { op, .. } => *op >= first,
-            });
+            let first = ends[ends.len().saturating_sub(KEEP)];
+            records.retain(|r| r.op() >= first);
             let tmp = at.with_extension("jsonl.tmp");
             let mut file = File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
             for record in &records {
@@ -371,6 +430,7 @@ impl Engine {
             finished: HashMap::new(),
             history: Vec::new(),
             undone: 0,
+            jobs: Vec::new(),
         };
         for record in records {
             engine.fold(record);
@@ -432,7 +492,52 @@ impl Engine {
                 self.finished
                     .insert(begun.submission.id, (request, outcome));
             }
+            Record::Job {
+                op,
+                submission,
+                spec,
+            } => {
+                self.next = self.next.max(op + 1);
+                let accepted = Outcome {
+                    op,
+                    title: submission.request.title().to_string(),
+                    items: Vec::new(),
+                    interrupted: false,
+                };
+                self.finished.insert(
+                    submission.id.clone(),
+                    (submission.request.clone(), accepted),
+                );
+                self.jobs
+                    .push(jobs::Entry::new(op, submission.origin, spec));
+            }
+            Record::Work { op, index, work } => {
+                if let Some(slot) = self.job_mut(op).and_then(|job| job.work.get_mut(index)) {
+                    *slot = work;
+                }
+            }
+            Record::Finish { op, state } => {
+                let Some(job) = self.job_mut(op) else { return };
+                job.state = state;
+                let title = job.title();
+                let steps: Vec<Step> = job
+                    .work
+                    .iter()
+                    .flat_map(|work| &work.steps)
+                    .filter(|step| step.applied)
+                    .cloned()
+                    .collect();
+                if !steps.is_empty() {
+                    self.history.truncate(self.history.len() - self.undone);
+                    self.undone = 0;
+                    self.history.push(Undoable { op, title, steps });
+                }
+            }
         }
+    }
+
+    fn job_mut(&mut self, op: u64) -> Option<&mut jobs::Entry> {
+        self.jobs.iter_mut().find(|job| job.id == op)
     }
 
     /// The `End` for an operation the owner didn't finish, worked out from
@@ -503,7 +608,12 @@ impl Engine {
                 ))
             };
         }
-        if matches!(submission.origin, Origin::Agent { .. }) && !agents_change_files(&self.paths) {
+        // Stopping a job changes nothing, so agents may always.
+        let changes = !matches!(submission.request, Request::Cancel { .. });
+        if changes
+            && matches!(submission.origin, Origin::Agent { .. })
+            && !agents_change_files(&self.paths)
+        {
             return Err(
                 "Agents can't change files: Let agents change files is off in Monodrive's Agents settings."
                     .into(),
@@ -512,6 +622,10 @@ impl Engine {
         match submission.request {
             Request::Undo => self.reverse(submission, false),
             Request::Redo => self.reverse(submission, true),
+            Request::Copy { .. } | Request::Move { .. } | Request::Retry { .. } => {
+                self.queue(submission)
+            }
+            Request::Cancel { job } => self.cancel(job),
             _ => self.run(submission),
         }
     }
@@ -578,7 +692,7 @@ impl Engine {
             Request::Duplicate { paths } => each(paths, &|path| {
                 existing(path).map(|_| Plan::Create(Make::Copy))
             }),
-            Request::Undo | Request::Redo => Vec::new(),
+            _ => Vec::new(),
         }
     }
 
@@ -622,13 +736,19 @@ impl Engine {
         let at = at.ok_or_else(|| format!("Nothing to {verb}."))?;
         let target = &self.history[at];
         let (of, target_op) = (target.title, target.op);
-        // Undo moves back what the operation moved; redo what undo did.
-        let moving: Vec<usize> = (0..target.steps.len())
+        // Undo moves back what the operation moved, last change first; redo
+        // what undo did, in the order it first happened.
+        let mut moving: Vec<usize> = (0..target.steps.len())
             .filter(|&i| target.steps[i].applied != redo)
             .collect();
+        if !redo {
+            moving.reverse();
+        }
+        // A replaced item goes back where its replacement leaves first.
+        let leaving: Vec<FileId> = moving.iter().map(|&i| target.steps[i].id).collect();
         let refused: Vec<String> = moving
             .iter()
-            .filter_map(|&i| target.steps[i].ready(redo).err())
+            .filter_map(|&i| target.steps[i].ready(redo, &leaving).err())
             .collect();
         if !refused.is_empty() {
             return Err(format!("Can't {verb} {of}: {}", refused.join(" ")));
@@ -776,7 +896,7 @@ fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
 
 /// A move whose destination is free now.
 fn movable(step: Step) -> Result<Plan, String> {
-    step.ready(true)?;
+    step.ready(true, &[])?;
     Ok(Plan::Move(step))
 }
 
@@ -808,7 +928,7 @@ impl Make {
             Make::Copy => {
                 let copy = copy_name(path)
                     .ok_or_else(|| format!("{}: can't name a copy of this.", path.display()))?;
-                disk::duplicate(path, &copy).map(|()| copy)
+                disk::copy(path, &copy, None).map(|()| copy)
             }
         };
         made.map_err(|e| format!("{}: {e}", path.display()))

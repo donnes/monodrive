@@ -3,14 +3,16 @@
 //! at a UI change.
 //!
 //! `cargo run -p monodrive --example snapshot -- [folder]` writes
-//! `target/snapshots/list.png` and `grid.png`. Without a folder it draws a
-//! made-up one, so the pictures show nobody's files.
+//! `target/snapshots/list.png`, `grid.png` and `activity.png`. Without a
+//! folder it draws a made-up one, so the pictures show nobody's files.
+//! Activity shows real jobs, run by an operation owner on a temp folder.
 
-use gpui::{AppContext, HeadlessAppContext, px, size};
-use monodrive::browser::Browser;
+use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
+use monodrive::browser::{Browser, Operations, ShowActivity};
 use monodrive::preferences::{Preferences, View};
+use monodrive_core::ops::{self, Conflict, Origin, Request};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn main() -> gpui::Result<()> {
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
@@ -47,7 +49,87 @@ fn main() -> gpui::Result<()> {
         cx.capture_screenshot(window.into())?.save(&path)?;
         println!("{}", path.display());
     }
+    let scratch = tempfile::tempdir_in(&out)?;
+    let client = jobs(scratch.path())?;
+    cx.update(|cx| cx.set_global(Operations(Arc::new(Mutex::new(client)))));
+    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+        cx.new(|cx| Browser::new(folder.clone(), cx))
+    })?;
+    cx.run_until_parked();
+    // Actions reach the browser through what has focus.
+    cx.update_window(window.into(), |root, window, cx| {
+        if let Ok(browser) = root.downcast::<Browser>() {
+            window.focus(&browser.focus_handle(cx), cx);
+        }
+        window.dispatch_action(Box::new(ShowActivity), cx)
+    })?;
+    cx.run_until_parked();
+    let path = out.join("activity.png");
+    cx.capture_screenshot(window.into())?.save(&path)?;
+    println!("{}", path.display());
     Ok(())
+}
+
+/// An owner on `dir` that has run a finished copy, one stopped at a name
+/// that's taken, and a move that failed.
+fn jobs(dir: &Path) -> gpui::Result<ops::Client> {
+    let paths = ops::Paths {
+        state: dir.join("state"),
+        settings: dir.join("settings.json"),
+    };
+    let owner = ops::Owner::bind(paths.clone()).map_err(std::io::Error::other)?;
+    std::thread::spawn(move || owner.serve());
+    let (from, into) = (dir.join("Drafts"), dir.join("Invoices"));
+    std::fs::create_dir_all(&from)?;
+    std::fs::create_dir_all(&into)?;
+    for (name, size) in [("Brief.pdf", 240_000), ("notes.md", 3_000)] {
+        std::fs::write(from.join(name), vec![b'x'; size])?;
+    }
+    let mut client = ops::Client::new(paths, None);
+    let names = |names: &[&str]| names.iter().map(|name| from.join(name)).collect();
+    let agent = Origin::Agent {
+        client: Some("claude-code".into()),
+    };
+    for (origin, request) in [
+        (
+            Origin::Window,
+            Request::Copy {
+                paths: names(&["Brief.pdf", "notes.md"]),
+                into: into.clone(),
+                conflict: Conflict::Stop,
+            },
+        ),
+        (
+            agent.clone(),
+            Request::Copy {
+                paths: names(&["notes.md"]),
+                into: into.clone(),
+                conflict: Conflict::Stop,
+            },
+        ),
+        (
+            agent,
+            Request::Move {
+                paths: names(&["missing.txt"]),
+                into: into.clone(),
+                conflict: Conflict::Stop,
+            },
+        ),
+    ] {
+        client
+            .submit(origin, request)
+            .map_err(std::io::Error::other)?;
+        // Each finishes in moments; the next copy needs this one's files.
+        while client
+            .jobs()
+            .map_err(std::io::Error::other)?
+            .iter()
+            .any(|job| job.state.active())
+        {
+            std::thread::yield_now();
+        }
+    }
+    Ok(client)
 }
 
 /// A folder like a real one: a few folders, documents, pictures and an app.

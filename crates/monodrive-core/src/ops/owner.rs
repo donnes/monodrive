@@ -2,7 +2,9 @@
 //! operation; the window and each `monodrive mcp` reach it over a Unix
 //! socket, one JSON line each way, in a folder only this user can open.
 
-use super::{Engine, Origin, Outcome, Paths, Request, Submission};
+use super::jobs::{self, Shared};
+use super::{Engine, Job, Origin, Outcome, Paths, Request, Submission};
+use serde::{Deserialize, Serialize};
 use std::fs::{File, Permissions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
@@ -11,6 +13,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SOCKET: &str = "owner.sock";
@@ -23,8 +26,20 @@ const FIRST_CLIENT_MS: i32 = 30_000;
 /// A client that stops partway through a line is dropped after this.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What a client asks the owner, one per line.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Message {
+    /// Answered with a `Result<Outcome, String>`.
+    Submit(Submission),
+    /// Answered with a `Result<Vec<Job>, String>`.
+    Jobs,
+}
+
 pub struct Owner {
-    engine: Engine,
+    shared: Arc<Shared>,
+    /// Readable when a job ends.
+    woken: UnixStream,
     listener: UnixListener,
     socket: PathBuf,
     _lock: File,
@@ -57,26 +72,32 @@ impl Owner {
         }
         let listener = UnixListener::bind(&socket).map_err(fail)?;
         listener.set_nonblocking(true).map_err(fail)?;
+        let (woken, wake) = UnixStream::pair().map_err(|e| e.to_string())?;
+        woken.set_nonblocking(true).map_err(|e| e.to_string())?;
         Ok(Self {
-            engine,
+            shared: Shared::new(engine, Some(wake)),
+            woken,
             listener,
             socket,
             _lock: lock,
         })
     }
 
-    /// Answers clients one request at a time until the last one leaves, or
-    /// none comes. Each request runs to the end before the next is read.
+    /// Answers clients until the last one leaves and no job is going, or
+    /// none comes. Requests are answered one at a time; copies and moves run
+    /// as jobs on their own threads, so status keeps coming meanwhile.
     pub fn serve(mut self) -> io::Result<()> {
         let mut clients: Vec<BufReader<UnixStream>> = Vec::new();
         let mut served = false;
         loop {
-            let timeout = match (clients.is_empty(), served) {
-                (true, true) => return Ok(()),
-                (true, false) => FIRST_CLIENT_MS,
-                (false, _) => -1,
+            let busy = self.shared.lock().busy();
+            let timeout = match (clients.is_empty(), served, busy) {
+                (true, true, false) => return Ok(()),
+                (true, false, false) => FIRST_CLIENT_MS,
+                _ => -1,
             };
-            let mut fds: Vec<libc::pollfd> = std::iter::once(self.listener.as_raw_fd())
+            let mut fds: Vec<libc::pollfd> = [self.listener.as_raw_fd(), self.woken.as_raw_fd()]
+                .into_iter()
                 .chain(clients.iter().map(|client| client.get_ref().as_raw_fd()))
                 .map(|fd| libc::pollfd {
                     fd,
@@ -96,9 +117,13 @@ impl Owner {
             if ready == 0 {
                 return Ok(());
             }
+            if fds[1].revents != 0 {
+                let mut drained = [0; 64];
+                while io::Read::read(&mut self.woken, &mut drained).is_ok_and(|n| n > 0) {}
+            }
             // From the end, so dropping a client keeps the others' places.
             for at in (0..clients.len()).rev() {
-                if fds[at + 1].revents != 0 && !self.answer(&mut clients[at]) {
+                if fds[at + 2].revents != 0 && !self.answer(&mut clients[at]) {
                     clients.swap_remove(at);
                 }
             }
@@ -126,10 +151,18 @@ impl Owner {
             Ok(0) | Err(_) => return false,
             Ok(_) => {}
         }
-        let reply: Result<Outcome, String> = serde_json::from_str::<Submission>(&line)
-            .map_err(|e| format!("Monodrive couldn't read the request: {e}"))
-            .and_then(|submission| self.engine.submit(submission));
-        let Ok(mut reply) = serde_json::to_string(&reply) else {
+        let reply = match serde_json::from_str::<Message>(&line) {
+            Ok(Message::Submit(submission)) => {
+                let outcome = self.shared.lock().submit(submission);
+                jobs::start(&self.shared);
+                serde_json::to_string(&outcome)
+            }
+            Ok(Message::Jobs) => serde_json::to_string(&Ok::<_, String>(self.shared.lock().jobs())),
+            Err(e) => serde_json::to_string(&Err::<Outcome, _>(format!(
+                "Monodrive couldn't read the request: {e}"
+            ))),
+        };
+        let Ok(mut reply) = reply else {
             return false;
         };
         reply.push('\n');
@@ -253,11 +286,21 @@ impl Client {
             origin,
             request,
         };
-        let mut line = serde_json::to_string(&submission).map_err(|e| e.to_string())?;
-        line.push('\n');
         // A lost connection may have lost the reply after the work was
         // done. The retry carries the same id, so the owner answers it from
         // its journal instead of running it again.
+        self.ask(&Message::Submit(submission))
+    }
+
+    /// Every job still going and the latest finished, newest first.
+    pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
+        self.ask(&Message::Jobs)
+    }
+
+    /// Sends `message`, again on a new connection if the first is lost.
+    fn ask<T: for<'de> Deserialize<'de>>(&mut self, message: &Message) -> Result<T, String> {
+        let mut line = serde_json::to_string(message).map_err(|e| e.to_string())?;
+        line.push('\n');
         let reply = self
             .send(&line)
             .or_else(|_| {
@@ -265,7 +308,7 @@ impl Client {
                 self.send(&line)
             })
             .map_err(|e| format!("Monodrive's file operations aren't reachable: {e}"))?;
-        serde_json::from_str::<Result<Outcome, String>>(&reply)
+        serde_json::from_str::<Result<T, String>>(&reply)
             .map_err(|e| format!("Monodrive's file operations replied oddly: {e}"))?
     }
 

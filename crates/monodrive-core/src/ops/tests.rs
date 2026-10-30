@@ -371,3 +371,225 @@ fn a_torn_last_line_is_cut_before_the_journal_grows() {
     let error = Engine::open(paths(dir.path())).err().unwrap();
     assert!(error.contains("line 1"), "{error}");
 }
+
+/// `src/` holding `a.txt`, `b/inner.md` and `c.txt`, and `dest/` holding
+/// its own `a.txt` and `c.txt`.
+fn transfer_fixture(files: &Path) -> (PathBuf, PathBuf) {
+    let (src, dest) = (files.join("src"), files.join("dest"));
+    std::fs::create_dir_all(src.join("b")).unwrap();
+    std::fs::create_dir(&dest).unwrap();
+    for (path, text) in [
+        (src.join("a.txt"), "new a"),
+        (src.join("b/inner.md"), "inner"),
+        (src.join("c.txt"), "new c"),
+        (dest.join("a.txt"), "old a"),
+        (dest.join("c.txt"), "old c"),
+    ] {
+        std::fs::write(path, text).unwrap();
+    }
+    (src, dest)
+}
+
+/// Queues a copy or move and runs it here to the end, as a job thread would.
+fn job(shared: &jobs::Shared, request: Request) -> Job {
+    let op = run(&mut shared.lock(), request).unwrap().op;
+    jobs::run(shared, op);
+    status(shared, op)
+}
+
+fn status(shared: &jobs::Shared, op: u64) -> Job {
+    let engine = shared.lock();
+    let jobs = engine.jobs();
+    jobs.into_iter().find(|job| job.id == op).unwrap()
+}
+
+fn copy(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
+    Request::Copy {
+        paths: paths.iter().map(|p| p.to_path_buf()).collect(),
+        into: into.into(),
+        conflict,
+    }
+}
+
+fn transfer(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
+    Request::Move {
+        paths: paths.iter().map(|p| p.to_path_buf()).collect(),
+        into: into.into(),
+        conflict,
+    }
+}
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// Takes what a test sent to the Trash back out, so the Trash ends as it was.
+fn untrash(trashed: &Path, into: &Path) {
+    std::fs::rename(trashed, into.join("untrashed")).unwrap();
+}
+
+#[test]
+fn copies_and_moves_follow_each_conflict_choice() {
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let a = src.join("a.txt");
+
+    let stopped = job(&shared, copy(&[&a], &dest, Conflict::Stop));
+    assert_eq!(stopped.state, State::Waiting);
+    assert!(
+        matches!(&stopped.tasks[0].done, Some(Done::Failed(why)) if why.contains("already exists"))
+    );
+    let retried = run(
+        &mut shared.lock(),
+        Request::Retry {
+            job: stopped.id,
+            conflict: Some(Conflict::Skip),
+        },
+    )
+    .unwrap()
+    .op;
+    jobs::run(&shared, retried);
+    let skipped = status(&shared, retried);
+    assert_eq!(skipped.state, State::Completed);
+    assert!(matches!(skipped.tasks[0].done, Some(Done::Skipped(_))));
+    assert_eq!(read(&dest.join("a.txt")), "old a");
+
+    let both = job(&shared, copy(&[&a], &dest, Conflict::KeepBoth));
+    assert_eq!(both.tasks[0].done, Some(Done::To(dest.join("a 2.txt"))));
+    assert_eq!(read(&dest.join("a 2.txt")), "new a");
+    assert_eq!(read(&a), "new a");
+
+    // Replace keeps what was there in the Trash, and undo brings it back.
+    let replaced = job(&shared, copy(&[&a], &dest, Conflict::Replace));
+    assert_eq!(replaced.state, State::Completed);
+    assert_eq!(read(&dest.join("a.txt")), "new a");
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    assert_eq!(read(&dest.join("a.txt")), "old a");
+    let copy_in_trash = undone.items[0].result.clone().unwrap();
+    assert_eq!(read(&copy_in_trash), "new a");
+    untrash(&copy_in_trash, &files);
+
+    // On one volume a move is a rename; undo renames it back.
+    let moved = job(&shared, transfer(&[&src.join("b")], &dest, Conflict::Stop));
+    assert_eq!(moved.tasks[0].done, Some(Done::To(dest.join("b"))));
+    assert!(!src.join("b").exists());
+    assert_eq!(read(&dest.join("b/inner.md")), "inner");
+    run(&mut shared.lock(), Request::Undo).unwrap();
+    assert_eq!(read(&src.join("b/inner.md")), "inner");
+
+    // A replacing move, undone: both items back where they were.
+    let c = src.join("c.txt");
+    job(&shared, transfer(&[&c], &dest, Conflict::Replace));
+    assert_eq!(read(&dest.join("c.txt")), "new c");
+    assert!(!c.exists());
+    run(&mut shared.lock(), Request::Undo).unwrap();
+    assert_eq!(
+        (read(&c), read(&dest.join("c.txt"))),
+        ("new c".into(), "old c".into())
+    );
+
+    let into_itself = job(&shared, copy(&[&src], &src.join("b"), Conflict::Stop));
+    assert!(
+        matches!(&into_itself.tasks[0].done, Some(Done::Failed(why)) if why.contains("into itself"))
+    );
+    assert_eq!(into_itself.state, State::Failed);
+    let in_place = job(&shared, transfer(&[&a], &src, Conflict::Stop));
+    assert!(
+        matches!(&in_place.tasks[0].done, Some(Done::Failed(why)) if why.contains("already in"))
+    );
+}
+
+#[test]
+fn cancel_keeps_finished_items_and_a_queued_job_never_starts() {
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let (a, c) = (src.join("a.txt"), src.join("c.txt"));
+    let request = copy(&[&src.join("b"), &a, &c], &dest, Conflict::KeepBoth);
+    let op = run(&mut shared.lock(), request).unwrap().op;
+    assert!(jobs::next(&shared, op));
+    run(&mut shared.lock(), Request::Cancel { job: op }).unwrap();
+    assert!(!jobs::next(&shared, op));
+    let cancelled = status(&shared, op);
+    assert_eq!(cancelled.state, State::Cancelled);
+    assert_eq!(cancelled.tasks[0].done, Some(Done::To(dest.join("b"))));
+    assert_eq!(cancelled.tasks[1].done, None);
+    assert!(!dest.join("a 2.txt").exists());
+    assert!(run(&mut shared.lock(), Request::Cancel { job: op }).is_err());
+
+    let queued = run(&mut shared.lock(), copy(&[&a], &dest, Conflict::KeepBoth))
+        .unwrap()
+        .op;
+    run(&mut shared.lock(), Request::Cancel { job: queued }).unwrap();
+    assert!(!jobs::next(&shared, queued));
+    assert_eq!(status(&shared, queued).state, State::Cancelled);
+    assert!(!dest.join("a 2.txt").exists());
+    // Undo reaches the cancelled job's finished copy, which goes to the
+    // Trash; take it out again.
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    let trashed = undone.items[0].result.clone().unwrap();
+    assert!(!dest.join("b").exists());
+    untrash(&trashed, &files);
+}
+
+#[test]
+fn an_interrupted_job_is_settled_from_the_disk_and_retry_skips_what_finished() {
+    let (dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let (b, c, a) = (src.join("b"), src.join("c.txt"), src.join("a.txt"));
+    std::fs::rename(dest.join("c.txt"), files.join("c elsewhere.txt")).unwrap();
+    std::fs::rename(dest.join("a.txt"), files.join("a elsewhere.txt")).unwrap();
+    let submitted = submission(
+        Origin::Window,
+        transfer(&[&b, &c, &a], &dest, Conflict::Stop),
+    );
+    let op = shared.lock().submit(submitted.clone()).unwrap().op;
+    assert!(jobs::next(&shared, op));
+    // The owner dies right after renaming c.txt, before recording it.
+    let (id, stamp) = disk::stamp(&c).unwrap();
+    let mut work = shared.lock().job_mut(op).unwrap().work[1].clone();
+    work.to = Some(dest.join("c.txt"));
+    work.steps.push(Step {
+        id,
+        undone: Spot::Path(c.clone()),
+        done: Spot::Path(dest.join("c.txt")),
+        applied: false,
+        stamp,
+    });
+    let intent = Record::Work { op, index: 1, work };
+    shared.lock().write(&intent).unwrap();
+    disk::rename_new(&c, &dest.join("c.txt")).unwrap();
+    drop(shared);
+
+    let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
+    let settled = status(&shared, op);
+    assert_eq!(settled.state, State::Interrupted);
+    assert_eq!(settled.tasks[0].done, Some(Done::To(dest.join("b"))));
+    assert_eq!(settled.tasks[1].done, Some(Done::To(dest.join("c.txt"))));
+    assert_eq!(settled.tasks[2].done, None);
+    assert!(a.exists());
+    // The same submission again is the same job, not a new one.
+    assert_eq!(shared.lock().submit(submitted).unwrap().op, op);
+
+    let retried = run(
+        &mut shared.lock(),
+        Request::Retry {
+            job: op,
+            conflict: None,
+        },
+    )
+    .unwrap()
+    .op;
+    jobs::run(&shared, retried);
+    let retry = status(&shared, retried);
+    assert_eq!(retry.tasks.len(), 1);
+    assert_eq!(retry.tasks[0].done, Some(Done::To(dest.join("a.txt"))));
+    // Undo takes back the retry, then all the interrupted job changed.
+    run(&mut shared.lock(), Request::Undo).unwrap();
+    run(&mut shared.lock(), Request::Undo).unwrap();
+    for path in [&a, &b, &c] {
+        assert!(path.exists(), "{}", path.display());
+    }
+}
