@@ -6,6 +6,8 @@ pub mod index;
 pub mod mcp;
 pub mod ops;
 pub mod paths;
+pub mod places;
+pub mod volumes;
 
 /// `~/Library/Application Support/Monodrive`.
 pub fn support_dir() -> Option<std::path::PathBuf> {

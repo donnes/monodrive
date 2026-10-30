@@ -1,11 +1,14 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
-//! service method; the behavior lives in `entries`, `index` and `ops`.
+//! service method; the behavior lives in `entries`, `index`, `ops`,
+//! `places` and `volumes`.
 
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, GrepMode, Index, Status};
 use crate::ops::{self, Conflict, Done, Job, Origin, Request};
+use crate::places::{self, Availability, Place};
+use crate::volumes::{self, Volume, VolumeId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -19,11 +22,16 @@ const INSTRUCTIONS: &str = "Monodrive: an always-current index of this Mac's fil
 much faster than Spotlight or walking folders with find. Use find_files to locate files \
 by name, grep to search inside files, and list_dir to see one folder. index_status says \
 whether the index is ready. trash, put_back, rename, create_folder, create_folder_with, \
-create_file, duplicate, undo and redo change files through the same undo history as the Monodrive window.";
+create_file, duplicate, undo and redo change files through the same undo history as the Monodrive window. \
+list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
-    let mut server = Server::new(ops::Client::new(paths, std::env::current_exe().ok()));
+    let places = places::Store::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
+    let mut server = Server::new(
+        ops::Client::new(paths, std::env::current_exe().ok()),
+        places,
+    );
     let mut stdout = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let line = line?;
@@ -50,6 +58,7 @@ pub struct Server {
     ops: ops::Client,
     /// The name the agent's MCP client gave, to attribute its changes.
     client: Option<String>,
+    places: places::Store,
 }
 
 #[derive(Deserialize)]
@@ -127,6 +136,17 @@ enum ToolCall {
         job: u64,
         conflict: Option<Conflict>,
     },
+    ListPlaces {},
+    Pin {
+        path: String,
+        at: Option<usize>,
+    },
+    Unpin {
+        path: String,
+    },
+    Eject {
+        path: String,
+    },
 }
 
 fn folders_first() -> bool {
@@ -138,11 +158,12 @@ fn default_limit() -> usize {
 }
 
 impl Server {
-    pub fn new(ops: ops::Client) -> Self {
+    pub fn new(ops: ops::Client, places: places::Store) -> Self {
         Self {
             index: None,
             ops,
             client: None,
+            places,
         }
     }
 
@@ -305,6 +326,30 @@ impl Server {
                     out
                 })),
             }),
+            ToolCall::ListPlaces {} => {
+                let volumes = volumes::list();
+                self.places
+                    .places(&volumes)
+                    .map(|places| list_places(&places, &volumes))
+            }
+            ToolCall::Pin { path, at } => {
+                let path = expand_home(&path);
+                self.places
+                    .pin(&path, at, &volumes::list())
+                    .map(|()| format!("{}\n", path.display()))
+            }
+            ToolCall::Unpin { path } => {
+                let path = expand_home(&path);
+                self.places
+                    .unpin(&path, &volumes::list())
+                    .map(|()| format!("Unpinned {}; the folder is untouched.\n", path.display()))
+            }
+            ToolCall::Eject { path } => {
+                let origin = Origin::Agent {
+                    client: self.client.clone(),
+                };
+                volumes::eject(&expand_home(&path), &origin, &mut self.ops).map(|done| done + "\n")
+            }
         };
         match text {
             Ok(text) if text.is_empty() => tool_text("No results.", false),
@@ -372,6 +417,58 @@ impl Server {
     }
 }
 
+/// Favorites, then volumes: one path a line, with what's worth knowing
+/// about it in brackets.
+fn list_places(places: &[Place], volumes: &[Volume]) -> String {
+    let mut out = String::from("Favorites\n");
+    for place in places {
+        let _ = match &place.availability {
+            Availability::Available(path) => writeln!(out, "{}", path.display()),
+            Availability::Unavailable(why) => {
+                writeln!(
+                    out,
+                    "{} (unavailable: {why})",
+                    place.favorite.path.display()
+                )
+            }
+        };
+    }
+    out.push_str("Volumes\n");
+    for volume in volumes {
+        let mut about = vec![
+            volume.name.clone(),
+            format!("{} free of {}", bytes(volume.free), bytes(volume.total)),
+        ];
+        for (yes, label) in [
+            (volume.startup, "startup disk"),
+            (volume.read_only, "read-only"),
+            (volume.network, "network"),
+            (volume.ejectable || volume.removable, "removable"),
+        ] {
+            if yes {
+                about.push(label.into());
+            }
+        }
+        match &volume.id {
+            Some(VolumeId::Uuid(uuid)) => about.push(format!("uuid {uuid}")),
+            Some(VolumeId::Url(url)) => about.push(url.clone()),
+            None => {}
+        }
+        let _ = writeln!(out, "{} ({})", volume.mount.display(), about.join(", "));
+    }
+    out
+}
+
+/// Finder's decimal units, to a size worth reading for a disk.
+fn bytes(n: u64) -> String {
+    let n = n as f64;
+    match n {
+        ..1e9 => format!("{:.0} MB", n / 1e6),
+        ..1e12 => format!("{:.1} GB", n / 1e9),
+        _ => format!("{:.2} TB", n / 1e12),
+    }
+}
+
 /// One line: what a job is doing, how far it's got, and who asked.
 fn summary(job: &Job) -> String {
     let done = job.tasks.iter().filter(|task| task.done.is_some()).count();
@@ -432,7 +529,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 18] = [
+pub const TOOLS: [Tool; 22] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -601,6 +698,45 @@ pub const TOOLS: [Tool; 18] = [
             })
         },
     },
+    Tool {
+        name: "list_places",
+        description: "The Monodrive sidebar's favorite folders, then the mounted volumes with free space, \
+    read-only, network and removable flags, and their identity. Never reads a volume's contents.",
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "pin",
+        description: "Add a folder to the sidebar's favorites, or move one already there to position \
+    at (0 is first). Changes no files.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "A folder. Absolute; ~ is your home."},
+                    "at": {"type": "integer", "minimum": 0, "description": "Position; last by default."}
+                },
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "unpin",
+        description: "Remove a folder from the sidebar's favorites. Only the bookmark goes; the folder stays.",
+        input_schema: path_schema,
+    },
+    Tool {
+        name: "eject",
+        description: "Eject or unmount the volume mounted at path, as Finder does. Refuses the startup disk, \
+    a volume a Monodrive copy or move is using, and one macOS says is busy; never forces. Undo by \
+    reconnecting the drive or share.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Where it's mounted, as list_places prints it."}},
+                "required": ["path"]
+            })
+        },
+    },
 ];
 
 fn tools() -> Value {
@@ -700,7 +836,17 @@ mod tests {
             settings: "/nonexistent/monodrive-test/settings.json".into(),
             trash: "/nonexistent/monodrive-test/Trash".into(),
         };
-        Server::new(ops::Client::new(paths, None))
+        Server::new(
+            ops::Client::new(paths, None),
+            places("/nonexistent/monodrive-test".as_ref()),
+        )
+    }
+
+    fn places(dir: &std::path::Path) -> places::Store {
+        places::Store {
+            places: dir.join("places.json"),
+            recents: dir.join("recents.json"),
+        }
     }
 
     fn text(reply: &Value) -> &str {
@@ -766,7 +912,7 @@ mod tests {
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(ops::Client::new(paths, None));
+        let mut server = Server::new(ops::Client::new(paths, None), places(dir.path()));
         let (made, renamed) = (dir.path().join("made"), dir.path().join("renamed"));
         let shown = |path: &std::path::Path| format!("{}\n", path.display());
         let reply = call(
@@ -809,6 +955,11 @@ mod tests {
         );
         assert_eq!(reply["result"]["isError"], true);
         assert!(text(&reply).starts_with("Agents can't"), "{reply}");
+        let reply = call(
+            &mut server,
+            json!({"name": "eject", "arguments": {"path": "/"}}),
+        );
+        assert!(text(&reply).starts_with("Agents can't eject"), "{reply}");
         drop(server);
         serving.join().unwrap().unwrap();
     }
@@ -826,7 +977,10 @@ mod tests {
         let serve = || {
             let owner = ops::Owner::bind(paths.clone()).unwrap();
             let serving = std::thread::spawn(move || owner.serve());
-            (serving, Server::new(ops::Client::new(paths.clone(), None)))
+            (
+                serving,
+                Server::new(ops::Client::new(paths.clone(), None), places(dir.path())),
+            )
         };
         let (serving, mut server) = serve();
         let (file, into) = (dir.path().join("a.txt"), dir.path().join("into"));
@@ -889,6 +1043,59 @@ mod tests {
         drop(server);
         serving.join().unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(into.join("a 2.txt")).unwrap(), "a");
+    }
+
+    #[test]
+    fn place_tools_pin_list_and_unpin_favorites_and_eject_refuses_without_ejecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, gone) = (dir.path().join("Work"), dir.path().join("Gone"));
+        std::fs::create_dir(&work).unwrap();
+        std::fs::create_dir(&gone).unwrap();
+        let mut server = server();
+        server.places = places(dir.path());
+        for (path, at) in [(&gone, json!(null)), (&work, json!(0))] {
+            let reply = call(
+                &mut server,
+                json!({"name": "pin", "arguments": {"path": path, "at": at}}),
+            );
+            assert_eq!(text(&reply), format!("{}\n", path.display()));
+        }
+        std::fs::rename(&gone, dir.path().join("Moved")).unwrap();
+        let reply = call(&mut server, json!({"name": "list_places"}));
+        assert_eq!(reply["result"]["isError"], false);
+        let lines: Vec<&str> = text(&reply).lines().collect();
+        let gone_line = format!("{0} (unavailable: {0} no longer exists.)", gone.display());
+        assert_eq!(lines[..2], ["Favorites", &work.display().to_string()]);
+        assert_eq!(lines[7], gone_line);
+        assert_eq!(lines[8], "Volumes");
+        assert!(lines[9].starts_with("/ ("), "{}", lines[9]);
+        assert!(lines[9].contains(" free of ") && lines[9].contains("startup disk, uuid "));
+
+        let reply = call(
+            &mut server,
+            json!({"name": "unpin", "arguments": {"path": gone}}),
+        );
+        assert_eq!(
+            text(&reply),
+            format!("Unpinned {}; the folder is untouched.\n", gone.display())
+        );
+        for bad in [
+            json!({"name": "pin", "arguments": {"path": work, "at": -1}}),
+            json!({"name": "eject", "arguments": {}}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
+        for (path, refusal) in [
+            (dir.path().to_path_buf(), " isn't a mounted volume."),
+            ("/".into(), " is the startup disk."),
+        ] {
+            let reply = call(
+                &mut server,
+                json!({"name": "eject", "arguments": {"path": path}}),
+            );
+            assert_eq!(reply["result"]["isError"], true);
+            assert!(text(&reply).ends_with(refusal), "{reply}");
+        }
     }
 
     #[test]

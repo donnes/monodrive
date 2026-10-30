@@ -2983,6 +2983,7 @@ dependencies = [
 name = "monodrive-core"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "criterion",
  "fsearch",
  "libc",

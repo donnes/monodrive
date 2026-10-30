@@ -303,6 +303,11 @@ impl Client {
         self.ask(&Message::Jobs)
     }
 
+    /// The Agents setting, for changes outside the owner, such as Eject.
+    pub fn agents_change_files(&self) -> bool {
+        super::agents_change_files(&self.paths)
+    }
+
     /// Calls `changed` each time the owner's journal changes; see `Watch`.
     pub fn watch(&self, changed: impl Fn() + Send + 'static) -> io::Result<Watch> {
         Watch::start(&self.paths.state, changed)
