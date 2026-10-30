@@ -6,7 +6,7 @@
 
 use crate::archives::{self, Archive};
 use crate::catalogs::{self, Catalog, Found, Resolved, Unreadable};
-use crate::cloud::{self, Asked};
+use crate::cloud::{self, Asked, CloudFolder};
 use crate::compare::{
     self, Action, Block, Comparison, CopyPlan, Ending, LineKind, Newer, TextDiff,
 };
@@ -48,7 +48,7 @@ job_status follows; archive_list shows what a ZIP holds without extracting it. \
 compare compares two files or folders, diff shows two text files' differences, and compare_copy \
 copies differences one way as a job. storage_scan shows what takes up space in a folder, duplicates \
 finds identical files there, and cleanup_duplicates trashes the copies you choose. \
-list_places shows the sidebar's favorites, the mounted volumes and the saved servers; pin, unpin and eject \
+list_places shows the sidebar's favorites, the mounted volumes, the cloud folders and the saved servers; pin, unpin and eject \
 manage them, connect mounts an smb:// share with credentials macOS already has, disconnect unmounts it, and \
 forget_server forgets a saved address. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches. \
@@ -824,8 +824,14 @@ impl Server {
             ToolCall::ListPlaces {} => {
                 let volumes = volumes::list();
                 let places = self.places.places(&volumes);
+                let cloud = cloud::folders(&expand_home("~"));
                 places.and_then(|places| {
-                    Ok(list_places(&places, &volumes, &self.places.servers()?))
+                    Ok(list_places(
+                        &places,
+                        &volumes,
+                        &cloud,
+                        &self.places.servers()?,
+                    ))
                 })
             }
             ToolCall::Pin { path, at } => {
@@ -1607,9 +1613,14 @@ fn saved_search(search: &SavedSearch) -> String {
     }
 }
 
-/// Favorites, then volumes, then saved servers: one path or address a line,
-/// with what's worth knowing about it in brackets.
-fn list_places(places: &[Place], volumes: &[Volume], servers: &[String]) -> String {
+/// Favorites, then volumes, then cloud folders, then saved servers: one path
+/// or address a line, with what's worth knowing about it in brackets.
+fn list_places(
+    places: &[Place],
+    volumes: &[Volume],
+    cloud: &[CloudFolder],
+    servers: &[String],
+) -> String {
     let mut out = String::from("Favorites\n");
     for place in places {
         let _ = match &place.availability {
@@ -1645,6 +1656,10 @@ fn list_places(places: &[Place], volumes: &[Volume], servers: &[String]) -> Stri
             None => {}
         }
         let _ = writeln!(out, "{} ({})", volume.mount.display(), about.join(", "));
+    }
+    out.push_str("Cloud\n");
+    for folder in cloud {
+        let _ = writeln!(out, "{} ({})", folder.path.display(), folder.name);
     }
     out.push_str("Servers\n");
     for address in servers {
@@ -3006,7 +3021,8 @@ pub const TOOLS: [Tool; 69] = [
     Tool {
         name: "list_places",
         description: "The Monodrive sidebar's favorite folders, then the mounted volumes with free space, \
-    read-only, network and removable flags, and their identity, then the saved servers. Never reads a volume's contents.",
+    read-only, network and removable flags, and their identity, then the cloud folders on this Mac, then the saved servers. \
+    Never reads a volume's or cloud folder's contents.",
         input_schema: || json!({"type": "object", "properties": {}}),
     },
     Tool {
@@ -4694,6 +4710,14 @@ mod tests {
         assert!(
             text(&reply).ends_with("Servers\nsmb://nas.invalid/media\n"),
             "{reply}"
+        );
+        let cloud = CloudFolder {
+            name: "Dropbox".into(),
+            path: "/Users/me/Library/CloudStorage/Dropbox".into(),
+        };
+        assert_eq!(
+            list_places(&[], &[], &[cloud], &[]),
+            "Favorites\nVolumes\nCloud\n/Users/me/Library/CloudStorage/Dropbox (Dropbox)\nServers\n"
         );
         for (tool, address, refusal) in [
             (

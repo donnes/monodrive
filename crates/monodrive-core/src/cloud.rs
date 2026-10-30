@@ -13,11 +13,48 @@ use objc2_foundation::{
 use serde::Serialize;
 use std::fs::Metadata;
 use std::os::macos::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// `SF_DATALESS` from <sys/stat.h>, which libc doesn't export: the kernel
 /// sets it on every placeholder, whichever provider made it.
 const SF_DATALESS: u32 = 0x4000_0000;
+
+/// A folder iCloud Drive or a File Provider app keeps on this Mac.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudFolder {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// The cloud folders under `home`: iCloud Drive, then what's in
+/// `~/Library/CloudStorage` by name, as macOS names the folders there. It
+/// looks at those folders from outside and never goes in, since going in can
+/// ask for permission or wake the provider. One it can't see isn't listed.
+pub fn folders(home: &Path) -> Vec<CloudFolder> {
+    let library = home.join("Library");
+    let icloud = library.join("Mobile Documents/com~apple~CloudDocs");
+    let mut providers: Vec<CloudFolder> = std::fs::read_dir(library.join("CloudStorage"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let path = entry.path();
+            (!name.starts_with('.')).then_some(CloudFolder { name, path })
+        })
+        .collect();
+    providers.sort_by_key(|folder| folder.name.to_lowercase());
+    icloud
+        .is_dir()
+        .then(|| CloudFolder {
+            name: "iCloud Drive".into(),
+            path: icloud,
+        })
+        .into_iter()
+        .chain(providers)
+        .collect()
+}
 
 /// Whether an item's contents are on this Mac.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -263,6 +300,31 @@ fn flags<const N: usize>(url: &NSURL, keys: [&NSURLResourceKey; N]) -> [bool; N]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_folders_are_icloud_then_the_providers_by_name_and_nothing_else() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(folders(home.path()), []);
+        let storage = home.path().join("Library/CloudStorage");
+        for name in ["OneDrive-Personal", "Dropbox", ".hidden"] {
+            std::fs::create_dir_all(storage.join(name)).unwrap();
+        }
+        std::fs::write(storage.join("a file"), "").unwrap();
+        let names =
+            |home: &Path| -> Vec<String> { folders(home).into_iter().map(|f| f.name).collect() };
+        assert_eq!(names(home.path()), ["Dropbox", "OneDrive-Personal"]);
+        let icloud = home
+            .path()
+            .join("Library/Mobile Documents/com~apple~CloudDocs");
+        std::fs::create_dir_all(&icloud).unwrap();
+        assert_eq!(
+            folders(home.path())[0],
+            CloudFolder {
+                name: "iCloud Drive".into(),
+                path: icloud
+            }
+        );
+    }
 
     #[test]
     fn only_the_dataless_flag_makes_a_placeholder() {

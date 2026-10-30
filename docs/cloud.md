@@ -2,6 +2,10 @@
 
 iCloud Drive and File Provider apps such as Dropbox, Google Drive and OneDrive keep some files only in the cloud. Each such file is a placeholder: the kernel marks it `SF_DATALESS`, and `lstat` still gives its name, size and dates. Reading a placeholder makes macOS download it before the read returns, and listing a placeholder folder makes the provider fetch its items. `monodrive-core`'s `cloud` module decides what counts as a placeholder, and everything that walks or reads the disk checks it first.
 
+## Finding the folders
+
+`cloud::folders` lists iCloud Drive and each folder in `~/Library/CloudStorage`, for the palette's Cloud storage page and `list_places`. It uses one `stat` of `Mobile Documents/com~apple~CloudDocs` and one listing of `CloudStorage`, with the type from the directory entry. It never goes inside a provider's folder, since that can ask for permission or wake the provider, so a folder is named as it is on disk: `GoogleDrive-me@example.com`, not Finder's "Google Drive". What it can't see isn't listed.
+
 ## Availability
 
 `cloud::Availability` comes from the `st_flags` of the `lstat` a listing already makes, so it adds no system call. A listing says `Local` or `Placeholder`. Only `info` asks Foundation whether a placeholder is `Downloading`, whether the item is in the cloud at all, and why its last download failed. Those questions go to the provider's daemon, which takes about a millisecond an item. A search result from the index is `Unknown`, because fsearch keeps no flags.
