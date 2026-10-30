@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 /// wrong.
 const OUTPUT_LIMIT: u64 = 8 << 20;
 const ERROR_LIMIT: u64 = 64 << 10;
+/// The most read of a `.git` file or a worktree's `gitdir`, which hold a
+/// path.
+const LINK_LIMIT: u64 = 64 << 10;
 
 /// The git Monodrive runs, and how long one command may take.
 #[derive(Clone, Debug)]
@@ -483,9 +486,27 @@ fn is_checkout(worktree: &Worktree, common_dir: &Path) -> io::Result<bool> {
 }
 
 /// The real path a one-line link file such as `.git` names after `prefix`,
-/// relative to the file's folder unless it's absolute.
+/// relative to the file's folder unless it's absolute. Anything in a
+/// worktree's folder can stand in its place, so it's opened without waiting
+/// for a writer, as a FIFO would make it, and read only as far as a link
+/// could go.
 fn link(file: &Path, prefix: &[u8]) -> io::Result<Option<PathBuf>> {
-    let text = std::fs::read(file)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(file)?;
+    let shown = file.display();
+    if !opened.metadata()?.is_file() {
+        let why = format!("{shown} isn't a regular file.");
+        return Err(io::Error::new(io::ErrorKind::InvalidData, why));
+    }
+    let mut text = Vec::new();
+    opened.take(LINK_LIMIT + 1).read_to_end(&mut text)?;
+    if text.len() as u64 > LINK_LIMIT {
+        let why = format!("{shown} is over {} KB.", LINK_LIMIT >> 10);
+        return Err(io::Error::new(io::ErrorKind::InvalidData, why));
+    }
     let text = text.strip_suffix(b"\n").unwrap_or(&text);
     let Some(to) = text.strip_prefix(prefix) else {
         return Ok(None);

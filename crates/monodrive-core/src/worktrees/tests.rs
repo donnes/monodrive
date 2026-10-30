@@ -91,6 +91,16 @@ fn every_way_into_a_repository_lists_its_worktrees_once_with_their_states() {
     add(&["-b", "replaced", "../replaced"]);
     std::fs::rename(at("replaced"), at("replaced before")).unwrap();
     repo(&at("replaced"));
+    // A .git that would block a plain read, and one too big to be a link.
+    for name in ["fifo", "huge"] {
+        add(&["-b", name, &format!("../{name}")]);
+        std::fs::rename(at(name).join(".git"), at(name).join("dotgit")).unwrap();
+    }
+    let made = Command::new("/usr/bin/mkfifo")
+        .arg(at("fifo/.git"))
+        .status();
+    assert!(made.unwrap().success());
+    std::fs::write(at("huge/.git"), vec![b'a'; 100 << 10]).unwrap();
     std::fs::create_dir_all(main.join("src/deep")).unwrap();
     std::os::unix::fs::symlink(&main, at("alias")).unwrap();
     chmod(&at("closed"), 0o000);
@@ -130,7 +140,7 @@ fn every_way_into_a_repository_lists_its_worktrees_once_with_their_states() {
         path: at(name),
         ..w
     };
-    assert_eq!(inventory.worktrees.len(), 9);
+    assert_eq!(inventory.worktrees.len(), 11);
     assert_eq!(
         inventory.worktrees[0],
         Worktree {
@@ -172,6 +182,23 @@ fn every_way_into_a_repository_lists_its_worktrees_once_with_their_states() {
             Worktree {
                 state: State::Replaced,
                 ..linked(Some("replaced"))
+            },
+        ),
+        (
+            "fifo",
+            Worktree {
+                state: State::Unreadable(format!(
+                    "{} isn't a regular file.",
+                    at("fifo/.git").display()
+                )),
+                ..linked(Some("fifo"))
+            },
+        ),
+        (
+            "huge",
+            Worktree {
+                state: State::Unreadable(format!("{} is over 64 KB.", at("huge/.git").display())),
+                ..linked(Some("huge"))
             },
         ),
     ] {
