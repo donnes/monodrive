@@ -118,7 +118,7 @@ impl Page {
             Page::Window => Some(Preferences::restore_window),
             Page::Appearance => Some(Preferences::restore_appearance),
             Page::Keyboard => Some(|p| p.shortcuts.clear()),
-            Page::Agents => None,
+            Page::Agents => Some(|p| p.agents_change_files = true),
         }
     }
 }
@@ -388,7 +388,7 @@ impl SettingsView {
                 return;
             };
             let (Some(source), Some(support)) =
-                (paths.into_iter().next(), preferences::support_dir())
+                (paths.into_iter().next(), monodrive_core::support_dir())
             else {
                 return;
             };
@@ -743,37 +743,62 @@ impl SettingsView {
         ]
     }
 
-    fn agents(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn agents(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let exe = std::env::current_exe()
             .map(|exe| exe.display().to_string())
             .unwrap_or_else(|_| "monodrive".into());
         let command = format!("claude mcp add monodrive -- {} mcp", shell_quote(&exe));
-        vec![group(
-            "MCP",
-            Some("Agents run Monodrive as an MCP server and search the same index as this window."),
-            vec![row(
-                "Claude Code",
-                Some("Copies the command that adds Monodrive to Claude Code."),
-                self.focusable(
-                    "copy-mcp-command",
-                    true,
-                    push_button(
-                        "copy-mcp-command",
-                        if self.copied {
-                            "Copied"
-                        } else {
-                            "Copy Command"
-                        },
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
-                        this.copied = true;
-                        cx.notify();
-                    })),
-                    cx,
+        vec![
+            group(
+                "MCP",
+                Some(
+                    "Agents run Monodrive as an MCP server and search the same index as this window.",
                 ),
-            )],
-        )]
+                vec![row(
+                    "Claude Code",
+                    Some("Copies the command that adds Monodrive to Claude Code."),
+                    self.focusable(
+                        "copy-mcp-command",
+                        true,
+                        push_button(
+                            "copy-mcp-command",
+                            if self.copied {
+                                "Copied"
+                            } else {
+                                "Copy Command"
+                            },
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+                            this.copied = true;
+                            cx.notify();
+                        })),
+                        cx,
+                    ),
+                )],
+            ),
+            group(
+                "Files",
+                None,
+                vec![row(
+                    "Let agents change files",
+                    Some(
+                        "Trash, put back, rename, create, duplicate, undo and redo. Off, agents can only read.",
+                    ),
+                    self.focusable(
+                        "agents-change-files",
+                        true,
+                        toggle(
+                            "agents-change-files",
+                            "Let agents change files",
+                            p.agents_change_files,
+                            |p, on| p.agents_change_files = on,
+                        ),
+                        cx,
+                    ),
+                )],
+            ),
+        ]
     }
 
     /// Every command and its shortcut, grouped as in the menu bar.
@@ -1633,7 +1658,7 @@ impl Render for SettingsView {
             Page::Window => self.window_page(&prefs, cx),
             Page::Appearance => self.appearance(&prefs, window, cx),
             Page::Keyboard => self.keyboard(&prefs, cx),
-            Page::Agents => self.agents(cx),
+            Page::Agents => self.agents(&prefs, cx),
         };
         let card = div()
             .id("settings")

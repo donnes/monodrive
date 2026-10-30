@@ -4,7 +4,14 @@
 pub mod entries;
 pub mod index;
 pub mod mcp;
+pub mod ops;
 pub mod paths;
+
+/// `~/Library/Application Support/Monodrive`.
+pub fn support_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::PathBuf::from(home).join("Library/Application Support/Monodrive"))
+}
 
 /// `~` and `~/rest` resolved against `$HOME`; other paths unchanged.
 pub fn expand_home(path: &str) -> std::path::PathBuf {

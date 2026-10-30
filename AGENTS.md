@@ -41,7 +41,7 @@ The most common defect is a change that works on the path you tested and is miss
 
 ## Where code lives
 
-- `crates/monodrive-core` holds the services and has no GPUI. `entries` lists folders, `index` wraps fsearch, and `mcp` is the MCP server.
+- `crates/monodrive-core` holds the services and has no GPUI. `entries` lists folders, `index` wraps fsearch, `mcp` is the MCP server, and `ops` changes files through the one owner process the window and every MCP server share (see `docs/operations.md`).
 - `crates/monodrive` is the GPUI app; `main.rs` decodes the command line and `lib.rs` opens the window, so benchmarks can build its views. `commands.rs` is the one table of commands that the keymap, menu bar, command palette (`palette.rs`) and Keyboard settings read; add a command there, not a key binding in a view. `browser.rs` is the window, `settings.rs` is the Settings sheet, `preferences.rs` holds what it edits and saves it to `~/Library/Application Support/Monodrive/settings.json`, `text_field.rs` is the single-line input (cut down from Monocode's `input.rs`), `theme.rs` turns preferences into Monocode's appearance tokens, `palettes.rs` holds Monocode's color presets, `background.rs` bakes and paints the background image, `file_icons.rs` draws the icons Finder shows, through `NSWorkspace`, at the size drawn, `thumbnails.rs` decodes image thumbnails for the grid, `goto.rs` is Go to Folder, `frame.rs` sizes and places the window, `traffic_lights.rs` pins the macOS window buttons, and `profile.rs` is the `profile` feature's launch and frame report.
 - `assets/` holds the app icon: its Icon Composer project and the PNGs `scripts/icons` exports from it. See `assets/README.md`.
 - `vendor/` is the patched GPUI from Monocode (see rule 4).

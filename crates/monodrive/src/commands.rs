@@ -7,9 +7,9 @@
 
 use crate::browser::{
     Back, CopyPath, DeselectAll, EnclosingFolder, FocusSearch, Forward, GoApplications, GoComputer,
-    GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, OpenSelected, OpenSettings, ResetZoom,
-    ReverseSort, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles, ViewAsGrid,
-    ViewAsList, ZoomIn, ZoomOut,
+    GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, OpenSelected, OpenSettings, Redo,
+    ResetZoom, ReverseSort, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
+    Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{browser, goto, palette, settings, text_field};
@@ -147,9 +147,21 @@ pub fn all() -> Vec<Command> {
         command("Copy Path", File, &["cmd-alt-c"], BROWSER, || {
             Box::new(CopyPath)
         }),
-        command("Deselect All", Edit, &["cmd-alt-a"], BROWSER, || {
-            Box::new(DeselectAll)
+        // From the list only, so ⌘Z while typing a search never changes
+        // files; the menu bar's Undo works anywhere in the window.
+        command("Undo", Edit, &["cmd-z"], Some("FileList"), || {
+            Box::new(Undo)
         }),
+        command("Redo", Edit, &["cmd-shift-z"], Some("FileList"), || {
+            Box::new(Redo)
+        }),
+        separated(command(
+            "Deselect All",
+            Edit,
+            &["cmd-alt-a"],
+            BROWSER,
+            || Box::new(DeselectAll),
+        )),
         command("Back", Go, &["cmd-["], BROWSER, || Box::new(Back)),
         command("Forward", Go, &["cmd-]"], BROWSER, || Box::new(Forward)),
         command("Enclosing Folder", Go, &["cmd-up"], BROWSER, || {
@@ -451,19 +463,25 @@ fn install_menus(cx: &mut App) {
     cx.set_menus(vec![
         menu(Group::App, items(Group::App)),
         menu(Group::File, items(Group::File)),
-        Menu {
-            name: "Edit".into(),
-            items: vec![
-                MenuItem::os_action("Cut", text_field::Cut, OsAction::Cut),
-                MenuItem::os_action("Copy", text_field::Copy, OsAction::Copy),
-                MenuItem::os_action("Paste", text_field::Paste, OsAction::Paste),
-                MenuItem::os_action("Select All", text_field::SelectAll, OsAction::SelectAll),
-            ]
-            .into_iter()
-            .chain(items(Group::Edit))
-            .collect(),
-            disabled: false,
-        },
+        menu(Group::Edit, {
+            // Finder's order: Undo and Redo, the clipboard, then the rest.
+            let mut edit = items(Group::Edit);
+            let at = edit
+                .iter()
+                .position(|item| matches!(item, MenuItem::Separator))
+                .unwrap_or(edit.len());
+            edit.splice(
+                at..at,
+                [
+                    MenuItem::separator(),
+                    MenuItem::os_action("Cut", text_field::Cut, OsAction::Cut),
+                    MenuItem::os_action("Copy", text_field::Copy, OsAction::Copy),
+                    MenuItem::os_action("Paste", text_field::Paste, OsAction::Paste),
+                    MenuItem::os_action("Select All", text_field::SelectAll, OsAction::SelectAll),
+                ],
+            );
+            edit
+        }),
         menu(Group::Go, items(Group::Go)),
         menu(Group::View, items(Group::View)),
         menu(Group::Window, items(Group::Window)),

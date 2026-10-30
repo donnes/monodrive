@@ -123,6 +123,9 @@ pub struct Preferences {
     pub grid_label: RowSize,
     /// Images show their pictures in the grid.
     pub thumbnails: bool,
+    /// Agents may change files over MCP. The operation owner reads it from
+    /// the saved file, by this name.
+    pub agents_change_files: bool,
 }
 
 /// How narrow and wide the sidebar can be dragged.
@@ -158,6 +161,7 @@ impl Default for Preferences {
             grid_icon: 72,
             grid_label: RowSize::Medium,
             thumbnails: true,
+            agents_change_files: true,
         }
     }
 }
@@ -197,6 +201,7 @@ impl Preferences {
             grid_icon: self.grid_icon,
             grid_label: self.grid_label,
             thumbnails: self.thumbnails,
+            agents_change_files: self.agents_change_files,
             ..Self::default()
         };
     }
@@ -237,14 +242,8 @@ impl Preferences {
     }
 }
 
-/// `~/Library/Application Support/Monodrive`.
-pub fn support_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/Monodrive"))
-}
-
 fn path() -> Option<PathBuf> {
-    Some(support_dir()?.join("settings.json"))
+    Some(monodrive_core::support_dir()?.join("settings.json"))
 }
 
 /// Reads saved preferences. A missing or unreadable file means defaults, and

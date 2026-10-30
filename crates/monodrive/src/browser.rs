@@ -17,18 +17,19 @@ use chrono::{DateTime, Local};
 use gpui::RenderImage;
 use gpui::{
     Action, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
-    FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, Keystroke, Modifiers,
+    FocusHandle, Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollStrategy,
     ScrollWheelEvent, Task, UniformListScrollHandle, Window, WindowAppearance, WindowControlArea,
     actions, canvas, div, prelude::*, px, uniform_list,
 };
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::{Index, Progress, Status};
+use monodrive_core::ops::{self, Origin, Request};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 actions!(
@@ -80,8 +81,16 @@ actions!(
         ZoomIn,
         ZoomOut,
         ResetZoom,
+        Undo,
+        Redo,
     ]
 );
+
+/// The window's connection to the operation owner, shared with background
+/// work. `run` sets it; without it, as in benchmarks, Undo and Redo do
+/// nothing.
+pub struct Operations(pub Arc<Mutex<ops::Client>>);
+impl Global for Operations {}
 
 pub fn bind(cx: &mut App) {
     let context = Some("Browser");
@@ -198,6 +207,9 @@ pub struct Browser {
     /// Hands disk changes from fsearch's thread to this view.
     _changes: Task<()>,
     error: Option<String>,
+    /// Why the last undo or redo didn't happen, until the next one or
+    /// leaving the folder.
+    notice: Option<String>,
     /// The trimmed search text; empty while showing the folder.
     query: String,
     selection: Selection,
@@ -294,6 +306,7 @@ impl Browser {
             refresh: None,
             _changes: Task::ready(()),
             error: None,
+            notice: None,
             query: String::new(),
             selection: Selection::default(),
             scroll: UniformListScrollHandle::new(),
@@ -350,6 +363,7 @@ impl Browser {
 
     /// Leaves search, if any, and lists the current folder.
     fn show_folder(&mut self, cx: &mut Context<Self>) {
+        self.notice = None;
         self.query.clear();
         self.search.update(cx, |field, cx| field.clear(cx));
         self.reload(cx);
@@ -1446,6 +1460,30 @@ impl Browser {
         cx.notify();
     }
 
+    /// Undoes or redoes the last operation in the history the window shares
+    /// with agents, off the UI thread. The listing follows the disk.
+    fn reverse(&mut self, request: Request, cx: &mut Context<Self>) {
+        let Some(ops) = cx.try_global::<Operations>().map(|ops| ops.0.clone()) else {
+            return;
+        };
+        self.notice = None;
+        let work = cx.background_executor().spawn(async move {
+            let mut client = ops.lock().unwrap_or_else(PoisonError::into_inner);
+            client.submit(Origin::Window, request)
+        });
+        cx.spawn(async move |this, cx| {
+            let notice = match work.await {
+                Ok(outcome) => outcome.failures().next().map(str::to_owned),
+                Err(e) => Some(e),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.notice = notice;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Copies the selected paths, one per line in the order shown, or the
     /// folder's, ready to paste into an agent's prompt or a terminal.
     fn copy_path(&self, cx: &mut Context<Self>) {
@@ -1771,8 +1809,17 @@ impl Browser {
                 }
             })
             .child(drag_area().flex_1().h_full())
+            .children(self.notice.clone().map(|notice| {
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(accent())
+                    .child(notice)
+            }))
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_size(px(12.))
                     .text_color(content(0.4))
                     .child(count),
@@ -2251,6 +2298,7 @@ impl Render for Browser {
                     .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
                         if this.query.is_empty() {
                             this.selection.clear();
+                            this.notice = None;
                             cx.notify();
                         } else {
                             this.show_folder(cx);
@@ -2261,6 +2309,8 @@ impl Render for Browser {
                         this.selection.clear();
                         cx.notify();
                     }))
+                    .on_action(cx.listener(|this, _: &Undo, _, cx| this.reverse(Request::Undo, cx)))
+                    .on_action(cx.listener(|this, _: &Redo, _, cx| this.reverse(Request::Redo, cx)))
             })
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
@@ -3238,5 +3288,46 @@ mod tests {
         assert_eq!(typed(&key("space", Some(" "))), None);
         assert_eq!(typed(&key("enter", Some("\r"))), None);
         assert_eq!(typed(&key("up", None)), None);
+    }
+
+    #[gpui::test]
+    fn undo_reverses_an_agents_rename_after_that_agent_has_gone(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let state = tempfile::tempdir().unwrap();
+        let paths = ops::Paths {
+            state: state.path().join("state"),
+            settings: state.path().join("settings.json"),
+        };
+        let serve = || {
+            let owner = ops::Owner::bind(paths.clone()).unwrap();
+            std::thread::spawn(move || owner.serve())
+        };
+        let (a, b) = (project.join("a.txt"), project.join("b.txt"));
+        let serving = serve();
+        let mut agent = ops::Client::new(paths.clone(), None);
+        let rename = Request::Rename {
+            path: a.clone(),
+            name: "b.txt".into(),
+        };
+        agent
+            .submit(Origin::Agent { client: None }, rename)
+            .unwrap();
+        // The agent leaves, and its owner with it; the window's undo
+        // reaches the next owner.
+        drop(agent);
+        serving.join().unwrap().unwrap();
+        let serving = serve();
+        let client = ops::Client::new(paths.clone(), None);
+        cx.update(|cx| cx.set_global(Operations(Arc::new(Mutex::new(client)))));
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "cmd-z");
+        assert!(a.exists() && !b.exists());
+        press(cx, "cmd-shift-z");
+        assert!(b.exists() && !a.exists());
+        press(cx, "cmd-shift-z");
+        let notice = browser.read_with(cx, |browser, _| browser.notice.clone());
+        assert_eq!(notice.as_deref(), Some("Nothing to redo."));
+        cx.update(|_, cx| drop(cx.remove_global::<Operations>()));
+        serving.join().unwrap().unwrap();
     }
 }

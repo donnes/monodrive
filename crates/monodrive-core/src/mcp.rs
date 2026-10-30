@@ -1,14 +1,16 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
-//! service method; the behavior lives in `entries` and `index`.
+//! service method; the behavior lives in `entries`, `index` and `ops`.
 
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, GrepMode, Index, Status};
+use crate::ops::{self, Origin, Request};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 
 /// Newest first. A client asking for another version gets the newest.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -16,10 +18,12 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 const INSTRUCTIONS: &str = "Monodrive: an always-current index of this Mac's files, \
 much faster than Spotlight or walking folders with find. Use find_files to locate files \
 by name, grep to search inside files, and list_dir to see one folder. index_status says \
-whether the index is ready.";
+whether the index is ready. trash, put_back, rename, create_folder, create_file, duplicate, \
+undo and redo change files through the same undo history as the Monodrive window.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
-    let mut server = Server::default();
+    let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
+    let mut server = Server::new(ops::Client::new(paths, std::env::current_exe().ok()));
     let mut stdout = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let line = line?;
@@ -38,11 +42,14 @@ pub fn serve_stdio() -> std::io::Result<()> {
     Ok(())
 }
 
-#[derive(Default)]
 pub struct Server {
     /// Started on the first tool that needs it, so connecting an agent
     /// never kicks off a disk crawl by itself.
     index: Option<Result<Index, String>>,
+    /// Connects to the operation owner on the first change.
+    ops: ops::Client,
+    /// The name the agent's MCP client gave, to attribute its changes.
+    client: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +80,27 @@ enum ToolCall {
         folders_first: bool,
     },
     IndexStatus {},
+    Trash {
+        paths: Vec<String>,
+    },
+    PutBack {
+        paths: Vec<String>,
+    },
+    Rename {
+        path: String,
+        name: String,
+    },
+    CreateFolder {
+        path: String,
+    },
+    CreateFile {
+        path: String,
+    },
+    Duplicate {
+        paths: Vec<String>,
+    },
+    Undo {},
+    Redo {},
 }
 
 fn folders_first() -> bool {
@@ -84,6 +112,14 @@ fn default_limit() -> usize {
 }
 
 impl Server {
+    pub fn new(ops: ops::Client) -> Self {
+        Self {
+            index: None,
+            ops,
+            client: None,
+        }
+    }
+
     /// Handles one message and returns the reply. Notifications and
     /// responses get none.
     pub fn handle(&mut self, message: &Value) -> Option<Value> {
@@ -93,6 +129,10 @@ impl Server {
         Some(match method {
             "initialize" => {
                 let asked = params.get("protocolVersion").and_then(Value::as_str);
+                self.client = params
+                    .pointer("/clientInfo/name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 let version = PROTOCOL_VERSIONS
                     .iter()
                     .find(|v| Some(**v) == asked)
@@ -179,11 +219,61 @@ impl Server {
                 }
                 out
             }),
+            ToolCall::Trash { paths } => self.change(Request::Trash {
+                paths: expand(&paths),
+            }),
+            ToolCall::PutBack { paths } => self.change(Request::PutBack {
+                paths: expand(&paths),
+            }),
+            ToolCall::Rename { path, name } => self.change(Request::Rename {
+                path: expand_home(&path),
+                name,
+            }),
+            ToolCall::CreateFolder { path } => self.change(Request::NewFolder {
+                path: expand_home(&path),
+            }),
+            ToolCall::CreateFile { path } => self.change(Request::NewFile {
+                path: expand_home(&path),
+            }),
+            ToolCall::Duplicate { paths } => self.change(Request::Duplicate {
+                paths: expand(&paths),
+            }),
+            ToolCall::Undo {} => self.change(Request::Undo),
+            ToolCall::Redo {} => self.change(Request::Redo),
         };
         match text {
             Ok(text) if text.is_empty() => tool_text("No results.", false),
             Ok(text) => tool_text(&text, false),
             Err(e) => tool_text(&e, true),
+        }
+    }
+
+    /// Runs a change through the operation owner: each resulting path on
+    /// its own line, and any item that failed with its reason.
+    fn change(&mut self, request: Request) -> Result<String, String> {
+        let origin = Origin::Agent {
+            client: self.client.clone(),
+        };
+        let outcome = self.ops.submit(origin, request)?;
+        let mut out = String::new();
+        if outcome.title.starts_with("Undo ") || outcome.title.starts_with("Redo ") {
+            let _ = writeln!(out, "{}", outcome.title);
+        }
+        for item in &outcome.items {
+            let _ = match &item.result {
+                Ok(path) => writeln!(out, "{}", path.display()),
+                Err(e) => writeln!(out, "{e}"),
+            };
+        }
+        if outcome.interrupted {
+            out.push_str(
+                "(Monodrive stopped partway; these results were read back from the disk.)\n",
+            );
+        }
+        if outcome.failures().next().is_some() {
+            Err(out)
+        } else {
+            Ok(out)
         }
     }
 
@@ -205,6 +295,10 @@ impl Server {
             .as_ref()
             .map_err(Clone::clone)
     }
+}
+
+fn expand(paths: &[String]) -> Vec<PathBuf> {
+    paths.iter().map(|path| expand_home(path)).collect()
 }
 
 /// MCP lets a call to a tool without parameters leave out `arguments`.
@@ -276,8 +370,82 @@ fn tools() -> Value {
             "description": "Whether the index is ready, how far its first build has got, and whether it \
     can see the whole disk. Never starts indexing.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "trash",
+            "description": "Move files or folders to the Trash; never deletes. Prints where each went in \
+    the Trash. put_back or undo restores them.",
+            "inputSchema": paths_schema()
+        },
+        {
+            "name": "put_back",
+            "description": "Restore items Monodrive moved to the Trash, given their paths in the Trash. \
+    Prints where each went back to.",
+            "inputSchema": paths_schema()
+        },
+        {
+            "name": "rename",
+            "description": "Rename a file or folder where it is. name is the new name, not a path. \
+    Never replaces an existing item.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute; ~ is your home."},
+                    "name": {"type": "string"}
+                },
+                "required": ["path", "name"]
+            }
+        },
+        {
+            "name": "create_folder",
+            "description": "Create an empty folder at path. Its parent must exist.",
+            "inputSchema": path_schema()
+        },
+        {
+            "name": "create_file",
+            "description": "Create an empty file at path. Its parent must exist; never replaces a file.",
+            "inputSchema": path_schema()
+        },
+        {
+            "name": "duplicate",
+            "description": "Copy files or folders beside themselves, named as Finder does (\"name copy\"), \
+    keeping metadata. Prints each copy's path.",
+            "inputSchema": paths_schema()
+        },
+        {
+            "name": "undo",
+            "description": "Undo the last file change, whether this agent, another agent or the Monodrive \
+    window made it. Refuses if the files changed since.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "redo",
+            "description": "Redo the last undone file change. Refuses if the files changed since.",
+            "inputSchema": {"type": "object", "properties": {}}
         }
     ])
+}
+
+fn path_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Absolute; ~ is your home."}},
+        "required": ["path"]
+    })
+}
+
+fn paths_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Absolute; ~ is your home."
+            }
+        },
+        "required": ["paths"]
+    })
 }
 
 fn tool_text(text: &str, is_error: bool) -> Value {
@@ -302,9 +470,22 @@ mod tests {
             .expect("a request gets a reply")
     }
 
+    /// A server whose changes go nowhere: read-only tools never connect.
+    fn server() -> Server {
+        let paths = ops::Paths {
+            state: "/nonexistent/monodrive-test".into(),
+            settings: "/nonexistent/monodrive-test/settings.json".into(),
+        };
+        Server::new(ops::Client::new(paths, None))
+    }
+
+    fn text(reply: &Value) -> &str {
+        reply["result"]["content"][0]["text"].as_str().unwrap()
+    }
+
     #[test]
     fn notifications_get_no_reply() {
-        let mut server = Server::default();
+        let mut server = server();
         let reply =
             server.handle(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
         assert_eq!(reply, None);
@@ -315,7 +496,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.toml"), "").unwrap();
         std::fs::create_dir(dir.path().join("src")).unwrap();
-        let mut server = Server::default();
+        let mut server = server();
         let reply = call(
             &mut server,
             json!({"name": "list_dir", "arguments": {"path": dir.path()}}),
@@ -328,7 +509,7 @@ mod tests {
 
     #[test]
     fn index_status_reports_without_starting_the_index() {
-        let mut server = Server::default();
+        let mut server = server();
         let reply = call(
             &mut server,
             json!({"name": "index_status", "arguments": {}}),
@@ -347,10 +528,63 @@ mod tests {
 
     #[test]
     fn unknown_tools_are_protocol_errors() {
-        let reply = call(
-            &mut Server::default(),
-            json!({"name": "rm_rf", "arguments": {}}),
-        );
+        let reply = call(&mut server(), json!({"name": "rm_rf", "arguments": {}}));
         assert_eq!(reply["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn change_tools_print_resulting_paths_and_share_undo_with_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ops::Paths {
+            state: dir.path().join("state"),
+            settings: dir.path().join("settings.json"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let mut server = Server::new(ops::Client::new(paths, None));
+        let (made, renamed) = (dir.path().join("made"), dir.path().join("renamed"));
+        let shown = |path: &std::path::Path| format!("{}\n", path.display());
+        let reply = call(
+            &mut server,
+            json!({"name": "create_folder", "arguments": {"path": made}}),
+        );
+        assert_eq!(text(&reply), shown(&made));
+        let reply = call(
+            &mut server,
+            json!({"name": "rename", "arguments": {"path": made, "name": "renamed"}}),
+        );
+        assert_eq!(text(&reply), shown(&renamed));
+        let reply = call(&mut server, json!({"name": "undo"}));
+        assert_eq!(text(&reply), format!("Undo Rename\n{}", shown(&made)));
+        assert!(made.is_dir() && !renamed.exists());
+
+        // Arguments that don't decode are protocol errors; a relative path
+        // is the owner's to refuse.
+        for bad in [
+            json!({"name": "rename", "arguments": {"path": made}}),
+            json!({"name": "trash", "arguments": {"paths": made}}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
+        let reply = call(
+            &mut server,
+            json!({"name": "create_file", "arguments": {"path": "notes.md"}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(text(&reply).contains("absolute"), "{reply}");
+
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"agents_change_files": false}"#,
+        )
+        .unwrap();
+        let reply = call(
+            &mut server,
+            json!({"name": "create_file", "arguments": {"path": dir.path().join("off.md")}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(text(&reply).starts_with("Agents can't"), "{reply}");
+        drop(server);
+        serving.join().unwrap().unwrap();
     }
 }

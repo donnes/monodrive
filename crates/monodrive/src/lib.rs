@@ -27,6 +27,7 @@ use gpui::{
 };
 use preferences::Preferences;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// Opens a window on `folder`, or the home folder, and starts the index.
 pub fn run(folder: Option<PathBuf>) {
@@ -40,6 +41,11 @@ pub fn run(folder: Option<PathBuf>) {
             #[cfg(feature = "profile")]
             profile::start(cx);
             preferences::init(cx);
+            // Connects on the first undo or redo, starting the owner if needed.
+            if let Some(paths) = monodrive_core::ops::Paths::user() {
+                let client = monodrive_core::ops::Client::new(paths, std::env::current_exe().ok());
+                cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));
+            }
             commands::apply(cx);
             // A changed shortcut rebuilds the keymap and the menu bar; Show
             // Hidden Files' checkmark rebuilds the menu bar alone.

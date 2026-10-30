@@ -7,6 +7,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        // The operation owner, started by the window or `mcp` when needed.
+        Some("ops") => std::process::exit(monodrive_core::ops::run_owner()),
         Some("--version" | "-V") => println!("Monodrive {}", env!("CARGO_PKG_VERSION")),
         Some(other) if other.starts_with('-') => {
             eprintln!("usage: monodrive [folder] | monodrive mcp | monodrive --version");
