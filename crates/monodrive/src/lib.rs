@@ -48,9 +48,16 @@ pub fn run(folder: Option<PathBuf>) {
             profile::start(cx);
             preferences::init(cx);
             // Connects on the first change or look at the jobs, starting the
-            // owner if needed.
+            // owner if needed. The watch on its journal connects to nothing.
+            let (heard, changes) = async_channel::unbounded();
+            let mut watch = None;
             if let Some(paths) = monodrive_core::ops::Paths::user() {
                 let client = monodrive_core::ops::Client::new(paths, std::env::current_exe().ok());
+                watch = client
+                    .watch(move || {
+                        let _ = heard.try_send(());
+                    })
+                    .ok();
                 cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));
             }
             cx.set_global(pasteboard::Pasteboard::general());
@@ -120,6 +127,9 @@ pub fn run(folder: Option<PathBuf>) {
                     let view = cx.new(|cx| {
                         let mut browser = browser::Browser::new(folder, cx);
                         browser.start_index(cx);
+                        if let Some(watch) = watch {
+                            browser.hear_jobs(watch, changes, cx);
+                        }
                         browser
                     });
                     window.focus(&view.focus_handle(cx), cx);

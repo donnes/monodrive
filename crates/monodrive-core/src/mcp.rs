@@ -584,7 +584,8 @@ pub const TOOLS: [Tool; 18] = [
     },
     Tool {
         name: "cancel_job",
-        description: "Stop a job after the item it's on. Finished items stay; undo reverses them.",
+        description: "Stop a job after the item it's on, or one waiting at a conflict. Finished items \
+    stay; undo reverses them.",
         input_schema: job_schema,
     },
     Tool {

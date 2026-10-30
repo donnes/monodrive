@@ -3,11 +3,11 @@
 //! socket, one JSON line each way, in a folder only this user can open.
 
 use super::jobs::{self, Shared};
-use super::{Engine, Job, Origin, Outcome, Paths, Request, Submission};
+use super::{Engine, JOURNAL, Job, Origin, Outcome, Paths, Request, Submission};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, Permissions};
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -303,6 +303,11 @@ impl Client {
         self.ask(&Message::Jobs)
     }
 
+    /// Calls `changed` each time the owner's journal changes; see `Watch`.
+    pub fn watch(&self, changed: impl Fn() + Send + 'static) -> io::Result<Watch> {
+        Watch::start(&self.paths.state, changed)
+    }
+
     /// Sends `message`, again on a new connection if the first is lost.
     fn ask<T: for<'de> Deserialize<'de>>(&mut self, message: &Message) -> Result<T, String> {
         let mut line = serde_json::to_string(message).map_err(|e| e.to_string())?;
@@ -333,6 +338,151 @@ impl Client {
         }
         Ok(reply)
     }
+}
+
+/// Calls `changed` on its own thread each time the owner's journal is
+/// written, made or replaced: someone asked for a change, maybe an agent
+/// for a new job. The window checks its jobs then, instead of asking the
+/// owner all the time. It reads nothing and holds no connection, so it never
+/// keeps an owner running. Dropping it stops the thread.
+pub struct Watch {
+    queue: OwnedFd,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The `ident` of the event that stops the thread.
+const STOP: usize = 0;
+
+impl Watch {
+    fn start(state: &Path, changed: impl Fn() + Send + 'static) -> io::Result<Self> {
+        private_dir(state).map_err(io::Error::other)?;
+        // SAFETY: kqueue has no preconditions; the descriptor is owned here.
+        let queue = match unsafe { libc::kqueue() } {
+            -1 => return Err(io::Error::last_os_error()),
+            fd => unsafe { OwnedFd::from_raw_fd(fd) },
+        };
+        let raw = queue.as_raw_fd();
+        listen(raw, STOP, libc::EVFILT_USER, 0)?;
+        // The folder tells when the journal is made or replaced (a trim
+        // renames a new one into place); the file when it's written.
+        let folder = open_events(state)?;
+        listen(
+            raw,
+            folder.as_raw_fd() as usize,
+            libc::EVFILT_VNODE,
+            libc::NOTE_WRITE,
+        )?;
+        let at = state.join(JOURNAL);
+        let mut journal = follow(raw, &at);
+        let thread = std::thread::spawn(move || {
+            let _folder = folder;
+            loop {
+                // SAFETY: an all-zero kevent is valid, and the call writes
+                // at most the one it's given.
+                let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+                let n = unsafe {
+                    libc::kevent(raw, std::ptr::null(), 0, &mut event, 1, std::ptr::null())
+                };
+                if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if n <= 0 || event.filter == libc::EVFILT_USER {
+                    return;
+                }
+                let gone = libc::NOTE_DELETE | libc::NOTE_RENAME;
+                let on_journal = journal
+                    .as_ref()
+                    .is_some_and(|fd| event.ident == fd.as_raw_fd() as usize);
+                if !on_journal || event.fflags & gone != 0 {
+                    journal = follow(raw, &at);
+                }
+                changed();
+            }
+        });
+        Ok(Self {
+            queue,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        let mut stop = event(STOP, libc::EVFILT_USER, libc::NOTE_TRIGGER, 0);
+        // SAFETY: the queue is open until this returns, and the change list
+        // holds one event.
+        unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                &raw mut stop,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn event(ident: usize, filter: i16, fflags: u32, flags: u16) -> libc::kevent {
+    libc::kevent {
+        ident,
+        filter,
+        flags,
+        fflags,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    }
+}
+
+/// Adds `ident` to the queue, reporting each change once.
+fn listen(queue: RawFd, ident: usize, filter: i16, fflags: u32) -> io::Result<()> {
+    let mut change = event(ident, filter, fflags, libc::EV_ADD | libc::EV_CLEAR);
+    // SAFETY: the change list holds one event and nothing is read back.
+    let added = unsafe {
+        libc::kevent(
+            queue,
+            &raw mut change,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if added < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Opens `path` only to hear about it, which never keeps a volume busy.
+fn open_events(path: &Path) -> io::Result<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: the path is a valid C string; the descriptor is owned here.
+    match unsafe { libc::open(path.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) } {
+        -1 => Err(io::Error::last_os_error()),
+        fd => Ok(unsafe { OwnedFd::from_raw_fd(fd) }),
+    }
+}
+
+/// Listens to the journal at `at`, if it's there yet. Closing the last one
+/// took it off the queue.
+fn follow(queue: RawFd, at: &Path) -> Option<OwnedFd> {
+    let journal = open_events(at).ok()?;
+    let fflags = libc::NOTE_WRITE | libc::NOTE_EXTEND | libc::NOTE_DELETE | libc::NOTE_RENAME;
+    listen(
+        queue,
+        journal.as_raw_fd() as usize,
+        libc::EVFILT_VNODE,
+        fflags,
+    )
+    .ok()?;
+    Some(journal)
 }
 
 /// Connects to the running owner, or starts one detached and connects.

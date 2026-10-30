@@ -10,7 +10,7 @@ mod owner;
 
 pub use disk::FileId;
 pub use jobs::{Conflict, Done, Job, State, Task};
-pub use owner::{Client, Owner, run_owner};
+pub use owner::{Client, Owner, Watch, run_owner};
 
 use disk::Stamp;
 use serde::{Deserialize, Serialize};
@@ -544,6 +544,12 @@ impl Engine {
                     submission.id.clone(),
                     (submission.request.clone(), accepted),
                 );
+                // Owners before Continue retried a job as a new one, which
+                // took over its remaining items. The old one is done with;
+                // its changes are already in the history.
+                if let Request::Retry { job, .. } = submission.request {
+                    self.jobs.retain(|old| old.id != job);
+                }
                 self.jobs
                     .push(jobs::Entry::new(op, submission.origin, spec));
             }
@@ -573,9 +579,12 @@ impl Engine {
             }
             Record::Finish { op, state } => {
                 let Some(job) = self.job_mut(op) else { return };
+                // A waiting job's run already joined the history when it
+                // stopped; cancelling it adds nothing.
+                let ran = job.state.active();
                 job.state = state;
                 let (op, title, steps) = (job.run, job.title(), job.run_steps());
-                if !steps.is_empty() {
+                if ran && !steps.is_empty() {
                     self.history.truncate(self.history.len() - self.undone);
                     self.undone = 0;
                     self.history.push(Undoable { op, title, steps });

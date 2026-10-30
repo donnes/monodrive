@@ -876,3 +876,92 @@ fn a_source_replaced_while_its_job_waits_is_left_alone() {
     assert_eq!(read(&c), "other");
     assert!(!files.join("c.txt").exists());
 }
+
+#[test]
+fn a_watch_hears_another_client_queue_a_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths(dir.path());
+    let owner = Owner::bind(paths.clone()).unwrap();
+    let serving = std::thread::spawn(move || owner.serve());
+    let mut window = Client::new(paths.clone(), None);
+    assert!(window.jobs().unwrap().is_empty());
+    // Asking about jobs writes nothing; only the agent's copy will.
+    let (heard, hear) = std::sync::mpsc::channel();
+    let watch = window
+        .watch(move || {
+            let _ = heard.send(());
+        })
+        .unwrap();
+    let (src, dest) = transfer_fixture(dir.path());
+    let mut agent = Client::new(paths, None);
+    let copy = copy(&[&src.join("b")], &dest, Conflict::Stop);
+    agent.submit(Origin::Agent { client: None }, copy).unwrap();
+    hear.recv().unwrap();
+    drop((watch, window, agent));
+    serving.join().unwrap().unwrap();
+}
+
+#[test]
+fn cancelling_a_waiting_job_keeps_what_it_finished_in_the_history_once() {
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let waiting = job(
+        &shared,
+        copy(&[&src.join("b"), &src.join("a.txt")], &dest, Conflict::Stop),
+    );
+    assert_eq!(waiting.state, State::Waiting);
+    run(&mut shared.lock(), Request::Cancel { job: waiting.id }).unwrap();
+    let cancelled = status(&shared, waiting.id);
+    assert_eq!(cancelled.state, State::Cancelled);
+    assert_eq!(cancelled.tasks[0].done, Some(Done::To(dest.join("b"))));
+    assert_eq!(read(&dest.join("a.txt")), "old a");
+    // The copy it finished is in the history once: undone and redone,
+    // there's nothing more to redo. Redo takes it back out of the Trash.
+    run(&mut shared.lock(), Request::Undo).unwrap();
+    assert!(!dest.join("b").exists());
+    run(&mut shared.lock(), Request::Redo).unwrap();
+    assert!(dest.join("b/inner.md").exists());
+    assert_eq!(
+        run(&mut shared.lock(), Request::Redo).unwrap_err(),
+        "Nothing to redo."
+    );
+}
+
+#[test]
+fn a_job_retried_as_a_new_one_by_an_older_owner_no_longer_waits() {
+    let (dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let a = src.join("a.txt");
+    let waiting = job(&shared, copy(&[&a], &dest, Conflict::Stop));
+    assert_eq!(waiting.state, State::Waiting);
+    drop(shared);
+    // What an owner before Continue wrote for Skip: a new job of the
+    // remaining items, which finished.
+    let retry = serde_json::json!({
+        "record": "job",
+        "op": 2,
+        "submission": {
+            "id": "old-retry",
+            "origin": {"type": "window"},
+            "request": {"type": "retry", "job": waiting.id, "conflict": "skip"}
+        },
+        "spec": {"kind": "copy", "into": dest, "conflict": "skip", "sources": [a], "ids": []}
+    });
+    let finish = serde_json::json!({"record": "finish", "op": 2, "state": "completed"});
+    let journal = paths(dir.path()).state.join(JOURNAL);
+    let mut lines = std::fs::read_to_string(&journal).unwrap();
+    for record in [retry, finish] {
+        lines.push_str(&format!("{record}\n"));
+    }
+    std::fs::write(&journal, lines).unwrap();
+
+    let engine = Engine::open(paths(dir.path())).unwrap();
+    let left: Vec<_> = engine
+        .jobs()
+        .iter()
+        .map(|job| (job.id, job.state))
+        .collect();
+    assert_eq!(left, [(2, State::Completed)]);
+}

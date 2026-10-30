@@ -753,11 +753,13 @@ impl Engine {
 
     pub(super) fn cancel(&mut self, job: u64) -> Result<Outcome, String> {
         let entry = self.job_mut(job).ok_or_else(|| format!("No job {job}."))?;
-        if !entry.state.active() {
+        if !entry.state.active() && entry.state != State::Waiting {
             return Err(format!("Job {job} has already stopped."));
         }
         entry.cancel.store(true, Ordering::Relaxed);
-        if entry.state == State::Queued {
+        // A running job stops itself after its item; one queued or waiting
+        // at a conflict has nothing on the way.
+        if entry.state != State::Running {
             let record = Record::Finish {
                 op: job,
                 state: State::Cancelled,

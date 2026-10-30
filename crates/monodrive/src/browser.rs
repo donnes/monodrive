@@ -247,8 +247,6 @@ pub struct Browser {
     /// A job of the window's needs an answer: the popover opens once the
     /// next frame has drawn.
     jobs_wanted: bool,
-    /// The owner's folder, whose changes may be an agent's new job.
-    ops_state: Option<PathBuf>,
     /// The name being edited in place.
     renaming: Option<Renaming>,
     /// What a change made, to select once the listing that has it lands.
@@ -370,7 +368,6 @@ impl Browser {
             jobs,
             jobs_focus: cx.focus_handle(),
             jobs_wanted: false,
-            ops_state: ops::Paths::user().map(|paths| paths.state),
             renaming: None,
             select_after: Vec::new(),
             query: String::new(),
@@ -556,13 +553,6 @@ impl Browser {
     /// Refreshes the listing shortly after the disk changes under a folder on
     /// screen.
     fn disk_changed(&mut self, batch: &[(PathBuf, bool)], cx: &mut Context<Self>) {
-        if let Some(state) = &self.ops_state
-            && batch.iter().any(|(changed, below)| {
-                changed.starts_with(state) || (*below && state.starts_with(changed))
-            })
-        {
-            self.jobs.update(cx, |jobs, cx| jobs.poke(cx));
-        }
         if !self.query.is_empty() {
             return;
         }
@@ -1694,6 +1684,18 @@ impl Browser {
                     .right(px(8.))
                     .child(self.jobs.clone()),
             )
+    }
+
+    /// Checks the jobs each time `changes` says the owner's journal changed,
+    /// which may be an agent's new job. The app starts this at launch.
+    pub fn hear_jobs(
+        &mut self,
+        watch: ops::Watch,
+        changes: async_channel::Receiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        self.jobs
+            .update(cx, |jobs, cx| jobs.hear(watch, changes, cx));
     }
 
     /// Shows `jobs` in the title bar as if the owner had just reported

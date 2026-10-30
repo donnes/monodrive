@@ -12,7 +12,7 @@ use gpui::{
     App, Context, ElementId, EventEmitter, Hsla, KeyBinding, PathBuilder, Role, Task, actions,
     canvas, div, point, prelude::*, px,
 };
-use monodrive_core::ops::{Conflict, Done, Job, Origin, Request, State};
+use monodrive_core::ops::{Conflict, Done, Job, Origin, Request, State, Watch};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
@@ -49,6 +49,8 @@ pub struct Jobs {
     /// The window's own copies and moves, followed until they end.
     followed: HashSet<u64>,
     open: bool,
+    /// Hears the owner's journal change, which may be an agent's new job.
+    _heard: Option<Task<()>>,
     /// The owner is asked again each `CHECK`.
     watching: bool,
     watch: Option<Task<()>>,
@@ -57,6 +59,24 @@ pub struct Jobs {
 impl EventEmitter<JobsEvent> for Jobs {}
 
 impl Jobs {
+    /// Checks the jobs each time `changes` says the owner's journal
+    /// changed, for as long as `watch` is kept.
+    pub fn hear(
+        &mut self,
+        watch: Watch,
+        changes: async_channel::Receiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        self._heard = Some(cx.spawn(async move |this, cx| {
+            let _watch = watch;
+            while changes.recv().await.is_ok() {
+                if this.update(cx, |this, cx| this.poke(cx)).is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
     /// Follows a job the window started, and asks about it now.
     pub fn follow(&mut self, job: u64, cx: &mut Context<Self>) {
         self.followed.insert(job);
@@ -71,7 +91,7 @@ impl Jobs {
     }
 
     /// Something changed the owner's journal, maybe an agent's new job.
-    pub fn poke(&mut self, cx: &mut Context<Self>) {
+    fn poke(&mut self, cx: &mut Context<Self>) {
         if !self.watching {
             self.watch(cx);
         }
@@ -236,7 +256,7 @@ impl Jobs {
             _ => Vec::new(),
         };
         let close = match job.state {
-            State::Queued | State::Running => Some("Cancel"),
+            State::Queued | State::Running | State::Waiting => Some("Cancel"),
             State::Failed | State::Interrupted => Some("Dismiss"),
             _ => None,
         };
