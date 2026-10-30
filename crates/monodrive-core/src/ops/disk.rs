@@ -16,10 +16,13 @@ pub struct FileId {
     ino: u64,
 }
 
-/// What an item was like, to tell whether it changed since.
+/// What an item was like, to tell whether it changed since. A folder's
+/// covers everything inside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
+    entries: u64,
     size: u64,
+    /// The latest modification time, in seconds and nanoseconds.
     modified: (i64, i64),
 }
 
@@ -32,19 +35,39 @@ pub fn id(path: &Path) -> Option<FileId> {
     })
 }
 
+/// The item at `path` and its stamp. A folder is walked whole, without
+/// following links; a subfolder that can't be read counts as empty.
 pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
     let meta = std::fs::symlink_metadata(path)?;
     let id = FileId {
         dev: meta.dev(),
         ino: meta.ino(),
     };
-    Ok((
-        id,
-        Stamp {
-            size: meta.size(),
-            modified: (meta.mtime(), meta.mtime_nsec()),
-        },
-    ))
+    let mut stamp = Stamp {
+        entries: 0,
+        size: meta.size(),
+        modified: (meta.mtime(), meta.mtime_nsec()),
+    };
+    let mut folders = Vec::new();
+    if meta.is_dir() {
+        folders.push(path.to_path_buf());
+    }
+    while let Some(folder) = folders.pop() {
+        let Ok(items) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for item in items.filter_map(Result::ok) {
+            // DirEntry::metadata doesn't follow links.
+            let Ok(meta) = item.metadata() else { continue };
+            stamp.entries += 1;
+            stamp.size += meta.size();
+            stamp.modified = stamp.modified.max((meta.mtime(), meta.mtime_nsec()));
+            if meta.is_dir() {
+                folders.push(item.path());
+            }
+        }
+    }
+    Ok((id, stamp))
 }
 
 /// Moves `path` to its volume's Trash and returns where it landed. Fails
@@ -83,9 +106,10 @@ pub fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
 /// Each file is an APFS clone where the volume supports it.
 pub fn duplicate(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (c_path(from)?, c_path(to)?);
-    // COPYFILE_CLONE copies data and metadata, never replaces `to`, and
-    // copies links rather than what they point to.
-    let flags = libc::COPYFILE_CLONE | libc::COPYFILE_RECURSIVE;
+    // COPYFILE_CLONE copies data, stat and extended attributes, never
+    // replaces `to`, and copies links rather than what they point to. ACLs
+    // need their own flag.
+    let flags = libc::COPYFILE_CLONE | libc::COPYFILE_ACL | libc::COPYFILE_RECURSIVE;
     // SAFETY: both are NUL-terminated paths that outlive the call, and a
     // null state is allowed.
     if unsafe { libc::copyfile(from.as_ptr(), to.as_ptr(), std::ptr::null_mut(), flags) } == 0 {

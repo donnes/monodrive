@@ -12,7 +12,7 @@ use disk::{FileId, Stamp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Where the owner keeps its state, and the settings it obeys.
@@ -143,9 +143,9 @@ struct Step {
     done: Spot,
     /// At `done` rather than `undone`.
     applied: bool,
-    /// For an item the operation created: how it was then, so undo refuses
-    /// to trash it once it's been edited.
-    created: Option<Stamp>,
+    /// How the item was when Monodrive last moved or made it, so neither
+    /// undo nor redo moves it once it's been edited since.
+    stamp: Stamp,
 }
 
 impl Step {
@@ -173,10 +173,11 @@ impl Step {
                 here.display()
             ));
         }
-        if let (Some(created), false) = (self.created, done)
-            && disk::stamp(here).map(|(_, now)| now).ok() != Some(created)
-        {
-            return Err(format!("{} changed since it was created.", here.display()));
+        if disk::stamp(here).map(|(_, now)| now).ok() != Some(self.stamp) {
+            return Err(format!(
+                "{} changed since Monodrive last moved or made it.",
+                here.display()
+            ));
         }
         if let Spot::Path(to) = self.spot(done)
             && disk::id(to).is_some_and(|there| there != self.id)
@@ -205,9 +206,7 @@ impl Step {
             }
         };
         self.applied = done;
-        if self.created.is_some() && done {
-            self.created = disk::stamp(&to).ok().map(|(_, stamp)| stamp);
-        }
+        self.restamp(&to);
         Ok(to)
     }
 
@@ -244,7 +243,15 @@ impl Step {
             }) = Spot::Trash(Some(there.clone()));
         }
         self.applied = !self.applied;
+        self.restamp(&there);
         Ok(there)
+    }
+
+    /// After a move, which can change a folder's own mtime.
+    fn restamp(&mut self, path: &Path) {
+        if let Ok((_, stamp)) = disk::stamp(path) {
+            self.stamp = stamp;
+        }
     }
 }
 
@@ -311,16 +318,7 @@ impl Engine {
     /// trims it once it's long.
     fn open(paths: Paths) -> Result<Self, String> {
         let at = paths.state.join(JOURNAL);
-        let records: Vec<Record> = match File::open(&at) {
-            Ok(file) => BufReader::new(file)
-                .lines()
-                .map_while(Result::ok)
-                // A crash mid-write can leave the last line torn.
-                .filter_map(|line| serde_json::from_str(&line).ok())
-                .collect(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(format!("{}: {e}", at.display())),
-        };
+        let records = read_journal(&at)?;
         let mut engine = Self::load(paths, &records)?;
         let mut unfinished: Vec<u64> = engine.begun.keys().copied().collect();
         unfinished.sort_unstable();
@@ -552,7 +550,7 @@ impl Engine {
                         undone: Spot::Trash(None),
                         done: Spot::Path(made.clone()),
                         applied: true,
-                        created: Some(stamp),
+                        stamp,
                     });
                     Ok(made)
                 }
@@ -587,7 +585,7 @@ impl Engine {
     /// Puts back an item from where Monodrive's history last left it in
     /// the Trash.
     fn plan_put_back(&self, path: &Path) -> Result<Plan, String> {
-        let id = existing(path)?;
+        let (id, stamp) = existing(path)?;
         let trashed = Spot::Trash(Some(path.to_path_buf()));
         let original = self
             .history
@@ -610,7 +608,7 @@ impl Engine {
             undone: trashed,
             done: Spot::Path(original),
             applied: false,
-            created: None,
+            stamp,
         })
     }
 
@@ -690,6 +688,37 @@ impl Engine {
     }
 }
 
+/// Every record in the journal at `at`. A crash mid-append leaves a last
+/// line without its newline; that's cut off before anything is appended
+/// after it. Any other line that doesn't read is an error, not skipped.
+fn read_journal(at: &Path) -> Result<Vec<Record>, String> {
+    let fail = |e: std::io::Error| format!("{}: {e}", at.display());
+    let bytes = match std::fs::read(at) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(fail(e)),
+    };
+    let whole = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |end| end + 1);
+    if whole < bytes.len() {
+        let file = File::options().write(true).open(at).map_err(fail)?;
+        file.set_len(whole as u64)
+            .and_then(|()| file.sync_all())
+            .map_err(fail)?;
+    }
+    bytes[..whole]
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .enumerate()
+        .map(|(n, line)| {
+            serde_json::from_slice(line)
+                .map_err(|e| format!("{} line {}: {e}", at.display(), n + 1))
+        })
+        .collect()
+}
+
 enum Plan {
     Move(Step),
     /// Creates or copies the item's path.
@@ -704,13 +733,13 @@ fn absolute(path: &Path) -> Result<(), String> {
     }
 }
 
-fn existing(path: &Path) -> Result<FileId, String> {
+fn existing(path: &Path) -> Result<(FileId, Stamp), String> {
     absolute(path)?;
-    disk::id(path).ok_or_else(|| format!("{}: No such file or folder.", path.display()))
+    disk::stamp(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn plan_trash(path: &Path) -> Result<Plan, String> {
-    let id = existing(path)?;
+    let (id, stamp) = existing(path)?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if path.parent().is_none() || home.as_deref() == Some(path) {
         return Err(format!(
@@ -723,12 +752,12 @@ fn plan_trash(path: &Path) -> Result<Plan, String> {
         undone: Spot::Path(path.to_path_buf()),
         done: Spot::Trash(None),
         applied: false,
-        created: None,
+        stamp,
     }))
 }
 
 fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
-    let id = existing(path)?;
+    let (id, stamp) = existing(path)?;
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
         return Err(format!("{name:?} can't be a name."));
     }
@@ -741,7 +770,7 @@ fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
         undone: Spot::Path(path.to_path_buf()),
         done: Spot::Path(to),
         applied: false,
-        created: None,
+        stamp,
     })
 }
 

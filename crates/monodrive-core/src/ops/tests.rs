@@ -79,6 +79,15 @@ fn rename_undoes_and_redoes_and_refuses_once_the_item_changed() {
         vec![upper.clone()]
     );
     assert_eq!(moved(run(&mut engine, Request::Undo)), vec![b.clone()]);
+    // Edited since, so redo leaves it as it is.
+    std::fs::write(&b, "edited").unwrap();
+    let refused = run(&mut engine, Request::Redo).unwrap_err();
+    assert!(refused.contains("changed since"), "{refused}");
+    let names: Vec<_> = std::fs::read_dir(&files)
+        .unwrap()
+        .map(|item| item.unwrap().file_name())
+        .collect();
+    assert!(names.contains(&"b.txt".into()), "{names:?}");
 
     // Something else now sits at b.txt: undo must not rename it to a.txt.
     let other = dir.path().join("other.txt");
@@ -120,6 +129,11 @@ fn trash_puts_back_and_undoing_a_new_folder_trashes_it_until_redo() {
         vec![notes.clone()]
     );
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "keep");
+    // Edited once it was back, so undo won't send it to the Trash again.
+    std::fs::write(&notes, "edited").unwrap();
+    let refused = run(&mut engine, Request::Undo).unwrap_err();
+    assert!(refused.contains("changed since"), "{refused}");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "edited");
 
     let folder = files.join("new");
     let made = run(
@@ -136,7 +150,7 @@ fn trash_puts_back_and_undoing_a_new_folder_trashes_it_until_redo() {
 }
 
 #[test]
-fn undo_refuses_to_trash_a_new_file_once_it_was_edited() {
+fn undo_refuses_to_trash_a_new_file_or_copied_folder_once_it_was_edited() {
     let (_dir, files, mut engine) = engine();
     let file = files.join("draft.md");
     let new = || Request::NewFile { path: file.clone() };
@@ -148,11 +162,24 @@ fn undo_refuses_to_trash_a_new_file_once_it_was_edited() {
     );
     std::fs::write(&file, "work").unwrap();
     let refused = run(&mut engine, Request::Undo).unwrap_err();
-    assert!(
-        refused.contains("changed since it was created"),
-        "{refused}"
-    );
+    assert!(refused.contains("changed since"), "{refused}");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "work");
+
+    // An edit deep inside a copied folder counts too.
+    std::fs::create_dir_all(files.join("docs/deep")).unwrap();
+    std::fs::write(files.join("docs/deep/inner.md"), "a").unwrap();
+    let [copy] = moved(run(
+        &mut engine,
+        Request::Duplicate {
+            paths: vec![files.join("docs")],
+        },
+    ))
+    .try_into()
+    .unwrap();
+    std::fs::write(copy.join("deep/inner.md"), "edited").unwrap();
+    let refused = run(&mut engine, Request::Undo).unwrap_err();
+    assert!(refused.contains("changed since"), "{refused}");
+    assert!(copy.join("deep/inner.md").exists());
 }
 
 #[test]
@@ -220,12 +247,13 @@ fn opening_settles_what_a_crash_left_unfinished_from_the_disk() {
     let after = submission(Origin::Window, rename(&a, "b"));
     let before = submission(Origin::Window, rename(&c, "d"));
     for (submission, path, to) in [(&after, &a, &b), (&before, &c, &files.join("d"))] {
+        let (id, stamp) = disk::stamp(path).unwrap();
         let step = Step {
-            id: disk::id(path).unwrap(),
+            id,
             undone: Spot::Path(path.clone()),
             done: Spot::Path(to.clone()),
             applied: false,
-            created: None,
+            stamp,
         };
         engine
             .begin(submission, None, vec![step], Vec::new())
@@ -312,4 +340,28 @@ fn one_owner_serves_clients_and_exits_once_the_last_one_leaves() {
     assert_eq!(moved(client.submit(Origin::Window, Request::Redo)), [b]);
     drop(client);
     serving.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_torn_last_line_is_cut_before_the_journal_grows() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = paths(dir.path()).state.join(JOURNAL);
+    // A crash partway through appending a record.
+    std::fs::write(&journal, r#"{"record":"begin","op":1,"subm"#).unwrap();
+    let a = dir.path().join("a");
+    std::fs::write(&a, "").unwrap();
+    let first = submission(Origin::Window, rename(&a, "b"));
+    let mut engine = Engine::open(paths(dir.path())).unwrap();
+    let outcome = engine.submit(first.clone()).unwrap();
+    drop(engine);
+    let mut engine = Engine::open(paths(dir.path())).unwrap();
+    assert_eq!(engine.submit(first).unwrap(), outcome);
+    drop(engine);
+
+    // Anything else that doesn't read stops the owner instead.
+    let mut damaged = b"not a record\n".to_vec();
+    damaged.extend(std::fs::read(&journal).unwrap());
+    std::fs::write(&journal, damaged).unwrap();
+    let error = Engine::open(paths(dir.path())).err().unwrap();
+    assert!(error.contains("line 1"), "{error}");
 }

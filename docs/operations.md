@@ -15,7 +15,7 @@ The window and each `monodrive mcp` server are separate processes, and an agent'
 
 ## The journal
 
-`journal.jsonl` is JSON lines, synced after each line. Each operation writes a `Begin` record before anything on disk changes, naming each item by device and inode with where it is and where it's going. It writes an `End` record with the per-item outcome after the changes are made.
+`journal.jsonl` is JSON lines, synced after each line. A crash mid-append leaves a last line without its newline, which startup cuts off before appending; any other line that doesn't read stops the owner with an error instead of being skipped. Each operation writes a `Begin` record before anything on disk changes, naming each item by device and inode with where it is and where it's going. It writes an `End` record with the per-item outcome after the changes are made.
 
 - **Retries.** A client that loses its connection resends the same request id. A request id the journal has finished returns its recorded outcome instead of running again.
 - **Crashes.** On startup, an operation with a `Begin` and no `End` is settled from the disk. Each item is looked for, by inode, where it was and where it was going, including the volume's Trash. The owner records what it finds as an interrupted outcome and never repeats a rename or a removal. An interrupted creation or copy can't be told from one the user made, so it's reported and left out of the history.
@@ -25,7 +25,7 @@ The window and each `monodrive mcp` server are separate processes, and an agent'
 
 The history is linear and shared: undo reverses the newest operation still done, whoever made it, and a new operation drops what could be redone. Each item an operation moved toggles between two places: a path, or the Trash. An item an operation created waits in the Trash while that operation is undone, so undoing New Folder or Duplicate trashes the item and redo puts it back.
 
-Before undo or redo changes anything, it checks every item: the same inode is where the operation left it, nothing else occupies the place it's going, and an item the operation created hasn't been modified since. Any mismatch refuses the whole step with the path and reason. Renames use `renamex_np` with `RENAME_EXCL`, so a change made between the check and the rename still can't be overwritten.
+Before undo or redo changes anything, it checks every item: the same inode is where the operation left it, nothing else occupies the place it's going, and the item hasn't been modified since Monodrive last moved or made it. A folder's stamp covers everything inside it (entry count, total size, latest mtime), so moving a large folder walks it. Any mismatch refuses the whole step with the path and reason. Renames use `renamex_np` with `RENAME_EXCL`, so a change made between the check and the rename still can't be overwritten.
 
 ## Trash
 
