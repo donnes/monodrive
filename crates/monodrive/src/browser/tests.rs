@@ -1580,3 +1580,55 @@ fn a_change_on_disk_reaches_both_panes_on_screen(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(left.read_with(cx, |pane, _| pane.entries.len()), 4);
 }
+
+/// Whether the keys are on the list of the pane commands act on.
+fn keys_on_the_list(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    let list = in_pane(browser, cx, |pane, _| pane.list_focus.clone());
+    cx.update(|window, _| list.is_focused(window))
+}
+
+#[gpui::test]
+fn a_rename_that_fails_in_a_hidden_tab_leaves_the_keys_alone(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    // The second tab is the one edited; ⌃Tab comes round to the first.
+    press(cx, "cmd-t down down down enter");
+    let edited = pane_of(&browser, cx);
+    retype(cx, "zeta");
+    press(cx, "ctrl-tab");
+    assert_eq!(tabs(&browser, cx), (2, 0));
+    // The blur sent the name, and it's taken: the reason waits in that tab.
+    let why = edited.read_with(cx, |pane, _| {
+        pane.renaming.as_ref().and_then(|r| r.error.clone())
+    });
+    assert!(why.is_some());
+    assert!(keys_on_the_list(&browser, cx));
+    press(cx, "down");
+    assert_eq!(shown(&browser, cx).1, ["docs"]);
+    // Back in that tab, its field has the keys again.
+    press(cx, "ctrl-tab");
+    let field = edited.read_with(cx, |pane, cx| {
+        pane.renaming.as_ref().unwrap().field.focus_handle(cx)
+    });
+    assert!(cx.update(|window, _| field.is_focused(window)));
+    press(cx, "escape");
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn a_new_folder_made_after_leaving_its_tab_leaves_the_keys_alone(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-t");
+    let made_in = pane_of(&browser, cx);
+    // Both keys go in before the owner answers.
+    cx.simulate_keystrokes("cmd-shift-n ctrl-tab");
+    cx.run_until_parked();
+    assert_eq!(tabs(&browser, cx), (2, 0));
+    assert!(project.join("untitled folder").is_dir());
+    assert!(made_in.read_with(cx, |pane, _| pane.renaming.is_none()));
+    assert!(keys_on_the_list(&browser, cx));
+    release(owned, cx);
+}

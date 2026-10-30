@@ -353,7 +353,7 @@ impl Browser {
         }
         self.tab_scroll.scroll_to_item(at);
         self.pane()
-            .update(cx, |pane, cx| pane.focus_list(window, cx));
+            .update(cx, |pane, cx| pane.take_keys(window, cx));
         self.mirror_pane(cx);
         self.save_session(cx);
         cx.notify();

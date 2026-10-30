@@ -329,6 +329,21 @@ impl Pane {
         }
     }
 
+    /// The keys may come here: what answers late mustn't take them from another
+    /// tab or pane, or from under a sheet.
+    fn has_the_window(&self) -> bool {
+        self.shown && self.chrome.focused && !self.chrome.covered
+    }
+
+    /// Where the keys go on arriving at this pane: a name left being edited,
+    /// or the list.
+    pub(super) fn take_keys(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.renaming {
+            Some(renaming) => window.focus(&renaming.field.focus_handle(cx), cx),
+            None => self.focus_list(window, cx),
+        }
+    }
+
     /// What's on screen, as a place in the history.
     pub(super) fn stop(&self) -> &Stop {
         &self.history[self.at]
@@ -1694,7 +1709,7 @@ impl Pane {
             .and_then(|(_, outcome)| outcome.items.first())
             .and_then(|item| item.result.clone().ok());
         self.settle(done, true, cx);
-        if let Some(path) = made {
+        if let Some(path) = made.filter(|_| self.has_the_window()) {
             self.start_rename(path, folder, window, cx);
         }
     }
@@ -1849,13 +1864,13 @@ impl Pane {
                     Err(e) => Some(e.clone()),
                 };
                 let failure = failure.map(|why| rename_reason(&why, &path));
+                let has_the_window = this.has_the_window();
                 let still = this.renaming.as_mut().filter(|r| r.path == path);
                 match (failure, still) {
                     (Some(why), Some(renaming)) => {
                         renaming.sending = false;
                         renaming.error = Some(why);
-                        // Not out from under a sheet that took the keys.
-                        if !this.chrome.covered {
+                        if has_the_window {
                             window.focus(&renaming.field.focus_handle(cx), cx);
                         }
                     }
