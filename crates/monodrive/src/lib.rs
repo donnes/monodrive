@@ -31,7 +31,7 @@ mod workspace;
 
 use commands::{CloseWindow, Hide, HideOthers, Minimize, NewWindow, Quit, ShowAll};
 use gpui::{
-    App, Focusable, Global, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    App, Focusable, Global, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
     WindowOptions, point, prelude::*, px, size,
 };
 use preferences::Preferences;
@@ -133,27 +133,11 @@ pub fn run(folder: Option<PathBuf>) {
             cx.on_action(|_: &Hide, cx| cx.hide());
             cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
             cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-            cx.on_action(|_: &CloseWindow, cx| {
-                if let Some(window) = cx.active_window() {
-                    let _ = window.update(cx, |_, window, _| window.remove_window());
-                }
-            });
-            cx.on_action(|_: &Minimize, cx| {
-                if let Some(window) = cx.active_window() {
-                    let _ = window.update(cx, |_, window, _| window.minimize_window());
-                }
-            });
             cx.on_action(|_: &NewWindow, cx| {
                 open_window(Opening::Folder(browser::home()), false, cx);
                 cx.activate(true);
             });
-            cx.on_window_closed(|cx, window| {
-                session::forget(window.as_u64(), cx);
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
+            window_commands(cx);
             let openings = match folder {
                 Some(folder) => vec![Opening::Folder(folder)],
                 None => {
@@ -174,6 +158,30 @@ pub fn run(folder: Option<PathBuf>) {
             }
             cx.activate(true);
         });
+}
+
+/// Runs `act` on the window in front, once the command that asked has returned:
+/// commands dispatch inside that window's own update, and updating a window from
+/// inside itself fails.
+fn on_front_window(cx: &mut App, act: impl FnOnce(&mut Window) + 'static) {
+    if let Some(front) = cx.active_window() {
+        cx.defer(move |cx| {
+            let _ = front.update(cx, |_, window, _| act(window));
+        });
+    }
+}
+
+/// The commands on the window in front, and what follows a window closing.
+fn window_commands(cx: &mut App) {
+    cx.on_action(|_: &CloseWindow, cx| on_front_window(cx, Window::remove_window));
+    cx.on_action(|_: &Minimize, cx| on_front_window(cx, |window| window.minimize_window()));
+    cx.on_window_closed(|cx, window| {
+        session::forget(window.as_u64(), cx);
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
+    })
+    .detach();
 }
 
 /// Opens a window, moved along from the ones already showing. Restoring

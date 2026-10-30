@@ -1677,3 +1677,59 @@ fn every_applications_folder_is_tidy_through_links_too() {
     assert!(!sidebar::lists_hidden(&link, true, &roots));
     assert!(sidebar::lists_hidden(dir.path(), true, &roots));
 }
+
+#[gpui::test]
+fn close_window_closes_from_the_keys_and_the_menu_and_forgets_that_window(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let saved = world.dir.path().join("windows.json");
+    let path = saved.clone();
+    cx.update(|cx| {
+        session::init(path, cx);
+        crate::window_commands(cx);
+    });
+    // Three windows that keep their session, the last keeping these keys.
+    let mut handles = Vec::new();
+    let mut cx = cx;
+    for _ in 0..3 {
+        let (browser, opened) = open(&world, &project, cx);
+        let handle = opened.update(|window, _| window.window_handle());
+        browser.update(opened, |b, cx| {
+            b.keep_session(handle.window_id().as_u64(), cx)
+        });
+        opened.run_until_parked();
+        handles.push(handle);
+        cx = opened;
+    }
+    assert_eq!(cx.windows().len(), 3);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(session::load(&saved).unwrap().windows.len(), 3);
+
+    // ⇧⌘W, as a key.
+    let last = handles[2];
+    last.update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.update(|cx| {
+        let keys = gpui::Keystroke::parse("cmd-shift-w").unwrap();
+        let _ = last.update(cx, |_, window, cx| window.dispatch_keystroke(keys, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 2);
+
+    // Window ▸ Close Window, as the menu bar sends it.
+    let second = handles[1];
+    second
+        .update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.update(|cx| cx.dispatch_action(&commands::CloseWindow));
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+
+    // What's saved is the window left, as after the red button.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(session::load(&saved).unwrap().windows.len(), 1);
+}
