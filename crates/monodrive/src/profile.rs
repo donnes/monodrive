@@ -48,7 +48,7 @@ pub fn on_launch(browser: &Entity<Browser>, window: &mut Window, cx: &mut App) {
     let mut landed = false;
     window
         .observe(browser, cx, move |browser, window, cx| {
-            if landed || browser.read(cx).is_listing() {
+            if landed || browser.read(cx).is_listing(cx) {
                 return;
             }
             landed = true;

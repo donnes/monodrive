@@ -5,11 +5,14 @@
 use super::tests::*;
 use super::*;
 use crate::palette::{Page, PaletteView};
-use gpui::{Action, TestAppContext, VisualTestContext};
+use gpui::{Action, Keystroke, TestAppContext, VisualTestContext, point};
 use monodrive_core::cloud::CloudFolder;
+use monodrive_core::entries::{Entry, Kind};
+use monodrive_core::ops::Origin;
 use monodrive_core::places::Store;
 use monodrive_core::servers::Cancel;
 use monodrive_core::volumes::{Volume, VolumeId};
+use std::collections::HashSet;
 
 #[derive(Default)]
 struct Fake {
@@ -182,7 +185,7 @@ fn center(cx: &mut VisualTestContext, selector: &str) -> Point<Pixels> {
 }
 
 fn here(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> PathBuf {
-    browser.read_with(cx, |browser, _| browser.folder().to_path_buf())
+    in_pane(browser, cx, |browser, _| browser.folder().to_path_buf())
 }
 
 /// Pins two folders ahead of the default favorites and returns them.
@@ -236,7 +239,7 @@ fn drives_show_how_full_each_is_with_marks_and_follow_the_watch(cx: &mut TestApp
     assert!(!on_screen(cx, "volume-eject-0"));
     assert!(on_screen(cx, "volume-eject-1"));
     // The status line has the space of the volume the folder is on.
-    let space = browser.read_with(cx, |browser, _| browser.space_here());
+    let space = in_pane(&browser, cx, |pane, _| pane.chrome.space.clone());
     assert_eq!(space, Some(format!("{} free", format_bytes(400),)));
 
     // Nothing new is listed until the watch speaks: no polling.
@@ -267,7 +270,7 @@ fn eject_shows_macos_refusal_and_leaves_a_drive_that_went(cx: &mut TestAppContex
     );
     assert!(world.fake.ejected.lock().unwrap().is_empty());
     // Clicking Eject doesn't also open the drive's row.
-    assert_eq!(browser.read_with(cx, |b, _| b.history.len()), 1);
+    assert_eq!(in_pane(&browser, cx, |b, _| b.history.len()), 1);
 
     press_on(cx, "volume-eject-1");
     assert_eq!(*world.fake.ejected.lock().unwrap(), vec![mount.clone()]);
@@ -417,7 +420,7 @@ fn add_to_sidebar_takes_a_folder_and_remove_forgets_it(cx: &mut TestAppContext) 
     press(cx, "escape");
     cx.simulate_click(gap, with(""));
     cx.run_until_parked();
-    assert!(browser.read_with(cx, |b, _| b.showing_recents()));
+    assert!(in_pane(&browser, cx, |b, _| b.showing_recents()));
     press(cx, "cmd-[");
 
     // Remove from Sidebar through that menu.
@@ -445,14 +448,14 @@ fn the_trash_opens_with_its_bar_and_back_returns(cx: &mut TestAppContext) {
     assert!(!on_screen(cx, "put-back"));
     click(cx, "open-trash");
     assert_eq!(shown(&browser, cx).0, ["old.txt", "older.txt"]);
-    assert_eq!(browser.read_with(cx, |b, _| b.trash_header.count), Some(2));
+    assert_eq!(in_pane(&browser, cx, |b, _| b.trash_header.count), Some(2));
     assert!(on_screen(cx, "put-back"));
     assert!(on_screen(cx, "empty-trash"));
-    assert_eq!(browser.read_with(cx, |b, _| b.put_back().1), None);
+    assert_eq!(in_pane(&browser, cx, |b, _| b.put_back().1), None);
 
     // Monodrive didn't trash this, so it never guesses where it came from.
     press(cx, "down");
-    let (known, why) = browser.read_with(cx, |b, _| b.put_back());
+    let (known, why) = in_pane(&browser, cx, |b, _| b.put_back());
     assert!(known.is_empty());
     assert!(why.unwrap().contains("doesn't know where it came from"));
     click(cx, "put-back");
@@ -469,7 +472,7 @@ fn the_trash_opens_with_its_bar_and_back_returns(cx: &mut TestAppContext) {
     click(cx, "empty-trash");
     assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::EmptyTrash(_)))));
     press(cx, "enter");
-    assert_eq!(browser.read_with(cx, |b, _| b.trash_header.count), Some(0));
+    assert_eq!(in_pane(&browser, cx, |b, _| b.trash_header.count), Some(0));
     click(cx, "empty-trash");
     assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
     release(owned, cx);
@@ -501,13 +504,13 @@ fn put_back_returns_what_monodrive_trashed(cx: &mut TestAppContext) {
     click(cx, "open-trash");
     // The Trash's rows, as if listed: this test's Trash is a temp folder.
     let entry = monodrive_core::entries::entry_at(&trashed).unwrap();
-    browser.update(cx, |browser, cx| {
+    on_pane(&browser, cx, |browser, cx| {
         browser.selection.select(&entry);
         browser.entries = vec![entry];
         cx.notify();
     });
     cx.run_until_parked();
-    let (known, why) = browser.read_with(cx, |b, _| b.put_back());
+    let (known, why) = in_pane(&browser, cx, |b, _| b.put_back());
     assert_eq!(known, vec![trashed.clone()]);
     assert_eq!(why, None);
     click(cx, "put-back");
@@ -533,7 +536,7 @@ fn recents_list_what_was_opened_mark_what_went_and_clear(cx: &mut TestAppContext
 
     press(cx, "cmd-shift-f");
     assert_eq!(shown(&browser, cx).0, ["a.txt", "gone.txt"]);
-    let missing = browser.read_with(cx, |b, _| b.missing.clone());
+    let missing = in_pane(&browser, cx, |b, _| b.missing.clone());
     assert_eq!(missing, HashSet::from([gone.clone()]));
     // A gone one stays in the list, and opening it says so.
     press(cx, "down down cmd-o");
@@ -549,10 +552,10 @@ fn recents_list_what_was_opened_mark_what_went_and_clear(cx: &mut TestAppContext
 
     // Back leaves it, and Forward comes back to it.
     press(cx, "cmd-[");
-    assert!(browser.read_with(cx, |b, _| !b.showing_recents()));
+    assert!(in_pane(&browser, cx, |b, _| !b.showing_recents()));
     assert_eq!(shown(&browser, cx).0, ["docs", "zeta", "a.txt"]);
     press(cx, "cmd-]");
-    assert!(browser.read_with(cx, |b, _| b.showing_recents()));
+    assert!(in_pane(&browser, cx, |b, _| b.showing_recents()));
 
     // Clear Recents is in the Recents row's menu.
     let at = center(cx, "place-0");
@@ -745,7 +748,8 @@ fn command_backspace_in_the_sidebar_never_reaches_the_lists_selection(cx: &mut T
         favorites
     );
     // With the list's keys back, they're the list's commands again.
-    browser.update_in(cx, |b, window, cx| b.focus_list(window, cx));
+    let pane = pane_of(&browser, cx);
+    pane.update_in(cx, |b, window, cx| b.focus_list(window, cx));
     cx.run_until_parked();
     assert_eq!(changing_files(cx), [true; 4]);
     release(owned, cx);
@@ -899,7 +903,7 @@ fn a_selections_actions_are_what_its_context_menu_offers(cx: &mut TestAppContext
     let world = world(vec![startup()], cx);
     let (browser, cx) = open(&world, &project, cx);
     press(cx, "down down down");
-    let list = browser.read_with(cx, |b, _| b.list_focus.clone());
+    let list = in_pane(&browser, cx, |b, _| b.list_focus.clone());
     let mut offered: Vec<&str> = cx.update(|window, cx| {
         commands::context_menu(&[Scope::Selection], cx.global::<Preferences>(), |action| {
             window.is_action_available_in(action, &list)
@@ -982,7 +986,8 @@ fn enter_runs_duplicate_on_the_selection_and_focus_comes_back(cx: &mut TestAppCo
     assert_eq!(shown(&browser, cx).1, ["a.txt"]);
     press(cx, "enter");
     assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
-    let focused = cx.update(|window, cx| browser.read(cx).list_focus.is_focused(window));
+    let list = in_pane(&browser, cx, |b, _| b.list_focus.clone());
+    let focused = cx.update(|window, _| list.is_focused(window));
     assert!(focused);
     assert!(project.join("a copy.txt").exists());
     release(owned, cx);
@@ -996,7 +1001,8 @@ fn a_paste_finishing_under_the_palette_stops_move_to_trash(cx: &mut TestAppConte
     press(cx, "down down down cmd-c cmd-k");
     assert_eq!(shown(&browser, cx).1, ["a.txt"]);
     // It was asked for before the palette opened, and its job ends now.
-    browser.update_in(cx, |browser, window, cx| browser.paste(false, window, cx));
+    let pane = pane_of(&browser, cx);
+    pane.update_in(cx, |pane, window, cx| pane.paste(false, window, cx));
     cx.run_until_parked();
     assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
     cx.simulate_input("move to trash");

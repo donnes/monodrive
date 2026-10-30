@@ -4,8 +4,8 @@
 //! hears a change, so nothing here polls.
 
 use super::{
-    Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, OpenPlace, OpenSelected, PlaceNext,
-    PlacePrevious, Sheet, drag_area, home, sidebar_width,
+    Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, OpenPlace, OpenSelected, Operations,
+    PlaceNext, PlacePrevious, Sheet, drag_area, home, lock, sidebar_width,
 };
 use crate::commands::{self, Scope};
 use crate::preferences::Preferences;
@@ -129,6 +129,20 @@ pub(super) enum RowTarget {
     Volume(PathBuf),
 }
 
+/// Where the pane that commands act on is, for marking its row.
+struct Here {
+    folder: PathBuf,
+    recents: bool,
+    searching: bool,
+    in_trash: bool,
+}
+
+impl Here {
+    fn showing_folder(&self) -> bool {
+        !self.searching && !self.recents
+    }
+}
+
 /// A favorite being dragged by its handle.
 #[derive(Clone)]
 struct DraggedFavorite {
@@ -214,9 +228,7 @@ impl Browser {
                 while lists.try_recv().is_ok() {}
                 let reloaded = this.update(cx, |this, cx| {
                     this.load_lists(cx);
-                    if this.showing_recents() {
-                        this.list(true, cx);
-                    }
+                    this.relist_recents(cx);
                 });
                 if reloaded.is_err() {
                     return;
@@ -238,8 +250,10 @@ impl Browser {
         self.sidebar.load_volumes = Some(cx.spawn(async move |this, cx| {
             let volumes = listed.await;
             let _ = this.update(cx, |this, cx| {
+                let pane = this.pane().clone();
+                let here = pane.read(cx).folder().to_path_buf();
                 let gone = this.sidebar.volumes.iter().find(|old| {
-                    this.folder().starts_with(&old.mount)
+                    here.starts_with(&old.mount)
                         && !old.startup
                         && !volumes.iter().any(|new| new.mount == old.mount)
                 });
@@ -247,7 +261,7 @@ impl Browser {
                     if this.toast.is_none() {
                         this.toast(format!("{name} was disconnected."), false, None, cx);
                     }
-                    this.navigate(home(), cx);
+                    pane.update(cx, |pane, cx| pane.navigate(home(), cx));
                 }
                 this.sidebar.volumes = volumes;
                 this.load_lists(cx);
@@ -304,12 +318,19 @@ impl Browser {
                     this.toast(why, true, None, cx);
                 }
                 this.load_lists(cx);
-                if this.showing_recents() {
-                    this.list(true, cx);
-                }
+                this.relist_recents(cx);
             });
         })
         .detach();
+    }
+
+    /// Recents changed: lists it again where it's on screen.
+    fn relist_recents(&mut self, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| {
+            if pane.showing_recents() {
+                pane.list(true, cx);
+            }
+        });
     }
 
     /// Add to Sidebar: pins the folder selected, last.
@@ -387,42 +408,48 @@ impl Browser {
     }
 
     /// The volume to eject for the folder on screen, if any.
-    pub(super) fn ejectable_here(&self) -> Option<PathBuf> {
-        volumes::holding(&self.sidebar.volumes, self.folder())
+    pub(super) fn ejectable_here(&self, cx: &App) -> Option<PathBuf> {
+        volumes::holding(&self.sidebar.volumes, self.pane().read(cx).folder())
             .filter(|volume| !volume.startup)
             .map(|volume| volume.mount.clone())
     }
 
     /// Ejects off the UI thread; a refusal comes back with macOS's reason.
-    pub(super) fn eject(&mut self, mount: PathBuf, window: &Window, cx: &mut Context<Self>) {
-        let Some(drives) = cx
-            .try_global::<Places>()
-            .map(|places| places.drives.clone())
-        else {
+    pub(super) fn eject(&mut self, mount: PathBuf, cx: &mut Context<Self>) {
+        let (Some(drives), Some(owner)) = (
+            cx.try_global::<Places>()
+                .map(|places| places.drives.clone()),
+            cx.try_global::<Operations>().map(|ops| ops.0.clone()),
+        ) else {
             return;
         };
-        self.with_owner(
-            window,
-            cx,
-            move |owner| drives.eject(&mount, owner),
-            |this, done, _, cx| {
+        let done = cx
+            .background_executor()
+            .spawn(async move { drives.eject(&mount, &mut lock(&owner)) });
+        cx.spawn(async move |this, cx| {
+            let done = done.await;
+            let _ = this.update(cx, |this, cx| {
                 match done {
                     Ok(said) => this.toast(said, false, None, cx),
                     Err(why) => this.toast(why, true, None, cx),
                 }
                 this.load_volumes(cx);
-            },
-        );
+            });
+        })
+        .detach();
     }
 
     /// Opens the row the sidebar's keys are on.
     pub(super) fn open_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.row_at(self.sidebar_cursor) {
-            Some(Row::Recents) => self.open_recents(window, cx),
+            Some(Row::Recents) => self
+                .pane()
+                .update(cx, |pane, cx| pane.open_recents(window, cx)),
             Some(Row::Favorite(ix)) => self.open_favorite(ix, window, cx),
             Some(Row::Volume(ix)) => {
                 if let Some(mount) = self.sidebar.volumes.get(ix).map(|v| v.mount.clone()) {
-                    self.go(mount, window, cx);
+                    self.pane()
+                        .update(cx, |pane, cx| pane.go(mount, window, cx));
                 }
             }
             None => {}
@@ -436,7 +463,9 @@ impl Browser {
             return;
         };
         match place.availability.clone() {
-            Availability::Available(path) => self.go(path, window, cx),
+            Availability::Available(path) => {
+                self.pane().update(cx, |pane, cx| pane.go(path, window, cx))
+            }
             Availability::Unavailable(why) => self.toast(why, true, None, cx),
         }
     }
@@ -457,11 +486,12 @@ impl Browser {
     }
 
     /// Tabbing into the sidebar starts on the place that's open, if any.
-    pub(super) fn cursor_on_folder(&self) -> Option<usize> {
-        if self.showing_recents() {
+    pub(super) fn cursor_on_folder(&self, cx: &App) -> Option<usize> {
+        let pane = self.pane().read(cx);
+        if pane.showing_recents() {
             return Some(0);
         }
-        let folder = self.folder();
+        let folder = pane.folder();
         let favorite = self
             .sidebar
             .places
@@ -535,10 +565,11 @@ impl Browser {
 
     fn recents_row(
         &self,
+        here: &Here,
         cursor: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let selected = self.query.is_empty() && self.showing_recents();
+        let selected = !here.searching && here.recents;
         Self::slot(0, selected, true, cx)
             .aria_label("Recents")
             .child(
@@ -555,6 +586,7 @@ impl Browser {
     fn favorite_row(
         &self,
         fav: usize,
+        here: &Here,
         cursor: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -562,7 +594,7 @@ impl Browser {
         let ix = fav + 1;
         let label = label_of(&place.favorite.path);
         let glyph = glyph_of(&place.favorite.path);
-        let selected = self.showing_folder() && place.at() == Some(self.folder());
+        let selected = here.showing_folder() && place.at() == Some(here.folder.as_path());
         let reason = match &place.availability {
             Availability::Available(_) => None,
             Availability::Unavailable(why) => Some(why.clone()),
@@ -645,12 +677,13 @@ impl Browser {
     fn volume_row(
         &self,
         vol: usize,
+        here: &Here,
         cursor: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let volume = &self.sidebar.volumes[vol];
         let ix = vol + 1 + self.sidebar.places.len();
-        let selected = self.showing_folder() && self.folder() == volume.mount;
+        let selected = here.showing_folder() && here.folder == volume.mount;
         let mount = volume.mount.clone();
         let glyph = if volume.network {
             "server"
@@ -697,8 +730,8 @@ impl Browser {
                             )
                             .occlude()
                             .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.eject(mount.clone(), window, cx);
+                                move |this, _, _, cx| {
+                                    this.eject(mount.clone(), cx);
                                 },
                             )),
                         )
@@ -735,8 +768,8 @@ impl Browser {
     }
 
     /// The Trash and Settings at the sidebar's foot.
-    fn foot(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let in_trash = self.in_trash(cx);
+    fn foot(&self, here: &Here, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let in_trash = here.in_trash;
         div()
             .h(px(40.))
             .flex_shrink_0()
@@ -749,7 +782,10 @@ impl Browser {
                 icon_button("trash", "Trash", "trash", true)
                     .debug_selector(|| "open-trash".into())
                     .when(in_trash, |d| d.bg(content(0.14)))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_trash(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.pane()
+                            .update(cx, |pane, cx| pane.open_trash(window, cx));
+                    })),
             )
             .children(self.index_bar(cx))
             .child(
@@ -765,7 +801,15 @@ impl Browser {
         // only they show it.
         let cursor = (self.sidebar_focus.is_focused(window) && window.last_input_was_keyboard())
             .then_some(self.sidebar_cursor);
-        let focused = self.search.focus_handle(cx).is_focused(window);
+        let pane = self.pane().read(cx);
+        let search = pane.search.clone();
+        let here = Here {
+            folder: pane.folder().to_path_buf(),
+            recents: pane.showing_recents(),
+            searching: !pane.query.is_empty(),
+            in_trash: pane.in_trash(cx),
+        };
+        let focused = search.focus_handle(cx).is_focused(window);
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
         let last_row = self.sidebar.places.len() + self.sidebar.volumes.len();
@@ -787,7 +831,7 @@ impl Browser {
                     .px_2()
                     .gap_2()
                     .child(icon("search", 14.).text_color(content(0.55)))
-                    .child(div().flex_1().min_w_0().child(self.search.clone()))
+                    .child(div().flex_1().min_w_0().child(search))
                     .when_some(
                         (!focused)
                             .then(|| commands::shortcut_label(FocusSearch.name(), cx))
@@ -826,11 +870,13 @@ impl Browser {
                         this.move_sidebar_cursor((this.sidebar_cursor + 1).min(last_row), cx)
                     }))
                     .on_action(cx.listener(|this, _: &FocusList, window, cx| {
-                        this.focus_list(window, cx);
-                        // Arrive somewhere the arrows can go on from.
-                        if this.selection.is_empty() && !this.entries.is_empty() {
-                            this.select_row(0, cx);
-                        }
+                        this.pane().update(cx, |pane, cx| {
+                            pane.focus_list(window, cx);
+                            // Arrive somewhere the arrows can go on from.
+                            if pane.selection.is_empty() && !pane.entries.is_empty() {
+                                pane.select_row(0, cx);
+                            }
+                        });
                     }))
                     .on_action(
                         cx.listener(|this, _: &OpenPlace, window, cx| this.open_place(window, cx)),
@@ -871,13 +917,13 @@ impl Browser {
                         },
                     )
                     .when_some(self.ejectable_at_cursor(), |d, mount| {
-                        d.on_action(cx.listener(move |this, _: &super::Eject, window, cx| {
-                            this.eject(mount.clone(), window, cx)
+                        d.on_action(cx.listener(move |this, _: &super::Eject, _, cx| {
+                            this.eject(mount.clone(), cx)
                         }))
                     })
                     .when(at_cursor == Some(Row::Recents), |d| {
                         d.on_action(cx.listener(|this, _: &super::ClearRecents, _, cx| {
-                            this.clear_recents(cx)
+                            this.pane().update(cx, |pane, cx| pane.clear_recents(cx))
                         }))
                     })
                     .flex_1()
@@ -886,7 +932,7 @@ impl Browser {
                     .flex()
                     .flex_col()
                     .child(self.favorites_header(cx))
-                    .child(self.recents_row(cursor, cx))
+                    .child(self.recents_row(&here, cursor, cx))
                     .children(self.sidebar.error.clone().map(|why| {
                         div()
                             .px_2()
@@ -896,17 +942,17 @@ impl Browser {
                     }))
                     .children(
                         (0..self.sidebar.places.len())
-                            .map(|fav| self.favorite_row(fav, cursor, cx))
+                            .map(|fav| self.favorite_row(fav, &here, cursor, cx))
                             .collect::<Vec<_>>(),
                     )
                     .child(section_label("Locations").flex_shrink_0())
                     .children(
                         (0..self.sidebar.volumes.len())
-                            .map(|vol| self.volume_row(vol, cursor, cx))
+                            .map(|vol| self.volume_row(vol, &here, cursor, cx))
                             .collect::<Vec<_>>(),
                     ),
             )
-            .child(self.foot(cx))
+            .child(self.foot(&here, cx))
             .child(
                 // The edge that drags to resize, as NSSplitView's divider does.
                 div()

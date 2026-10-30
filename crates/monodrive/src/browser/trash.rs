@@ -2,8 +2,9 @@
 //! with a header bar, and Put Back acts only on what Monodrive's own history
 //! says came from somewhere. Recents is a list of files, gone ones included.
 
+use super::pane::{Pane, Stop};
 use super::sidebar::Places;
-use super::{Browser, Operations, Stop, lock};
+use super::{EmptyTrash, Operations, lock};
 use crate::theme::{self, ButtonLook, content, text_button};
 use gpui::{Context, FontWeight, Task, Window, div, prelude::*, px};
 use monodrive_core::cloud::Availability;
@@ -56,7 +57,7 @@ pub(super) fn read_recents(store: Option<&Store>) -> Result<Vec<PathBuf>, String
     store.map_or(Ok(Vec::new()), Store::recents)
 }
 
-impl Browser {
+impl Pane {
     pub(super) fn showing_recents(&self) -> bool {
         self.history[self.at].recents
     }
@@ -303,7 +304,7 @@ impl Browser {
                     )
                     .debug_selector(|| "empty-trash".into())
                     .when(can_empty, |d| {
-                        d.on_click(cx.listener(|this, _, window, cx| this.empty_trash(window, cx)))
+                        d.on_click(|_, window, cx| window.dispatch_action(Box::new(EmptyTrash), cx))
                     }),
                 ),
         )
