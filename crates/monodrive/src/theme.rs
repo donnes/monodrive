@@ -34,7 +34,7 @@ pub const PATH_BAR_HEIGHT: f32 = 28.;
 /// From a pane's edges to the text and controls in its bars and rows.
 pub const PANE_INSET: f32 = 16.;
 /// The side padding of a path crumb, so a crumb's text can sit on the inset.
-pub const CRUMB_INSET: f32 = 6.;
+pub const CRUMB_INSET: f32 = 4.;
 pub const BUTTON_HEIGHT: f32 = 24.;
 pub const FIELD_HEIGHT: f32 = 28.;
 

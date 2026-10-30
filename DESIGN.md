@@ -49,7 +49,7 @@ The top bar has one job: where am I, among which tabs. It holds Back and Forward
 
 The path bar is 28 pt, under the files, and part of the pane, so each pane gets its own. ⌥⌘P or Settings hides it, and it's on by default. On the left, in a folder, are the path crumbs. On the right is the status: `1 of 7 selected, 6 bytes · 49.6 GB free`, or `2 items` for search results and Recents. Toasts sit above it.
 
-Path crumbs show the current folder and as many ancestors as fit, at full width, counted from the right. Everything else collapses into one "…", which is only a marker: Go to Folder reaches the hidden levels. No ancestor is shown cut short. The current folder's name doesn't truncate until the status text beside it has given way.
+A crumb has 4 pt of side padding, and its 12 pt chevron has 1 pt on each side. Path crumbs show the current folder and as many ancestors as fit, at full width, counted from the right. Everything else collapses into one "…", which is only a marker: Go to Folder reaches the hidden levels. No ancestor is shown cut short. The current folder's name doesn't truncate until the status text beside it has given way.
 
 A name that can't be used turns the rename field's outline red and shows one short line right under it, over the row below. No row moves, and the line stays in the window.
 

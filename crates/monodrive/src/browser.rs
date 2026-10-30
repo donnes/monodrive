@@ -202,8 +202,10 @@ const TOAST_FOR: Duration = Duration::from_secs(4);
 const COLLAPSED: &str = "…";
 /// A crumb's side padding.
 const CRUMB_PADDING: f32 = 2. * theme::CRUMB_INSET;
+/// The gap on each side of a crumb's chevron.
+const CRUMB_GAP: f32 = 1.;
 /// A crumb's chevron and the gaps either side of it.
-const CRUMB_CHEVRON: f32 = 16.;
+const CRUMB_CHEVRON: f32 = 12. + 2. * CRUMB_GAP;
 /// The path bar's side padding and a point of slack.
 const PATH_BAR_CHROME: f32 = theme::PANE_INSET * 2. - theme::CRUMB_INSET + 2.;
 /// The pane's margin and border when it's a card.
@@ -2490,7 +2492,7 @@ impl Browser {
             .max_w(px(most))
             .flex()
             .items_center()
-            .gap(px(2.))
+            .gap(px(CRUMB_GAP))
             .text_size(px(theme::TEXT_SMALL))
             .overflow_hidden()
             .when(hidden > 0, |d| {
@@ -2520,7 +2522,7 @@ impl Browser {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(2.))
+                            .gap(px(CRUMB_GAP))
                             .min_w_0()
                             .when(ix > 0, |d| {
                                 d.child(icon("chevron-right", 12.).text_color(content(0.3)))
