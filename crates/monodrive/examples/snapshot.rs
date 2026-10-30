@@ -27,6 +27,7 @@
 //!
 //! `tabs-one.png`, `tabs-three.png` and `tabs-many.png` show the top bar, and
 //! `split.png` and `split-boxy.png` two panes with the keys on the right one.
+//! `sidebar-closed.png` and `sidebar-closed-split.png` have no sidebar.
 //!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
@@ -35,9 +36,9 @@ use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
-    EnclosingFolder, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings,
-    Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves,
-    ToggleSplit, Undo,
+    EnclosingFolder, FocusSearch, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected,
+    OpenSettings, Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu,
+    ShowCopiesAndMoves, ToggleSplit, Undo,
 };
 use monodrive::connect;
 use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
@@ -394,6 +395,19 @@ fn shoot_tabs(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpu
         }
         save(cx, window, out, name)?;
     }
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            show_sidebar: false,
+            ..base.clone()
+        })
+    });
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    save(cx, window, out, "sidebar-closed")?;
+    for action in [&NewTab as &dyn Action, &ToggleSplit, &FocusSearch] {
+        dispatch(cx, window, action)?;
+    }
+    save(cx, window, out, "sidebar-closed-split")?;
     Ok(())
 }
 

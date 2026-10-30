@@ -3,10 +3,13 @@
 
 use super::pane::{Opening, Pane, Stop};
 use super::{Browser, drag_area, pane_room};
+use crate::preferences::Preferences;
 use crate::theme::{self, accent, content, icon_button, row_icon_button};
+use crate::traffic_lights;
 use gpui::{
-    App, Context, CursorStyle, DispatchPhase, Entity, FontWeight, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Role, Stateful, Window, canvas, div, prelude::*, px,
+    App, Context, CursorStyle, DispatchPhase, Entity, Focusable, FontWeight, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Role, Stateful, Window, canvas, div, prelude::*,
+    px,
 };
 use std::path::PathBuf;
 
@@ -15,6 +18,10 @@ const TAB_WIDEST: f32 = 180.;
 const TAB_NARROWEST: f32 = 96.;
 /// What the top bar always leaves for dragging the window.
 const DRAG_ROOM: f32 = 24.;
+/// The search field's width in the top bar, while the sidebar is closed.
+const SEARCH_WIDTH: f32 = 200.;
+/// The space between the traffic lights and Back.
+const LIGHTS_GAP: f32 = 8.;
 
 /// The narrowest a pane gets while dragging the divider.
 const NARROWEST_PANE: f32 = 240.;
@@ -480,9 +487,18 @@ impl Browser {
 
     /// One job: where am I, among which tabs. The folder's name is the first
     /// tab, so it stays put when tabs arrive.
-    pub(super) fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn title_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let pane = self.pane().read(cx);
         let (back, forward) = (pane.at > 0, pane.at + 1 < pane.history.len());
+        let closed = !cx.global::<Preferences>().show_sidebar;
+        // With no sidebar to hold it, the field shows while it's in use.
+        let searching =
+            closed && (!pane.query.is_empty() || pane.search.focus_handle(cx).is_focused(window));
+        let lights = (traffic_lights::REACH + LIGHTS_GAP) / window.content_zoom();
         let titles: Vec<String> = self.tabs.iter().map(|tab| tab.title(cx)).collect();
         let several = titles.len() > 1;
         let pills: Vec<_> = titles
@@ -497,6 +513,8 @@ impl Browser {
             .items_center()
             .gap_1()
             .pr_3()
+            // The traffic lights, where the sidebar would have them.
+            .when(closed, |d| d.child(drag_area().w(px(lights)).h_full()))
             .child(
                 icon_button("back", "Back", "chevron-left", back).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -511,6 +529,7 @@ impl Browser {
                     },
                 )),
             )
+            .when(closed, |d| d.child(self.sidebar_button(cx)))
             .child(
                 div()
                     .id("tabs")
@@ -534,6 +553,9 @@ impl Browser {
                 )
             })
             .child(drag_area().flex_1().min_w(px(DRAG_ROOM)).h_full())
+            .when(searching, |d| {
+                d.child(self.search_field(window, cx).w(px(SEARCH_WIDTH)))
+            })
             .children(self.jobs.read(cx).ring().map(|ring| {
                 ring.on_click(cx.listener(|this, _, window, cx| this.toggle_jobs(window, cx)))
             }))

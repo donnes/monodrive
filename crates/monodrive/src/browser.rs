@@ -130,6 +130,7 @@ actions!(
         ToggleSplit,
         CopyToOtherPane,
         MoveToOtherPane,
+        ToggleSidebar,
     ]
 );
 
@@ -738,6 +739,15 @@ impl Browser {
             // somewhere to come back to.
             self.focus_before_sheet = window.focused(cx).filter(|f| *f != self.focus);
         }
+    }
+
+    /// ⌃⌘S and its button. The keys don't stay in a sidebar that's gone.
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_focus.is_focused(window) || self.settings_focus.is_focused(window) {
+            self.pane()
+                .update(cx, |pane, cx| pane.focus_list(window, cx));
+        }
+        preferences::update(cx, |p| p.show_sidebar = !p.show_sidebar);
     }
 
     /// Typing in the sidebar searches, as in the list.
@@ -1364,6 +1374,9 @@ impl Render for Browser {
             .on_action(|_: &ToggleHiddenFiles, _, cx| {
                 preferences::update(cx, |p| p.show_hidden = !p.show_hidden)
             })
+            .on_action(
+                cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)),
+            )
             .on_action(|_: &TogglePathBar, _, cx| {
                 preferences::update(cx, |p| p.show_path_bar = !p.show_path_bar)
             })
@@ -1376,7 +1389,7 @@ impl Render for Browser {
             .font_family(theme::UI_FONT)
             .text_color(content(1.))
             .bg(theme::shell_fill())
-            .child(self.sidebar(window, cx))
+            .when(prefs.show_sidebar, |d| d.child(self.sidebar(window, cx)))
             .child(
                 div()
                     .flex_1()
@@ -1387,10 +1400,10 @@ impl Render for Browser {
                     // Boxy runs the pane the window's full height.
                     .when(boxy, |d| {
                         d.bg(theme::pane_fill())
-                            .border_l_1()
+                            .when(prefs.show_sidebar, |d| d.border_l_1())
                             .border_color(content(0.06))
                     })
-                    .child(self.title_bar(cx))
+                    .child(self.title_bar(window, cx))
                     .child(
                         div()
                             .relative()
@@ -1402,7 +1415,7 @@ impl Render for Browser {
                                 if boxy {
                                     d.when(!split, |d| d.border_t_1())
                                 } else {
-                                    d.mr_2().mb_2()
+                                    d.mr_2().mb_2().when(!prefs.show_sidebar, |d| d.ml_2())
                                 }
                             })
                             .child(self.split_view(boxy, window, cx))
@@ -1434,11 +1447,18 @@ impl Render for Browser {
 /// cards, or Boxy's border.
 fn pane_room(window: &Window, cx: &App) -> f32 {
     let prefs = cx.global::<Preferences>();
-    let margin = match prefs.workspace_style {
-        WorkspaceStyle::Rounded => 8.,
-        WorkspaceStyle::Boxy => 1.,
+    let sidebar = if prefs.show_sidebar {
+        sidebar_width(prefs.sidebar_width, window)
+    } else {
+        0.
     };
-    window.viewport_size().width.as_f32() - sidebar_width(prefs.sidebar_width, window) - margin
+    let margin = match (prefs.workspace_style, prefs.show_sidebar) {
+        (WorkspaceStyle::Rounded, true) => 8.,
+        (WorkspaceStyle::Rounded, false) => 16.,
+        (WorkspaceStyle::Boxy, true) => 1.,
+        (WorkspaceStyle::Boxy, false) => 0.,
+    };
+    window.viewport_size().width.as_f32() - sidebar - margin
 }
 
 /// Runs `work` with the operation owner off the UI thread, then `done` with

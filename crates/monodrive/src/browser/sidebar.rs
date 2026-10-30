@@ -853,20 +853,54 @@ impl Browser {
             )
     }
 
+    /// The search field of the pane commands act on.
+    pub(super) fn search_field(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let search = self.pane().read(cx).search.clone();
+        let focused = search.focus_handle(cx).is_focused(window);
+        theme::field(if focused { accent() } else { content(0.12) })
+            .debug_selector(|| "search-field".into())
+            .key_context("Search")
+            .flex_shrink_0()
+            .h(px(theme::FIELD_HEIGHT))
+            .px_2()
+            .gap_2()
+            .child(icon("search", 14.).text_color(content(0.55)))
+            .child(div().flex_1().min_w_0().child(search))
+            .when_some(
+                (!focused)
+                    .then(|| commands::shortcut_label(FocusSearch.name(), cx))
+                    .flatten(),
+                |d, keys| {
+                    d.child(
+                        div()
+                            .text_size(px(theme::TEXT_CAPTION))
+                            .text_color(content(0.65))
+                            .child(keys),
+                    )
+                },
+            )
+    }
+
+    /// Opens or closes the sidebar: at its top right, or in the top bar when
+    /// it's closed.
+    pub(super) fn sidebar_button(&self, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
+        icon_button("toggle-sidebar", "Show Sidebar", "sidebar-left", true)
+            .debug_selector(|| "toggle-sidebar".into())
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
+    }
+
     pub(super) fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A click focuses the sidebar too; only keys move its cursor, so
         // only they show it.
         let cursor = (self.sidebar_focus.is_focused(window) && window.last_input_was_keyboard())
             .then_some(self.sidebar_cursor);
         let pane = self.pane().read(cx);
-        let search = pane.search.clone();
         let here = Here {
             folder: pane.folder().to_path_buf(),
             recents: pane.showing_recents(),
             searching: !pane.query.is_empty(),
             in_trash: pane.in_trash(cx),
         };
-        let focused = search.focus_handle(cx).is_focused(window);
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
         let last_row = self.sidebar.places.len() + self.sidebar.volumes.len();
@@ -878,31 +912,16 @@ impl Browser {
             .flex()
             .flex_col()
             .px_2()
-            .child(drag_area().h(px(theme::TITLE_BAR_HEIGHT)).w_full())
             .child(
-                theme::field(if focused { accent() } else { content(0.12) })
-                    .key_context("Search")
+                div()
+                    .h(px(theme::TITLE_BAR_HEIGHT))
                     .flex_shrink_0()
-                    .h(px(theme::FIELD_HEIGHT))
-                    .mb_1()
-                    .px_2()
-                    .gap_2()
-                    .child(icon("search", 14.).text_color(content(0.55)))
-                    .child(div().flex_1().min_w_0().child(search))
-                    .when_some(
-                        (!focused)
-                            .then(|| commands::shortcut_label(FocusSearch.name(), cx))
-                            .flatten(),
-                        |d, keys| {
-                            d.child(
-                                div()
-                                    .text_size(px(theme::TEXT_CAPTION))
-                                    .text_color(content(0.65))
-                                    .child(keys),
-                            )
-                        },
-                    ),
+                    .flex()
+                    .items_center()
+                    .child(drag_area().flex_1().h_full())
+                    .child(self.sidebar_button(cx)),
             )
+            .child(self.search_field(window, cx).mb_1())
             .child(
                 div()
                     .id("places")

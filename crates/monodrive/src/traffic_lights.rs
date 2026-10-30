@@ -10,6 +10,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 const BUTTON_SIZE: f64 = 14.;
 const LEFT_MARGIN: f64 = 12.;
 const BUTTON_SPACING: f64 = 6.;
+/// How far the buttons reach from the window's left edge, in screen points.
+pub const REACH: f32 = (LEFT_MARGIN + 3. * BUTTON_SIZE + 2. * BUTTON_SPACING) as f32;
 
 /// Pins the buttons, or moves already pinned ones. AppKit can recreate them,
 /// so call this again whenever the window may have rebuilt its titlebar.

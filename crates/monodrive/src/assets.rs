@@ -49,6 +49,7 @@ icons!(
     "search",
     "server",
     "settings",
+    "sidebar-left",
     "sliders",
     "terminal",
     "trash",

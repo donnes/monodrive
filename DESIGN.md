@@ -45,7 +45,7 @@ A sheet with keys of its own has a 32 pt footer under a hairline, with its text 
 
 ### Top bar and path bar
 
-The top bar has one job: where am I, among which tabs. It holds Back and Forward, the current folder's name in semibold, and the jobs ring at the right. Nothing else goes there. The name is the first tab, so it doesn't move when tabs arrive.
+The top bar has one job: where am I, among which tabs. It holds Back and Forward, the current folder's name in semibold, and the jobs ring at the right. Nothing else goes there, except the sidebar's button and the search field while the sidebar is closed. The name is the first tab, so it doesn't move when tabs arrive.
 
 With two or more tabs, each is a 24 pt pill named for its folder, 180 pt wide: 0.14 fill and semibold ink for the active one, none and 0.65 ink for the rest, with the usual hover. A press selects it, a drag reorders it, and hovering shows a 20 pt ✕ over the name's end, which moves nothing. A + follows the last pill. Too many to fit, they shrink to 96 pt, truncating their names, and then the strip scrolls sideways; the active one scrolls into view. The bar always leaves 24 pt to drag the window by.
 
@@ -54,6 +54,10 @@ The path bar is 28 pt, under the files, and part of the pane, so each pane gets 
 A crumb has 4 pt of side padding, and its 12 pt chevron has 1 pt on each side. Path crumbs show the current folder and as many ancestors as fit, at full width, counted from the right. Everything else collapses into one "…", which is only a marker: Go to Folder reaches the hidden levels. No ancestor is shown cut short. The current folder's name doesn't truncate until the status text beside it has given way.
 
 A name that can't be used turns the rename field's outline red and shows one short line right under it, over the row below. No row moves, and the line stays in the window.
+
+### Closing the sidebar
+
+⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits at the sidebar's top right, then after Forward in the top bar. The traffic lights stay, with Back and Forward right after them. The sidebar opens and closes at once, with no animation: a width that moves lays out the whole window each frame. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
 
 ### Two panes
 

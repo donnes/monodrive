@@ -110,6 +110,8 @@ pub struct Preferences {
     pub ui_scale: u32,
     /// Points, within `SIDEBAR_WIDTHS`.
     pub sidebar_width: f32,
+    /// Whether the sidebar is open.
+    pub show_sidebar: bool,
     /// Shortcuts changed on the Keyboard page, by command id.
     pub shortcuts: crate::commands::Shortcuts,
     /// How folders are listed.
@@ -155,6 +157,7 @@ impl Default for Preferences {
             workspace_style: WorkspaceStyle::Rounded,
             ui_scale: 100,
             sidebar_width: 240.,
+            show_sidebar: true,
             shortcuts: Default::default(),
             sort: Default::default(),
             window_size: WindowSize::Reasonable,
@@ -196,6 +199,7 @@ impl Preferences {
         *self = Self {
             show_hidden: self.show_hidden,
             sidebar_width: self.sidebar_width,
+            show_sidebar: self.show_sidebar,
             shortcuts: std::mem::take(&mut self.shortcuts),
             sort: self.sort,
             window_size: self.window_size,
@@ -323,6 +327,19 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Preferences)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closed_sidebar_is_kept_and_older_files_open_it() {
+        let closed = Preferences {
+            show_sidebar: false,
+            ..Default::default()
+        };
+        let saved = serde_json::to_vec(&closed).unwrap();
+        let read: Preferences = serde_json::from_slice(&saved).unwrap();
+        assert!(!read.show_sidebar);
+        let older: Preferences = serde_json::from_slice(b"{}").unwrap();
+        assert!(older.show_sidebar);
+    }
 
     #[test]
     fn restoring_appearance_leaves_other_pages_alone() {

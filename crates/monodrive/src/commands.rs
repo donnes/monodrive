@@ -15,8 +15,8 @@ use crate::browser::{
     NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInTerminal, OpenSelected,
     OpenSettings, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom,
     RevealInFinder, ReverseSort, ShowCopiesAndMoves, ShowPackageContents, SortByKind,
-    SortByModified, SortByName, SortBySize, ToggleHiddenFiles, TogglePathBar, ToggleSplit, Undo,
-    ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    SortByModified, SortByName, SortBySize, ToggleHiddenFiles, TogglePathBar, ToggleSidebar,
+    ToggleSplit, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{browser, connect, empty_trash, goto, jobs, menu, palette, settings, text_field};
@@ -447,6 +447,10 @@ pub fn all() -> Vec<Command> {
         command("Show Path Bar", View, &["alt-cmd-p"], None, || {
             Box::new(TogglePathBar)
         }),
+        // ⌃⌘S, as Finder's.
+        command("Show Sidebar", View, &["ctrl-cmd-s"], BROWSER, || {
+            Box::new(ToggleSidebar)
+        }),
         on(
             FOLDER,
             separated(command(
@@ -775,6 +779,9 @@ pub(crate) fn checked(prefs: &Preferences) -> Vec<&'static str> {
     }
     if prefs.show_path_bar {
         ids.push(TogglePathBar.name());
+    }
+    if prefs.show_sidebar {
+        ids.push(ToggleSidebar.name());
     }
     ids
 }
