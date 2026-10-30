@@ -390,13 +390,12 @@ fn scrolling_under_a_resting_drag_retargets_it_and_a_stale_target_takes_nothing(
     // Released before the pill caught up, with another row under the pointer.
     scroll(rows * 10., cx);
     cx.simulate_mouse_up(over, MouseButton::Left, with(""));
-    // At rest, the pill catches up once the frame after the scroll has drawn.
+    // At rest, the pill catches up with the platform's next replay of the move.
     scroll(rows * -10., cx);
     carry(source, over, "", cx);
     assert_eq!(says(&browser, cx).unwrap(), "Move f001 to f005");
     scroll(rows * 10., cx);
-    cx.update(|window, cx| window.simulate_next_frame(cx));
-    draw(cx);
+    hover(over, "", cx);
     assert_eq!(says(&browser, cx).unwrap(), "Move f001 to f015");
     cx.simulate_mouse_up(over, MouseButton::Left, with(""));
     finish_job(&mut owned, cx);
@@ -431,5 +430,48 @@ fn closing_a_tab_under_a_drag_takes_nothing_into_what_it_showed(cx: &mut TestApp
     finish_job(&mut owned, cx);
     assert!(!project.join("inner.md").exists());
     assert!(project.join("docs/sub/inner.md").exists());
+    release(owned, cx);
+}
+
+/// What the platform does for a drag at rest: a move replayed at the same place
+/// and a frame after each, with nothing else asking for a frame. Then the button
+/// comes up with no move before it.
+#[gpui::test]
+fn releasing_a_resting_drag_drops_on_what_the_pill_shows(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let mut owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-2");
+    draw(cx);
+    let cell = |ix: usize, cx: &mut VisualTestContext| {
+        in_pane(&browser, cx, |pane, _| {
+            let height = grid_cell(pane.grid_icon).1;
+            pane.list_bounds.get().origin
+                + point(
+                    px(8. + pane.cell_width * (ix as f32 + 0.5)),
+                    px(4. + height * 0.4),
+                )
+        })
+    };
+    let (docs, file) = (cell(0, cx), cell(2, cx));
+    cx.simulate_mouse_down(file, MouseButton::Left, with(""));
+    for ix in 1..=8 {
+        let along = file + (docs - file) * (ix as f32 / 8.);
+        cx.simulate_mouse_move(along, MouseButton::Left, with(""));
+    }
+    for _ in 0..10 {
+        cx.simulate_mouse_move(docs, MouseButton::Left, with(""));
+        cx.run_until_parked();
+    }
+    assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to docs");
+    cx.simulate_mouse_up(docs, MouseButton::Left, with(""));
+    let (active, pill) = browser.read_with(cx, |b, cx| {
+        (cx.has_active_drag(), b.drag.decision(|_, d| d.says()))
+    });
+    assert!(!active, "the drag ended");
+    assert_eq!(pill, None);
+    assert!(!dragging(&browser, cx));
+    finish_job(&mut owned, cx);
+    assert!(project.join("docs/a.txt").exists());
     release(owned, cx);
 }

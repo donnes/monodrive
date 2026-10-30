@@ -15,8 +15,8 @@ use crate::file_icons;
 use crate::theme::{self, Elevation, content};
 use gpui::{
     App, Context, Div, DragMoveEvent, Entity, EntityId, ExternalDragPayload, ExternalPaths,
-    FileDragPaths, FontWeight, Modifiers, MouseButton, MouseMoveEvent, Pixels, PlatformInput,
-    Point, Render, Stateful, Window, div, prelude::*, px,
+    FileDragPaths, FontWeight, Modifiers, MouseButton, MouseUpEvent, Pixels, PlatformInput, Point,
+    Render, Stateful, Task, Window, div, prelude::*, px,
 };
 use monodrive_core::entries::{Entry, Kind};
 use objc2_app_kit::{NSEvent, NSEventModifierFlags};
@@ -26,7 +26,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
+/// How often a drag checks that the button is still down.
+const BUTTON_CHECK: Duration = Duration::from_millis(50);
 /// The drag image's icon.
 const IMAGE_SIDE: f32 = 32.;
 /// The pill's height, which its card radius makes fully round.
@@ -233,9 +236,10 @@ struct Session {
     /// What the frame shows, worked out once per target, keys and answer about
     /// its volume, since a selection can run to thousands.
     decided: Option<(Target, (bool, bool, bool), Decision)>,
-    /// The next frame comes from something that doesn't move what's under the
-    /// pointer: a move has just looked, or only the keys changed.
-    settled: bool,
+    /// Watches the button while the window owns the drag.
+    button_watch: Option<Task<()>>,
+    /// The files came from another app, whose drag AppKit ends.
+    external: bool,
 }
 
 #[derive(Default)]
@@ -267,7 +271,8 @@ impl Drag {
             sources_asked: false,
             target_devices: HashMap::new(),
             decided: None,
-            settled: false,
+            button_watch: None,
+            external: false,
         });
     }
 
@@ -295,7 +300,6 @@ impl Drag {
         let mut state = self.0.borrow_mut();
         if let Some(session) = state.session.as_mut() {
             session.target = None;
-            session.settled = true;
         }
         state.session.is_some()
     }
@@ -314,28 +318,18 @@ impl Drag {
         self.0.borrow().session.as_ref().is_some_and(|s| s.folders)
     }
 
-    /// What changed needs a frame, and nothing moved under the pointer.
-    fn keep_settled(&self) {
-        if let Some(session) = self.0.borrow_mut().session.as_mut() {
-            session.settled = true;
-        }
-    }
-
     /// Before a frame: ends with GPUI's drag, and works out what it would do.
-    /// Says whether what's under the pointer may have changed without a move,
-    /// as a scroll or a closed tab changes it.
-    fn settle(&self, dragging: bool, keys: Modifiers) -> bool {
+    fn settle(&self, dragging: bool, keys: Modifiers) {
         let mut state = self.0.borrow_mut();
         if !dragging {
             state.session = None;
         }
         let Some(session) = state.session.as_mut() else {
-            return false;
+            return;
         };
-        let moved_under = !std::mem::take(&mut session.settled);
         let Some(target) = session.target.clone() else {
             session.decided = None;
-            return moved_under;
+            return;
         };
         let same_volume = session.same_volume(&target);
         let pressed = (keys.alt, keys.platform, same_volume);
@@ -347,7 +341,6 @@ impl Drag {
             let decision = decide(&session.sources, &target, keys, same_volume);
             session.decided = Some((target, pressed, decision));
         }
-        moved_under
     }
 
     /// Reads what the frame shows a drop would do.
@@ -373,6 +366,19 @@ impl Drag {
             _ => None,
         })
         .flatten()
+    }
+
+    /// There's a drag of the window's own, not yet watched.
+    fn needs_button_watch(&self) -> bool {
+        let state = self.0.borrow();
+        let watchable = |s: &Session| !s.external && s.button_watch.is_none();
+        state.session.as_ref().is_some_and(watchable)
+    }
+
+    fn keep_button_watch(&self, watch: Task<()>) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut() {
+            session.button_watch = Some(watch);
+        }
     }
 
     /// The sources, the first time they're asked for.
@@ -403,7 +409,6 @@ impl Drag {
             && session.sources == sources
         {
             session.source_devices = devices;
-            session.settled = true;
         }
     }
 
@@ -412,7 +417,6 @@ impl Drag {
             && let Some(known) = session.target_devices.get_mut(folder)
         {
             *known = device;
-            session.settled = true;
         }
     }
 
@@ -424,6 +428,21 @@ impl Drag {
         let (shown, _, decision) = session.decided?;
         (session.target? == shown).then_some(decision)
     }
+}
+
+/// The button is up and the drag still thinks it's down: the mouse-up that went
+/// missing, at the same place, through the same path as a real one.
+fn release_lost_drag(window: &mut Window, cx: &mut App) {
+    if !cx.has_active_drag() {
+        return;
+    }
+    let event = MouseUpEvent {
+        button: MouseButton::Left,
+        position: window.mouse_position(),
+        modifiers: window.modifiers(),
+        click_count: 1,
+    };
+    window.dispatch_event(PlatformInput::MouseUp(event), cx);
 }
 
 /// Makes `element` offer what `offer` does while the pointer's over it: on
@@ -621,7 +640,6 @@ impl Browser {
         .on_drop::<ExternalPaths>(cx.listener(|this, _, window, cx| this.drop_files(window, cx)))
         .on_modifiers_changed(cx.listener(|this, _, _, cx| {
             if this.drag.active() {
-                this.drag.keep_settled();
                 cx.notify();
             }
         }))
@@ -630,6 +648,9 @@ impl Browser {
     /// Files from another app. Whether they're all folders takes the disk.
     fn begin_external(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.drag.begin(paths.clone(), false);
+        if let Some(session) = self.drag.0.borrow_mut().session.as_mut() {
+            session.external = true;
+        }
         let drag = self.drag.clone();
         let checked = cx.background_executor().spawn(async move {
             let folders = paths.iter().all(|path| path.is_dir());
@@ -647,25 +668,34 @@ impl Browser {
     }
 
     /// Before a frame: the drag's state for what's held now, and what's still
-    /// to be read about its volumes, off the UI thread. A frame that may have
-    /// moved things under a resting pointer looks again once it's drawn, with
-    /// a move at the same place, so that frame's listeners answer. That move's
-    /// own frame doesn't look again, so nothing repeats.
+    /// to be read about its volumes, off the UI thread. While the drag rests,
+    /// the platform replays the last move, and AppKit its dragging updates, so
+    /// the pill catches up with a scroll or a closed tab under the pointer.
     pub(super) fn settle_drag(&self, window: &Window, cx: &mut Context<Self>) {
-        let moved_under = self.drag.settle(cx.has_active_drag(), held_keys(window));
+        self.drag.settle(cx.has_active_drag(), held_keys(window));
         self.read_volumes(cx);
-        if moved_under {
-            window.on_next_frame(|window, cx| {
-                if cx.has_active_drag() {
-                    let event = MouseMoveEvent {
-                        position: window.mouse_position(),
-                        pressed_button: Some(MouseButton::Left),
-                        modifiers: window.modifiers(),
-                    };
-                    window.dispatch_event(PlatformInput::MouseMove(event), cx);
-                }
-            });
+        self.watch_button(window, cx);
+    }
+
+    /// A mouse-up can go missing, as GPUI's own drag replay allows for when a
+    /// native menu takes one, and a drag then has nothing to end it. So while
+    /// the window owns a drag, the button itself is what says it's over. A
+    /// window with no AppKit behind it, as in tests, has only its events.
+    fn watch_button(&self, window: &Window, cx: &mut Context<Self>) {
+        if crate::traffic_lights::ns_window(window).is_none() || !self.drag.needs_button_watch() {
+            return;
         }
+        let watch = cx.spawn_in(window, async move |_, cx| {
+            loop {
+                cx.background_executor().timer(BUTTON_CHECK).await;
+                let held = NSEvent::pressedMouseButtons() & 1 != 0;
+                if !held {
+                    let _ = cx.update(release_lost_drag);
+                    return;
+                }
+            }
+        });
+        self.drag.keep_button_watch(watch);
     }
 
     /// Starts what this drag doesn't know yet about its volumes. Each answer
@@ -774,7 +804,9 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::super::drag_tests::{carry, draw, hover, says};
-    use super::super::tests::{browse, folder as project_folder, in_pane, press, row, shown};
+    use super::super::tests::{
+        browse, folder as project_folder, in_pane, own, press, release, restart, row, shown,
+    };
     use super::*;
     use gpui::{ExternalDragPayload as Payload, TestAppContext};
 
@@ -936,6 +968,25 @@ mod tests {
         draw(cx);
         assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to docs");
         press(cx, "escape");
+    }
+
+    #[gpui::test]
+    fn a_button_up_with_no_mouse_up_still_ends_the_drag_and_drops(cx: &mut TestAppContext) {
+        let (_dir, project) = project_folder();
+        let mut owned = own(cx);
+        let (browser, cx) = browse(&project, cx);
+        let (docs, file) = (row(&browser, 0, cx), row(&browser, 2, cx));
+        carry(file, docs, "", cx);
+        assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to docs");
+        cx.update(release_lost_drag);
+        draw(cx);
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+        assert!(!browser.read_with(cx, |b, _| b.drag.active()));
+        restart(&mut owned, cx);
+        cx.executor().advance_clock(crate::jobs::CHECK);
+        cx.run_until_parked();
+        assert!(project.join("docs/a.txt").exists());
+        release(owned, cx);
     }
 
     #[test]
