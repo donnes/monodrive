@@ -214,6 +214,8 @@ pub struct SettingsView {
     /// The agent the Agents page shows setup for, and those whose config
     /// already has Monodrive.
     harness: Harness,
+    /// The agents that look installed, the only ones offered. `None` until read.
+    installed: Option<Vec<Harness>>,
     added: Vec<Harness>,
     /// The Add or Remove last pressed, while it runs and after it fails.
     job: Option<Job>,
@@ -277,6 +279,7 @@ impl SettingsView {
             menu_focus: cx.focus_handle(),
             copied: None,
             harness: Harness::ClaudeCode,
+            installed: None,
             added: Vec::new(),
             job: None,
             over_action: false,
@@ -431,15 +434,17 @@ impl SettingsView {
         .detach();
     }
 
-    /// Reads the agents' configs off the UI thread to mark the ones that
-    /// already have Monodrive.
+    /// Reads the agents' configs off the UI thread to find the ones to offer
+    /// and mark those that already have Monodrive.
     fn check_agents(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let added = cx
+            let (installed, added) = cx
                 .background_executor()
-                .spawn(async { agents::added() })
+                .spawn(async { (agents::detected(), agents::added()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.harness = keep_or_first(this.harness, &installed);
+                this.installed = Some(installed);
                 this.added = added;
                 cx.notify();
             });
@@ -1087,8 +1092,9 @@ impl SettingsView {
                 format!("{} mcp", agents::shell_quote(&exe)),
                 cx,
             ));
-        let harnesses = Harness::ALL;
+        let harnesses = self.installed.clone().unwrap_or_default();
         let at = harnesses.iter().position(|h| *h == harness).unwrap_or(0);
+        let offered = harnesses.clone();
         let picker = div()
             .id("agent-harness")
             .role(Role::RadioGroup)
@@ -1096,8 +1102,8 @@ impl SettingsView {
             // One Tab stop; the arrows pick, as in a macOS radio group.
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 if let Some(step) = arrow(&event.keystroke.key) {
-                    let next = at.saturating_add_signed(step).min(harnesses.len() - 1);
-                    this.pick_harness(harnesses[next], cx);
+                    let next = at.saturating_add_signed(step).min(offered.len() - 1);
+                    this.pick_harness(offered[next], cx);
                     cx.stop_propagation();
                 }
             }))
@@ -1220,6 +1226,20 @@ impl SettingsView {
                 ))
                 .child(step_row(2, harness.then().to_string(), None))
             });
+        let mut mcp = vec![server.into_any_element()];
+        match self.installed.as_deref() {
+            Some([]) => mcp.push(
+                div()
+                    .py(px(12.))
+                    .text_size(px(theme::TEXT_CAPTION))
+                    .line_height(px(16.))
+                    .text_color(content(0.65))
+                    .child("No coding agents found. The command above works with any that runs MCP servers.")
+                    .into_any_element(),
+            ),
+            Some(_) => mcp.push(setup.into_any_element()),
+            None => {}
+        }
         let tools = TOOLS
             .iter()
             .map(|tool| {
@@ -1250,7 +1270,7 @@ impl SettingsView {
                 Some(
                     "Agents run Monodrive as an MCP server and search the same index as this window.",
                 ),
-                vec![server.into_any_element(), setup.into_any_element()],
+                mcp,
             ),
             group(
                 "Files",
@@ -2486,6 +2506,15 @@ fn step_row(number: u32, text: String, below: Option<AnyElement>) -> impl IntoEl
 }
 
 /// The green dot by an agent whose config already has Monodrive.
+/// What stays picked once the list is known: `picked` if it's there, else the
+/// first.
+fn keep_or_first(picked: Harness, installed: &[Harness]) -> Harness {
+    match installed.first() {
+        Some(first) if !installed.contains(&picked) => *first,
+        _ => picked,
+    }
+}
+
 fn added_dot() -> impl IntoElement {
     div()
         .size(px(6.))
@@ -2497,6 +2526,17 @@ fn added_dot() -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_picked_agent_stays_only_if_it_is_installed() {
+        let installed = [Harness::Codex, Harness::Cursor];
+        assert_eq!(keep_or_first(Harness::Cursor, &installed), Harness::Cursor);
+        assert_eq!(
+            keep_or_first(Harness::ClaudeCode, &installed),
+            Harness::Codex
+        );
+        assert_eq!(keep_or_first(Harness::ClaudeCode, &[]), Harness::ClaudeCode);
+    }
 
     #[test]
     fn slider_ends_reach_the_range_ends_and_clamp_beyond() {

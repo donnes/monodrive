@@ -829,7 +829,7 @@ impl Browser {
                             .aria_label("No Full Disk Access, so some folders are skipped. Show how to turn it on.")
                             .child(div().min_w_0().truncate().child(words))
                             .on_hover(on_hover)
-                            .on_click(|_, _, cx| onboarding::show(Step::FullDiskAccess, cx)),
+                            .on_click(|_, _, cx| onboarding::show(Step::Checklist, cx)),
                     )
                     .into_any_element(),
             );

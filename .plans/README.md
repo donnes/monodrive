@@ -53,7 +53,7 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - 21: a Commands page in Settings.
 - 22: one place to manage all worktrees. The search index finds .git entries and Git confirms each repository. Delete moves the folder to the Trash, then removes Git's registration; refused if locked or the main worktree, and dirty or unpushed work needs an extra confirmation showing what's there.
 
-- Onboarding (done; granting Full Disk Access itself needs a person to check): first launch, a dedicated window with a step list beside a how-to picture: Welcome, Full Disk Access, Connect agents, Ready. The first index crawl waits for the Full Disk Access step; the app detects the grant on return and offers to reopen.
+- Onboarding (done; granting Full Disk Access itself needs a person to check): first launch, a dedicated window with Welcome and then one checklist of Full Disk Access and coding agents. The first index crawl waits until the access is granted or onboarding closes; the app detects the grant on return and offers to reopen.
 
 Saved browsing workspaces were dropped.
 

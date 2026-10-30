@@ -101,7 +101,7 @@ A restored tab whose drive or folder is gone, or that would raise a privacy prom
 
 ### Onboarding
 
-A fixed 760 by 520 pt window of its own, not a sheet, because no main window is behind it on first launch: a step list on the left, then the step's title, one or two lines of why, a picture and the buttons, with the primary one bottom right. ↩ does what the primary button does, Esc goes back a step and never closes it, and ⌘W closes it for now, so it comes back next launch. The Full Disk Access picture is drawn from elements, schematic, so it stays crisp in both themes and doesn't date with macOS.
+A fixed 640 by 520 pt window of its own, not a sheet, because no main window is behind it on first launch. Welcome is centered: the icon, one line of why and the keys to know. The checklist is a card of rows, Full Disk Access first and then the coding agents, each with a button that turns into a green check as it finishes, and the row stays draggable into System Settings' list until the access is on. ↩ does what the button in the accent color does, Esc goes back a step and never closes it, and ⌘W closes it for now, so it comes back next launch. Open Monodrive is always available, since neither the access nor an agent is required.
 
 ### Type
 

@@ -1789,7 +1789,7 @@ fn the_no_access_notice_stays_after_indexing_and_opens_that_step(cx: &mut TestAp
             .find(|other| other.window_id() != this.window_id())
     });
     let mut onboarding = VisualTestContext::from_window(opened.unwrap(), cx);
-    assert!(onboarding.debug_bounds("access-app").is_some());
+    assert!(onboarding.debug_bounds("access-grant").is_some());
 }
 
 #[test]

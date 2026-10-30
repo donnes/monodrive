@@ -53,8 +53,6 @@ impl Setup for Fake {
         "/Applications/Monodrive.app".into()
     }
 
-    fn reveal(&self, _: &Path, _: &App) {}
-
     fn relaunch(&self, _: &mut App) {
         self.relaunches.fetch_add(1, Ordering::SeqCst);
     }
@@ -137,7 +135,7 @@ fn no_grant() -> Arc<Fake> {
 }
 
 #[gpui::test]
-fn return_walks_the_steps_and_escape_only_goes_back(cx: &mut TestAppContext) {
+fn return_goes_for_the_access_and_escape_only_goes_back(cx: &mut TestAppContext) {
     let fake = no_grant();
     let main = launched(&fake, false, cx);
     assert_eq!(main.get(), 0, "no main window behind onboarding");
@@ -149,48 +147,60 @@ fn return_walks_the_steps_and_escape_only_goes_back(cx: &mut TestAppContext) {
     assert_eq!(step(window, cx), Step::Welcome);
 
     press("enter", cx);
-    assert_eq!(step(window, cx), Step::FullDiskAccess);
+    assert_eq!(step(window, cx), Step::Checklist);
     press("escape", cx);
     assert_eq!(step(window, cx), Step::Welcome);
     press("enter", cx);
 
     // Without the access, ↩ goes for the access rather than past it.
     press("enter", cx);
-    assert_eq!(step(window, cx), Step::FullDiskAccess);
+    assert_eq!(step(window, cx), Step::Checklist);
     assert_eq!(fake.opened_settings.load(Ordering::SeqCst), 1);
+    assert_eq!(main.get(), 0);
 
-    click("onboarding-not-now", cx);
-    assert_eq!(step(window, cx), Step::Agents);
-    press("enter", cx);
-    assert_eq!(step(window, cx), Step::Ready);
     click("onboarding-back", cx);
-    assert_eq!(step(window, cx), Step::Agents);
-    let skipped = window
-        .read_with(cx, |view, _| view.skipped.clone())
-        .unwrap();
-    assert_eq!(skipped, [Step::FullDiskAccess, Step::Agents]);
+    assert_eq!(step(window, cx), Step::Welcome);
 }
 
 #[gpui::test]
-fn the_grant_shows_on_returning_to_the_window_and_lets_it_continue(cx: &mut TestAppContext) {
+fn opening_monodrive_without_the_access_finishes_and_lets_the_crawl_go(cx: &mut TestAppContext) {
     let fake = no_grant();
-    launched(&fake, false, cx);
-    let (window, cx) = flow(cx);
+    let main = launched(&fake, false, cx);
+    let (_, visual) = flow(cx);
+    press("enter", visual);
+    click("onboarding-primary", visual);
+    assert_eq!(main.get(), 1);
+    assert_eq!(fake.opened_settings.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        cx.update(|cx| cx.global::<Preferences>().onboarding_version),
+        VERSION
+    );
+    assert!(!cx.update(|cx| cx.global::<IndexGate>().held()));
+}
+
+#[gpui::test]
+fn the_grant_shows_on_returning_to_the_window_and_starts_the_crawl(cx: &mut TestAppContext) {
+    let fake = no_grant();
+    let main = launched(&fake, false, cx);
+    let (_, cx) = flow(cx);
     press("enter", cx);
     assert!(!on_screen("access-granted", cx));
 
-    click("onboarding-primary", cx);
+    click("access-grant", cx);
+    assert_eq!(fake.opened_settings.load(Ordering::SeqCst), 1);
     cx.deactivate_window();
     fake.granted.store(true, Ordering::SeqCst);
     // Not until the window is back: nothing polls.
     assert!(!on_screen("access-granted", cx));
+    assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     assert!(on_screen("access-granted", cx));
-    assert!(!on_screen("onboarding-not-now", cx));
+    assert!(!on_screen("access-grant", cx));
+    assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
 
     press("enter", cx);
-    assert_eq!(step(window, cx), Step::Agents);
+    assert_eq!(main.get(), 1);
 }
 
 #[gpui::test]
@@ -215,9 +225,7 @@ fn finishing_is_saved_opens_the_windows_and_isnt_shown_again(cx: &mut TestAppCon
     let main = launched(&fake, false, cx);
     let (window, visual) = flow(cx);
     // Already granted: past what there's nothing to ask about.
-    assert_eq!(step(window, visual), Step::Agents);
-    press("enter", visual);
-    assert_eq!(step(window, visual), Step::Ready);
+    assert_eq!(step(window, visual), Step::Checklist);
     press("enter", visual);
     assert_eq!(main.get(), 1);
     assert_eq!(
@@ -245,9 +253,9 @@ fn finishing_is_saved_opens_the_windows_and_isnt_shown_again(cx: &mut TestAppCon
     let (window, visual) = flow(cx);
     assert_eq!(step(window, visual), Step::Welcome);
     let windows = visual.update(|_, cx| cx.windows().len());
-    visual.update(|_, cx| show(Step::FullDiskAccess, cx));
+    visual.update(|_, cx| show(Step::Checklist, cx));
     visual.run_until_parked();
-    assert_eq!(step(window, visual), Step::FullDiskAccess);
+    assert_eq!(step(window, visual), Step::Checklist);
     assert_eq!(visual.update(|_, cx| cx.windows().len()), windows);
 }
 
@@ -375,7 +383,6 @@ fn finishing_after_the_windows_were_closed_opens_one(cx: &mut TestAppContext) {
 
     let (_, visual) = flow(cx);
     press("enter", visual);
-    press("enter", visual);
     assert!(cx.update(|cx| !cx.has_global::<Flow>()));
     assert_eq!(main.get(), 2, "the app has a window to go on with");
 }
@@ -420,7 +427,7 @@ fn the_first_look_at_the_mac_is_off_the_ui_thread_with_the_crawl_held(cx: &mut T
 }
 
 #[gpui::test]
-fn with_no_saved_index_the_crawl_waits_for_the_access_step(cx: &mut TestAppContext) {
+fn with_no_saved_index_the_crawl_waits_for_the_checklist(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let fake = no_grant();
     launched(&fake, false, cx);
@@ -432,10 +439,10 @@ fn with_no_saved_index_the_crawl_waits_for_the_access_step(cx: &mut TestAppConte
 
     let (window, visual) = flow(cx);
     press("enter", visual);
-    assert_eq!(step(window, visual), Step::FullDiskAccess);
+    assert_eq!(step(window, visual), Step::Checklist);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
 
-    click("onboarding-not-now", visual);
+    click("onboarding-primary", visual);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
 }
 
@@ -464,7 +471,7 @@ fn closing_during_the_wait_lets_the_crawl_go(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_agents_step_writes_nothing_until_a_switch_is_pressed(cx: &mut TestAppContext) {
+fn the_checklist_writes_no_agent_config_until_a_button_is_pressed(cx: &mut TestAppContext) {
     let fake = Arc::new(Fake {
         granted: AtomicBool::new(true),
         detected: vec![Harness::Cursor, Harness::Codex],
@@ -472,27 +479,20 @@ fn the_agents_step_writes_nothing_until_a_switch_is_pressed(cx: &mut TestAppCont
     });
     launched(&fake, false, cx);
     let (window, cx) = flow(cx);
-    assert_eq!(step(window, cx), Step::Agents);
+    assert_eq!(step(window, cx), Step::Checklist);
     assert!(fake.applied.lock().unwrap().is_empty());
 
-    click("agent-switch-Cursor", cx);
+    click("agent-cursor", cx);
     assert_eq!(
         *fake.applied.lock().unwrap(),
         [(Harness::Cursor, Action::Add)]
     );
     // And pressing it again takes it out.
-    click("agent-switch-Cursor", cx);
+    click("agent-cursor", cx);
     assert_eq!(
         fake.applied.lock().unwrap().last(),
         Some(&(Harness::Cursor, Action::Remove))
     );
-    // Back to none, so moving on counts as skipping.
-    press("enter", cx);
-    let skipped = window
-        .read_with(cx, |view, _| view.skipped.clone())
-        .unwrap();
-    assert_eq!(skipped, [Step::Agents]);
-    assert_eq!(fake.applied.lock().unwrap().len(), 2);
     assert_eq!(version(cx), 0);
 }
 
