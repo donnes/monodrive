@@ -192,7 +192,7 @@ pub struct Pane {
     /// Scroll to the selection once the layout settles (after a view switch).
     reveal_pending: bool,
     /// Every thumbnail asked for and not yet given back, loaded or not.
-    thumbs: HashMap<Thumb, Option<Arc<RenderImage>>>,
+    pub(super) thumbs: HashMap<Thumb, Option<Arc<RenderImage>>>,
     /// The thumbnails the last frame drew; the rest are given back.
     drawn: HashSet<Thumb>,
     /// Changes that arrived while a listing was on its way, checked against
@@ -255,6 +255,14 @@ impl Pane {
             if query != this.query {
                 this.query = query;
                 this.reload(cx);
+            }
+        })
+        .detach();
+        // Cleanup otherwise runs while drawing, and a closed tab, pane or window
+        // doesn't draw again. GPUI keeps a loaded asset until it's removed.
+        cx.on_release(|this, cx| {
+            for (thumb, image) in this.thumbs.drain() {
+                thumbnails::release(&thumb, image, None, cx);
             }
         })
         .detach();
@@ -3102,7 +3110,7 @@ impl Pane {
             .collect();
         for thumb in gone {
             let image = self.thumbs.remove(&thumb).flatten();
-            thumbnails::release(&thumb, image, window, cx);
+            thumbnails::release(&thumb, image, Some(&mut *window), cx);
         }
         let can_make_here = self.takes_files(cx);
         div()

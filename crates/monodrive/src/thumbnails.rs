@@ -36,7 +36,7 @@ pub fn wanted(entry: &Entry) -> bool {
             .is_some_and(|ext| PICTURES.contains(&ext.to_lowercase().as_str()))
 }
 
-struct Thumbnail;
+pub(crate) struct Thumbnail;
 
 /// How many thumbnails decode at once.
 const DECODERS: usize = 2;
@@ -113,11 +113,17 @@ pub fn get(thumb: &Thumb, window: &mut Window, cx: &mut App) -> Option<Arc<Rende
 }
 
 /// Gives back a thumbnail no longer drawn, in memory and on the GPU; one
-/// still decoding is dropped when it finishes.
-pub fn release(thumb: &Thumb, image: Option<Arc<RenderImage>>, window: &mut Window, cx: &mut App) {
+/// still decoding is dropped when it finishes. `window` is the window being
+/// drawn, which `App` can't reach from inside its update.
+pub fn release(
+    thumb: &Thumb,
+    image: Option<Arc<RenderImage>>,
+    window: Option<&mut Window>,
+    cx: &mut App,
+) {
     cx.remove_asset::<Thumbnail>(thumb);
     if let Some(image) = image {
-        cx.drop_image(image, Some(window));
+        cx.drop_image(image, window);
     }
 }
 

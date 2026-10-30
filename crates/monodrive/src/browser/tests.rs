@@ -2,6 +2,7 @@ use super::pane::*;
 use super::*;
 use crate::pasteboard::Pasteboard;
 use crate::preferences::View;
+use crate::thumbnails::{Thumb, Thumbnail};
 use gpui::{Keystroke, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point};
 use monodrive_core::entries::{Entry, Kind, Sort, SortBy};
 use monodrive_core::ops::Origin;
@@ -1631,4 +1632,50 @@ fn a_new_folder_made_after_leaving_its_tab_leaves_the_keys_alone(cx: &mut TestAp
     assert!(made_in.read_with(cx, |pane, _| pane.renaming.is_none()));
     assert!(keys_on_the_list(&browser, cx));
     release(owned, cx);
+}
+
+/// A folder holding one picture, and the pane's thumbnails once the grid drew
+/// it.
+fn drawn_thumbs(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Vec<Thumb> {
+    press(cx, "cmd-2");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    in_pane(browser, cx, |pane, _| pane.thumbs.keys().cloned().collect())
+}
+
+#[gpui::test]
+fn closing_a_tab_or_a_pane_gives_back_its_thumbnails(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (one, two) = (dir.path().join("one"), dir.path().join("two"));
+    for (folder, side) in [(&one, 40), (&two, 50)] {
+        std::fs::create_dir(folder).unwrap();
+        image::RgbaImage::new(side, side)
+            .save(folder.join("picture.png"))
+            .unwrap();
+    }
+    let (browser, cx) = browse(&one, cx);
+    // A second tab on the other picture, then close it.
+    press(cx, "cmd-t");
+    on_pane(&browser, cx, |pane, cx| pane.navigate(two.clone(), cx));
+    cx.run_until_parked();
+    let thumbs = drawn_thumbs(&browser, cx);
+    assert_eq!(thumbs.len(), 1);
+    let cached = |thumb: &Thumb, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| cx.has_asset::<Thumbnail>(thumb))
+    };
+    assert!(cached(&thumbs[0], cx));
+    press(cx, "cmd-w");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!cached(&thumbs[0], cx));
+    // The same for one of two panes.
+    press(cx, "cmd-alt-s");
+    on_pane(&browser, cx, |pane, cx| pane.navigate(two.clone(), cx));
+    cx.run_until_parked();
+    let thumbs = drawn_thumbs(&browser, cx);
+    assert!(cached(&thumbs[0], cx));
+    press(cx, "cmd-alt-s");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!cached(&thumbs[0], cx));
 }
