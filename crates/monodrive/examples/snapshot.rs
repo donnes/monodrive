@@ -30,6 +30,9 @@
 //! `sidebar-closed.png` and `sidebar-closed-split.png` have no sidebar, and
 //! `unavailable.png` is a restored tab whose drive is gone.
 //!
+//! `drag-move.png` and `drag-copy.png` catch a drag over a folder, with its
+//! outline and pill, and `drag-pin.png` one between favorites, with the line.
+//!
 //! `onboarding-welcome.png`, `onboarding-access.png`,
 //! `onboarding-access-asked.png`, `onboarding-access-granted.png`,
 //! `onboarding-access-reopen.png`, `onboarding-agents.png`,
@@ -41,7 +44,10 @@
 //! `target/snapshots/light`.
 
 use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
-use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
+use gpui::{
+    AppContext, Focusable, HeadlessAppContext, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, point, px, size,
+};
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
@@ -361,7 +367,123 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();
     save(&mut cx, window, out, "background")?;
-    shoot_tabs(&mut cx, out, folder, &base)
+    shoot_tabs(&mut cx, out, folder, &base)?;
+    shoot_drags(&mut cx, out, folder, &base)
+}
+
+/// Sends mouse events to `window` as a person's hand would, and draws.
+fn mouse(
+    cx: &mut Cx,
+    window: gpui::WindowHandle<Browser>,
+    events: Vec<PlatformInput>,
+) -> gpui::Result<()> {
+    for event in events {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.dispatch_event(event, cx);
+            window.refresh();
+        })?;
+        cx.run_until_parked();
+    }
+    Ok(())
+}
+
+fn press_at(position: Point<Pixels>, modifiers: Modifiers) -> PlatformInput {
+    PlatformInput::MouseDown(MouseDownEvent {
+        button: MouseButton::Left,
+        position,
+        modifiers,
+        click_count: 1,
+        first_mouse: false,
+    })
+}
+
+fn release_at(position: Point<Pixels>, modifiers: Modifiers) -> PlatformInput {
+    PlatformInput::MouseUp(MouseUpEvent {
+        button: MouseButton::Left,
+        position,
+        modifiers,
+        click_count: 1,
+    })
+}
+
+fn drag_at(position: Point<Pixels>, modifiers: Modifiers) -> PlatformInput {
+    PlatformInput::MouseMove(MouseMoveEvent {
+        position,
+        pressed_button: Some(MouseButton::Left),
+        modifiers,
+    })
+}
+
+/// A drag from `from` caught over `to`, drawn, then cancelled.
+fn shoot_drag(
+    cx: &mut Cx,
+    window: gpui::WindowHandle<Browser>,
+    (from, to): (Point<Pixels>, Point<Pixels>),
+    keys: Modifiers,
+    out: &Path,
+    name: &str,
+) -> gpui::Result<()> {
+    let started = from + point(px(8.), px(0.));
+    mouse(
+        cx,
+        window,
+        vec![
+            press_at(from, keys),
+            drag_at(started, keys),
+            drag_at(to, keys),
+        ],
+    )?;
+    save(cx, window, out, name)?;
+    cx.update_window(window.into(), |_, window, cx| {
+        cx.stop_active_drag(window);
+        window.refresh();
+    })?;
+    mouse(cx, window, vec![release_at(to, keys)])
+}
+
+fn shoot_drags(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
+    cx.update(|cx| cx.set_global(base.clone()));
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    // The list's rows and the sidebar's favorites, as the default frame lays
+    // them out. Row 1 is a folder, and rows 5 to 7 are files.
+    let row = |ix: f32| point(px(300.), px(73. + 28. * (ix + 0.5)));
+    shoot_drag(
+        cx,
+        window,
+        (row(5.), row(1.)),
+        Modifiers::default(),
+        out,
+        "drag-move",
+    )?;
+    // Three selected, and ⌥ held.
+    let chosen = Modifiers {
+        platform: true,
+        ..Modifiers::default()
+    };
+    mouse(
+        cx,
+        window,
+        [row(6.), row(7.)]
+            .into_iter()
+            .flat_map(|at| [press_at(at, chosen), release_at(at, chosen)])
+            .collect(),
+    )?;
+    let option = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    shoot_drag(cx, window, (row(6.), row(1.)), option, out, "drag-copy")?;
+    // A folder, onto the edge between Recents and the first favorite.
+    let between = point(px(120.), px(142.));
+    shoot_drag(
+        cx,
+        window,
+        (row(2.), between),
+        Modifiers::default(),
+        out,
+        "drag-pin",
+    )
 }
 
 /// The top bar with tabs, and the panes they hold.

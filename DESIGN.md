@@ -63,6 +63,12 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 Split View (⌥⌘S) puts two panes side by side, equal to begin with, each with its own column titles, files and path bar. In Rounded each is its own card with an 8 pt gap, and that gap is the divider; in Boxy they touch. Each pane has a 1 pt border: `accent()` on the one commands act on, 0.06 on the other, so turning it on moves nothing else. The divider drags, stops 240 pt from either side, and a double-click makes them equal again. A narrow list drops columns rather than the name, which keeps 160 pt: Kind goes first, then Date Modified, then Size.
 
+### Dragging files
+
+Pressing an item's icon or name starts a drag once the pointer moves; on a selected list row, any part of the row does. Anywhere else a press starts the marquee. An item outside the selection becomes the selection first, as a click would; ⌘ or ⇧ add to it as they do on a click. The pointer carries a 32 pt icon with a count badge when there's more than one.
+
+What a drop would land on gets `drop_outline`, 2 pt of accent inside its edge: a folder's row or cell, a crumb, a tab, a sidebar row, or the whole pane for the folder it shows. Between favorites, the gap gets `insertion_line`. A 28 pt pill sits by the pointer, on a `Popover` surface, and says what will happen: `Move report.pdf to Inbox`, `Copy 3 items to Projects`, `Pin docs to Favorites`. It changes with ⌥ and ⌘ while the pointer rests, and flips to the pointer's other side at the window's edge. A drop that would do nothing has no outline and its pill says why, at 0.65: `Already in Inbox`. Over what takes nothing, there's no pill. Esc cancels. Nothing opens on hover.
+
 ### A location that can't open
 
 A restored tab whose drive or folder is gone, or that would raise a privacy prompt, shows what's wrong in the middle of the pane: its name in `TEXT_TITLE`, one line of why, then Back and Go to Folder, and Open when a person has to ask. No file shows and nothing can land there, and the path bar hides, so nothing reaches for a path another drive may have taken. It opens by itself when its drive comes back.
@@ -126,7 +132,7 @@ Ink is the theme's content color at a fixed alpha, through `content()`. Nothing 
 
 ### Elevation
 
-Two levels, both from `floating`: `Popover` for menus, popovers and toasts, and `Sheet` for sheets over `scrim`. Nothing else casts a shadow, except a control's knob or raised segment. Floating surfaces are frosted in dark themes and opaque in light ones.
+Two levels, both from `floating`: `Popover` for menus, popovers, toasts and the drag's pill, and `Sheet` for sheets over `scrim`. Nothing else casts a shadow, except a control's knob or raised segment. Floating surfaces are frosted in dark themes and opaque in light ones.
 
 ### Motion
 
@@ -159,6 +165,7 @@ All in `theme.rs`. Each returns an element the caller extends.
 - `field(border)`: a text field's outline.
 - `switch(on)`: a switch's look, without its role or handlers.
 - `row_slot(id)`: where a stacked row's role and handlers go, gap included. `row(active)`: the row inside it, in a menu, picker or popover. `row_muted(active)` is its secondary ink. `destructive_row(active)` and `destructive_ink(active)` are the same for a command marked `destructive`.
+- `drop_outline()`: what a drop would land on, over it; the caller gives it the shape's radius. `insertion_line()`: where a drop would land between stacked rows, in the gap under the row above.
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.
 - `icon(path, side)`, `section_label(label)`.

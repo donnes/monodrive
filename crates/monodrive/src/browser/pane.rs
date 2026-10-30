@@ -3,6 +3,7 @@
 //! What's window-wide (toasts, sheets, the jobs ring, the sidebar) belongs to
 //! `Browser`, which a pane reaches through `PaneEvent`.
 
+use super::drag::{Drag, Spot, Target};
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, Eject,
     EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
@@ -240,6 +241,11 @@ pub struct Pane {
     pub(super) missing: HashSet<PathBuf>,
     backdrop: Entity<Backdrop>,
     pub(super) chrome: Chrome,
+    /// The window's drag of files.
+    pub(super) drag: Drag,
+    /// This press landed on an item, so what it starts is a drag of the item
+    /// and not a rectangle.
+    pub(super) grabbed: bool,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -248,6 +254,7 @@ impl Pane {
     pub(super) fn new(
         opening: Opening,
         index: Arc<OnceLock<Result<Index, String>>>,
+        drag: Drag,
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| TextField::new("Search", "Search", cx));
@@ -325,6 +332,8 @@ impl Pane {
             missing: HashSet::new(),
             backdrop: cx.new(|_| Backdrop::default()),
             chrome: Chrome::default(),
+            drag,
+            grabbed: false,
         }
     }
 
@@ -2019,6 +2028,10 @@ impl Pane {
         let ellipsis =
             text_width(COLLAPSED, theme::TEXT_SMALL, FontWeight::NORMAL, window) + CRUMB_PADDING;
         let hidden = hidden_levels(&widths, ellipsis, room);
+        // The folder itself has its pane's say on whether files land in it.
+        let takes_here = self.takes_files(cx);
+        let dragging = self.drag.active();
+        let id = cx.entity_id();
         div()
             .flex_shrink_0()
             .max_w(px(most))
@@ -2046,6 +2059,14 @@ impl Pane {
                     .map(|(ix, path)| {
                         let name = level_name(&path);
                         let here = ix == last;
+                        let spot = Spot::Crumb(id, ix);
+                        let outlined = self.drag.outlines(&spot);
+                        let drops = dragging && (!here || takes_here);
+                        let target = drops.then(|| Target::Folder {
+                            spot,
+                            path: path.clone(),
+                            name: name.clone(),
+                        });
                         // Clicking an ancestor selects the folder on the way back down.
                         let child = current
                             .ancestors()
@@ -2062,6 +2083,7 @@ impl Pane {
                             .child(
                                 div()
                                     .id(("path-step", ix))
+                                    .debug_selector(move || format!("crumb-{ix}"))
                                     .role(gpui::Role::Link)
                                     .aria_label(name.clone())
                                     .px(px(theme::CRUMB_INSET))
@@ -2089,7 +2111,14 @@ impl Pane {
                                                 ))
                                         }
                                     })
-                                    .child(name),
+                                    .when_some(target, |d, target| {
+                                        let drag = self.drag.clone();
+                                        d.on_mouse_move(move |_, _, _| drag.offer(target.clone()))
+                                    })
+                                    .child(name)
+                                    .when(outlined, |d| {
+                                        d.relative().child(theme::drop_outline().rounded_full())
+                                    }),
                             )
                     }),
             )
@@ -2166,6 +2195,8 @@ impl Pane {
         let (cell, height) = (self.cell_width, grid_cell(prefs.grid_icon).1);
         let across = self.across;
         let active = self.list_active(window, cx);
+        let drops = self.drag.active() && !self.in_trash(cx);
+        let id = cx.entity_id();
         // Sharp on Retina screens.
         let pixels = (side * window.scale_factor()).ceil() as u32;
         range
@@ -2202,6 +2233,8 @@ impl Pane {
                                 .into_any_element(),
                             None => file_icons::icon(entry, side, window, cx),
                         };
+                        let rename = self.rename_field(&entry.path, cell - 8., cx);
+                        let grabs = !missing && rename.is_none();
                         div()
                             .id(ix)
                             .w(px(cell))
@@ -2215,14 +2248,18 @@ impl Pane {
                             .pt(px(8.))
                             .child(
                                 div()
+                                    .id(("grab-art", ix))
                                     .p_1()
                                     .rounded(px(theme::RADIUS_ROW))
                                     .when(selected, |d| d.bg(content(0.14)))
+                                    .when(grabs, |d| Self::grab(d, ix, cx))
                                     .child(art),
                             )
-                            .child(match self.rename_field(&entry.path, cell - 8., cx) {
+                            .child(match rename {
                                 Some(field) => field.text_size(px(label)).into_any_element(),
                                 None => div()
+                                    .id(("grab-name", ix))
+                                    .when(grabs, |d| Self::grab(d, ix, cx))
                                     .max_w(px(cell - 8.))
                                     .px(px(6.))
                                     .rounded(px(theme::RADIUS_ROW))
@@ -2252,6 +2289,15 @@ impl Pane {
                                 this.click_entry(ix, event, window, cx)
                             }))
                             .map(|d| Self::context_target(d, ix, cx))
+                            .when(drops, |d| {
+                                d.on_mouse_move(
+                                    cx.listener(move |this, _, _, _| this.offer_row(ix, id)),
+                                )
+                            })
+                            .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
+                                d.relative()
+                                    .child(theme::drop_outline().rounded(px(theme::RADIUS_ROW)))
+                            })
                     });
                 div().flex().px_1().children(cells).into_any_element()
             })
@@ -2271,6 +2317,8 @@ impl Pane {
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
         // Finder greys the selection when the list isn't where keys go.
         let active = self.list_active(window, cx);
+        let drops = self.drag.active() && !self.in_trash(cx);
+        let id = cx.entity_id();
         range
             .filter_map(|ix| {
                 let entry = self.entries.get(ix)?;
@@ -2289,6 +2337,8 @@ impl Pane {
                 } else {
                     content(0.65)
                 };
+                let rename = self.rename_field(&entry.path, 260., cx);
+                let grabs = !missing && rename.is_none();
                 Some(
                     div()
                         .id(ix)
@@ -2318,17 +2368,28 @@ impl Pane {
                                 .items_center()
                                 .gap_2()
                                 .when(tree, |d| d.child(self.disclosure(ix, depth, open, cx)))
-                                .child(file_icons::icon(entry, icon_size, window, cx))
-                                .child(match self.rename_field(&entry.path, 260., cx) {
-                                    // The name stays put; its outline grows around it.
-                                    Some(field) => field.ml(px(-7.)).into_any_element(),
-                                    None => div()
+                                // As in Finder, the rest of a row that isn't
+                                // selected starts a rectangle.
+                                .child(
+                                    div()
+                                        .id(("grab", ix))
                                         .flex_shrink_0()
-                                        .max_w(px(360.))
-                                        .truncate()
-                                        .child(entry.name.clone())
-                                        .into_any_element(),
-                                })
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .when(grabs && !selected, |d| Self::grab(d, ix, cx))
+                                        .child(file_icons::icon(entry, icon_size, window, cx))
+                                        .child(match rename {
+                                            // The name stays put; its outline grows around it.
+                                            Some(field) => field.ml(px(-7.)).into_any_element(),
+                                            None => div()
+                                                .flex_shrink_0()
+                                                .max_w(px(360.))
+                                                .truncate()
+                                                .child(entry.name.clone())
+                                                .into_any_element(),
+                                        }),
+                                )
                                 .children(parent.map(|parent| {
                                     div().min_w_0().truncate().text_color(muted).child(parent)
                                 })),
@@ -2355,10 +2416,20 @@ impl Pane {
                             }))
                         })
                         .when(missing, |d| d.opacity(0.5))
+                        .when(grabs && selected, |d| Self::grab(d, ix, cx))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_entry(ix, event, window, cx)
                         }))
                         .map(|d| Self::context_target(d, ix, cx))
+                        .when(drops, |d| {
+                            d.on_mouse_move(
+                                cx.listener(move |this, _, _, _| this.offer_row(ix, id)),
+                            )
+                        })
+                        .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
+                            d.relative()
+                                .child(theme::drop_outline().rounded(px(theme::RADIUS_ROW)))
+                        })
                         .into_any_element(),
                 )
             })
@@ -3224,6 +3295,9 @@ impl Pane {
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     this.focus_list(window, cx);
                     this.swept = false;
+                    if std::mem::take(&mut this.grabbed) {
+                        return;
+                    }
                     let at = this.listing_point(event.position);
                     this.marquee = Some(Marquee {
                         start: at,
@@ -3281,6 +3355,9 @@ impl Render for Pane {
             .update(cx, |backdrop, cx| backdrop.set(look, cx));
         let list = self.file_list(window, cx);
         let (date, size, kind) = columns(self.chrome.width);
+        let id = cx.entity_id();
+        let dropping_here = self.drag.active() && self.takes_files(cx);
+        let outlined = self.drag.outlines(&Spot::Pane(id));
         div()
             .relative()
             .size_full()
@@ -3326,5 +3403,20 @@ impl Render for Pane {
             })
             .child(list)
             .children(self.path_bar(window, cx))
+            .when(dropping_here, |d| {
+                d.on_mouse_move(cx.listener(move |this, _, _, _| {
+                    this.drag.offer(Target::Folder {
+                        spot: Spot::Pane(id),
+                        path: this.folder().to_path_buf(),
+                        name: level_name(this.folder()),
+                    });
+                }))
+            })
+            .when(outlined, |d| {
+                d.child(theme::drop_outline().when(!boxy, |d| {
+                    // The card's corners inside its border.
+                    d.rounded(px(theme::RADIUS_CARD - 1.))
+                }))
+            })
     }
 }

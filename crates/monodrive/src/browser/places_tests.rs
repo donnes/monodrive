@@ -1770,3 +1770,122 @@ fn a_restored_place_on_a_drive_is_checked_for_consent_before_it_is_touched(
     assert_eq!(shown(&browser, cx).0, ["mine.txt"]);
     assert_eq!(here(&browser, cx), mount.join("link"));
 }
+
+/// Presses on what's at `from`, starts a drag and carries it to `to`.
+fn carry(from: Point<Pixels>, to: Point<Pixels>, keys: &str, cx: &mut VisualTestContext) {
+    cx.simulate_mouse_down(from, MouseButton::Left, with(keys));
+    for at in [from + point(px(8.), px(0.)), to] {
+        cx.simulate_mouse_move(at, MouseButton::Left, with(keys));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+}
+
+fn says(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
+    browser.read_with(cx, |b, _| b.drag.decision(|_, d| d.says()))
+}
+
+#[gpui::test]
+fn a_favorite_takes_files_and_the_edges_between_favorites_pin_folders(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::write(project.join("b.txt"), "").unwrap();
+    let world = world(vec![startup()], cx);
+    let (one, two) = two_favorites(&world);
+    let mut owned = own(cx);
+    let (browser, cx) = open(&world, &project, cx);
+    let (docs, file) = (row(&browser, 0, cx), row(&browser, 2, cx));
+    let name_of = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+    // The middle of a favorite is that folder.
+    let middle = center(cx, "place-1");
+    carry(file, middle, "", cx);
+    assert_eq!(
+        says(&browser, cx).unwrap(),
+        format!("Move a.txt to {}", name_of(&one))
+    );
+    cx.simulate_mouse_up(middle, MouseButton::Left, with(""));
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(one.join("a.txt").exists());
+    // A file on a favorite's edge has nowhere to pin, so it still goes in.
+    let edge = cx.debug_bounds("place-2").unwrap().top_center() + point(px(0.), px(2.));
+    let file = row(&browser, 2, cx);
+    carry(file, edge, "", cx);
+    assert_eq!(
+        says(&browser, cx).unwrap(),
+        format!("Move b.txt to {}", name_of(&two))
+    );
+    press(cx, "escape");
+    cx.simulate_mouse_up(edge, MouseButton::Left, with(""));
+    // A folder on the same edge pins between the two, with the line there.
+    carry(docs, edge, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Pin docs to Favorites");
+    assert_eq!(browser.read_with(cx, |b, _| b.drag.pins_at()), Some(1));
+    cx.simulate_mouse_up(edge, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    let pinned = project.canonicalize().unwrap().join("docs");
+    assert_eq!(saved(&world.store)[..3], [one.clone(), pinned, two.clone()]);
+    // Pinning moves nothing.
+    assert!(project.join("docs/inner.md").exists());
+    // The edge under the last row pins after it, and Recents' before the first.
+    let zeta = row(&browser, 1, cx);
+    let under = cx.debug_bounds("place-0").unwrap().bottom_center() + point(px(0.), px(1.));
+    carry(zeta, under, "", cx);
+    assert_eq!(browser.read_with(cx, |b, _| b.drag.pins_at()), Some(0));
+    cx.simulate_mouse_up(under, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert_eq!(
+        saved(&world.store)[0],
+        project.canonicalize().unwrap().join("zeta")
+    );
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn a_drive_takes_a_copy_as_another_volume_and_a_read_only_one_takes_nothing(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, project) = folder();
+    let (ext, locked) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let drive = ext.path().canonicalize().unwrap();
+    let world = world(
+        vec![
+            startup(),
+            volume("Ext", &drive, "ext", 100, 10),
+            Volume {
+                read_only: true,
+                ..volume("Locked", locked.path(), "locked", 100, 10)
+            },
+        ],
+        cx,
+    );
+    let mut owned = own(cx);
+    let (browser, cx) = open(&world, &project, cx);
+    let first = favorites(&browser, cx).len() + 1;
+    let (ext_row, locked_row) = (
+        center(cx, &format!("place-{}", first + 1)),
+        center(cx, &format!("place-{}", first + 2)),
+    );
+    let file = row(&browser, 2, cx);
+    carry(file, ext_row, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Copy a.txt to Ext");
+    // ⌘ forces a move even there.
+    cx.simulate_modifiers_change(with("cmd"));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to Ext");
+    cx.simulate_modifiers_change(Default::default());
+    cx.simulate_mouse_move(locked_row, MouseButton::Left, with(""));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(says(&browser, cx), None);
+    cx.simulate_mouse_move(ext_row, MouseButton::Left, with(""));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(ext_row, MouseButton::Left, with(""));
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(drive.join("a.txt").exists() && project.join("a.txt").exists());
+    release(owned, cx);
+}

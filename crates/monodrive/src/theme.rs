@@ -457,6 +457,25 @@ pub fn row_slot(id: impl Into<ElementId>) -> Stateful<Div> {
         .cursor_pointer()
 }
 
+/// What says a drop would land here, over what it's on: 2 pt of accent inside
+/// its edge, so nothing moves. The caller gives it the shape's radius.
+pub fn drop_outline() -> Div {
+    div().absolute().inset_0().border_2().border_color(accent())
+}
+
+/// Where a drop would land between two stacked rows: the accent, filling the
+/// gap under the row above, whose slot needs `relative()`.
+pub fn insertion_line() -> Div {
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .h(px(ROW_GAP))
+        .rounded_full()
+        .bg(accent())
+}
+
 /// A row in a menu, a picker or a popover, inside a [`row_slot`]. `active` is
 /// the row the keys or the pointer are on: the accent with its ink.
 pub fn row(active: bool) -> Div {

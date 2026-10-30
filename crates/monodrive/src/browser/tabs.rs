@@ -1,6 +1,7 @@
 //! The tabs of a window and the top bar that shows them. A tab holds its
 //! panes; only the active tab's are drawn, listed or told about the disk.
 
+use super::drag::{Spot, Target};
 use super::pane::{Opening, Pane, Stop};
 use super::{Browser, drag_area, pane_room};
 use crate::preferences::Preferences;
@@ -115,7 +116,8 @@ impl Browser {
     /// A new pane in this window, not yet listed.
     pub(super) fn add_pane(&mut self, opening: Opening, cx: &mut Context<Self>) -> Entity<Pane> {
         let index = self.index.clone();
-        let pane = cx.new(|cx| Pane::new(opening, index, cx));
+        let drag = self.drag.clone();
+        let pane = cx.new(|cx| Pane::new(opening, index, drag, cx));
         cx.subscribe(&pane, Self::pane_event).detach();
         cx.observe(&pane, |_, _, cx| cx.notify()).detach();
         pane
@@ -415,6 +417,15 @@ impl Browser {
         let active = ix == self.active;
         let hovered = self.hovered_tab == Some(ix);
         let alone = self.tabs.len() == 1;
+        // A drop goes to its folder, and hovering doesn't switch to it.
+        let target = self.drag.active().then(|| &self.tabs[ix]).and_then(|tab| {
+            let pane = tab.focused().read(cx);
+            pane.takes_files(cx).then(|| Target::Folder {
+                spot: Spot::Tab(ix),
+                path: pane.folder().to_path_buf(),
+                name: title.clone(),
+            })
+        });
         div()
             .id(("tab", ix))
             .debug_selector(move || format!("tab-{ix}"))
@@ -476,6 +487,13 @@ impl Browser {
             })
             // ✕ sits over the name's end, so showing it moves nothing.
             .when(hovered && !alone, |d| d.pr(px(24.)))
+            .when_some(target, |d, target| {
+                let drag = self.drag.clone();
+                d.on_mouse_move(move |_, _, _| drag.offer(target.clone()))
+            })
+            .when(self.drag.outlines(&Spot::Tab(ix)), |d| {
+                d.child(theme::drop_outline().rounded_full())
+            })
             .child(div().min_w_0().truncate().child(title))
             .when(hovered && !alone, |d| {
                 d.child(

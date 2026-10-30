@@ -3,6 +3,7 @@
 //! Everything shown is read off the UI thread and read again when a watch
 //! hears a change, so nothing here polls.
 
+use super::drag::{Spot, Target};
 use super::pane::Stop;
 use super::{
     Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, OpenInNewTab, OpenPlace,
@@ -197,6 +198,8 @@ impl Render for DraggedFavorite {
 
 const ROW_HEIGHT: f32 = theme::SIDEBAR_ROW_HEIGHT;
 const DRIVE_HEIGHT: f32 = 40.;
+/// How far into a favorite its edge counts as between rows, as in Finder.
+const PIN_EDGE: f32 = 8.;
 
 pub(crate) fn label_of(path: &Path) -> String {
     if path == home() {
@@ -393,6 +396,16 @@ impl Browser {
     pub(super) fn add_to_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.change_places(cx, move |store, volumes| {
             store.pin(&path, None, volumes).map(|_| ())
+        });
+    }
+
+    /// A drop between favorites: pins `paths` from position `at`.
+    pub(super) fn pin_folders(&mut self, paths: Vec<PathBuf>, at: usize, cx: &mut Context<Self>) {
+        self.change_places(cx, move |store, volumes| {
+            for (offset, path) in paths.iter().enumerate() {
+                store.pin(path, Some(at + offset), volumes)?;
+            }
+            Ok(())
         });
     }
 
@@ -640,6 +653,59 @@ impl Browser {
             })
     }
 
+    /// What a sidebar row needs while files are dragged: it takes them into
+    /// `folder` if it has one, and shows whether a drop would land.
+    fn drop_row(
+        &self,
+        slot: Stateful<gpui::Div>,
+        ix: usize,
+        folder: Option<(PathBuf, String)>,
+    ) -> Stateful<gpui::Div> {
+        let spot = Spot::Place(ix);
+        let outlined = self.drag.outlines(&spot);
+        slot.when_some(folder.filter(|_| self.drag.active()), |d, (path, name)| {
+            let drag = self.drag.clone();
+            let target = Target::Folder { spot, path, name };
+            d.on_mouse_move(move |_, _, _| drag.offer(target.clone()))
+        })
+        .when(outlined, |d| {
+            d.relative().child(
+                theme::drop_outline()
+                    .bottom(px(theme::ROW_GAP))
+                    .rounded(px(theme::RADIUS_ROW)),
+            )
+        })
+    }
+
+    /// The edges of a row in Favorites while folders are dragged, each
+    /// pinning at its position; the line shows in the gap under the row above.
+    fn pin_edge(&self, at: usize, top: bool) -> gpui::Div {
+        let drag = self.drag.clone();
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .h(px(PIN_EDGE))
+            .map(|d| if top { d.top_0() } else { d.bottom_0() })
+            .debug_selector(move || format!("pin-edge-{at}-{top}"))
+            .on_mouse_move(move |_, _, _| drag.offer(Target::Pin(at)))
+    }
+
+    /// `slot`, the row at position `at` in Favorites, with its edges while
+    /// folders are dragged. `first` has none above it to pin before.
+    fn pin_edges(&self, slot: Stateful<gpui::Div>, at: usize, first: bool) -> Stateful<gpui::Div> {
+        let pins = self.drag.folders();
+        slot.when(pins, |d| {
+            d.relative()
+                .when(!first, |d| d.child(self.pin_edge(at, true)))
+                .child(self.pin_edge(if first { at } else { at + 1 }, false))
+        })
+        .when(
+            self.drag.pins_at() == Some(if first { at } else { at + 1 }),
+            |d| d.relative().child(theme::insertion_line()),
+        )
+    }
+
     fn recents_row(
         &self,
         here: &Here,
@@ -649,6 +715,7 @@ impl Browser {
         let selected = !here.searching && here.recents;
         Self::slot(0, selected, true, cx)
             .aria_label("Recents")
+            .map(|d| self.pin_edges(d, 0, true))
             .child(
                 Self::row(0, selected, true, cursor)
                     .h(px(ROW_HEIGHT))
@@ -741,6 +808,7 @@ impl Browser {
                     .on_click(cx.listener(move |this, _, _, cx| this.remove_favorite(fav, cx))),
                 )
             });
+        let folder = place.at().map(|path| (path.to_path_buf(), label.clone()));
         Self::slot(ix, selected, !editing, cx)
             .aria_label(label)
             .when(editing, |d| {
@@ -749,6 +817,8 @@ impl Browser {
                 }))
             })
             .child(row)
+            .map(|d| self.drop_row(d, ix, folder))
+            .map(|d| self.pin_edges(d, fav, false))
     }
 
     fn volume_row(
@@ -825,9 +895,12 @@ impl Browser {
                             .bg(content(0.55)),
                     )
             }));
+        // A drive that can't be written to takes nothing.
+        let folder = (!volume.read_only).then(|| (volume.mount.clone(), volume.name.clone()));
         Self::slot(ix, selected, true, cx)
             .aria_label(volume.name.clone())
             .child(row)
+            .map(|d| self.drop_row(d, ix, folder))
     }
 
     fn favorites_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

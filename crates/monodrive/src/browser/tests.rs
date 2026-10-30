@@ -245,10 +245,21 @@ pub(super) fn row(
     })
 }
 
+/// List row `ix` where it holds neither icon nor name, where a press starts
+/// a rectangle.
+pub(super) fn blank(
+    browser: &Entity<Browser>,
+    ix: usize,
+    cx: &mut VisualTestContext,
+) -> Point<Pixels> {
+    row(browser, ix, cx) + gpui::point(px(240.), px(0.))
+}
+
 pub(super) fn with(modifiers: &str) -> Modifiers {
     Modifiers {
         platform: modifiers.contains("cmd"),
         shift: modifiers.contains("shift"),
+        alt: modifiers.contains("alt"),
         ..Modifiers::default()
     }
 }
@@ -323,7 +334,7 @@ fn shift_arrows_extend_and_select_all_and_deselect_all(cx: &mut TestAppContext) 
 fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
     let (_dir, folder) = sized();
     let (browser, cx) = browse(&folder, cx);
-    let (from, to) = (row(&browser, 0, cx), row(&browser, 2, cx));
+    let (from, to) = (blank(&browser, 0, cx), blank(&browser, 2, cx));
     cx.simulate_mouse_down(from, MouseButton::Left, with(""));
     cx.simulate_mouse_move(to, MouseButton::Left, with(""));
     cx.simulate_mouse_up(to, MouseButton::Left, with(""));
@@ -335,14 +346,14 @@ fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
     // ⌘ adds a drag to what was selected.
     let last = row(&browser, 3, cx);
     cx.simulate_click(last, with(""));
-    let (from, to) = (row(&browser, 0, cx), row(&browser, 1, cx));
+    let (from, to) = (blank(&browser, 0, cx), blank(&browser, 1, cx));
     cx.simulate_mouse_down(from, MouseButton::Left, with("cmd"));
     cx.simulate_mouse_move(to, MouseButton::Left, with("cmd"));
     cx.simulate_mouse_up(to, MouseButton::Left, with("cmd"));
     assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "d.txt"]);
     // A drag that ends on the row it began on is a drag, not a click
     // that would toggle that row back out.
-    let start = row(&browser, 2, cx);
+    let start = blank(&browser, 2, cx);
     let end = start + gpui::point(px(80.), px(0.));
     cx.simulate_mouse_down(start, MouseButton::Left, with("cmd"));
     cx.simulate_mouse_move(end, MouseButton::Left, with("cmd"));
@@ -364,6 +375,9 @@ fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
         })
     };
     let (from, to) = (cell(1, cx), cell(2, cx));
+    // Beside the icon, in the blank part of its cell.
+    let margin = in_pane(&browser, cx, |browser, _| browser.cell_width / 2. - 2.);
+    let from = from - gpui::point(px(margin), px(0.));
     cx.simulate_mouse_down(from, MouseButton::Left, with(""));
     cx.simulate_mouse_move(to, MouseButton::Left, with(""));
     cx.simulate_mouse_up(to, MouseButton::Left, with(""));
@@ -407,7 +421,7 @@ fn a_drag_past_the_bottom_scrolls_and_keeps_selecting(cx: &mut TestAppContext) {
         std::fs::write(tall.join(format!("{ix:03}.txt")), "").unwrap();
     }
     let (browser, cx) = browse(&tall, cx);
-    let start = row(&browser, 0, cx);
+    let start = blank(&browser, 0, cx);
     let below = in_pane(&browser, cx, |browser, _| {
         browser.list_bounds.get().bottom_left()
     }) + gpui::point(px(60.), px(80.));
@@ -659,7 +673,7 @@ pub(super) fn own(cx: &mut TestAppContext) -> Owned {
 /// Waits for the owner's jobs to end without polling: the window lets go,
 /// the owner exits once its jobs are done, and the next one reads how
 /// they ended from the journal.
-fn restart(owned: &mut Owned, cx: &mut VisualTestContext) {
+pub(super) fn restart(owned: &mut Owned, cx: &mut VisualTestContext) {
     cx.update(|_, cx| drop(cx.remove_global::<Operations>()));
     let (serving, operations) = {
         let ended = std::mem::replace(&mut owned.serving, std::thread::spawn(|| Ok(())));

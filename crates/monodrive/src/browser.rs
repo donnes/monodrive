@@ -1,11 +1,14 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
+mod drag;
 mod pane;
 mod sidebar;
 mod tabs;
 mod trash;
 
+#[cfg(test)]
+mod drag_tests;
 #[cfg(test)]
 mod places_tests;
 #[cfg(test)]
@@ -237,6 +240,8 @@ pub struct Browser {
     hovered_tab: Option<usize>,
     /// The divider between two panes, while it's dragged.
     split_drag: Option<SplitDrag>,
+    /// Files being dragged over this window.
+    drag: drag::Drag,
     /// Started with the window; searches wait on it.
     index: Arc<OnceLock<Result<Index, String>>>,
     /// Saves the window's frame once a move or resize settles.
@@ -461,6 +466,7 @@ impl Browser {
             tab_scroll: ScrollHandle::new(),
             hovered_tab: None,
             split_drag: None,
+            drag: drag::Drag::default(),
             index,
             frame_save: Task::ready(()),
             _changes: Task::ready(()),
@@ -1380,6 +1386,7 @@ impl Focusable for Browser {
 
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_drag(window, cx);
         let prefs = cx.global::<Preferences>().clone();
         let system_light = matches!(
             window.appearance(),
@@ -1459,6 +1466,7 @@ impl Render for Browser {
             // the menu's commands act on what it was opened on.
             .when(!sheet && self.menu.is_none(), |d| d.key_context("Browser"))
             .track_focus(&self.focus);
+        let root = self.drags(root, cx);
         // What acts on a pane goes to the one the commands are for.
         let root = self
             .pane()
@@ -1478,9 +1486,12 @@ impl Render for Browser {
                     this.open_connect(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)))
-                // Esc closes Quick Look first, then leaves search, then lets
-                // go of the selection.
+                // Esc ends a drag first, then closes Quick Look, then leaves
+                // search, then lets go of the selection.
                 .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+                    if cx.stop_active_drag(window) {
+                        return;
+                    }
                     this.toast = None;
                     if this.close_quick_look() {
                         return;
@@ -1613,6 +1624,7 @@ impl Render for Browser {
                 Sheet::Connect(view) => view.clone().into_any_element(),
             }))
             .children(self.menu.as_ref().map(|menu| menu.view.clone()))
+            .children(self.drag_pill(window))
             // Last, so its window listeners run before any element's.
             .children(
                 self.resizing_sidebar
