@@ -42,13 +42,17 @@ The most common defect is a change that works on the path you tested and is miss
 ## Where code lives
 
 - `crates/monodrive-core` holds the services and has no GPUI. `entries` lists folders, `index` wraps fsearch, `places` and `volumes` are the sidebar's lists and drives, `servers` mounts shares through NetFS, `mcp` is the MCP server, and `ops` changes files through the one owner process the window and every MCP server share (see `docs/operations.md`).
-- `crates/monodrive` is the GPUI app; `main.rs` decodes the command line and `lib.rs` opens the window, so benchmarks can build its views. `commands.rs` is the one table of commands that the keymap, menu bar, command palette (`palette.rs`) and Keyboard settings read; add a command there, not a key binding in a view. `browser.rs` is the window, `browser/sidebar.rs` its sidebar and the `Drives` it reaches the system through, `browser/trash.rs` the Trash's bar and Recents, `connect.rs` Connect to Server, `settings.rs` is the Settings sheet, `agents.rs` adds `monodrive mcp` to coding agents' configs for its Agents page, `preferences.rs` holds what it edits and saves it to `~/Library/Application Support/Monodrive/settings.json`, `text_field.rs` is the single-line input (cut down from Monocode's `input.rs`), `theme.rs` turns preferences into Monocode's appearance tokens, `palettes.rs` holds Monocode's color presets, `background.rs` bakes and paints the background image, `file_icons.rs` draws the icons Finder shows, through `NSWorkspace`, at the size drawn, `thumbnails.rs` decodes image thumbnails for the grid, `goto.rs` is Go to Folder, `jobs.rs` is the title bar's ring of copies and moves and its popover, `empty_trash.rs` asks before Empty Trash, `menu.rs` is the context menu (ported from Monocode's `popover.rs`), which shows the commands whose `scopes` match and that would run where it opened, `workspace.rs` hands files to Finder and Terminal through `NSWorkspace`, `frame.rs` sizes and places the window, `traffic_lights.rs` pins the macOS window buttons, and `profile.rs` is the `profile` feature's launch and frame report.
+- `crates/monodrive` is the GPUI app; `main.rs` decodes the command line and `lib.rs` opens the window, so benchmarks can build its views. `commands.rs` is the one table of commands that the keymap, menu bar, command palette (`palette.rs`) and Keyboard settings read; add a command there, not a key binding in a view. `browser.rs` is the window, `browser/sidebar.rs` its sidebar and the `Drives` it reaches the system through, `browser/trash.rs` the Trash's bar and Recents, `connect.rs` Connect to Server, `settings.rs` is the Settings sheet, `agents.rs` adds `monodrive mcp` to coding agents' configs for its Agents page, `preferences.rs` holds what it edits and saves it to `~/Library/Application Support/Monodrive/settings.json`, `text_field.rs` is the single-line input (cut down from Monocode's `input.rs`), `theme.rs` turns preferences into Monocode's appearance tokens and holds the shared controls and scales, `palettes.rs` holds Monocode's color presets, `background.rs` bakes and paints the background image, `file_icons.rs` draws the icons Finder shows, through `NSWorkspace`, at the size drawn, `thumbnails.rs` decodes image thumbnails for the grid, `goto.rs` is Go to Folder, `jobs.rs` is the title bar's ring of copies and moves and its popover, `empty_trash.rs` asks before Empty Trash, `menu.rs` is the context menu (ported from Monocode's `popover.rs`), which shows the commands whose `scopes` match and that would run where it opened, `workspace.rs` hands files to Finder and Terminal through `NSWorkspace`, `frame.rs` sizes and places the window, `traffic_lights.rs` pins the macOS window buttons, and `profile.rs` is the `profile` feature's launch and frame report.
 - `assets/` holds the app icon: its Icon Composer project and the PNGs `scripts/icons` exports from it. See `assets/README.md`.
 - `vendor/` is the patched GPUI from Monocode (see rule 4).
 
+## Design
+
+Read `DESIGN.md` before any UI work. It sets the shapes, sizes, type, colors and states, and lists the shared controls in `theme.rs` that views use.
+
 ## Reusing Monocode
 
-The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migrate-monocode-to-gpui` branch. `vendor/` was synced from that branch at 7a6ea059. Prefer porting its components (`popover.rs`, `modal.rs`, the settings palettes) over writing new ones, and strip their Monocode-specific dependencies when you do. Keep its conventions: content ink at varying alpha (`theme::content`) instead of fixed greys, 32 pt sidebar rows, 24 pt chrome buttons, and the 40 pt title bar.
+The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migrate-monocode-to-gpui` branch. `vendor/` was synced from that branch at 7a6ea059. Prefer porting its components (`popover.rs`, `modal.rs`, the settings palettes) over writing new ones, strip their Monocode-specific dependencies when you do, and rebuild them on `theme.rs`'s controls. Keep its conventions where `DESIGN.md` doesn't say otherwise: content ink at varying alpha (`theme::content`) instead of fixed greys, 32 pt sidebar rows, 24 pt chrome buttons, and the 40 pt title bar. Monocode's radii don't carry over.
 
 ## Running
 
@@ -60,7 +64,7 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 
 ## Verifying
 
-- `scripts/check` runs what CI runs: format, clippy with warnings denied, and tests. Run it before you push.
+- `scripts/check` runs what CI runs: the design check, format, clippy with warnings denied, and tests. Run it before you push.
 - While iterating, run `cargo test -p <crate> <name>`.
 - Test behavior that can break: MCP protocol handling, argument decoding, path handling, listing and sorting rules, and the logic a bug fix changed. Skip tests for what types already guarantee, layout, copy text and wiring.
 - Extend an existing test before adding one. Test at the lowest layer that fails without the change.
@@ -69,7 +73,7 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 - No sleeps, polling loops or wall-clock assertions in tests.
 - `clippy.toml` enforces what it can of the rules above: no sleeps, no deleting files, and `Index::start` only where an `#[expect]` says why. CI also runs cargo-deny (`deny.toml`), so a new dependency's license must be on its allowlist.
 - Speed has budgets in `docs/performance.md`. Run the benchmarks it lists when a change touches listing, sorting, the browser's rendering or launch, and compare against the last run.
-- Visual changes get a look. `cargo run -p monodrive --example snapshot -- [folder]` draws the list and grid to `target/snapshots/` through GPUI's headless renderer: no window, no screen capture, no index. Run it before and after a change. Ask before using computer use or screen capture of the real app.
+- Visual changes get a look. `cargo run -p monodrive --example snapshot -- [folder]` draws every surface, dark and light, to `target/snapshots/` through GPUI's headless renderer: no window, no screen capture, no index. Run it before and after a change. Ask before using computer use or screen capture of the real app.
 
 ## Taste
 

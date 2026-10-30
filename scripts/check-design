@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Fails on UI values that DESIGN.md says come from theme.rs. A justified
+# exception gets `// design: <reason>` on the line or the line above it.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+find crates/monodrive/src -name '*.rs' ! -name theme.rs ! -name palettes.rs -print0 | sort -z |
+    xargs -0 awk '
+    function complain(what) {
+        printf "%s:%d: %s: %s\n", FILENAME, FNR, what, $0
+        failed = 1
+    }
+    function number_after(prefix, line,    rest) {
+        rest = substr(line, index(line, prefix) + length(prefix))
+        return rest + 0
+    }
+    FNR == 1 { excused = 0 }
+    {
+        code = $0
+        comment = index(code, "//")
+        if (comment > 0) code = substr(code, 1, comment - 1)
+        allowed = excused || $0 ~ /\/\/ design: [^ ]/
+        excused = code ~ /^[ \t]*$/ && $0 ~ /\/\/ design: [^ ]/
+        if (allowed) next
+
+        if (code ~ /\.rounded\(/ && code !~ /\.rounded\(px\((theme::)?RADIUS_(ROW|CARD|THUMB)[ )]/)
+            complain("radius outside the scale, use RADIUS_ROW, RADIUS_CARD or RADIUS_THUMB")
+        if (code ~ /\.rounded_[a-z0-9_]*\(/ && code !~ /\.rounded_full\(/)
+            complain("radius outside the scale, use RADIUS_ROW, RADIUS_CARD, RADIUS_THUMB or rounded_full")
+        if (code ~ /(^|[^a-zA-Z0-9_.])(rgb|rgba|hsl|hsla)\(/ || code ~ /gpui::(white|black)\(/)
+            complain("raw color, use a token from theme.rs")
+        if (code ~ /\.text_size\(px\([0-9]/ || code ~ /\.text_(xs|sm|base|lg|xl|[0-9]xl)\(\)/)
+            complain("text size outside the scale, use TEXT_CAPTION, TEXT_SMALL, TEXT_BODY or TEXT_TITLE")
+        if (code ~ /BoxShadow::|\.shadow\(vec!/)
+            complain("raw shadow, use floating or a shadow from theme.rs")
+        if (code ~ /[^a-z_]icon\("[^"]*", [0-9]/) {
+            match(code, /[^a-z_]icon\("[^"]*", /)
+            side = substr(code, RSTART + RLENGTH) + 0
+            if (side != 12 && side != 14 && side != 16)
+                complain("icon size outside the scale, use 12, 14 or 16")
+        }
+        if (code ~ /[^a-z_]content\(0?\.?[0-9]/) {
+            alpha = number_after("content(", code)
+            if (alpha != 1 && alpha != 0.65 && alpha != 0.55 && alpha != 0.3 && alpha != 0.2 && alpha != 0.14 && alpha != 0.12 && alpha != 0.08 && alpha != 0.06 && alpha != 0.03)
+                complain("ink alpha outside the scale in DESIGN.md")
+        }
+    }
+    END { exit failed }
+    '
