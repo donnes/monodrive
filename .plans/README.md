@@ -45,11 +45,12 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - 13: browse a ZIP like a folder, with a read-only header and Extract buttons.
 - 14: servers under Locations.
 - 15: an aligned two-pane list with a status column.
-- 16, 18: options still to be shown.
+- 16: a cataloged drive keeps its sidebar row when unplugged, with its last known contents browsable read-only under a banner.
 - 17: a report of largest files and verified duplicates, with a review before anything goes to the Trash.
+- 18: a cloud badge at the end of the row or on a grid icon's corner; clicking it downloads.
 - 19: columns with a preview in the last column; gallery as a large preview above a thumbnail strip.
 - 21: a Commands page in Settings.
-- 22: one place to manage all worktrees: scan for them, then manage and delete them.
+- 22: one place to manage all worktrees. The search index finds .git entries and Git confirms each repository. Delete moves the folder to the Trash, then removes Git's registration; refused if locked or the main worktree, and dirty or unpushed work needs an extra confirmation showing what's there.
 
 Saved browsing workspaces were dropped.
 
