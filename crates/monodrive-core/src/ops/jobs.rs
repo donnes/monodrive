@@ -800,6 +800,7 @@ impl Item<'_> {
                     done: Spot::Trash(None),
                     applied: false,
                     stamp: there_stamp,
+                    keep: Vec::new(),
                 };
                 Ok((to, Some(replacing)))
             }
@@ -922,6 +923,7 @@ impl Item<'_> {
             done: Spot::Path(to.to_path_buf()),
             applied: false,
             stamp,
+            keep: Vec::new(),
         })
         .map_err(|e| self.with_replaced(e))
         .map(|_| ())
@@ -958,6 +960,7 @@ impl Item<'_> {
                 done: Spot::Trash(None),
                 applied: false,
                 stamp,
+                keep: Vec::new(),
             })
             .map_err(|e| {
                 format!(
@@ -1011,6 +1014,7 @@ impl Item<'_> {
             done: Spot::Path(to.to_path_buf()),
             applied: false,
             stamp: made_stamp,
+            keep: Vec::new(),
         };
         // Undoing it sends it to the Trash, not back to its hidden name.
         if let Err(e) = self.apply_then(&mut placed, |step| step.undone = Spot::Trash(None)) {

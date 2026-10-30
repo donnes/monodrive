@@ -80,6 +80,21 @@ pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
     Ok((id, stamp))
 }
 
+/// A file's identity and stamp, read from what `file` has open, as
+/// `stamp` reads them from a path.
+pub fn stamp_open(file: &std::fs::File) -> io::Result<(FileId, Stamp)> {
+    let meta = file.metadata()?;
+    if meta.is_dir() {
+        return Err(io::Error::other("a folder, not a file"));
+    }
+    let stamp = Stamp {
+        entries: 0,
+        size: meta.size(),
+        digest: mix(&meta),
+    };
+    Ok((FileId::of(&meta), stamp))
+}
+
 /// One item's share of a stamp's digest. Summed, so the order a folder lists
 /// in doesn't matter; std's hasher isn't stable across releases, and the
 /// journal keeps stamps.

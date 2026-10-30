@@ -65,7 +65,7 @@ A rename into a name another item of the same operation still holds waits for th
 
 ## Duplicate cleanup
 
-`Request::TrashDuplicates` carries a storage scan's cleanup: for each group of identical files, the copies to keep and the copies to trash, each with the identity and stamp it had when it was verified. The owner trashes a group's copies only while at least one copy it keeps is still that file and stamp, and each copy only if it is too; anything else stays, with the reason. It's one operation, so one undo puts every trashed copy back. An agent's preview prints a token, and confirming runs that kept plan once. [Storage inspection](storage.md) covers how copies are verified.
+`Request::TrashDuplicates` carries a storage scan's cleanup: for each group of identical files, the copies to keep and the copies to trash, each with the identity and stamp it had when it was verified. Each copy goes to the Trash only if it's still the file and stamp it was, and only while at least one copy its group keeps still opens for reading and, through what's open, is that file and stamp; a stamp alone doesn't show read permission. That's checked just before each copy moves, since an earlier one may have been a copy another group keeps, and again on redo, where the kept copies travel with each item in the history. Anything else stays, with the reason. It's one operation, so one undo puts every trashed copy back. An agent's preview prints a token, and confirming runs that kept plan once. [Storage inspection](storage.md) covers how copies are verified.
 
 ## Trash
 

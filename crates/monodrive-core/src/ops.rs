@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// Where the owner keeps its state, and the settings it obeys.
@@ -283,6 +284,10 @@ struct Step {
     /// How the item was when Monodrive last moved or made it, so neither
     /// undo nor redo moves it once it's been edited since.
     stamp: Stamp,
+    /// A duplicate's copies kept beside it: it goes to the Trash, first or
+    /// on redo, only while one of them is still there to read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    keep: Vec<Seen>,
 }
 
 impl Step {
@@ -330,6 +335,12 @@ impl Step {
             && disk::id(to).is_some_and(|there| there != self.id && !leaving.contains(&there))
         {
             return Err(format!("{} already exists.", to.display()));
+        }
+        if done && !self.keep.is_empty() && !self.keep.iter().any(readable) {
+            return Err(format!(
+                "{}: stays, since no copy kept beside it still opens as the scan found it. Scan again.",
+                here.display()
+            ));
         }
         Ok(here.to_path_buf())
     }
@@ -864,6 +875,7 @@ impl Engine {
                         done: Spot::Path(made.clone()),
                         applied: true,
                         stamp,
+                        keep: Vec::new(),
                     });
                     Ok(made)
                 }
@@ -952,6 +964,7 @@ impl Engine {
             done: Spot::Path(original),
             applied: false,
             stamp,
+            keep: Vec::new(),
         })
     }
 
@@ -1143,37 +1156,49 @@ fn plan_trash(path: &Path) -> Result<Plan, String> {
         done: Spot::Trash(None),
         applied: false,
         stamp,
+        keep: Vec::new(),
     }))
 }
 
-/// Trashes a group's copies only while one it keeps is still as it was
-/// found, and each only if it is too.
+/// Trashes a group's copies only while one it keeps can still be read as
+/// it was found, and each only if it is as found too.
 fn plan_copies(copies: &Copies) -> Vec<(PathBuf, Result<Plan, String>)> {
-    let as_found = |seen: &Seen| disk::stamp(&seen.path).ok() == Some(seen.found);
-    let kept = copies.keep.iter().any(as_found);
     copies
         .trash
         .iter()
         .map(|seen| {
             let path = &seen.path;
-            let plan = if !kept {
-                Err(format!(
-                    "{}: left alone, since no copy kept beside it is as the scan found it. Scan again.",
-                    path.display()
-                ))
-            } else if copies.keep.iter().any(|k| k.found.0 == seen.found.0) {
+            let plan = if copies.keep.iter().any(|k| k.found.0 == seen.found.0) {
                 Err(format!("{}: is a copy kept.", path.display()))
-            } else if !as_found(seen) {
+            } else if disk::stamp(path).ok() != Some(seen.found) {
                 Err(format!(
                     "{}: changed since the scan, so it stays. Scan again.",
                     path.display()
                 ))
             } else {
-                plan_trash(path)
+                plan_trash(path).and_then(|plan| match plan {
+                    Plan::Move(step) => movable(Step {
+                        keep: copies.keep.clone(),
+                        ..step
+                    }),
+                    plan => Ok(plan),
+                })
             };
             (path.clone(), plan)
         })
         .collect()
+}
+
+/// Whether `seen` opens for reading and, through what's open, is still the
+/// file and stamp it was. Read permission isn't in a stamp. A pipe put
+/// there can't block the owner, and a link isn't the copy.
+fn readable(seen: &Seen) -> bool {
+    File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(&seen.path)
+        .and_then(|file| disk::stamp_open(&file))
+        .is_ok_and(|found| found == seen.found)
 }
 
 fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
@@ -1189,6 +1214,7 @@ fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
         done: Spot::Path(to),
         applied: false,
         stamp,
+        keep: Vec::new(),
     })
 }
 
@@ -1418,6 +1444,7 @@ fn plan_into_new(item: &Path, folder: &Path) -> Result<Plan, String> {
         done: Spot::Path(folder.join(name)),
         applied: false,
         stamp,
+        keep: Vec::new(),
     })
 }
 

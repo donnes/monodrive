@@ -207,3 +207,21 @@ fn a_cleanup_trashes_only_named_verified_copies_and_keeps_one_of_each() {
     assert_eq!(paths(&copies.trash), all[1..]);
     assert!(matches!(plan.request(), Request::TrashDuplicates { groups } if groups == plan.groups));
 }
+
+#[test]
+fn a_group_whose_files_all_fail_to_read_drops_out() {
+    let (_dir, root) = folder();
+    let locked = ["a.txt", "b.txt"].map(|name| root.join(name));
+    for path in &locked {
+        write(path, b"same");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let report = scanned(&root);
+    let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| duplicates(&report)));
+    for path in &locked {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let found = found.expect("finding duplicates doesn't panic");
+    assert!(found.groups.is_empty());
+    assert_eq!(found.unreadable.len(), 2, "{:?}", found.unreadable);
+}

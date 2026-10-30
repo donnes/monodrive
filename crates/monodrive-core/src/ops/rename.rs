@@ -380,6 +380,7 @@ impl Row {
             done: Spot::Path(self.to()),
             applied: false,
             stamp,
+            keep: Vec::new(),
         })
     }
 }

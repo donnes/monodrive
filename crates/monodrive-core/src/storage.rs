@@ -186,7 +186,7 @@ pub fn scan(
             .or_else(|| (met.get() >= MAX_ITEMS).then_some(Stop::Budget));
         stopped.is_some()
     };
-    let complete = sizes::walk(&root, &mut check, &mut |event| {
+    let complete = sizes::walk(&root, &sizes::gated(), &mut check, &mut |event| {
         met.set(met.get() + 1);
         progress.add(&progress.items, 1, NOTIFY_ITEMS);
         match event {
@@ -383,6 +383,9 @@ impl Report {
                         return vec![(matched, files)];
                     }
                     files.retain(|i| !failed.contains(i));
+                    if files.len() < 2 {
+                        return Vec::new();
+                    }
                     if files.iter().any(|i| !digests.contains_key(i)) {
                         return vec![(matched, files)];
                     }

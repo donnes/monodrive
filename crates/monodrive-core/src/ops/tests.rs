@@ -150,27 +150,41 @@ fn trash_puts_back_and_undoing_a_new_folder_trashes_it_until_redo() {
     assert!(folder.is_dir());
 }
 
+/// A storage scan's cleanup of `files`, trashing the copies `trash` names.
+fn cleanup(files: &Path, trash: &[&str]) -> Request {
+    use crate::storage::{self, Progress};
+    let report = storage::scan(files, &Progress::default(), None).unwrap();
+    let found = report.duplicates(&|_| true, &Progress::default(), None);
+    let trash: Vec<PathBuf> = trash.iter().map(|name| files.join(name)).collect();
+    found.cleanup(&trash).unwrap().request()
+}
+
+/// Real paths, as a scan reports them, holding `names`, each with `text`.
+fn copies(names: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, Engine) {
+    let (dir, files, engine) = engine();
+    let files = files.canonicalize().unwrap();
+    for (name, text) in names {
+        std::fs::write(files.join(name), text).unwrap();
+    }
+    (dir, files, engine)
+}
+
 #[test]
 fn a_duplicate_cleanup_refuses_what_changed_since_the_scan_and_undoes_in_one_step() {
-    use crate::storage::{self, Progress};
-    let (_dir, files, mut engine) = engine();
-    let files = files.canonicalize().unwrap();
-    let named = |names: &[&str]| names.iter().map(|n| files.join(n)).collect::<Vec<_>>();
-    for name in ["a.txt", "b.txt", "c.txt"] {
-        std::fs::write(files.join(name), "same").unwrap();
-    }
-    for name in ["x.md", "y.md"] {
-        std::fs::write(files.join(name), "other").unwrap();
-    }
-    let report = storage::scan(&files, &Progress::default(), None).unwrap();
-    let found = report.duplicates(&|_| true, &Progress::default(), None);
-    let plan = found.cleanup(&named(&["b.txt", "c.txt", "y.md"])).unwrap();
+    let (_dir, files, mut engine) = copies(&[
+        ("a.txt", "same"),
+        ("b.txt", "same"),
+        ("c.txt", "same"),
+        ("x.md", "other"),
+        ("y.md", "other"),
+    ]);
+    let plan = cleanup(&files, &["b.txt", "c.txt", "y.md"]);
     // Edited after the scan: c.txt itself, and x.md, the only copy kept
     // beside y.md, so neither c.txt nor y.md may go.
     std::fs::write(files.join("c.txt"), "SAME").unwrap();
     std::fs::write(files.join("x.md"), "OTHER").unwrap();
 
-    let outcome = run(&mut engine, plan.request()).unwrap();
+    let outcome = run(&mut engine, plan).unwrap();
     assert_eq!(outcome.title, "Trash Duplicates");
     let results: Vec<(&Path, Result<(), &str>)> = outcome
         .items
@@ -189,7 +203,7 @@ fn a_duplicate_cleanup_refuses_what_changed_since_the_scan_and_undoes_in_one_ste
             c.display()
         ),
         format!(
-            "{}: left alone, since no copy kept beside it is as the scan found it. Scan again.",
+            "{}: stays, since no copy kept beside it still opens as the scan found it. Scan again.",
             y.display()
         ),
     ];
@@ -204,6 +218,82 @@ fn a_duplicate_cleanup_refuses_what_changed_since_the_scan_and_undoes_in_one_ste
     assert!(!b.exists() && c.exists() && y.exists());
     assert_eq!(moved(run(&mut engine, Request::Undo)), vec![b.clone()]);
     assert_eq!(std::fs::read_to_string(&b).unwrap(), "same");
+}
+
+#[test]
+fn a_duplicate_cleanup_keeps_every_copy_when_the_kept_one_can_no_longer_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, files, mut engine) = copies(&[("s1-keep.txt", "same"), ("s1-copy.txt", "same")]);
+    let plan = cleanup(&files, &["s1-copy.txt"]);
+    let keep = files.join("s1-keep.txt");
+    let mode = |mode| std::fs::set_permissions(&keep, std::fs::Permissions::from_mode(mode));
+    mode(0o000).unwrap();
+    let refused = run(&mut engine, plan);
+    mode(0o644).unwrap();
+    let refused = refused.unwrap_err();
+    assert!(
+        refused.contains(": stays, since no copy kept beside it still opens"),
+        "{refused}"
+    );
+    assert!(files.join("s1-copy.txt").exists());
+}
+
+#[test]
+fn each_duplicate_waits_for_a_kept_copy_still_there_just_before_it_goes() {
+    let (_dir, files, mut engine) = copies(&[
+        ("s2-a.txt", "same"),
+        ("s2-b.txt", "same"),
+        ("s2-c.txt", "same"),
+    ]);
+    let seen = |name: &str| {
+        let path = files.join(name);
+        Seen {
+            found: disk::stamp(&path).unwrap(),
+            path,
+        }
+    };
+    // The second group keeps what the first trashes, so by the time its
+    // copy's turn comes, nothing it keeps is left.
+    let request = Request::TrashDuplicates {
+        groups: vec![
+            Copies {
+                keep: vec![seen("s2-a.txt")],
+                trash: vec![seen("s2-b.txt")],
+            },
+            Copies {
+                keep: vec![seen("s2-b.txt")],
+                trash: vec![seen("s2-c.txt")],
+            },
+        ],
+    };
+    let outcome = run(&mut engine, request).unwrap();
+    let (b, c) = (files.join("s2-b.txt"), files.join("s2-c.txt"));
+    assert!(outcome.items[0].result.is_ok(), "{outcome:?}");
+    let refused = outcome.items[1].result.as_ref().unwrap_err();
+    assert!(
+        refused.starts_with(&format!("{}: stays, since", c.display())),
+        "{refused}"
+    );
+    assert!(c.exists());
+    assert_eq!(moved(run(&mut engine, Request::Undo)), vec![b]);
+}
+
+#[test]
+fn redo_of_a_duplicate_cleanup_refuses_once_the_kept_copy_changed() {
+    let (_dir, files, mut engine) = copies(&[("s3-keep.txt", "same"), ("s3-copy.txt", "same")]);
+    let copy = files.join("s3-copy.txt");
+    moved(run(&mut engine, cleanup(&files, &["s3-copy.txt"])));
+    assert_eq!(moved(run(&mut engine, Request::Undo)), vec![copy.clone()]);
+    std::fs::write(files.join("s3-keep.txt"), "SAME").unwrap();
+    let refused = run(&mut engine, Request::Redo).unwrap_err();
+    assert!(
+        refused.starts_with(&format!(
+            "Can't redo Trash Duplicates: {}: stays, since no copy kept beside it",
+            copy.display()
+        )),
+        "{refused}"
+    );
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "same");
 }
 
 #[test]
@@ -317,6 +407,7 @@ fn opening_settles_what_a_crash_left_unfinished_from_the_disk() {
             done: Spot::Path(to.clone()),
             applied: false,
             stamp,
+            keep: Vec::new(),
         };
         engine
             .begin(submission, None, vec![step], Vec::new(), Vec::new())
@@ -837,6 +928,7 @@ fn an_interrupted_job_is_settled_from_the_disk_and_continues_past_what_finished(
         done: Spot::Path(dest.join("c.txt")),
         applied: false,
         stamp,
+        keep: Vec::new(),
     });
     let intent = Record::Work { op, index: 1, work };
     shared.lock().write(&intent).unwrap();
@@ -888,6 +980,7 @@ fn a_copy_placed_just_before_a_crash_still_undoes_to_the_trash() {
         done: Spot::Path(placed.clone()),
         applied: false,
         stamp,
+        keep: Vec::new(),
     });
     shared
         .lock()
@@ -1434,6 +1527,7 @@ fn renaming(from: &Path, to: &str) -> Step {
         done: Spot::Path(from.with_file_name(to)),
         applied: false,
         stamp,
+        keep: Vec::new(),
     }
 }
 

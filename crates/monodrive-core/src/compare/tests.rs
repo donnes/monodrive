@@ -200,16 +200,71 @@ fn the_walk_stops_partway_through_a_folder_once_it_has_read_its_budget() {
         write(&left.join(format!("{i}.txt")), "", when(0));
     }
     let progress = Progress::default();
-    let short = walk(&left, &right, &progress, None, 10).unwrap();
+    let short = walk(&left, &right, &progress, None, 10, &[]).unwrap();
     assert!(!short.complete);
     assert!(short.entries.is_empty(), "{:?}", short.entries);
     // A folder on both sides counts once a side.
     std::fs::create_dir(right.join("0.txt.d")).unwrap();
     std::fs::create_dir(left.join("0.txt.d")).unwrap();
-    assert!(!walk(&left, &right, &progress, None, 12).unwrap().complete);
-    let whole = walk(&left, &right, &progress, None, 13).unwrap();
+    assert!(
+        !walk(&left, &right, &progress, None, 12, &[])
+            .unwrap()
+            .complete
+    );
+    let whole = walk(&left, &right, &progress, None, 13, &[]).unwrap();
     assert!(whole.complete);
     assert_eq!(whole.entries.len(), 11);
+}
+
+#[test]
+fn consent_gated_folders_compare_as_unknown_without_being_opened() {
+    use std::os::unix::ffi::OsStringExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let (left, right) = (root.join("left"), root.join("right"));
+    for (side, text) in [(&left, "a"), (&right, "b")] {
+        write(&side.join("Desktop/a.txt"), text, when(0));
+        write(&side.join("same.txt"), "same", when(0));
+    }
+    // Each side as a home folder, as fsearch lists their gated folders.
+    let gated: Vec<PathBuf> = [&left, &right]
+        .into_iter()
+        .flat_map(|home| fsearch::gated(home.to_str().unwrap()))
+        .map(|path| OsString::from_vec(path).into())
+        .collect();
+    let lock = |mode| {
+        for side in [&left, &right] {
+            let desktop = side.join("Desktop");
+            std::fs::set_permissions(desktop, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    lock(0o000);
+    let progress = Progress::default();
+    let comparison = walk(&left, &right, &progress, None, MAX_ITEMS, &gated);
+    lock(0o755);
+    let needs = format!("{}: needs Full Disk Access", left.join("Desktop").display());
+    let statuses: Vec<(PathBuf, Status)> = comparison
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|entry| (entry.path, entry.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("Desktop".into(), Status::Unknown(needs.clone())),
+            ("same.txt".into(), Status::SameMetadata),
+        ]
+    );
+    let inside = walk(
+        &left.join("Desktop"),
+        &right.join("Desktop"),
+        &progress,
+        None,
+        MAX_ITEMS,
+        &gated,
+    );
+    assert_eq!(inside.unwrap_err(), needs);
 }
 
 #[test]
@@ -220,7 +275,11 @@ fn a_cancelled_walk_stops_even_at_empty_folders() {
     std::fs::create_dir(&right).unwrap();
     let progress = Progress::default();
     progress.cancel.store(true, Ordering::Relaxed);
-    assert!(!walk(&left, &right, &progress, None, 10).unwrap().complete);
+    assert!(
+        !walk(&left, &right, &progress, None, 10, &[])
+            .unwrap()
+            .complete
+    );
 }
 
 #[test]

@@ -49,7 +49,7 @@ pub fn measure(
         || cancelled.load(Ordering::Relaxed) || deadline.is_some_and(|end| Instant::now() >= end);
     let mut size = FolderSize::default();
     let mut counted = None;
-    size.complete = walk(folder, &mut stopped, &mut |met| match met {
+    size.complete = walk(folder, &gated(), &mut stopped, &mut |met| match met {
         Met::Folder { .. } => size.folders += 1,
         Met::Item { meta, .. } => {
             size.files += 1;
@@ -85,11 +85,42 @@ pub(crate) enum Met<'a> {
     },
 }
 
-/// Walks every item under `folder` without following links, until
-/// `stopped` says to stop. True if it met everything. Fails only when
-/// `folder` itself can't be listed.
+/// The folders a walk mustn't open while this process lacks Full Disk
+/// Access: fsearch's consent-gated folders in the home folder, and
+/// /Volumes. None with it.
+pub(crate) fn gated() -> Vec<PathBuf> {
+    if fsearch::has_full_disk_access() {
+        return Vec::new();
+    }
+    std::env::var("HOME").map_or_else(|_| Vec::new(), |home| paths(fsearch::gated(&home)))
+}
+
+fn paths(gated: Vec<Vec<u8>>) -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    gated
+        .into_iter()
+        .map(|path| OsString::from_vec(path).into())
+        .collect()
+}
+
+/// Why a walk didn't open `path`, if it's at or under one of `gated`:
+/// without Full Disk Access, opening a consent-gated folder shows a privacy
+/// prompt and blocks until it's answered, which no deadline interrupts.
+pub(crate) fn guarded(path: &Path, gated: &[PathBuf]) -> Option<std::io::Error> {
+    gated.iter().any(|g| path.starts_with(g)).then(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "needs Full Disk Access",
+        )
+    })
+}
+
+/// Walks every item under `folder` without following links or opening
+/// `gated` folders, until `stopped` says to stop. True if it met
+/// everything. Fails only when `folder` itself can't be listed.
 pub(crate) fn walk(
     folder: &Path,
+    gated: &[PathBuf],
     stopped: &mut dyn FnMut() -> bool,
     met: &mut dyn FnMut(Met),
 ) -> Result<bool, String> {
@@ -99,6 +130,17 @@ pub(crate) fn walk(
     while let Some((dir, at)) = pending.pop() {
         if stopped() {
             return Ok(false);
+        }
+        if let Some(why) = guarded(&dir, gated) {
+            if at == 0 {
+                return Err(format!("{}: {why}", folder.display()));
+            }
+            met(Met::Unreadable {
+                at,
+                path: &dir,
+                why,
+            });
+            continue;
         }
         let listing = match std::fs::read_dir(&dir) {
             Ok(listing) => listing,
@@ -328,6 +370,39 @@ mod tests {
             refused,
             format!("{}: Not a directory (os error 20)", file.display())
         );
+    }
+
+    #[test]
+    fn consent_gated_folders_are_reported_without_being_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let gated = paths(fsearch::gated(home.to_str().unwrap()));
+        let (desktop, containers) = (home.join("Desktop"), home.join("Library/Containers"));
+        write(&desktop.join("a.txt"), 10);
+        write(&containers.join("app/b.txt"), 20);
+        write(&home.join("Desktops/c.txt"), 30);
+        write(&home.join("Library/Caches/d.txt"), 40);
+        // Locked too, so opening either would fail another way.
+        for folder in [&desktop, &containers] {
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let (mut bytes, mut unreadable) = (0, Vec::new());
+        let complete = walk(&home, &gated, &mut || false, &mut |met| match met {
+            Met::Item { meta, .. } => bytes += meta.len(),
+            Met::Unreadable { path, why, .. } => {
+                unreadable.push(format!("{}: {why}", path.display()));
+            }
+            Met::Folder { .. } => {}
+        });
+        let inside = walk(&desktop, &gated, &mut || false, &mut |_| {});
+        for folder in [&desktop, &containers] {
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!((complete, bytes), (Ok(true), 70));
+        unreadable.sort();
+        let needs = |path: &Path| format!("{}: needs Full Disk Access", path.display());
+        assert_eq!(unreadable, [needs(&desktop), needs(&containers)]);
+        assert_eq!(inside, Err(needs(&desktop)));
     }
 
     #[test]

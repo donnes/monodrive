@@ -150,15 +150,24 @@ pub fn compare(
     progress: &Progress,
     deadline: Option<Instant>,
 ) -> Result<Comparison, String> {
-    walk(left, right, progress, deadline, MAX_ITEMS)
+    walk(
+        left,
+        right,
+        progress,
+        deadline,
+        MAX_ITEMS,
+        &crate::sizes::gated(),
+    )
 }
 
+/// Compares without opening `gated` folders or anything in them.
 fn walk(
     left: &Path,
     right: &Path,
     progress: &Progress,
     deadline: Option<Instant>,
     items: usize,
+    gated: &[PathBuf],
 ) -> Result<Comparison, String> {
     let root = |path: &Path| {
         let path = path
@@ -167,6 +176,11 @@ fn walk(
         Side::read(&path).map(|side| (path, side))
     };
     let ((left, l), (right, r)) = (root(left)?, root(right)?);
+    for root in [&left, &right] {
+        if let Some(why) = crate::sizes::guarded(root, gated) {
+            return Err(format!("{}: {why}", root.display()));
+        }
+    }
     let mut comparison = Comparison {
         left,
         right,
@@ -188,6 +202,7 @@ fn walk(
         items,
         progress,
         deadline,
+        gated,
     };
     let mut pending = vec![(PathBuf::new(), l, r)];
     while let Some((folder, l, r)) = pending.pop() {
@@ -263,6 +278,7 @@ struct Budget<'a> {
     items: usize,
     progress: &'a Progress,
     deadline: Option<Instant>,
+    gated: &'a [PathBuf],
 }
 
 impl Budget<'_> {
@@ -280,6 +296,9 @@ impl Budget<'_> {
 /// budget runs out partway.
 fn list(folder: &Path, budget: &mut Budget) -> Result<Option<Vec<(OsString, Listed)>>, String> {
     let fail = |e: std::io::Error| format!("{}: {e}", folder.display());
+    if let Some(why) = crate::sizes::guarded(folder, budget.gated) {
+        return Err(fail(why));
+    }
     let mut listed = Vec::new();
     for item in std::fs::read_dir(folder).map_err(fail)? {
         if !budget.take() {
