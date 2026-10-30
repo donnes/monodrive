@@ -12,6 +12,20 @@ pub enum Kind {
     Other,
 }
 
+impl Kind {
+    pub fn of(file_type: std::fs::FileType) -> Self {
+        if file_type.is_dir() {
+            Kind::Dir
+        } else if file_type.is_symlink() {
+            Kind::Link
+        } else if file_type.is_file() {
+            Kind::File
+        } else {
+            Kind::Other
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Entry {
     pub path: PathBuf,
@@ -149,16 +163,7 @@ pub fn list_dir(dir: &Path, show_hidden: bool, order: Sort) -> std::io::Result<V
             }
             // DirEntry::metadata doesn't follow symlinks, so links stay links.
             let meta = item.metadata().ok()?;
-            let file_type = meta.file_type();
-            let kind = if file_type.is_dir() {
-                Kind::Dir
-            } else if file_type.is_symlink() {
-                Kind::Link
-            } else if file_type.is_file() {
-                Kind::File
-            } else {
-                Kind::Other
-            };
+            let kind = Kind::of(meta.file_type());
             let modified = meta
                 .modified()
                 .ok()

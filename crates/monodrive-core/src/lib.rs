@@ -1,12 +1,15 @@
 //! Monodrive's services. The GPUI app and the MCP server both call these, so
 //! anything a user can do from the window an agent can do through MCP.
 
+pub mod apps;
 pub mod entries;
 pub mod index;
+pub mod info;
 pub mod mcp;
 pub mod ops;
 pub mod paths;
 pub mod places;
+pub mod sizes;
 pub mod volumes;
 
 /// `~/Library/Application Support/Monodrive`.

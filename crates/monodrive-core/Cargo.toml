@@ -9,10 +9,12 @@ publish.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc = "0.2"
-# Moves files to the Trash the way Finder does, and lists and ejects volumes,
-# through NSFileManager.
+# Moves files to the Trash the way Finder does, lists and ejects volumes, and
+# reads what Get Info shows, through Foundation.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSDictionary", "NSError", "NSFileManager", "NSString", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSBundle", "NSDictionary", "NSError", "NSFileManager", "NSString", "NSURL", "NSValue"] }
+# Open With, through NSWorkspace.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSRunningApplication", "NSWorkspace"] }
 block2 = "0.6"
 # No crates.io release yet, so it's pinned to a commit. Bump deliberately.
 fsearch = { git = "https://github.com/noahdunnagan/fsearch", rev = "88e63fdf850cf7749deae8198b187accd21f8ba5" }

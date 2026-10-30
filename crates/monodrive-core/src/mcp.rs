@@ -1,19 +1,23 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
-//! service method; the behavior lives in `entries`, `index`, `ops`,
-//! `places` and `volumes`.
+//! service method; the behavior lives in `entries`, `index`, `info`, `ops`,
+//! `places`, `sizes` and `volumes`.
 
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, GrepMode, Index, Status};
+use crate::info::{self, Info};
 use crate::ops::{self, Conflict, Done, Job, Origin, Request};
 use crate::places::{self, Availability, Place};
+use crate::sizes::{self, FolderSize};
 use crate::volumes::{self, Volume, VolumeId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Newest first. A client asking for another version gets the newest.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -21,8 +25,9 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 const INSTRUCTIONS: &str = "Monodrive: an always-current index of this Mac's files, \
 much faster than Spotlight or walking folders with find. Use find_files to locate files \
 by name, grep to search inside files, and list_dir to see one folder. index_status says \
-whether the index is ready. trash, put_back, rename, create_folder, create_folder_with, \
-create_file, duplicate, undo and redo change files through the same undo history as the Monodrive window. \
+whether the index is ready. stat describes items, and folder_size adds up a folder. \
+trash, put_back, rename, create_folder, create_folder_with, create_file, duplicate, undo \
+and redo change files through the same undo history as the Monodrive window. \
 list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
@@ -89,6 +94,14 @@ enum ToolCall {
         folders_first: bool,
     },
     IndexStatus {},
+    Stat {
+        paths: Vec<String>,
+    },
+    FolderSize {
+        path: String,
+        #[serde(default = "default_timeout")]
+        timeout_seconds: u64,
+    },
     Trash {
         paths: Vec<String>,
     },
@@ -155,6 +168,10 @@ fn folders_first() -> bool {
 
 fn default_limit() -> usize {
     50
+}
+
+fn default_timeout() -> u64 {
+    10
 }
 
 impl Server {
@@ -266,6 +283,30 @@ impl Server {
                 }
                 out
             }),
+            ToolCall::Stat { paths } => {
+                let mut failed = false;
+                let blocks: Vec<String> = paths
+                    .iter()
+                    .map(|path| match info::info(&expand_home(path)) {
+                        Ok(about) => stat(&about),
+                        Err(e) => {
+                            failed = true;
+                            format!("{e}\n")
+                        }
+                    })
+                    .collect();
+                let text = blocks.join("\n");
+                if failed { Err(text) } else { Ok(text) }
+            }
+            ToolCall::FolderSize {
+                path,
+                timeout_seconds,
+            } => {
+                let folder = expand_home(&path);
+                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
+                sizes::measure(&folder, &AtomicBool::new(false), deadline)
+                    .map(|size| folder_size(&folder, &size, timeout_seconds))
+            }
             ToolCall::Trash { paths } => self.change(Request::Trash {
                 paths: expand(&paths),
             }),
@@ -417,6 +458,108 @@ impl Server {
     }
 }
 
+/// One item's Get Info, a field a line after its path. Opened appears only
+/// when macOS recorded it.
+fn stat(about: &Info) -> String {
+    let mut out = format!("{}{}\n", about.path.display(), suffix(about.kind));
+    let mut field = |name: &str, value: String| {
+        let _ = writeln!(out, "{name}: {value}");
+    };
+    field("kind", about.kind_name.clone());
+    if let Some(size) = about.size {
+        field(
+            "size",
+            format!("{} bytes ({} on disk)", size.bytes, size.on_disk),
+        );
+    }
+    if let Some(parent) = &about.parent {
+        field("where", parent.display().to_string());
+    }
+    if let Some(volume) = &about.volume {
+        field(
+            "volume",
+            format!("{} at {}", volume.name, volume.mount.display()),
+        );
+    }
+    for (name, date) in [
+        ("created", about.created),
+        ("modified", about.modified),
+        ("opened", about.opened),
+    ] {
+        if let Some(date) = date {
+            field(name, utc(date));
+        }
+    }
+    let p = &about.permissions;
+    let access = match (p.readable, p.writable) {
+        (true, true) => "you can read and write",
+        (true, false) => "you can read, not write",
+        (false, true) => "you can write, not read",
+        (false, false) => "you can't read or write",
+    };
+    field(
+        "permissions",
+        format!(
+            "{:03o}, owner {}, group {}, {access}",
+            p.mode, p.owner, p.group
+        ),
+    );
+    if about.package {
+        field("package", "yes, opens as one item".into());
+    }
+    if let Some(target) = &about.link {
+        field("link to", target.display().to_string());
+    }
+    out
+}
+
+/// A folder's totals, saying so when it stopped before counting everything.
+fn folder_size(folder: &std::path::Path, size: &FolderSize, timeout: u64) -> String {
+    let mut out = format!("{}/\n", folder.display());
+    let _ = writeln!(
+        out,
+        "size: {} bytes ({} on disk)\nfiles: {}\nfolders: {}",
+        size.bytes, size.on_disk, size.files, size.folders
+    );
+    if size.unreadable > 0 {
+        let _ = writeln!(
+            out,
+            "unreadable folders: {} (their contents aren't counted)",
+            size.unreadable
+        );
+    }
+    if !size.complete {
+        let _ = writeln!(
+            out,
+            "(stopped after {timeout} s: these are partial totals; pass a larger timeout_seconds)"
+        );
+    }
+    out
+}
+
+/// ISO 8601 in UTC, to the second.
+fn utc(time: SystemTime) -> String {
+    let seconds = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(since) => since.as_secs() as libc::time_t,
+        Err(before) => -(before.duration().as_secs() as libc::time_t),
+    };
+    // SAFETY: an all-zero tm is valid, and gmtime_r writes only into it.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::gmtime_r(&seconds, &mut tm);
+        tm
+    };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
 /// Favorites, then volumes: one path a line, with what's worth knowing
 /// about it in brackets.
 fn list_places(places: &[Place], volumes: &[Volume]) -> String {
@@ -529,7 +672,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 22] = [
+pub const TOOLS: [Tool; 24] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -586,6 +729,28 @@ pub const TOOLS: [Tool; 22] = [
         description: "Whether the index is ready, how far its first build has got, and whether it \
     can see the whole disk. Never starts indexing.",
         input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "stat",
+        description: "Get Info for files, folders or links, one block per path: kind, size, where, \
+    volume, created, modified, opened (when macOS recorded it), permissions, whether it's a package, \
+    and a link's target. Dates are UTC. A folder's size comes from folder_size.",
+        input_schema: paths_schema,
+    },
+    Tool {
+        name: "folder_size",
+        description: "Add up every file under a folder without following links. Counts hard links \
+    once and reports folders it couldn't read. Stops at timeout_seconds and says when totals are partial.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "A folder. Absolute; ~ is your home."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}
+                },
+                "required": ["path"]
+            })
+        },
     },
     Tool {
         name: "trash",
@@ -893,6 +1058,92 @@ mod tests {
         // MCP lets a call without parameters leave out `arguments`.
         let bare = call(&mut server, json!({"name": "index_status"}));
         assert_eq!(bare["result"]["isError"], false, "{bare}");
+        assert!(server.index.is_none());
+    }
+
+    #[test]
+    fn stat_prints_a_block_per_path_and_folder_size_says_when_its_partial() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (file, folder, link) = (
+            dir.path().join("notes.txt"),
+            dir.path().join("docs"),
+            dir.path().join("shortcut"),
+        );
+        std::fs::write(&file, "hello").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("a.txt"), "0123456789").unwrap();
+        std::os::unix::fs::symlink("docs", &link).unwrap();
+        let missing = dir.path().join("missing");
+        let mut server = server();
+
+        let reply = call(
+            &mut server,
+            json!({"name": "stat", "arguments": {"paths": [file, link, missing]}}),
+        );
+        // One path failing marks the reply, and the others still print.
+        assert_eq!(reply["result"]["isError"], true);
+        let blocks: Vec<Vec<&str>> = text(&reply)
+            .split("\n\n")
+            .map(|block| block.lines().collect())
+            .collect();
+        let shown = |path: &std::path::Path| path.display().to_string();
+        let notes = &blocks[0];
+        assert_eq!(
+            notes[..2],
+            [shown(&file), "kind: Plain Text Document".into()]
+        );
+        assert!(notes[2].starts_with("size: 5 bytes ("), "{notes:?}");
+        assert_eq!(notes[3], format!("where: {}", shown(dir.path())));
+        assert!(notes[4].starts_with("volume: "), "{notes:?}");
+        assert!(notes[5].starts_with("created: 20") && notes[5].ends_with('Z'));
+        assert!(notes[6].starts_with("modified: 20"));
+        assert!(
+            notes[7].starts_with("permissions: 644, owner "),
+            "{notes:?}"
+        );
+        assert!(notes[7].ends_with(", you can read and write"));
+        assert_eq!(notes.len(), 8);
+        assert_eq!(blocks[1][0], format!("{}@", shown(&link)));
+        assert_eq!(blocks[1].last(), Some(&"link to: docs"));
+        assert_eq!(
+            blocks[2],
+            [format!(
+                "{}: No such file or directory (os error 2)",
+                shown(&missing)
+            )]
+        );
+        assert_eq!(
+            utc(std::time::UNIX_EPOCH + Duration::from_secs(1_793_314_588)),
+            "2026-10-29T22:56:28Z"
+        );
+
+        let reply = call(
+            &mut server,
+            json!({"name": "folder_size", "arguments": {"path": folder}}),
+        );
+        let lines: Vec<&str> = text(&reply).lines().collect();
+        assert_eq!(lines[0], format!("{}/", shown(&folder)));
+        assert!(lines[1].starts_with("size: 10 bytes ("), "{lines:?}");
+        assert_eq!(lines[2..], ["files: 1", "folders: 0"]);
+        let reply = call(
+            &mut server,
+            json!({"name": "folder_size", "arguments": {"path": folder, "timeout_seconds": 0}}),
+        );
+        assert!(
+            text(&reply).ends_with(
+                "(stopped after 0 s: these are partial totals; pass a larger timeout_seconds)\n"
+            ),
+            "{reply}"
+        );
+        for bad in [
+            json!({"name": "stat", "arguments": {"paths": file}}),
+            json!({"name": "folder_size", "arguments": {}}),
+            json!({"name": "folder_size", "arguments": {"path": folder, "timeout_seconds": -1}}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
         assert!(server.index.is_none());
     }
 
