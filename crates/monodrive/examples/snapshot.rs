@@ -17,17 +17,22 @@
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
 //! `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
-//! `recents.png`.
+//! `recents.png`. Then `palette.png`, `goto.png`, `settings-menu.png` and one
+//! `settings-<page>.png` for each Settings page, and `background.png`, the
+//! list over a picture that runs from bright to dark.
+//!
+//! All of it twice, once dark in `target/snapshots` and once light in
+//! `target/snapshots/light`.
 
 use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
-    GoRecents, GoTrash, Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu,
-    ShowCopiesAndMoves, Undo,
+    GoRecents, GoToFolder, GoTrash, OpenSettings, Operations, Places, Rename, SelectLast,
+    SelectNext, ShowContextMenu, ShowCopiesAndMoves, Undo,
 };
 use monodrive::connect;
-use monodrive::preferences::{Preferences, View};
+use monodrive::preferences::{Preferences, Theme, View};
 use monodrive_core::ops::{self, Conflict, Origin, Request};
 use monodrive_core::places::Store;
 use monodrive_core::servers::Cancel;
@@ -44,12 +49,24 @@ fn main() -> gpui::Result<()> {
         Some(folder) => PathBuf::from(folder),
         None => fill(&out)?,
     };
+    shoot(&out, &folder, Theme::Dark)?;
+    let light = out.join("light");
+    std::fs::create_dir_all(&light)?;
+    shoot(&light, &folder, Theme::Light)
+}
+
+/// Every picture, in `theme`, into `out`.
+fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
+    let base = Preferences {
+        theme,
+        ..Preferences::default()
+    };
     let mut cx = HeadlessAppContext::with_platform(
         gpui_platform::bench_text_system(),
         Arc::new(monodrive::assets::Assets),
         gpui_platform::current_headless_renderer,
     );
-    let scratch = tempfile::tempdir_in(&out)?;
+    let scratch = tempfile::tempdir_in(out)?;
     let trash = scratch.path().join("Trash");
     std::fs::create_dir_all(&trash)?;
     let places = made_up_places(scratch.path(), &trash)?;
@@ -58,13 +75,10 @@ fn main() -> gpui::Result<()> {
         cx.update(|cx| {
             cx.set_global(Preferences {
                 view,
-                ..Preferences::default()
+                ..base.clone()
             })
         });
-        let folder = folder.clone();
-        let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
-            cx.new(|cx| Browser::new(folder, cx))
-        })?;
+        let window = open(&mut cx, folder)?;
         // The listing lands, then a second pass lays out the grid's columns.
         for _ in 0..2 {
             cx.run_until_parked();
@@ -75,10 +89,8 @@ fn main() -> gpui::Result<()> {
         cx.capture_screenshot(window.into())?.save(&path)?;
         println!("{}", path.display());
     }
-    cx.update(|cx| cx.set_global(Preferences::default()));
-    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
-        cx.new(|cx| Browser::new(folder.clone(), cx))
-    })?;
+    cx.update(|cx| cx.set_global(base.clone()));
+    let window = open(&mut cx, folder)?;
     cx.run_until_parked();
     // Each command needs the frame drawn after the last: what's selected
     // decides which commands the browser takes.
@@ -106,12 +118,10 @@ fn main() -> gpui::Result<()> {
         cx.update(|cx| {
             cx.set_global(Preferences {
                 view,
-                ..Preferences::default()
+                ..base.clone()
             })
         });
-        let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
-            cx.new(|cx| Browser::new(folder.clone(), cx))
-        })?;
+        let window = open(&mut cx, folder)?;
         cx.run_until_parked();
         let actions = std::iter::repeat_n(&SelectNext as &dyn Action, selected)
             .chain([&ShowContextMenu as &dyn Action]);
@@ -163,57 +173,141 @@ fn main() -> gpui::Result<()> {
     serve()?;
     let client = ops::Client::new(paths, None);
     cx.update(|cx| cx.set_global(Operations(Arc::new(Mutex::new(client)))));
-    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
-        cx.new(|cx| Browser::new(folder.clone(), cx))
-    })?;
+    let window = open(&mut cx, folder)?;
     cx.run_until_parked();
     // The popover asks the owner; closed, the ring stays with its dot.
     dispatch(&mut cx, window, &ShowCopiesAndMoves)?;
-    save(&mut cx, window, &out, "jobs")?;
+    save(&mut cx, window, out, "jobs")?;
     dispatch(&mut cx, window, &ShowCopiesAndMoves)?;
-    save(&mut cx, window, &out, "ring-waiting")?;
+    save(&mut cx, window, out, "ring-waiting")?;
 
-    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
-        cx.new(|cx| Browser::new(folder.clone(), cx))
-    })?;
+    let window = open(&mut cx, folder)?;
     cx.run_until_parked();
     // The last entry, renamed to a name that's taken: the owner refuses it.
     dispatch(&mut cx, window, &SelectLast)?;
     dispatch(&mut cx, window, &Rename)?;
-    let taken = names(&folder)
+    let taken = names(folder)
         .into_iter()
         .find(|name| name.contains('.'))
         .unwrap_or_default();
     type_text(&mut cx, window, &taken)?;
     dispatch(&mut cx, window, &CommitRename)?;
-    save(&mut cx, window, &out, "rename-error")?;
+    save(&mut cx, window, out, "rename-error")?;
     // A free name, then Undo once it's drawn.
     dispatch(&mut cx, window, &CancelRename)?;
     dispatch(&mut cx, window, &Rename)?;
     type_text(&mut cx, window, "Renamed")?;
     dispatch(&mut cx, window, &CommitRename)?;
-    save(&mut cx, window, &out, "toast")?;
+    save(&mut cx, window, out, "toast")?;
     dispatch(&mut cx, window, &Undo)?;
     dispatch(&mut cx, window, &EmptyTrash)?;
-    save(&mut cx, window, &out, "empty-trash")?;
+    save(&mut cx, window, out, "empty-trash")?;
 
-    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
-        cx.new(|cx| Browser::new(folder.clone(), cx))
-    })?;
+    let window = open(&mut cx, folder)?;
     cx.run_until_parked();
     dispatch(&mut cx, window, &EditFavorites)?;
-    save(&mut cx, window, &out, "sidebar-edit")?;
+    save(&mut cx, window, out, "sidebar-edit")?;
     dispatch(&mut cx, window, &EditFavorites)?;
     dispatch(&mut cx, window, &ConnectToServer)?;
-    save(&mut cx, window, &out, "connect")?;
+    save(&mut cx, window, out, "connect")?;
     type_text(&mut cx, window, "smb://studio.local/projects")?;
     dispatch(&mut cx, window, &connect::Go)?;
-    save(&mut cx, window, &out, "connect-failed")?;
+    save(&mut cx, window, out, "connect-failed")?;
     dispatch(&mut cx, window, &connect::Dismiss)?;
     dispatch(&mut cx, window, &GoTrash)?;
-    save(&mut cx, window, &out, "trash")?;
+    save(&mut cx, window, out, "trash")?;
     dispatch(&mut cx, window, &GoRecents)?;
-    save(&mut cx, window, &out, "recents")?;
+    save(&mut cx, window, out, "recents")?;
+
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    let palette = named(&mut cx, "monodrive::OpenPalette")?;
+    dispatch(&mut cx, window, &*palette)?;
+    save(&mut cx, window, out, "palette")?;
+
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    dispatch(&mut cx, window, &GoToFolder)?;
+    save(&mut cx, window, out, "goto")?;
+
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    dispatch(&mut cx, window, &OpenSettings)?;
+    settle();
+    save(&mut cx, window, out, "settings-general")?;
+    // Tab onto the page list, whose arrows change pages.
+    let next = named(&mut cx, "settings::FocusNext")?;
+    dispatch(&mut cx, window, &*next)?;
+    for page in ["window", "appearance", "keyboard", "agents"] {
+        press(&mut cx, window, "down")?;
+        save(&mut cx, window, out, &format!("settings-{page}"))?;
+    }
+
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    dispatch(&mut cx, window, &OpenSettings)?;
+    settle();
+    dispatch(&mut cx, window, &*next)?;
+    press(&mut cx, window, "down")?;
+    press(&mut cx, window, "down")?;
+    // Past the other pages and the header's two buttons: the theme's menu.
+    for _ in 0..6 {
+        dispatch(&mut cx, window, &*next)?;
+    }
+    press(&mut cx, window, "down")?;
+    save(&mut cx, window, out, "settings-menu")?;
+
+    let picture = scratch.path().join("background.png");
+    let (bright, dark) = (0xf4 as f32, 0x18 as f32);
+    image::RgbaImage::from_fn(1100, 700, |x, y| {
+        let along = (x as f32 / 1100. + y as f32 / 700.) / 2.;
+        let shade = (bright + (dark - bright) * along) as u8;
+        image::Rgba([shade, shade, shade, 255])
+    })
+    .save(&picture)?;
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            background: Some(picture),
+            ..base.clone()
+        })
+    });
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    save(&mut cx, window, out, "background")?;
+    Ok(())
+}
+
+/// Lets the Settings sheet finish fading in, which goes by the clock.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "A picture of the sheet, not a test; the fade has no event to wait on."
+)]
+fn settle() {
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+fn open(cx: &mut Cx, folder: &Path) -> gpui::Result<gpui::WindowHandle<Browser>> {
+    let folder = folder.to_path_buf();
+    cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+        cx.new(|cx| Browser::new(folder, cx))
+    })
+}
+
+/// An action the library keeps private, by its name.
+fn named(cx: &mut Cx, name: &str) -> gpui::Result<Box<dyn Action>> {
+    cx.update(|cx| cx.build_action(name, None))
+        .map_err(std::io::Error::other)
+        .map_err(Into::into)
+}
+
+/// Sends a key with no text to what has focus.
+fn press(cx: &mut Cx, window: gpui::WindowHandle<Browser>, key: &str) -> gpui::Result<()> {
+    let keystroke = Keystroke::parse(key).map_err(std::io::Error::other)?;
+    cx.update_window(window.into(), |_, window, cx| {
+        window.dispatch_keystroke(keystroke, cx);
+        window.refresh();
+    })?;
+    cx.run_until_parked();
     Ok(())
 }
 
