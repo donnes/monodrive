@@ -35,7 +35,8 @@ Update a plan's row when its work lands on `main`.
 
 The maintainer chose these from drawn options. Mockups are not in the repo. Show 3 to 4 options before any other UI work.
 
-- 03 to 05: Monocode popover for the context menu, a title bar ring and popover for jobs, rename errors in the title bar, toasts with Undo, an in-app Empty Trash card.
+- 03 to 05: Monocode popover for the context menu, a title bar ring and popover for jobs, toasts with Undo, an in-app Empty Trash card.
+- Top bar: one job, where am I among which tabs. Back and forward, the folder name (which becomes the first tab), and the ring. Path, selection and free space go in a thin hideable bar under the files, one per pane. Rename errors sit under the field.
 - 07: a capacity bar under each drive, an Edit mode for Favorites, a Finder-style Connect to Server sheet, the Settings icon at the bottom right of the sidebar with a Trash icon button at the bottom left.
 - 08: compact tabs in the title bar; two equal panes with their own path lines, plus a way to collapse the sidebar.
 - 09: an outline on the target and a pill by the pointer that says what will happen.
