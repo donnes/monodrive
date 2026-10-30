@@ -279,6 +279,41 @@ fn each_duplicate_waits_for_a_kept_copy_still_there_just_before_it_goes() {
 }
 
 #[test]
+fn a_duplicate_group_that_keeps_nothing_trashes_nothing() {
+    let (_dir, files, mut engine) = copies(&[("s6-a.txt", "same"), ("s6-b.txt", "same")]);
+    let seen = |name: &str| {
+        let path = files.join(name);
+        Seen {
+            found: disk::stamp(&path).unwrap(),
+            path,
+        }
+    };
+    let request = Request::TrashDuplicates {
+        groups: vec![Copies {
+            keep: Vec::new(),
+            trash: vec![seen("s6-a.txt"), seen("s6-b.txt")],
+        }],
+    };
+    let refused = run(&mut engine, request).unwrap_err();
+    assert!(
+        refused.contains("stays, since its group keeps no copy."),
+        "{refused}"
+    );
+    assert!(files.join("s6-a.txt").exists() && files.join("s6-b.txt").exists());
+    // Nor does a step of one that reaches the history some other way.
+    let (id, stamp) = seen("s6-a.txt").found;
+    let step = Step {
+        id,
+        undone: Spot::Path(files.join("s6-a.txt")),
+        done: Spot::Trash(None),
+        applied: false,
+        stamp,
+        keep: Some(Vec::new()),
+    };
+    assert!(step.ready(true, &[]).is_err());
+}
+
+#[test]
 fn redo_of_a_duplicate_cleanup_refuses_once_the_kept_copy_changed() {
     let (_dir, files, mut engine) = copies(&[("s3-keep.txt", "same"), ("s3-copy.txt", "same")]);
     let copy = files.join("s3-copy.txt");
@@ -407,7 +442,7 @@ fn opening_settles_what_a_crash_left_unfinished_from_the_disk() {
             done: Spot::Path(to.clone()),
             applied: false,
             stamp,
-            keep: Vec::new(),
+            keep: None,
         };
         engine
             .begin(submission, None, vec![step], Vec::new(), Vec::new())
@@ -928,7 +963,7 @@ fn an_interrupted_job_is_settled_from_the_disk_and_continues_past_what_finished(
         done: Spot::Path(dest.join("c.txt")),
         applied: false,
         stamp,
-        keep: Vec::new(),
+        keep: None,
     });
     let intent = Record::Work { op, index: 1, work };
     shared.lock().write(&intent).unwrap();
@@ -980,7 +1015,7 @@ fn a_copy_placed_just_before_a_crash_still_undoes_to_the_trash() {
         done: Spot::Path(placed.clone()),
         applied: false,
         stamp,
-        keep: Vec::new(),
+        keep: None,
     });
     shared
         .lock()
@@ -1527,7 +1562,7 @@ fn renaming(from: &Path, to: &str) -> Step {
         done: Spot::Path(from.with_file_name(to)),
         applied: false,
         stamp,
-        keep: Vec::new(),
+        keep: None,
     }
 }
 

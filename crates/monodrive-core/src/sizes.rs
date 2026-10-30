@@ -92,7 +92,13 @@ pub(crate) fn gated() -> Vec<PathBuf> {
     if fsearch::has_full_disk_access() {
         return Vec::new();
     }
-    std::env::var("HOME").map_or_else(|_| Vec::new(), |home| paths(fsearch::gated(&home)))
+    let Ok(home) = std::env::var("HOME") else {
+        return Vec::new();
+    };
+    // Real paths, as the walk guards them.
+    let real = std::fs::canonicalize(&home).ok();
+    let home = real.as_deref().and_then(Path::to_str).unwrap_or(&home);
+    paths(fsearch::gated(home))
 }
 
 fn paths(gated: Vec<Vec<u8>>) -> Vec<PathBuf> {
@@ -116,7 +122,8 @@ pub(crate) fn guarded(path: &Path, gated: &[PathBuf]) -> Option<std::io::Error> 
 }
 
 /// Walks every item under `folder` without following links or opening
-/// `gated` folders, until `stopped` says to stop. True if it met
+/// `gated` folders, until `stopped` says to stop. A link given as `folder`
+/// is resolved first, so it can't lead into one. True if it met
 /// everything. Fails only when `folder` itself can't be listed.
 pub(crate) fn walk(
     folder: &Path,
@@ -124,9 +131,12 @@ pub(crate) fn walk(
     stopped: &mut dyn FnMut() -> bool,
     met: &mut dyn FnMut(Met),
 ) -> Result<bool, String> {
+    let root = folder
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", folder.display()))?;
     let mut linked = HashSet::new();
     let mut found = 0;
-    let mut pending = vec![(folder.to_path_buf(), 0)];
+    let mut pending = vec![(root, 0)];
     while let Some((dir, at)) = pending.pop() {
         if stopped() {
             return Ok(false);
@@ -382,6 +392,8 @@ mod tests {
         write(&containers.join("app/b.txt"), 20);
         write(&home.join("Desktops/c.txt"), 30);
         write(&home.join("Library/Caches/d.txt"), 40);
+        let link = home.join("to-desktop");
+        std::os::unix::fs::symlink(&desktop, &link).unwrap();
         // Locked too, so opening either would fail another way.
         for folder in [&desktop, &containers] {
             std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -395,14 +407,17 @@ mod tests {
             Met::Folder { .. } => {}
         });
         let inside = walk(&desktop, &gated, &mut || false, &mut |_| {});
+        let linked = walk(&link, &gated, &mut || false, &mut |_| {});
         for folder in [&desktop, &containers] {
             std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert_eq!((complete, bytes), (Ok(true), 70));
+        let link_size = std::fs::symlink_metadata(&link).unwrap().len();
+        assert_eq!((complete, bytes), (Ok(true), 70 + link_size));
         unreadable.sort();
         let needs = |path: &Path| format!("{}: needs Full Disk Access", path.display());
         assert_eq!(unreadable, [needs(&desktop), needs(&containers)]);
         assert_eq!(inside, Err(needs(&desktop)));
+        assert_eq!(linked, Err(needs(&link)));
     }
 
     #[test]

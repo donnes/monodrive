@@ -285,9 +285,10 @@ struct Step {
     /// undo nor redo moves it once it's been edited since.
     stamp: Stamp,
     /// A duplicate's copies kept beside it: it goes to the Trash, first or
-    /// on redo, only while one of them is still there to read.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    keep: Vec<Seen>,
+    /// on redo, only while one of them is still there to read. `None` for
+    /// every other item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keep: Option<Vec<Seen>>,
 }
 
 impl Step {
@@ -336,7 +337,10 @@ impl Step {
         {
             return Err(format!("{} already exists.", to.display()));
         }
-        if done && !self.keep.is_empty() && !self.keep.iter().any(readable) {
+        if done
+            && let Some(keep) = &self.keep
+            && !keep.iter().any(readable)
+        {
             return Err(format!(
                 "{}: stays, since no copy kept beside it still opens as the scan found it. Scan again.",
                 here.display()
@@ -875,7 +879,7 @@ impl Engine {
                         done: Spot::Path(made.clone()),
                         applied: true,
                         stamp,
-                        keep: Vec::new(),
+                        keep: None,
                     });
                     Ok(made)
                 }
@@ -964,7 +968,7 @@ impl Engine {
             done: Spot::Path(original),
             applied: false,
             stamp,
-            keep: Vec::new(),
+            keep: None,
         })
     }
 
@@ -1156,7 +1160,7 @@ fn plan_trash(path: &Path) -> Result<Plan, String> {
         done: Spot::Trash(None),
         applied: false,
         stamp,
-        keep: Vec::new(),
+        keep: None,
     }))
 }
 
@@ -1168,7 +1172,12 @@ fn plan_copies(copies: &Copies) -> Vec<(PathBuf, Result<Plan, String>)> {
         .iter()
         .map(|seen| {
             let path = &seen.path;
-            let plan = if copies.keep.iter().any(|k| k.found.0 == seen.found.0) {
+            let plan = if copies.keep.is_empty() {
+                Err(format!(
+                    "{}: stays, since its group keeps no copy.",
+                    path.display()
+                ))
+            } else if copies.keep.iter().any(|k| k.found.0 == seen.found.0) {
                 Err(format!("{}: is a copy kept.", path.display()))
             } else if disk::stamp(path).ok() != Some(seen.found) {
                 Err(format!(
@@ -1178,7 +1187,7 @@ fn plan_copies(copies: &Copies) -> Vec<(PathBuf, Result<Plan, String>)> {
             } else {
                 plan_trash(path).and_then(|plan| match plan {
                     Plan::Move(step) => movable(Step {
-                        keep: copies.keep.clone(),
+                        keep: Some(copies.keep.clone()),
                         ..step
                     }),
                     plan => Ok(plan),
@@ -1214,7 +1223,7 @@ fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
         done: Spot::Path(to),
         applied: false,
         stamp,
-        keep: Vec::new(),
+        keep: None,
     })
 }
 
@@ -1444,7 +1453,7 @@ fn plan_into_new(item: &Path, folder: &Path) -> Result<Plan, String> {
         done: Spot::Path(folder.join(name)),
         applied: false,
         stamp,
-        keep: Vec::new(),
+        keep: None,
     })
 }
 

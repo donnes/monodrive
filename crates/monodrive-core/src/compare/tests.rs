@@ -265,6 +265,14 @@ fn consent_gated_folders_compare_as_unknown_without_being_opened() {
         &gated,
     );
     assert_eq!(inside.unwrap_err(), needs);
+    // A link to one is the folder it leads to.
+    let links = [&left, &right].map(|side| {
+        let link = root.join(format!("{}-desktop", side.file_name().unwrap().display()));
+        std::os::unix::fs::symlink(side.join("Desktop"), &link).unwrap();
+        link
+    });
+    let linked = walk(&links[0], &links[1], &progress, None, MAX_ITEMS, &gated);
+    assert_eq!(linked.unwrap_err(), needs);
 }
 
 #[test]
