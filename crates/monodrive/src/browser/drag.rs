@@ -905,6 +905,11 @@ impl Browser {
             && let Some(ix) = self.tabs.iter().position(|t| t.panes().any(|p| *p == tab))
             && ix != self.active
         {
+            // Showing the tab reloads a search, which would pick its first hit.
+            let panes: Vec<_> = self.tabs[ix].panes().cloned().collect();
+            for pane in panes {
+                pane.update(cx, |pane, _| pane.keep_selection = !pane.query.is_empty());
+            }
             self.show_tab(ix, window, cx);
         }
         for (pane, to) in back.panes {
@@ -1045,6 +1050,35 @@ mod tests {
     };
     use super::*;
     use gpui::{ExternalDragPayload as Payload, TestAppContext};
+
+    #[gpui::test]
+    fn esc_back_to_a_tab_keeps_the_selection_over_its_search_results(cx: &mut TestAppContext) {
+        use crate::onboarding::{IndexGate, tests::Fake};
+        let (_dir, project) = project_folder();
+        cx.update(|cx| cx.set_global(IndexGate::new(Arc::new(Fake::default()), true)));
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down down down");
+        let source = browser.read_with(cx, |browser, _| browser.pane().clone());
+        let chosen = source.read_with(cx, |pane, _| pane.chosen());
+        source.update(cx, |pane, _| pane.query = "a".into());
+        browser.update_in(cx, |browser, window, cx| {
+            browser.new_tab(
+                super::super::pane::Stop::folder(project.clone()),
+                window,
+                cx,
+            );
+            let back = SpringBack {
+                tab: Some(source.clone()),
+                panes: Vec::new(),
+            };
+            browser.spring_back(back, window, cx);
+        });
+        source.update(cx, |pane, _| {
+            pane.pick_selection(None);
+            assert_eq!(pane.chosen(), chosen);
+        });
+        cx.run_until_parked();
+    }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(PathBuf::from).collect()
