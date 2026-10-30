@@ -10,7 +10,7 @@ Update a plan's row when its work lands on `main`.
 |---|---|---|
 | 01 Performance baseline | Done | |
 | 02 Selection | Done | |
-| 03 File operations | Planned | |
+| 03 File operations | In progress: owner, local mutations and undo done; copy/move jobs next | f932352, 3876a60, 41570a7 |
 | 04 Editing commands | Planned | |
 | 05 Context menu | Planned | |
 | 06 Quick Look | Planned | |
