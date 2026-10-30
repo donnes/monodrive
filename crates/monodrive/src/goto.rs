@@ -35,6 +35,8 @@ const LIMIT: usize = 8;
 
 pub struct GotoView {
     field: Entity<TextField>,
+    /// What the field started with, selected so typing replaces it.
+    prefill: String,
     /// The folder on screen, which a relative path starts from.
     base: PathBuf,
     completions: Vec<PathBuf>,
@@ -61,13 +63,15 @@ impl GotoView {
         if !start.ends_with('/') {
             start.push('/');
         }
-        field.update(cx, |field, cx| field.insert(&start, cx));
+        field.update(cx, |field, cx| field.set_text(&start, 0..start.len(), cx));
         cx.subscribe(&field, |this, _, _: &text_field::Changed, cx| {
+            this.start_over(cx);
             this.complete(cx)
         })
         .detach();
         let mut view = Self {
             field,
+            prefill: start,
             base: folder,
             completions: Vec::new(),
             selected: None,
@@ -76,6 +80,22 @@ impl GotoView {
         };
         view.complete(cx);
         view
+    }
+
+    /// A path of its own typed after what the field started with, with the
+    /// selection let go of, takes over from it: `~/here//System` is `/System`.
+    fn start_over(&mut self, cx: &mut Context<Self>) {
+        let typed = self.field.read(cx).text();
+        let Some(rest) = typed
+            .strip_prefix(self.prefill.as_str())
+            .filter(|rest| rest.starts_with('/') || rest.starts_with("~/"))
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let end = rest.len();
+        self.field
+            .update(cx, |field, cx| field.set_text(&rest, end..end, cx));
     }
 
     /// Lists what the typed path could complete to, off the UI thread.
@@ -166,14 +186,17 @@ impl Render for GotoView {
                 }))
         });
         let body = div()
+            .debug_selector(|| "goto-body".into())
             .flex()
             .flex_col()
             .children(self.error.clone().map(|error| {
+                // A long name wraps inside the card.
                 div()
-                    .h(px(theme::ROW_HEIGHT))
+                    .debug_selector(|| "goto-error".into())
+                    .min_h(px(theme::ROW_HEIGHT))
+                    .w_full()
                     .px_2()
-                    .flex()
-                    .items_center()
+                    .py(px(6.))
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(danger())
                     .child(error)
@@ -210,5 +233,99 @@ impl Render for GotoView {
                 self.field.clone(),
                 body,
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    fn open<'a>(
+        folder: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<GotoView>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(Preferences::default());
+            commands::apply(cx);
+        });
+        let folder = folder.to_path_buf();
+        let (view, cx) = cx.add_window_view(|_, cx| GotoView::new(folder, cx));
+        cx.update(|window, cx| {
+            window.activate_window();
+            let field = view.read(cx).focus_handle(cx);
+            window.focus(&field, cx);
+        });
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    fn typed(view: &Entity<GotoView>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |view, cx| view.field.read(cx).text().to_owned())
+    }
+
+    /// Lets go of what's selected, with the caret at the end.
+    fn to_the_end(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn typing_replaces_what_it_started_with(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(dir.path(), cx);
+        assert!(typed(&view, cx).starts_with('/') && typed(&view, cx).ends_with('/'));
+        cx.simulate_input("n");
+        assert_eq!(typed(&view, cx), "n");
+    }
+
+    #[gpui::test]
+    fn an_absolute_path_after_what_it_started_with_takes_over(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(dir.path(), cx);
+        to_the_end(cx);
+        cx.simulate_input("/");
+        assert_eq!(typed(&view, cx), "/");
+        cx.simulate_input("System");
+        assert_eq!(typed(&view, cx), "/System");
+    }
+
+    #[gpui::test]
+    fn the_home_folder_after_what_it_started_with_takes_over(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(dir.path(), cx);
+        to_the_end(cx);
+        cx.simulate_input("~/Library");
+        assert_eq!(typed(&view, cx), "~/Library");
+    }
+
+    #[gpui::test]
+    fn a_name_starting_with_a_tilde_adds_to_what_it_started_with(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(dir.path(), cx);
+        let start = typed(&view, cx);
+        to_the_end(cx);
+        cx.simulate_input("~backup");
+        assert_eq!(typed(&view, cx), format!("{start}~backup"));
+    }
+
+    #[gpui::test]
+    fn a_long_error_names_the_item_and_wraps_inside_the_card(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(dir.path(), cx);
+        let name = "b ".repeat(200);
+        let name = name.trim();
+        cx.simulate_input(&format!("/nowhere/at/all/{name}"));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let said = view.read_with(cx, |view, _| view.error.clone()).unwrap();
+        assert_eq!(said, format!("\"{name}\" doesn't exist."));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let error = cx.debug_bounds("goto-error").unwrap();
+        let card = cx.debug_bounds("goto-body").unwrap();
+        assert!(error.size.height.as_f32() > theme::ROW_HEIGHT, "{error:?}");
+        assert!(error.right() <= card.right(), "{error:?} in {card:?}");
     }
 }

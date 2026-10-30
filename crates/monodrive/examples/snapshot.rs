@@ -20,7 +20,7 @@
 //! `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
 //! `recents.png`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
-//! `palette-favorites.png`), `palette-selection.png`, `goto.png`, `settings-menu.png` and one
+//! `palette-favorites.png`), `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
 //! `settings-<page>.png` for each Settings page, `background.png`, the list
 //! over a picture that runs from bright to dark, `narrow.png`, where the path
 //! collapses, and `no-path-bar.png`.
@@ -317,6 +317,14 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     cx.run_until_parked();
     dispatch(&mut cx, window, &GoToFolder)?;
     save(&mut cx, window, out, "goto")?;
+    type_text(
+        &mut cx,
+        window,
+        "/Volumes/Archive/Projects/2026/Clients/Northwind Traders/Quarterly Reports/Final Versions/Signed Copies Sent To The Board Of Directors For Review.pdf",
+    )?;
+    let go = named(&mut cx, "goto::Go")?;
+    dispatch(&mut cx, window, &*go)?;
+    save(&mut cx, window, out, "goto-error")?;
 
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();

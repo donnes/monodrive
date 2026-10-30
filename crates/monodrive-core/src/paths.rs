@@ -29,7 +29,13 @@ pub fn destination(input: &str, base: &Path) -> Result<Destination, String> {
     } else {
         absolute(&unescape(trimmed))
     };
-    let meta = std::fs::metadata(&path).map_err(|_| format!("{trimmed} doesn't exist."))?;
+    let meta = std::fs::metadata(&path).map_err(|_| {
+        let name = path.file_name().map_or_else(
+            || trimmed.to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        format!("\"{name}\" doesn't exist.")
+    })?;
     if meta.is_dir() {
         return Ok(Destination {
             folder: path,

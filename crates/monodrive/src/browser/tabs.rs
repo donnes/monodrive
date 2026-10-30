@@ -25,7 +25,7 @@ const SEARCH_WIDTH: f32 = 200.;
 const LIGHTS_GAP: f32 = 8.;
 
 /// The narrowest a pane gets while dragging the divider.
-const NARROWEST_PANE: f32 = 240.;
+pub(super) const NARROWEST_PANE: f32 = 240.;
 /// The gap between two cards, which is the divider. Boxy's panes touch.
 pub(super) const CARD_GAP: f32 = 8.;
 
@@ -200,7 +200,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let tab = &self.tabs[self.active];
-        let room = pane_room(window, cx);
+        let room = pane_room(window, tab.second.is_some(), cx);
         let gap = if boxy { 0. } else { CARD_GAP };
         let card = |pane: &Entity<Pane>, focused: bool| {
             div()

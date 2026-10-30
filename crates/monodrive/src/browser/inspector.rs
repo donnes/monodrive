@@ -5,7 +5,7 @@
 //! it's closed, nothing here reads or runs.
 
 use super::pane::{Pane, format_date, format_size, level_name, real};
-use super::tabs::CARD_GAP;
+use super::tabs::{CARD_GAP, NARROWEST_PANE};
 use super::{Browser, GetInfo, HideInspector, OpenWith, format_bytes, with_owner};
 use crate::file_icons;
 use crate::native::native;
@@ -165,21 +165,25 @@ impl Inspector {
     }
 }
 
-/// How much of `room`, the panes' width without it, the inspector takes.
-pub(super) fn room(room: f32, cx: &App) -> f32 {
+/// How much of `room`, the panes' width without it, the inspector takes: none
+/// if that would leave the list under its least, or two panes under theirs
+/// with the divider between them.
+pub(super) fn room(room: f32, split: bool, cx: &App) -> f32 {
     let prefs = cx.global::<Preferences>();
     if !prefs.show_inspector {
         return 0.;
     }
-    let taken = match prefs.workspace_style {
-        preferences::WorkspaceStyle::Rounded => WIDTH + CARD_GAP,
-        preferences::WorkspaceStyle::Boxy => WIDTH,
+    let gap = match prefs.workspace_style {
+        preferences::WorkspaceStyle::Rounded => CARD_GAP,
+        preferences::WorkspaceStyle::Boxy => 0.,
     };
-    if room - taken >= LEAST_LIST {
-        taken
+    let taken = WIDTH + gap;
+    let least = if split {
+        2. * NARROWEST_PANE + gap
     } else {
-        0.
-    }
+        LEAST_LIST
+    };
+    if room - taken >= least { taken } else { 0. }
 }
 
 /// `2 folders, 3 PNG files, 1 more`: the commonest kinds first.
@@ -303,7 +307,8 @@ impl Browser {
 
     /// Whether it's on screen: asked for, and with room for the list beside it.
     fn inspector_open(&self, window: &Window, cx: &App) -> bool {
-        cx.global::<Preferences>().show_inspector && super::inspector_fits(window, cx)
+        let split = self.tabs[self.active].second.is_some();
+        cx.global::<Preferences>().show_inspector && super::inspector_fits(window, split, cx)
     }
 
     /// Reads the one item after `delay`, unless what's shown changes first.

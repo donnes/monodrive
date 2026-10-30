@@ -815,3 +815,75 @@ fn packages_have_no_triangle_and_stay_shut(cx: &mut TestAppContext) {
     press(cx, "right");
     assert_eq!(shown(&browser, cx).0, listed);
 }
+
+#[gpui::test]
+fn in_two_panes_it_leaves_each_its_least(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx, _fake) = set_up(&project, cx);
+    // 240 of sidebar and 8 of margin leave 752: room for the list beside it,
+    // and 4 short of two panes at 240 with the gap.
+    cx.simulate_resize(gpui::size(px(1000.), px(600.)));
+    press(cx, "cmd-i");
+    assert!(cx.debug_bounds("inspector").is_some());
+    press(cx, "cmd-alt-s");
+    assert!(cx.debug_bounds("inspector").is_none());
+    let widths = browser.read_with(cx, |browser, cx| {
+        browser.tabs[browser.active]
+            .panes()
+            .map(|pane| pane.read(cx).chrome.width)
+            .collect::<Vec<_>>()
+    });
+    assert!(widths.iter().all(|width| *width >= 240. - 2.), "{widths:?}");
+    // With room for all of it, it comes back.
+    cx.simulate_resize(gpui::size(px(1004.), px(600.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("inspector").is_some());
+}
+
+#[gpui::test]
+fn an_open_waiting_on_the_disk_gives_way_to_what_came_after(cx: &mut TestAppContext) {
+    let (_dir, project, app) = with_package();
+    let world = world(Vec::new(), cx);
+    let (browser, cx) = browse(&project, cx);
+    let row = |name: &str, browser: &Entity<Browser>, cx: &mut VisualTestContext| {
+        in_pane(browser, cx, |pane, _| row_of(pane, name))
+    };
+    let package = row("Tool.app", &browser, cx);
+    let docs = row("docs", &browser, cx);
+    let zeta = row("zeta", &browser, cx);
+
+    // Selected elsewhere: the app doesn't launch.
+    on_pane(&browser, cx, |pane, cx| {
+        pane.select_row(package, cx);
+        pane.open(package, cx);
+        pane.select_row(zeta, cx);
+    });
+    cx.run_until_parked();
+    assert!(world.fake.opened.lock().unwrap().is_empty());
+
+    // Went elsewhere: it doesn't come back.
+    let there = project.join("zeta");
+    on_pane(&browser, cx, |pane, cx| {
+        pane.select_row(docs, cx);
+        pane.open(docs, cx);
+        pane.navigate(there.clone(), cx);
+    });
+    cx.run_until_parked();
+    in_pane(&browser, cx, |pane, _| assert_eq!(pane.folder(), there));
+    assert!(world.fake.opened.lock().unwrap().is_empty());
+    press(cx, "cmd-[");
+
+    // Opened something else: only that one opens.
+    let (package, docs) = in_pane(&browser, cx, |pane, _| {
+        (row_of(pane, "Tool.app"), row_of(pane, "docs"))
+    });
+    on_pane(&browser, cx, |pane, cx| {
+        pane.select_row(docs, cx);
+        pane.open(docs, cx);
+        pane.select_row(package, cx);
+        pane.open(package, cx);
+    });
+    cx.run_until_parked();
+    in_pane(&browser, cx, |pane, _| assert_eq!(pane.folder(), project));
+    assert_eq!(*world.fake.opened.lock().unwrap(), [app]);
+}

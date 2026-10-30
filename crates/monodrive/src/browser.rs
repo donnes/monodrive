@@ -555,7 +555,7 @@ impl Browser {
     /// The panes on screen, each with its width inside its borders.
     fn pane_widths(&self, window: &Window, cx: &App) -> Vec<(Entity<Pane>, f32)> {
         let tab = &self.tabs[self.active];
-        let room = pane_room(window, cx);
+        let room = pane_room(window, tab.second.is_some(), cx);
         let boxy = cx.global::<Preferences>().workspace_style == WorkspaceStyle::Boxy;
         match &tab.second {
             None => vec![(tab.pane.clone(), if boxy { room } else { room - 2. })],
@@ -1705,14 +1705,15 @@ impl Render for Browser {
 
 /// How wide the panes' area is, inside the sidebar and the margin beside the
 /// cards, or Boxy's border.
-fn pane_room(window: &Window, cx: &App) -> f32 {
+fn pane_room(window: &Window, split: bool, cx: &App) -> f32 {
     let room = room_with_inspector(window, cx);
-    room - inspector::room(room, cx)
+    room - inspector::room(room, split, cx)
 }
 
-/// Whether the file list keeps its least beside the inspector.
-fn inspector_fits(window: &Window, cx: &App) -> bool {
-    inspector::room(room_with_inspector(window, cx), cx) > 0.
+/// Whether the file list, or each of two panes, keeps its least beside the
+/// inspector.
+fn inspector_fits(window: &Window, split: bool, cx: &App) -> bool {
+    inspector::room(room_with_inspector(window, cx), split, cx) > 0.
 }
 
 /// `pane_room` before the inspector takes its share.

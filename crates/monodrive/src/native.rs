@@ -131,18 +131,20 @@ pub struct Offered {
     pub has_default: bool,
 }
 
-/// The apps that can open all of `files`, asking once per extension, since
-/// LaunchServices answers by type and a selection can be thousands of files.
+/// The apps that can open all of `files`. LaunchServices answers by type and a
+/// selection can be thousands of files, so regular files with an extension ask
+/// once per extension. A link, a folder or a file with no extension may be any
+/// type, so each of those asks for itself. Reads the disk.
 pub fn offered(native: &dyn Native, files: &[PathBuf]) -> Offered {
     let mut seen = HashSet::new();
     let of_each: Vec<&PathBuf> = files
         .iter()
         .filter(|file| {
-            seen.insert(
-                file.extension()
-                    .map(|e| e.to_string_lossy().to_lowercase())
-                    .unwrap_or_default(),
-            )
+            let regular = std::fs::symlink_metadata(file).is_ok_and(|meta| meta.is_file());
+            match file.extension().filter(|_| regular) {
+                Some(extension) => seen.insert(extension.to_string_lossy().to_lowercase()),
+                None => true,
+            }
         })
         .collect();
     let Some((first, rest)) = of_each.split_first() else {
@@ -173,8 +175,12 @@ pub fn offered(native: &dyn Native, files: &[PathBuf]) -> Offered {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    struct Apps;
+    #[derive(Default)]
+    struct Apps {
+        asked: Mutex<Vec<PathBuf>>,
+    }
 
     fn app(name: &str) -> MacApp {
         MacApp {
@@ -200,12 +206,16 @@ mod tests {
         fn invalidate(&self, _: &Path) {}
         fn forget_sizes(&self) {}
         fn can_open(&self, file: &Path) -> Vec<MacApp> {
+            self.asked.lock().unwrap().push(file.to_path_buf());
+            // Where a link leads, as LaunchServices follows it.
+            let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
             match file.extension().and_then(|e| e.to_str()) {
                 Some("txt") => vec![app("Zed"), app("TextEdit"), app("Pages")],
                 _ => vec![app("Pages"), app("Preview"), app("Zed")],
             }
         }
         fn default_for(&self, file: &Path) -> Option<MacApp> {
+            let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
             match file.extension().and_then(|e| e.to_str()) {
                 Some("txt") => Some(app("TextEdit")),
                 _ => Some(app("Preview")),
@@ -229,20 +239,36 @@ mod tests {
 
     #[test]
     fn one_file_offers_its_default_first_then_the_rest_a_to_z() {
-        let got = offered(&Apps, &["/x/a.txt".into()]);
+        let got = offered(&Apps::default(), &["/x/a.txt".into()]);
         assert_eq!(names(&got), ["TextEdit", "Pages", "Zed"]);
         assert!(got.has_default);
     }
 
     #[test]
     fn several_files_offer_only_apps_that_open_them_all() {
-        let got = offered(&Apps, &["/x/a.txt".into(), "/x/b.pdf".into()]);
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "").unwrap();
+            path
+        };
+        let (a, b, shouting) = (file("a.txt"), file("b.pdf"), file("B.TXT"));
+        let got = offered(&Apps::default(), &[a.clone(), b.clone()]);
         assert_eq!(names(&got), ["Pages", "Zed"]);
         // Their defaults differ, so nothing is marked.
         assert!(!got.has_default);
         // Same type, so one question and the one default.
-        let got = offered(&Apps, &["/x/a.txt".into(), "/x/B.TXT".into()]);
+        let apps = Apps::default();
+        let got = offered(&apps, &[a.clone(), shouting]);
         assert_eq!(names(&got), ["TextEdit", "Pages", "Zed"]);
         assert!(got.has_default);
+        assert_eq!(*apps.asked.lock().unwrap(), std::slice::from_ref(&a));
+        // Two links with no extension say nothing of what they lead to.
+        let (to_text, to_pdf) = (dir.path().join("one"), dir.path().join("two"));
+        std::os::unix::fs::symlink(&a, &to_text).unwrap();
+        std::os::unix::fs::symlink(&b, &to_pdf).unwrap();
+        let got = offered(&Apps::default(), &[to_text, to_pdf]);
+        assert_eq!(names(&got), ["Pages", "Zed"]);
+        assert!(!got.has_default);
     }
 }

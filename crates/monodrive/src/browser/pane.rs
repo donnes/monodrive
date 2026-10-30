@@ -243,6 +243,8 @@ pub struct Pane {
     swept: bool,
     /// Where the listing was laid out last frame, in the window.
     pub(super) list_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// An Open waiting on the disk. Replacing it, or going elsewhere, drops it.
+    opening: Task<()>,
     /// Whether this lone selected entry is a package, as last worked out.
     package: Option<(PathBuf, bool)>,
     /// Whether this lone selected entry is a folder, as last worked out.
@@ -339,6 +341,7 @@ impl Pane {
             marquee: None,
             swept: false,
             list_bounds: Rc::default(),
+            opening: Task::ready(()),
             package: None,
             lone_folder: None,
             trash_header: trash::TrashHeader::default(),
@@ -354,6 +357,7 @@ impl Pane {
     pub(super) fn set_shown(&mut self, shown: bool) {
         self.shown = shown;
         if !shown {
+            self.opening = Task::ready(());
             self.refresh = None;
             self.held.clear();
             self.marquee = None;
@@ -596,6 +600,7 @@ impl Pane {
     }
 
     pub(super) fn collapse_all(&mut self) {
+        self.opening = Task::ready(());
         self.peek_hidden = false;
         // A refresh due for the folder being left has nothing to refresh.
         self.refresh = None;
@@ -1223,12 +1228,11 @@ impl Pane {
         let is_dir = cx
             .background_executor()
             .spawn(async move { target.is_dir() });
-        cx.spawn(async move |this, cx| {
+        self.opening = cx.spawn(async move |this, cx| {
             if is_dir.await {
                 let _ = this.update(cx, |this, cx| this.navigate(package, cx));
             }
-        })
-        .detach();
+        });
     }
 
     /// Whether the keys go to the list, the search over it, or a context
@@ -1499,17 +1503,30 @@ impl Pane {
                 _ => target.is_dir() && !info::is_package(&real(&target)),
             }
         });
-        cx.spawn(async move |this, cx| {
+        let asked_on = self.selected_now();
+        self.opening = cx.spawn(async move |this, cx| {
             let goes_in = goes_in.await;
             let _ = this.update(cx, |this, cx| {
+                // The selection moved while the disk answered: what was asked
+                // for isn't what's wanted now.
+                if this.selected_now() != asked_on {
+                    return;
+                }
                 if goes_in {
                     this.navigate(path, cx);
                 } else {
                     this.open_file(&path, cx);
                 }
             });
-        })
-        .detach();
+        });
+    }
+
+    /// What's selected, as far as an Open waiting on the disk cares.
+    fn selected_now(&self) -> (Option<PathBuf>, usize) {
+        (
+            self.selection.only().map(Path::to_path_buf),
+            self.selection.len(),
+        )
     }
 
     /// Moves the cursor a `step`, selecting what it lands on, or with ⇧
