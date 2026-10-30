@@ -58,6 +58,15 @@ pub fn default_for(file: &Path) -> Option<App> {
     })
 }
 
+/// The app with this bundle identifier, if it's installed.
+pub fn with_bundle_id(id: &str) -> Option<App> {
+    objc2::rc::autoreleasepool(|_| {
+        NSWorkspace::sharedWorkspace()
+            .URLForApplicationWithBundleIdentifier(&NSString::from_str(id))
+            .and_then(|url| app(&url))
+    })
+}
+
 /// Opens `files` in the app at `app`, launching it if needed. Waits for
 /// macOS to say it did, so call it off the UI thread.
 pub fn open_with(files: &[PathBuf], app: &Path) -> Result<(), String> {

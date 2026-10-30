@@ -223,6 +223,7 @@ impl Browser {
             .id("panes")
             .relative()
             .flex_1()
+            .min_w_0()
             .min_h_0()
             .flex()
             .gap(px(gap));

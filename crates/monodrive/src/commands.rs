@@ -10,11 +10,11 @@
 use crate::browser::{
     AddToSidebar, Back, ClearRecents, CloseTab, ConnectToServer, CopyPath, CopyToOtherPane,
     DeselectAll, Duplicate, EditFavorites, Eject, EmptyTrash, EnclosingFolder, FocusSearch,
-    Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents,
-    GoToFolder, GoTrash, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
-    NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInTerminal, OpenSelected,
-    OpenSettings, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom,
-    RevealInFinder, ReverseSort, ShowCopiesAndMoves, ShowPackageContents, SortByKind,
+    Forward, GetInfo, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
+    GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile,
+    NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInTerminal, OpenSelected,
+    OpenSettings, OpenWith, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename,
+    ResetZoom, RevealInFinder, ReverseSort, ShowCopiesAndMoves, ShowPackageContents, SortByKind,
     SortByModified, SortByName, SortBySize, ToggleHiddenFiles, TogglePathBar, ToggleSidebar,
     ToggleSplit, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
@@ -225,6 +225,11 @@ pub fn all() -> Vec<Command> {
                 || Box::new(OpenSelected),
             )),
         ),
+        // In the window's own menu, since which apps depends on the selection.
+        on(
+            SELECTION,
+            command("Open With", File, &[], BROWSER, || Box::new(OpenWith)),
+        ),
         // ⌃⌘O, as Finder's.
         on(
             &[Scope::Selection, Scope::Sidebar],
@@ -261,6 +266,10 @@ pub fn all() -> Vec<Command> {
                 BROWSER,
                 || Box::new(AddToSidebar),
             )),
+        ),
+        on(
+            &[Scope::Selection, Scope::Folder],
+            command("Get Info", File, &["cmd-i"], BROWSER, || Box::new(GetInfo)),
         ),
         on(
             &[Scope::Sidebar],
@@ -458,6 +467,9 @@ pub fn all() -> Vec<Command> {
         // ⌃⌘S, as Finder's.
         command("Show Sidebar", View, &["ctrl-cmd-s"], BROWSER, || {
             Box::new(ToggleSidebar)
+        }),
+        command("Hide Inspector", View, &[], BROWSER, || {
+            Box::new(HideInspector)
         }),
         on(
             FOLDER,
@@ -668,6 +680,8 @@ pub struct MenuRow {
     /// Starts a new section.
     pub separated: bool,
     pub destructive: bool,
+    /// Opens a submenu instead of running.
+    pub submenu: bool,
     pub action: Box<dyn Action>,
 }
 
@@ -700,6 +714,7 @@ pub fn context_menu(
             checked: ticked.contains(&command.id()),
             separated: last.is_some_and(|last| last != section),
             destructive: command.destructive,
+            submenu: command.id() == OpenWith.name(),
             action,
         });
         last = Some(section);
@@ -982,11 +997,13 @@ mod tests {
             shown(&[Scope::Selection, Scope::Package], &prefs, &all),
             [
                 "Open ⌘↓",
+                "Open With",
                 "Open in New Tab ⌃⌘O",
                 "Show Package Contents",
                 "Reveal in Finder",
                 "Open in Terminal",
                 "| Add to Sidebar ⌃⌘T",
+                "Get Info ⌘I",
                 "| Rename ↩",
                 "Duplicate ⌘D",
                 "Quick Look ⌘Y",
@@ -1003,6 +1020,7 @@ mod tests {
             [
                 "New Folder ⇧⌘N",
                 "New File",
+                "| Get Info ⌘I",
                 "| Paste ⌘V",
                 "| ✓ as List ⌘1",
                 "as Grid ⌘2",
@@ -1026,7 +1044,7 @@ mod tests {
         // New Folder with Selection is for several, after the ways to open.
         let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
         assert_eq!(
-            several[5..7],
+            several[7..9],
             ["| New Folder with Selection ⌃⌘N", "Rename ↩"]
         );
         // What wouldn't run now is left out, and so is a separator with

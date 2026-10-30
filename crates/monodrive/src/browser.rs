@@ -2,6 +2,8 @@
 //! search over the whole-disk index.
 
 mod drag;
+mod inspector;
+mod open_with;
 mod pane;
 mod sidebar;
 mod tabs;
@@ -9,6 +11,8 @@ mod trash;
 
 #[cfg(test)]
 mod drag_tests;
+#[cfg(test)]
+mod inspector_tests;
 #[cfg(test)]
 mod places_tests;
 #[cfg(test)]
@@ -138,6 +142,9 @@ actions!(
         CopyToOtherPane,
         MoveToOtherPane,
         ToggleSidebar,
+        GetInfo,
+        HideInspector,
+        OpenWith,
     ]
 );
 
@@ -271,6 +278,8 @@ pub struct Browser {
     /// While dragging the sidebar's edge: the sidebar's width less the
     /// pointer's x at the press, so the edge stays under the pointer.
     resizing_sidebar: Option<f32>,
+    /// What the inspector shows, while it's open.
+    inspector: inspector::Inspector,
     /// The context menu, while it has the keys.
     menu: Option<OpenMenu>,
     /// A context menu asked for, opened once the next frame has drawn.
@@ -450,6 +459,8 @@ impl Browser {
             }
         })
         .detach();
+        cx.on_release(|this, cx| this.inspector.release(None, cx))
+            .detach();
         let index = cx
             .try_global::<SharedIndex>()
             .map_or_else(Arc::default, |shared| shared.0.clone());
@@ -480,6 +491,7 @@ impl Browser {
             _index_watch: Task::ready(()),
             index_hovered: false,
             resizing_sidebar: None,
+            inspector: inspector::Inspector::default(),
             menu: None,
             menu_request: None,
             preview: None,
@@ -492,10 +504,11 @@ impl Browser {
     }
 
     /// The disk changed: every pane on screen checks what it's showing.
-    fn disk_changed(&self, batch: &[(PathBuf, bool)], cx: &mut Context<Self>) {
+    fn disk_changed(&mut self, batch: &[(PathBuf, bool)], cx: &mut Context<Self>) {
         for pane in self.shown_panes() {
             pane.update(cx, |pane, cx| pane.disk_changed(batch, cx));
         }
+        self.inspector_disk_changed(batch, cx);
     }
 
     /// The menu bar's checkmarks go with the window in front.
@@ -612,7 +625,12 @@ impl Browser {
         cx: &mut Context<Self>,
     ) {
         self.menu = None;
-        self.menu_request = Some(MenuRequest { scopes, at, origin });
+        self.menu_request = Some(MenuRequest {
+            scopes,
+            at,
+            origin,
+            open_with: false,
+        });
         cx.notify();
     }
 
@@ -620,27 +638,54 @@ impl Browser {
     /// origin now. That's read off the frame drawn last, which is why it
     /// waits for the frame showing what the click selected.
     fn open_menu(&mut self, request: MenuRequest, window: &mut Window, cx: &mut Context<Self>) {
-        let MenuRequest { scopes, at, origin } = request;
+        let MenuRequest {
+            scopes,
+            at,
+            origin,
+            open_with,
+        } = request;
         let rows = commands::context_menu(&scopes, cx.global::<Preferences>(), |action| {
             window.is_action_available_in(action, &origin)
         });
         if rows.is_empty() {
             return;
         }
-        let view = cx.new(|cx| ContextMenu::new(rows, at, cx));
+        let files = if rows.iter().any(|row| row.submenu) {
+            self.pane().read(cx).chosen()
+        } else {
+            Vec::new()
+        };
+        let chosen = files.clone();
+        let view = cx.new(|cx| {
+            let mut menu = ContextMenu::new(rows, at, chosen, cx);
+            if open_with {
+                menu.enter_first_submenu(cx);
+            }
+            menu
+        });
         cx.subscribe_in(&view, window, |this, _, event: &MenuEvent, window, cx| {
             let Some(menu) = this.menu.take() else {
                 return;
             };
             window.focus(&menu.origin, cx);
-            if let MenuEvent::Run(action) = event {
-                window.dispatch_action(action.boxed_clone(), cx);
+            match event {
+                MenuEvent::Run(action) => window.dispatch_action(action.boxed_clone(), cx),
+                MenuEvent::Dismissed => {}
+                MenuEvent::OpenWith(app) => this.open_files_with(menu.files, app.clone(), cx),
+                MenuEvent::OtherApp => this.open_files_with_other(menu.files, cx),
+                MenuEvent::AlwaysOpenWith(app) => {
+                    this.ask_always_open_with(menu.files, app.clone(), window, cx)
+                }
             }
             cx.notify();
         })
         .detach();
         window.focus(&view.focus_handle(cx), cx);
-        self.menu = Some(OpenMenu { view, origin });
+        self.menu = Some(OpenMenu {
+            view,
+            origin,
+            files,
+        });
         cx.notify();
     }
 
@@ -1102,6 +1147,7 @@ impl Browser {
             favorites: self.sidebar.places.clone(),
             volumes: self.sidebar.volumes.clone(),
             servers: self.sidebar.servers.clone(),
+            files: self.pane().read(cx).chosen(),
             index: self.index.clone(),
         };
         self.palette_target = Some(self.target(window, cx));
@@ -1167,6 +1213,10 @@ impl Browser {
             PaletteEvent::Eject(mount) => self.eject(mount.clone(), cx),
             PaletteEvent::Connect(address) => self.connect_to(address, window, cx),
             PaletteEvent::Say(text) => self.toast(text.clone(), false, None, cx),
+            PaletteEvent::OpenWith { files, app } => {
+                self.open_files_with(files.clone(), app.clone(), cx)
+            }
+            PaletteEvent::OtherApp(files) => self.open_files_with_other(files.clone(), cx),
         }
     }
 
@@ -1440,6 +1490,7 @@ impl Render for Browser {
         self.sidebar_focus.clone().tab_stop(regions);
         self.settings_focus.clone().tab_stop(regions);
         self.follow_keys(window, cx);
+        self.follow_inspector(window, cx);
         let widths = self.pane_widths(window, cx);
         for (pane, width) in widths {
             let chrome = self.chrome_for(&pane, width, cx);
@@ -1471,6 +1522,7 @@ impl Render for Browser {
         let root = self
             .pane()
             .update(cx, |pane, cx| pane.commands(root, sheet, cx));
+        let root = self.inspector_commands(root, sheet, selected, &prefs, cx);
         root
             // While a sheet is open, its commands (from the menu bar too) wait.
             .when(!sheet, |d| {
@@ -1616,8 +1668,17 @@ impl Render for Browser {
                                     d.mr_2().mb_2().when(!prefs.show_sidebar, |d| d.ml_2())
                                 }
                             })
-                            .child(self.split_view(boxy, window, cx))
-                            .children(self.toast_view(cx)),
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .flex()
+                                    .child(self.split_view(boxy, window, cx))
+                                    .children(self.toast_view(cx)),
+                            )
+                            .children(self.inspector_view(boxy, split, window, cx)),
                     ),
             )
             .children(self.sheet.as_ref().map(|sheet| match sheet {
@@ -1645,6 +1706,17 @@ impl Render for Browser {
 /// How wide the panes' area is, inside the sidebar and the margin beside the
 /// cards, or Boxy's border.
 fn pane_room(window: &Window, cx: &App) -> f32 {
+    let room = room_with_inspector(window, cx);
+    room - inspector::room(room, cx)
+}
+
+/// Whether the file list keeps its least beside the inspector.
+fn inspector_fits(window: &Window, cx: &App) -> bool {
+    inspector::room(room_with_inspector(window, cx), cx) > 0.
+}
+
+/// `pane_room` before the inspector takes its share.
+fn room_with_inspector(window: &Window, cx: &App) -> f32 {
     let prefs = cx.global::<Preferences>();
     let sidebar = if prefs.show_sidebar {
         sidebar_width(prefs.sidebar_width, window)
@@ -1691,12 +1763,16 @@ fn with_owner<V: 'static, T: Send + 'static>(
 struct OpenMenu {
     view: Entity<ContextMenu>,
     origin: FocusHandle,
+    /// What was selected as it opened, for Open With.
+    files: Vec<PathBuf>,
 }
 
 struct MenuRequest {
     scopes: Vec<Scope>,
     at: Point<Pixels>,
     origin: FocusHandle,
+    /// Open With's submenu opens with it.
+    open_with: bool,
 }
 
 /// A message after a change.

@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 #[derive(Default)]
-struct Fake {
+pub(super) struct Fake {
     /// Folders that would raise a privacy prompt.
     gated: Mutex<Vec<PathBuf>>,
     volumes: Mutex<Vec<Volume>>,
@@ -30,7 +30,7 @@ struct Fake {
     ejected: Mutex<Vec<PathBuf>>,
     /// What the next mount answers.
     mounted: Mutex<Option<Result<PathBuf, String>>>,
-    opened: Mutex<Vec<PathBuf>>,
+    pub(super) opened: Mutex<Vec<PathBuf>>,
     cloud: Mutex<Vec<CloudFolder>>,
     /// What the index finds, whatever's asked.
     files: Mutex<Vec<Entry>>,
@@ -113,11 +113,11 @@ fn startup() -> Volume {
     }
 }
 
-struct World {
+pub(super) struct World {
     /// Keeps the store's and the Trash's folder.
     dir: tempfile::TempDir,
     store: Store,
-    fake: Arc<Fake>,
+    pub(super) fake: Arc<Fake>,
     volumes_changed: async_channel::Sender<()>,
     lists_changed: async_channel::Sender<()>,
     volume_changes: async_channel::Receiver<()>,
@@ -126,7 +126,7 @@ struct World {
 
 /// Isolated places with `volumes` mounted, set as the app's. Call it before
 /// `browse`, which is when the sidebar first reads them.
-fn world(volumes: Vec<Volume>, cx: &mut TestAppContext) -> World {
+pub(super) fn world(volumes: Vec<Volume>, cx: &mut TestAppContext) -> World {
     let dir = tempfile::tempdir().unwrap();
     let real = dir.path().canonicalize().unwrap();
     let store = Store {

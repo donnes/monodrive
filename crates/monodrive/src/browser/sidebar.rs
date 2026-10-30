@@ -528,6 +528,10 @@ impl Browser {
             return;
         };
         match place.availability.clone() {
+            // A pinned app opens, as it does from the list.
+            Availability::Available(path) if crate::workspace::is_package(&path) => {
+                self.pane().update(cx, |pane, cx| pane.open_file(&path, cx))
+            }
             Availability::Available(path) => {
                 self.pane().update(cx, |pane, cx| pane.go(path, window, cx))
             }

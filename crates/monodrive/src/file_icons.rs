@@ -134,7 +134,8 @@ fn draw(icon: &NSImage, pixels: u32) -> Option<RenderImage> {
 }
 
 /// The sizes drawn lately, newest first, and the icons drawn at each. The
-/// list's size and the grid's, on a Retina and a plain screen, fit in four;
+/// list's size, the grid's and the inspector's, on a Retina and a plain
+/// screen, fit in six;
 /// dragging the grid size slider gives back the sizes it leaves behind.
 #[derive(Default)]
 struct Rasters {
@@ -146,7 +147,7 @@ struct Rasters {
 
 impl Global for Rasters {}
 
-const SIZES_KEPT: usize = 4;
+const SIZES_KEPT: usize = 6;
 
 /// Bytes of icons kept at each size, since every folder is its own icon:
 /// about 21,000 list rows, or 160 of the grid's largest cells, more than a
@@ -267,16 +268,16 @@ mod tests {
         let mut rasters = Rasters::default();
         assert!(rasters.draw(at("rs", 32)).is_empty());
         assert!(rasters.draw(at("", 32)).is_empty());
-        for pixels in [100, 102, 104] {
+        for pixels in [100, 102, 104, 106, 108] {
             assert!(rasters.draw(at("rs", pixels)).is_empty());
         }
         // Drawing the list's size again keeps it from being the oldest.
         assert!(rasters.draw(at("rs", 32)).is_empty());
-        assert_eq!(rasters.draw(at("rs", 106)), vec![at("rs", 100)]);
-        let mut gone = rasters.draw(at("rs", 108));
-        gone.extend(rasters.draw(at("rs", 110)));
+        assert_eq!(rasters.draw(at("rs", 110)), vec![at("rs", 100)]);
+        let mut gone = rasters.draw(at("rs", 112));
+        gone.extend(rasters.draw(at("rs", 114)));
         assert_eq!(gone, vec![at("rs", 102), at("rs", 104)]);
-        assert_eq!(rasters.sizes, [110, 108, 106, 32]);
+        assert_eq!(rasters.sizes, [114, 112, 110, 32, 108, 106]);
         assert_eq!(rasters.icons[&32].len(), 2);
     }
 

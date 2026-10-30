@@ -59,6 +59,18 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 ⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits at the sidebar's top right, then after Forward in the top bar. The traffic lights stay, with Back and Forward right after them. The sidebar opens and closes at once, with no animation: a width that moves lays out the whole window each frame. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
 
+### Inspector
+
+⌘I, or Get Info in a menu, opens a 260 pt panel to the right of the panes, under the top bar, and it stays open from then on; ⌘I again, Hide Inspector or its ✕ closes it. It takes its width from the panes and moves nothing else, and it stays out when the list would keep under 200 pt. It's a card beside the pane's in Rounded, with the 8 pt gap, and a region with a hairline in Boxy.
+
+It's about the pane commands act on: the selection, or with none its folder. From the top: a 96 pt icon or picture, the name in `TEXT_TITLE` medium, centered, the kind at 0.65, then sections. A section is a 14 pt icon at 0.55 and a `TEXT_SMALL` medium label at 0.65, 16 pt below the last, in sentence case, with no color of its own. Under it are 24 pt rows: an 84 pt label at 0.65, and the value at the right in primary ink. What's unknown has no row, not a dash; only what the disk can answer late says so, as `Calculating…`. A press in the panel leaves the keys where they were.
+
+What the listing knows shows at once. The disk is read 100 ms after the selection rests, and a read or a folder's total for what's no longer selected is dropped. Behind a privacy prompt it reads nothing and says so.
+
+### Submenus
+
+A row with a submenu ends in a 12 pt chevron, in place of a shortcut. Hovering opens it at once with its first row level with its parent, overlapping by 2 pt, to the left where the window runs out. It closes 200 ms after the pointer settles on another row, so the way across doesn't close it. → and ↩ take the keys in, ← brings them out, and Esc closes the whole menu. A row that's waiting on the disk, such as `Loading…`, is at 0.65 and the keys skip it.
+
 ### Two panes
 
 Split View (⌥⌘S) puts two panes side by side, equal to begin with, each with its own column titles, files and path bar. In Rounded each is its own card with an 8 pt gap, and that gap is the divider; in Boxy they touch. Each pane has a 1 pt border: `accent()` on the one commands act on, 0.06 on the other, so turning it on moves nothing else. The divider drags, stops 240 pt from either side, and a double-click makes them equal again. A narrow list drops columns rather than the name, which keeps 160 pt: Kind goes first, then Date Modified, then Size.

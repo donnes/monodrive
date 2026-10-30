@@ -38,6 +38,7 @@ use gpui::{
 };
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::Index;
+use monodrive_core::info;
 use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
 use monodrive_core::places::{self, Availability, Favorite};
 use std::cell::Cell;
@@ -382,6 +383,11 @@ impl Pane {
     /// New files can land here: it's a real folder, listed.
     pub(super) fn takes_files(&self, cx: &App) -> bool {
         self.showing_folder() && !self.in_trash(cx) && self.unavailable.is_none()
+    }
+
+    /// It shows one folder that's been checked and can be read about.
+    pub(super) fn shows_a_real_folder(&self) -> bool {
+        self.showing_folder() && self.unavailable.is_none() && !self.unchecked()
     }
 
     /// What's on screen came from a saved session and hasn't been checked.
@@ -962,9 +968,11 @@ impl Pane {
 
     /// Whether row `ix` is a folder, and whether it's open. Links aren't
     /// opened in place: telling where they lead would read the disk here.
-    fn is_open_folder(&self, ix: usize) -> Option<bool> {
+    /// Packages aren't either, which their extension says without a read.
+    pub(super) fn is_open_folder(&self, ix: usize) -> Option<bool> {
         let entry = self.entries.get(ix)?;
-        (entry.kind == Kind::Dir).then(|| self.expanded.contains(&entry.path))
+        (entry.kind == Kind::Dir && !workspace::is_package(&entry.path))
+            .then(|| self.expanded.contains(&entry.path))
     }
 
     /// The indent for a row's depth, then its disclosure triangle if it's a
@@ -1198,14 +1206,15 @@ impl Pane {
         if folders.is_empty() {
             folders.push(self.folder().to_path_buf());
         }
-        if let Err(e) = workspace::open_in_terminal(&folders) {
+        let terminal = cx.global::<Preferences>().terminal;
+        if let Err(e) = workspace::open_in_terminal(&folders, &terminal) {
             self.toast(e, true, None, cx);
         }
     }
 
-    /// Show Package Contents: goes inside the selected package, which ↩
-    /// will one day launch instead. A link goes in only if it leads to a
-    /// folder, which is on the disk, maybe a slow volume.
+    /// Show Package Contents: goes inside the selected package, which Open
+    /// launches instead. A link goes in only if it leads to a folder, which is
+    /// on the disk, maybe a slow volume.
     pub(super) fn show_package_contents(&mut self, cx: &mut Context<Self>) {
         let Some(package) = self.package() else {
             return;
@@ -1429,8 +1438,8 @@ impl Pane {
         .size_0()
     }
 
-    /// Opens what's selected: a lone folder goes in, and files open in
-    /// their apps. Several folders at once would need tabs or windows. Past
+    /// Opens what's selected: a lone folder goes in, and files and packages
+    /// open in their apps. Several folders at once would need tabs or windows. Past
     /// `OPEN_WITHOUT_ASKING` files it asks first, as Finder does, so ⌘A then
     /// ↩ can't launch a whole folder.
     pub(super) fn open_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1444,7 +1453,7 @@ impl Pane {
         }
         let files: Vec<PathBuf> = chosen
             .into_iter()
-            .filter(|entry| entry.kind != Kind::Dir)
+            .filter(|entry| entry.kind != Kind::Dir || workspace::is_package(&entry.path))
             .map(|entry| entry.path.clone())
             .collect();
         if files.len() <= OPEN_WITHOUT_ASKING {
@@ -1477,28 +1486,30 @@ impl Pane {
             return;
         };
         let path = entry.path.clone();
-        match entry.kind {
-            Kind::Dir => self.navigate(path, cx),
-            // Where a link leads is on the disk, maybe a slow volume.
-            Kind::Link => {
-                let target = path.clone();
-                let is_dir = cx
-                    .background_executor()
-                    .spawn(async move { target.is_dir() });
-                cx.spawn(async move |this, cx| {
-                    let is_dir = is_dir.await;
-                    let _ = this.update(cx, |this, cx| {
-                        if is_dir {
-                            this.navigate(path, cx);
-                        } else {
-                            this.open_file(&path, cx);
-                        }
-                    });
-                })
-                .detach();
-            }
-            _ => self.open_file(&path, cx),
+        let kind = entry.kind;
+        if !matches!(kind, Kind::Dir | Kind::Link) {
+            return self.open_file(&path, cx);
         }
+        // Whether it's a package, or where a link leads, is on the disk, maybe
+        // a slow volume. A package launches its handler, as in Finder.
+        let target = path.clone();
+        let goes_in = cx.background_executor().spawn(async move {
+            match kind {
+                Kind::Dir => !info::is_package(&target),
+                _ => target.is_dir() && !info::is_package(&real(&target)),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let goes_in = goes_in.await;
+            let _ = this.update(cx, |this, cx| {
+                if goes_in {
+                    this.navigate(path, cx);
+                } else {
+                    this.open_file(&path, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Moves the cursor a `step`, selecting what it lands on, or with ⇧
@@ -1862,6 +1873,15 @@ impl Pane {
         self.start_rename(path, folder, window, cx);
     }
 
+    /// The lone selected item's name, edited where the inspector shows it
+    /// and not in its row. Its field can draw in one place at a time.
+    pub(super) fn rename_in_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.rename_selected(window, cx);
+        if let Some(renaming) = &mut self.renaming {
+            renaming.in_inspector = true;
+        }
+    }
+
     /// Edits `path`'s name in place, selected up to its extension as in
     /// Finder, or whole for a folder. It needn't be listed yet.
     pub(super) fn start_rename(
@@ -1899,6 +1919,7 @@ impl Pane {
             field,
             error: None,
             sending: false,
+            in_inspector: false,
             _blur: blur,
         });
         cx.notify();
@@ -1974,6 +1995,32 @@ impl Pane {
     /// while the last name tried can't be used. The title bar says why.
     fn rename_field(&self, path: &Path, width: f32, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let renaming = self.renaming.as_ref().filter(|r| r.path == path)?;
+        if renaming.in_inspector {
+            return None;
+        }
+        self.name_field(renaming, width, cx)
+    }
+
+    /// The name being edited in the inspector, if it's `path`'s.
+    pub(super) fn inspector_rename_field(
+        &self,
+        path: &Path,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let renaming = self
+            .renaming
+            .as_ref()
+            .filter(|r| r.in_inspector && r.path == path)?;
+        self.name_field(renaming, width, cx)
+    }
+
+    fn name_field(
+        &self,
+        renaming: &Renaming,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
         let covered = self.chrome.covered;
         // Solid over the selection's accent, whatever the pane's glass.
         let mut fill = theme::pane_fill();
@@ -2532,6 +2579,8 @@ pub(super) struct Renaming {
     /// Sent to the owner and not yet answered, so a blur meanwhile doesn't
     /// send it again.
     sending: bool,
+    /// Its field is in the inspector, so the row shows the name as usual.
+    pub(super) in_inspector: bool,
     /// Clicking away commits.
     _blur: Subscription,
 }

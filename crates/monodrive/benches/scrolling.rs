@@ -1,8 +1,9 @@
 //! Scrolling a 10,000-entry folder in the list and the grid, through GPUI's
 //! headless Metal renderer. Each run opens a fresh window, scrolls a fixed
 //! distance one wheel event per frame, and reports frame and draw times.
-//! A last run carries a file over the list instead, one move per frame, with
-//! the pill and the outline drawn.
+//! Another scrolls the list beside the open inspector. A last run carries a
+//! file over the list instead, one move per frame, with the pill and the
+//! outline drawn.
 //! `cargo bench -p monodrive --bench scrolling`
 //!
 //! Benchmarks have no asset source, so the chrome's SVG icons draw nothing;
@@ -33,12 +34,13 @@ fn fill(dir: &Path) {
     }
 }
 
-fn scroll(view: View, cx: &mut BenchAppContext) {
+fn scroll(view: View, show_inspector: bool, cx: &mut BenchAppContext) {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     fill(dir.path());
     cx.update(|cx| {
         cx.set_global(Preferences {
             view,
+            show_inspector,
             // Pictures would decode from empty files; this measures icons.
             thumbnails: false,
             ..Preferences::default()
@@ -156,12 +158,17 @@ fn drag(cx: &mut BenchAppContext) {
 
 #[gpui::bench]
 fn scroll_list(cx: &mut BenchAppContext) {
-    scroll(View::List, cx);
+    scroll(View::List, false, cx);
+}
+
+#[gpui::bench]
+fn scroll_list_with_inspector(cx: &mut BenchAppContext) {
+    scroll(View::List, true, cx);
 }
 
 #[gpui::bench]
 fn scroll_grid(cx: &mut BenchAppContext) {
-    scroll(View::Grid, cx);
+    scroll(View::Grid, false, cx);
 }
 
 #[gpui::bench]
@@ -169,5 +176,11 @@ fn drag_over_list(cx: &mut BenchAppContext) {
     drag(cx);
 }
 
-gpui::bench_group!(benches, scroll_list, scroll_grid, drag_over_list);
+gpui::bench_group!(
+    benches,
+    scroll_list,
+    scroll_list_with_inspector,
+    scroll_grid,
+    drag_over_list
+);
 gpui::bench_main!(benches);

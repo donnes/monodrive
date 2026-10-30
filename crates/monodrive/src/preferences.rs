@@ -76,6 +76,43 @@ pub enum WorkspaceStyle {
     Boxy,
 }
 
+/// The terminal Open in Terminal uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Terminal {
+    Terminal,
+    Iterm,
+    Ghostty,
+    Warp,
+}
+
+impl Terminal {
+    pub const ALL: [Terminal; 4] = [
+        Terminal::Terminal,
+        Terminal::Iterm,
+        Terminal::Ghostty,
+        Terminal::Warp,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Terminal::Terminal => "Terminal",
+            Terminal::Iterm => "iTerm",
+            Terminal::Ghostty => "Ghostty",
+            Terminal::Warp => "Warp",
+        }
+    }
+
+    pub fn bundle_id(&self) -> &'static str {
+        match self {
+            Terminal::Terminal => "com.apple.Terminal",
+            Terminal::Iterm => "com.googlecode.iterm2",
+            Terminal::Ghostty => "com.mitchellh.ghostty",
+            Terminal::Warp => "dev.warp.Warp-Stable",
+        }
+    }
+}
+
 /// Monocode's interface scale steps.
 pub const UI_SCALE_PERCENTS: [u32; 16] = [
     50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
@@ -112,6 +149,9 @@ pub struct Preferences {
     pub sidebar_width: f32,
     /// Whether the sidebar is open.
     pub show_sidebar: bool,
+    /// Whether the inspector is open, to the right of the panes.
+    pub show_inspector: bool,
+    pub terminal: Terminal,
     /// Shortcuts changed on the Keyboard page, by command id.
     pub shortcuts: crate::commands::Shortcuts,
     /// How folders are listed.
@@ -162,6 +202,8 @@ impl Default for Preferences {
             ui_scale: 100,
             sidebar_width: 240.,
             show_sidebar: true,
+            show_inspector: false,
+            terminal: Terminal::Terminal,
             shortcuts: Default::default(),
             sort: Default::default(),
             window_size: WindowSize::Reasonable,
@@ -198,6 +240,7 @@ impl Preferences {
         let defaults = Self::default();
         self.show_hidden = defaults.show_hidden;
         self.sort = defaults.sort;
+        self.terminal = defaults.terminal;
     }
 
     /// Everything on the Appearance page. What other pages own, and the
@@ -207,6 +250,8 @@ impl Preferences {
             show_hidden: self.show_hidden,
             sidebar_width: self.sidebar_width,
             show_sidebar: self.show_sidebar,
+            show_inspector: self.show_inspector,
+            terminal: self.terminal,
             shortcuts: std::mem::take(&mut self.shortcuts),
             sort: self.sort,
             window_size: self.window_size,
@@ -348,6 +393,8 @@ mod tests {
         assert!(!read.show_sidebar);
         let older: Preferences = serde_json::from_slice(b"{}").unwrap();
         assert!(older.show_sidebar);
+        assert!(!older.show_inspector);
+        assert_eq!(older.terminal, Terminal::Terminal);
     }
 
     #[test]

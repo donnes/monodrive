@@ -13,6 +13,7 @@ mod frame;
 mod goto;
 mod jobs;
 mod menu;
+pub mod native;
 pub mod onboarding;
 mod palette;
 mod palettes;

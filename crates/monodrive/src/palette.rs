@@ -1,16 +1,18 @@
 //! The command palette (⌘K or ⇧⌘P). With nothing typed it offers what applies
 //! now, by section; typing searches commands, places and recents, then the
 //! index's files. A row with a chevron opens a page with its own filter:
-//! Remote locations, Cloud storage, Drives and Favorites. It works from what
+//! Remote locations, Cloud storage, Drives, Favorites and Open With. It works from what
 //! the browser last read, so it opens at once, and reads the rest in the
 //! background.
 
-use crate::browser::{self, Eject, Places, format_bytes};
+use crate::browser::{self, Eject, OpenWith, Places, format_bytes};
 use crate::commands::{self, Command, Scope};
 use crate::menu;
+use crate::native::{Offered, native, offered};
 use crate::preferences::Preferences;
 use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, Elevation, content, icon, row_icon_button};
+use crate::workspace;
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
     KeyContext, MouseButton, Role, ScrollHandle, SharedString, Task, Window, actions, div, point,
@@ -65,6 +67,13 @@ pub enum PaletteEvent {
     /// Connect to this saved server through the Connect card.
     Connect(String),
     Say(String),
+    /// Open these files in this app.
+    OpenWith {
+        files: Vec<PathBuf>,
+        app: PathBuf,
+    },
+    /// Ask for an app, then open these files in it.
+    OtherApp(Vec<PathBuf>),
 }
 
 /// What the browser knew as the palette opened.
@@ -75,6 +84,8 @@ pub struct Now {
     pub favorites: Vec<Place>,
     pub volumes: Vec<Volume>,
     pub servers: Vec<String>,
+    /// What's selected, for Open With.
+    pub files: Vec<PathBuf>,
     pub index: Arc<OnceLock<Result<Index, String>>>,
 }
 
@@ -85,6 +96,7 @@ pub(crate) enum Page {
     Cloud,
     Drives,
     Favorites,
+    OpenWith,
 }
 
 impl Page {
@@ -95,6 +107,7 @@ impl Page {
             Page::Cloud => "Cloud storage",
             Page::Drives => "Drives",
             Page::Favorites => "Favorites",
+            Page::OpenWith => "Open With",
         }
     }
 
@@ -105,6 +118,7 @@ impl Page {
             Page::Cloud => "cloud",
             Page::Drives => "hard-drive",
             Page::Favorites => "folder-01",
+            Page::OpenWith => "app-window",
         }
     }
 
@@ -112,7 +126,7 @@ impl Page {
         match self {
             Page::Root => "Search commands, places, and files…",
             Page::Remote => "Filter, or type a host or ssh alias…",
-            Page::Cloud | Page::Drives | Page::Favorites => "Filter…",
+            Page::Cloud | Page::Drives | Page::Favorites | Page::OpenWith => "Filter…",
         }
     }
 }
@@ -127,6 +141,9 @@ pub(crate) enum Target {
     AddRemote,
     /// A saved SMB address that isn't mounted.
     Server(String),
+    /// Open what's selected in this app.
+    App(PathBuf),
+    OtherApp,
 }
 
 /// A saved server, which can be forgotten.
@@ -145,6 +162,7 @@ enum RowId {
     Remote(String),
     Server(String),
     AddRemote,
+    OtherApp,
 }
 
 pub(crate) struct Row {
@@ -200,6 +218,8 @@ impl Row {
             (None, Target::Remote(host)) => RowId::Remote(host.clone()),
             (None, Target::Server(address)) => RowId::Server(address.clone()),
             (None, Target::AddRemote) => RowId::AddRemote,
+            (None, Target::App(path)) => RowId::Path(path.clone()),
+            (None, Target::OtherApp) => RowId::OtherApp,
         }
     }
 
@@ -234,6 +254,9 @@ pub struct PaletteView {
     recents: Vec<Entry>,
     remotes: Vec<Source>,
     cloud: Vec<CloudFolder>,
+    /// What Open With offers, once it's loaded.
+    apps: Option<Offered>,
+    apps_load: Task<()>,
     /// What the index found for the query.
     files: Vec<Entry>,
     /// Why saving or forgetting a server failed.
@@ -271,6 +294,8 @@ impl PaletteView {
             recents: Vec::new(),
             remotes: Vec::new(),
             cloud: Vec::new(),
+            apps: None,
+            apps_load: Task::ready(()),
             files: Vec::new(),
             error: None,
             file_search: Task::ready(()),
@@ -527,6 +552,26 @@ impl PaletteView {
             Page::Cloud => self.cloud.iter().map(cloud_row).collect(),
             Page::Drives => self.now.volumes.iter().map(drive_row).collect(),
             Page::Favorites => self.now.favorites.iter().map(favorite_row).collect(),
+            Page::OpenWith => {
+                let Some(offered) = &self.apps else {
+                    return Vec::new();
+                };
+                let mut rows: Vec<Row> = offered
+                    .apps
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, app)| {
+                        let title = if offered.has_default && ix == 0 {
+                            format!("{} (default)", app.name)
+                        } else {
+                            app.name.clone()
+                        };
+                        Row::new("", "app-window", title, Target::App(app.path.clone()))
+                    })
+                    .collect();
+                rows.push(Row::new("", "search", "Other…", Target::OtherApp));
+                rows
+            }
         }
     }
 
@@ -538,18 +583,18 @@ impl PaletteView {
         ticked: &[&str],
     ) -> Row {
         let keys = command.shortcuts(&prefs.shortcuts);
+        let target = if command.id() == OpenWith.name() {
+            Target::Page(Page::OpenWith)
+        } else {
+            Target::Command((command.action)())
+        };
         Row {
             keys: keys.first().map(|keys| commands::label(keys)),
             enabled: self.now.available.contains(command.id()),
             destructive: command.destructive,
             checked: ticked.contains(&command.id()),
             found_by: format!("{}: {}", command.group.label(), command.title),
-            ..Row::new(
-                section,
-                glyph_for(command),
-                command.title,
-                Target::Command((command.action)()),
-            )
+            ..Row::new(section, glyph_for(command), command.title, target)
         }
     }
 
@@ -606,11 +651,29 @@ impl PaletteView {
                 return self.open_page(page, cx);
             }
             Target::AddRemote => return self.add_remote(cx),
+            Target::App(app) => PaletteEvent::OpenWith {
+                files: self.now.files.clone(),
+                app: app.clone(),
+            },
+            Target::OtherApp => PaletteEvent::OtherApp(self.now.files.clone()),
         };
         cx.emit(event);
     }
 
     fn open_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if page == Page::OpenWith && self.apps.is_none() {
+            let (native, files) = (native(cx), self.now.files.clone());
+            let load = cx
+                .background_executor()
+                .spawn(async move { offered(&*native, &files) });
+            self.apps_load = cx.spawn(async move |this, cx| {
+                let apps = load.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.apps = Some(apps);
+                    this.refresh(cx);
+                });
+            });
+        }
         self.root_query = self.query.read(cx).text().to_owned();
         self.page = page;
         self.query.update(cx, |field, cx| {
@@ -850,6 +913,7 @@ impl PaletteView {
         match self.page {
             Page::Cloud if self.cloud.is_empty() => "No cloud folders on this Mac.",
             Page::Favorites if self.now.favorites.is_empty() => "No favorites.",
+            Page::OpenWith if self.apps.is_none() => "Loading…",
             _ => "No results.",
         }
     }
@@ -1049,9 +1113,11 @@ const SFTP: &str = "SFTP servers";
 const SMB: &str = "SMB servers";
 
 /// The commands on a selection, in the order worth offering them.
-const SELECTION_ORDER: [&str; 13] = [
+const SELECTION_ORDER: [&str; 15] = [
     "Open",
+    "Open With",
     "Quick Look",
+    "Get Info",
     "Rename",
     "Duplicate",
     "Copy",
@@ -1092,6 +1158,7 @@ fn glyph_for(command: &Command) -> &'static str {
         "Search" | "Reveal in Finder" => "search",
         "Eject" => "eject",
         "Open" => "external-link",
+        "Open With" => "app-window",
         "Quick Look" => "eye",
         "Rename" => "pencil",
         "Duplicate" | "Copy" => "copy",
@@ -1199,7 +1266,8 @@ fn favorite_row(place: &Place) -> Row {
 /// A recent or an indexed file. A folder shows in the window; anything else
 /// opens in its app.
 fn entry_row(section: &'static str, entry: &Entry) -> Row {
-    let folder = entry.kind == Kind::Dir;
+    // A package opens, as it does from the list.
+    let folder = entry.kind == Kind::Dir && !workspace::is_package(&entry.path);
     let shown = entry
         .path
         .parent()
@@ -1270,6 +1338,7 @@ mod tests {
             favorites: Vec::new(),
             volumes: Vec::new(),
             servers: vec!["smb://nas/media".into(), "smb://nas/photos".into()],
+            files: Vec::new(),
             index: Arc::default(),
         };
         let (view, cx) = cx.add_window_view(|_, cx| PaletteView::new(now, cx));

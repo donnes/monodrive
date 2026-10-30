@@ -6,10 +6,11 @@ use crate::agents::{self, Action, Harness, Setup};
 use crate::background::{self, Backdrop, Effect, Look, Scope};
 use crate::commands::{self, Group};
 use crate::frame;
+use crate::native::native;
 use crate::palettes::{self, PALETTES};
 use crate::preferences::{
-    self, GRID_ICON_SIZES, Preferences, RowSize, Theme, UI_SCALE_PERCENTS, View, WindowSize,
-    WorkspaceStyle,
+    self, GRID_ICON_SIZES, Preferences, RowSize, Terminal, Theme, UI_SCALE_PERCENTS, View,
+    WindowSize, WorkspaceStyle,
 };
 use crate::theme::{
     self, ButtonLook, Elevation, accent, content, focus_ring, icon, icon_button, knob, knob_shadow,
@@ -196,6 +197,8 @@ impl Slider {
 }
 
 pub struct SettingsView {
+    /// The terminals on offer.
+    terminals: Vec<Terminal>,
     focus: FocusHandle,
     page: Page,
     /// Each slider's track as last laid out, to turn a pointer into a value.
@@ -262,7 +265,9 @@ impl Focusable for SettingsView {
 
 impl SettingsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::find_terminals(cx);
         Self {
+            terminals: vec![Terminal::Terminal],
             focus: cx.focus_handle(),
             page: Page::General,
             tracks: Rc::default(),
@@ -394,6 +399,36 @@ impl SettingsView {
             self.check_agents(cx);
         }
         cx.notify();
+    }
+
+    /// Which terminals are installed, asked off the UI thread. The one chosen
+    /// stays on offer, so the control always shows what's set.
+    fn find_terminals(cx: &mut Context<Self>) {
+        let native = native(cx);
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    Terminal::ALL
+                        .into_iter()
+                        .filter(|terminal| native.installed(terminal.bundle_id()))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let chosen = cx.global::<Preferences>().terminal;
+                this.terminals = Terminal::ALL
+                    .into_iter()
+                    .filter(|terminal| {
+                        *terminal == chosen
+                            || *terminal == Terminal::Terminal
+                            || found.contains(terminal)
+                    })
+                    .collect();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Reads the agents' configs off the UI thread to mark the ones that
@@ -809,6 +844,26 @@ impl SettingsView {
                             "Keep folders on top",
                             p.sort.folders_first,
                             |p, on| p.sort.folders_first = on,
+                        ),
+                        cx,
+                    ),
+                ),
+                row(
+                    "Terminal",
+                    Some("What Open in Terminal uses."),
+                    self.focusable(
+                        "terminal",
+                        true,
+                        segmented(
+                            "terminal",
+                            "Terminal",
+                            p.terminal,
+                            &self
+                                .terminals
+                                .iter()
+                                .map(|terminal| (*terminal, terminal.name()))
+                                .collect::<Vec<_>>(),
+                            |p, terminal| p.terminal = terminal,
                         ),
                         cx,
                     ),

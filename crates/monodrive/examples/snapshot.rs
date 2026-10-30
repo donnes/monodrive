@@ -40,6 +40,12 @@
 //! `onboarding-ready-skipped.png` show each step and what the list shows for
 //! it, with a made-up Mac behind them.
 //!
+//! `inspector-file.png`, `inspector-folder.png`, `inspector-several.png`,
+//! `inspector-split.png` and `inspector-boxy.png` show the inspector, with a
+//! made-up folder total. `open-with.png` and `open-with-always.png` show the
+//! Open With submenu on made-up choices of the system's own apps, and
+//! `settings-general.png` the Terminal row.
+//!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
 
@@ -51,20 +57,24 @@ use gpui::{
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
-    EnclosingFolder, FocusSearch, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected,
-    OpenSettings, Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu,
+    EnclosingFolder, ExtendNext, FocusSearch, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected,
+    OpenSettings, OpenWith, Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu,
     ShowCopiesAndMoves, ToggleSplit, Undo,
 };
 use monodrive::connect;
+use monodrive::native::{self, Native, SizeDone};
 use monodrive::onboarding::{Onboarding, Setup, Step};
 use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
 use monodrive::session::{PaneState, StopState, TabState, WindowState};
+use monodrive_core::apps::App as MacApp;
 use monodrive_core::cloud::{Availability, CloudFolder};
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::index::Index;
+use monodrive_core::info::{self, Info};
 use monodrive_core::ops::{self, Conflict, Origin, Request};
 use monodrive_core::places::{Favorite, Pinned, Store};
 use monodrive_core::servers::Cancel;
+use monodrive_core::sizes::FolderSize;
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -99,7 +109,10 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     let trash = scratch.path().join("Trash");
     std::fs::create_dir_all(&trash)?;
     let places = made_up_places(scratch.path(), &trash)?;
-    cx.update(|cx| cx.set_global(places));
+    cx.update(|cx| {
+        cx.set_global(places);
+        cx.set_global(native::MadeUp(Arc::new(MadeUp)));
+    });
     onboarding(&mut cx, out, &base)?;
     for (name, view) in [("list", View::List), ("grid", View::Grid)] {
         cx.update(|cx| {
@@ -368,7 +381,78 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     cx.run_until_parked();
     save(&mut cx, window, out, "background")?;
     shoot_tabs(&mut cx, out, folder, &base)?;
-    shoot_drags(&mut cx, out, folder, &base)
+    shoot_drags(&mut cx, out, folder, &base)?;
+    shoot_inspector(&mut cx, out, folder, &base)
+}
+
+/// Past the inspector's wait, with its read drawn.
+fn rest(cx: &mut Cx) {
+    cx.advance_clock(std::time::Duration::from_millis(300));
+    cx.run_until_parked();
+}
+
+fn shoot_inspector(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
+    let on = Preferences {
+        show_inspector: true,
+        ..base.clone()
+    };
+    cx.update(|cx| cx.set_global(on.clone()));
+    // In the made-up folder, Brief.pdf, Design and notes.md by their rows.
+    let select = |cx: &mut Cx, window, rows: usize| -> gpui::Result<()> {
+        for action in std::iter::repeat_n(&SelectNext as &dyn Action, rows) {
+            dispatch(cx, window, action)?;
+        }
+        Ok(())
+    };
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    select(cx, window, 6)?;
+    rest(cx);
+    save(cx, window, out, "inspector-file")?;
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    select(cx, window, 1)?;
+    rest(cx);
+    save(cx, window, out, "inspector-folder")?;
+    dispatch(cx, window, &ExtendNext)?;
+    dispatch(cx, window, &ExtendNext)?;
+    rest(cx);
+    save(cx, window, out, "inspector-several")?;
+
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    dispatch(cx, window, &ToggleSplit)?;
+    select(cx, window, 11)?;
+    rest(cx);
+    save(cx, window, out, "inspector-split")?;
+
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            workspace_style: WorkspaceStyle::Boxy,
+            ..on.clone()
+        })
+    });
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    select(cx, window, 6)?;
+    rest(cx);
+    save(cx, window, out, "inspector-boxy")?;
+
+    // The File menu's way in, then the second kind of row.
+    cx.update(|cx| cx.set_global(base.clone()));
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    select(cx, window, 6)?;
+    dispatch(cx, window, &OpenWith)?;
+    cx.update_window(window.into(), |_, window, _| window.refresh())?;
+    cx.run_until_parked();
+    save(cx, window, out, "open-with")?;
+    let up = named(cx, "context_menu::Up")?;
+    let run = named(cx, "context_menu::Run")?;
+    dispatch(cx, window, &*up)?;
+    dispatch(cx, window, &*run)?;
+    save(cx, window, out, "open-with-always")?;
+    Ok(())
 }
 
 /// Sends mouse events to `window` as a person's hand would, and draws.
@@ -612,6 +696,67 @@ fn press(cx: &mut Cx, window: gpui::WindowHandle<Browser>, key: &str) -> gpui::R
 
 /// Volumes that aren't there, each showing something the sidebar can show.
 struct MadeUp;
+
+fn system_app(name: &str) -> MacApp {
+    MacApp {
+        name: name.into(),
+        bundle_id: None,
+        path: format!("/System/Applications/{name}.app").into(),
+    }
+}
+
+/// Real facts about the snapshot's own folder; a total and apps that are the
+/// same on every Mac.
+impl Native for MadeUp {
+    fn info(&self, path: &Path) -> Result<Info, String> {
+        info::info(path)
+    }
+
+    fn needs_consent(&self, _: &Path) -> bool {
+        false
+    }
+
+    fn known_size(&self, _: &Path) -> Option<FolderSize> {
+        None
+    }
+
+    fn measure(&self, _: PathBuf, done: SizeDone) -> Box<dyn Send> {
+        done(Ok(FolderSize {
+            bytes: 1_284_000_000,
+            complete: true,
+            ..FolderSize::default()
+        }));
+        Box::new(())
+    }
+
+    fn invalidate(&self, _: &Path) {}
+
+    fn forget_sizes(&self) {}
+
+    fn can_open(&self, _: &Path) -> Vec<MacApp> {
+        ["Notes", "Preview", "TextEdit"].map(system_app).to_vec()
+    }
+
+    fn default_for(&self, _: &Path) -> Option<MacApp> {
+        Some(system_app("Preview"))
+    }
+
+    fn open_with(&self, _: &[PathBuf], _: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn make_default(&self, _: &Path, _: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn choose_app(&self, done: Box<dyn FnOnce(Option<PathBuf>)>) {
+        done(None);
+    }
+
+    fn installed(&self, _: &str) -> bool {
+        true
+    }
+}
 
 impl Drives for MadeUp {
     fn list(&self) -> Vec<Volume> {

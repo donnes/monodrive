@@ -1070,10 +1070,12 @@ pub(super) fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
     cx.simulate_mouse_up(at, MouseButton::Right, with(""));
 }
 
-const ON_A_FILE: [&str; 9] = [
+const ON_A_FILE: [&str; 11] = [
     "Open",
+    "Open With",
     "Reveal in Finder",
     "Open in Terminal",
+    "Get Info",
     "Rename",
     "Duplicate",
     "Quick Look",
@@ -1107,8 +1109,8 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
     assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
     let (titles, _) = menu(&browser, cx).unwrap();
     assert_eq!(
-        titles[2..5],
-        ["Open in Terminal", "New Folder with Selection", "Duplicate"]
+        titles[3..6],
+        ["Open in Terminal", "Get Info", "New Folder with Selection"]
     );
     // A press outside closes it and reaches nothing behind it. The menu
     // opened rightward from the pointer, so this is left of it.
@@ -1122,6 +1124,7 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
     let folder_menu = vec![
         "New Folder",
         "New File",
+        "Get Info",
         "Paste",
         "as List",
         "as Grid",
@@ -1169,7 +1172,7 @@ fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut Test
     // ↑ and ↓ come round from the ends.
     press(cx, "up");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Copy Path"));
-    press(cx, "down down down down down");
+    press(cx, "down down down down down down down");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Duplicate"));
     press(cx, "enter");
     assert_eq!(menu(&browser, cx), None);
@@ -1191,7 +1194,7 @@ fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut Test
     press(cx, "alt-up down");
     assert_eq!(shown(&browser, cx).1, ["Kit.app"]);
     assert!(offered(cx));
-    press(cx, "shift-f10 down down down");
+    press(cx, "shift-f10 down down down down");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Show Package Contents"));
     press(cx, "enter");
     let inside = in_pane(&browser, cx, |browser, _| browser.folder().to_path_buf());
