@@ -16,7 +16,7 @@ Update a plan's row when its work lands on `main`.
 | 06 Quick Look | Done | 4c901ec |
 | 07 Places, drives and NAS | Done; a real SMB share still needs a check | ae1cead, 532d2b7, 4a396e1, f3bfa68 |
 | 08 Tabs and panes | Done; drag between panes is in plan 09 | 45d069b, ceac6c6, 0a9c58e, 96b1b0d, ab46328 |
-| 09 Drag and drop | Waiting for UI picks | |
+| 09 Drag and drop | Done; drags to and from other apps need a person to check | a0bb1bc |
 | 10 Open With and Get Info | Core on main; UI waiting for picks | |
 | 11 Search | Core and MCP filters on main; UI picked, filter UI skipped for now | |
 | 12 Batch rename | Core on main; UI waiting for picks | |
