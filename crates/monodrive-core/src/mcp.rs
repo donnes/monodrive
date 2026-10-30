@@ -1369,6 +1369,7 @@ fn worktree_line(worktree: &Worktree) -> String {
         worktrees::State::Ok => {}
         worktrees::State::Missing => about.push("missing".into()),
         worktrees::State::Stale => about.push("stale".into()),
+        worktrees::State::Replaced => about.push("replaced".into()),
         worktrees::State::Unreadable(why) => about.push(format!("unreadable: {why}")),
     }
     if let Some(why) = &worktree.prunable {
@@ -2677,7 +2678,7 @@ pub const TOOLS: [Tool; 51] = [
         name: "worktrees",
         description: "The Git worktrees of the repository path is in, reached through any folder or \
     worktree of it, the main one first. One a line: path, then branch or detached, short HEAD, and \
-    main worktree, locked, missing, stale, unreadable or prunable. Prunable is Git's view, never a \
+    main worktree, locked, missing, stale, replaced, unreadable or prunable. Prunable is Git's view, never a \
     sign a folder is safe to delete. Fetches nothing and changes nothing.",
         input_schema: path_schema,
     },
@@ -2685,7 +2686,7 @@ pub const TOOLS: [Tool; 51] = [
         name: "worktree_status",
         description: "One worktree's branch, HEAD and upstream, with ahead and behind when the upstream \
     is fetched, then how many paths are staged, unstaged, conflicted and untracked, or clean. Fetches \
-    nothing and takes no Git locks.",
+    nothing, takes no Git locks, and refuses a repository whose own config sets filters that run commands.",
         input_schema: || {
             json!({
                 "type": "object",

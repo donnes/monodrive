@@ -88,6 +88,9 @@ fn every_way_into_a_repository_lists_its_worktrees_once_with_their_states() {
     add(&["-b", "stale", "../stale"]);
     std::fs::rename(at("stale/.git"), at("stale/dotgit")).unwrap();
     add(&["-b", "closed", "../closed"]);
+    add(&["-b", "replaced", "../replaced"]);
+    std::fs::rename(at("replaced"), at("replaced before")).unwrap();
+    repo(&at("replaced"));
     std::fs::create_dir_all(main.join("src/deep")).unwrap();
     std::os::unix::fs::symlink(&main, at("alias")).unwrap();
     chmod(&at("closed"), 0o000);
@@ -127,7 +130,7 @@ fn every_way_into_a_repository_lists_its_worktrees_once_with_their_states() {
         path: at(name),
         ..w
     };
-    assert_eq!(inventory.worktrees.len(), 8);
+    assert_eq!(inventory.worktrees.len(), 9);
     assert_eq!(
         inventory.worktrees[0],
         Worktree {
@@ -161,6 +164,14 @@ fn every_way_into_a_repository_lists_its_worktrees_once_with_their_states() {
                 prunable: gone_reason.clone(),
                 state: State::Stale,
                 ..linked(Some("stale"))
+            },
+        ),
+        // Another repository where the worktree was: Git sees a .git there.
+        (
+            "replaced",
+            Worktree {
+                state: State::Replaced,
+                ..linked(Some("replaced"))
             },
         ),
     ] {
@@ -364,6 +375,92 @@ fn a_git_that_hangs_or_floods_is_stopped_and_reaped() {
     // zombie still does.
     let exists = unsafe { libc::kill(pid, 0) } == 0;
     assert!(!exists, "the git that flooded was killed and reaped");
+
+    // A git that fails while something it started keeps its errors open.
+    let script = "sh -c 'kill -STOP $$' >/dev/null &\necho $! > \"$0.pid\"\nexit 1";
+    let git = Git {
+        program: fake(&root, "fails", script),
+        // The stopped child never closes git's errors, so this is spent
+        // waiting; it only has to outlast starting the script.
+        timeout: Duration::from_secs(1),
+    };
+    let failed = list(&git, &root);
+    let held: libc::pid_t = std::fs::read_to_string(root.join("fails.pid"))
+        .unwrap_or_else(|e| panic!("{e}: {failed:?}"))
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: kills the stopped process the fake started and recorded.
+    unsafe { libc::kill(held, libc::SIGKILL) };
+    assert_eq!(failed, Err("git failed: exit status: 1".into()));
+}
+
+#[test]
+fn status_runs_no_command_the_repository_configures() {
+    let (_dir, root) = real_tempdir();
+    let marker = root.join("marker");
+    let mark = fake(
+        &root,
+        "mark",
+        &format!("echo \"$0 $*\" >> '{}'\ncat", marker.display()),
+    );
+    let hooks = root.join("hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    for hook in [
+        "post-index-change",
+        "reference-transaction",
+        "post-checkout",
+    ] {
+        fake(
+            &hooks,
+            hook,
+            &format!("echo {hook} >> '{}'", marker.display()),
+        );
+    }
+    let (main, sub) = (root.join("repo"), root.join("sub"));
+    repo(&sub);
+    commit(&sub, ".gitattributes", "* filter=m\n");
+    repo(&main);
+    commit(&main, ".gitattributes", "* filter=m diff=m\n");
+    let file = ["-c", "protocol.file.allow=always"];
+    fixture(
+        &main,
+        &[&file[..], &["submodule", "add", "-q", "../sub", "sub"]].concat(),
+    );
+    fixture(&main, &["commit", "-q", "-m", "sub"]);
+    // Set last, so no fixture command runs them.
+    let (mark, hooks) = (mark.to_str().unwrap(), hooks.to_str().unwrap());
+    for (key, value) in [
+        ("core.fsmonitor", mark),
+        ("core.hooksPath", hooks),
+        ("core.untrackedCache", "true"),
+        ("diff.external", mark),
+        ("diff.m.textconv", mark),
+        ("filter.m.smudge", mark),
+    ] {
+        fixture(&main, &["config", key, value]);
+    }
+    fixture(&main.join("sub"), &["config", "filter.m.clean", mark]);
+    // Same contents, new times, so status hashes them again.
+    for changed in [main.join("a"), main.join("sub/a")] {
+        std::fs::write(changed, "one\n").unwrap();
+    }
+    let ran = || std::fs::read_to_string(&marker).unwrap_or_default();
+
+    let git = found();
+    let clean = status(&git, &main);
+    assert_eq!(ran(), "");
+    assert!(clean.as_ref().is_ok_and(Status::is_clean), "{clean:?}");
+
+    for key in ["filter.m.clean", "filter.m.process"] {
+        fixture(&main, &["config", key, mark]);
+    }
+    assert_eq!(
+        status(&git, &main),
+        Err("This repository's own config sets filters that run commands (m), so Monodrive skipped status.".into())
+    );
+    assert_eq!(ran(), "");
+    assert_eq!(list(&git, &main).map(|i| i.worktrees.len()), Ok(1));
 }
 
 #[test]

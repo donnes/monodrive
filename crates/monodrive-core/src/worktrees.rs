@@ -56,8 +56,10 @@ pub enum State {
     Ok,
     /// The folder is gone, maybe on a drive that isn't connected.
     Missing,
-    /// The folder is there but is no longer this worktree's checkout.
+    /// The folder is there, but its link to the repository is gone.
     Stale,
+    /// The folder holds another checkout than this worktree's.
+    Replaced,
     /// The folder couldn't be read.
     Unreadable(String),
 }
@@ -161,6 +163,7 @@ impl Git {
 
         enum Event {
             Printed(io::Result<Vec<u8>>),
+            Said(Vec<u8>),
             Exited,
         }
         let (tx, rx) = mpsc::channel();
@@ -173,11 +176,12 @@ impl Git {
             let read = stdout.take(OUTPUT_LIMIT + 1).read_to_end(&mut out);
             let _ = printed.send(Event::Printed(read.map(|_| out)));
         });
-        let said = std::thread::spawn(move || {
-            let mut said = Vec::new();
-            let _ = (&mut stderr).take(ERROR_LIMIT).read_to_end(&mut said);
+        let said = tx.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = (&mut stderr).take(ERROR_LIMIT).read_to_end(&mut bytes);
             let _ = io::copy(&mut stderr, &mut io::sink());
-            said
+            let _ = said.send(Event::Said(bytes));
         });
         let pid = child.id();
         std::thread::spawn(move || {
@@ -186,25 +190,29 @@ impl Git {
         });
 
         let deadline = Instant::now().checked_add(self.timeout);
-        let (mut out, mut done) = (None, false);
-        while out.is_none() || !done {
+        let next = || {
             let left = deadline.map_or(Duration::MAX, |d| {
                 d.saturating_duration_since(Instant::now())
             });
-            match rx.recv_timeout(left) {
-                Ok(Event::Exited) => done = true,
-                Ok(Event::Printed(Ok(bytes))) if bytes.len() as u64 > OUTPUT_LIMIT => {
+            rx.recv_timeout(left).ok()
+        };
+        let (mut out, mut done, mut said) = (None, false, None);
+        while out.is_none() || !done {
+            match next() {
+                Some(Event::Exited) => done = true,
+                Some(Event::Printed(Ok(bytes))) if bytes.len() as u64 > OUTPUT_LIMIT => {
                     let why = format!(
                         "git printed more than {} MB, so Monodrive stopped it.",
                         OUTPUT_LIMIT >> 20
                     );
                     return Err(stop(&mut child, why));
                 }
-                Ok(Event::Printed(Ok(bytes))) => out = Some(bytes),
-                Ok(Event::Printed(Err(e))) => {
+                Some(Event::Printed(Ok(bytes))) => out = Some(bytes),
+                Some(Event::Printed(Err(e))) => {
                     return Err(stop(&mut child, format!("Couldn't read git's output: {e}")));
                 }
-                Err(_) => {
+                Some(Event::Said(bytes)) => said = Some(bytes),
+                None => {
                     let why = format!(
                         "git didn't finish within {:?}, so Monodrive stopped it.",
                         self.timeout
@@ -217,8 +225,15 @@ impl Git {
         if status.success() {
             return Ok(out.unwrap_or_default());
         }
-        let said = said.join().unwrap_or_default();
-        let said = String::from_utf8_lossy(&said);
+        // Something git started may keep its errors open past its exit.
+        while said.is_none() {
+            match next() {
+                Some(Event::Said(bytes)) => said = Some(bytes),
+                Some(_) => {}
+                None => return Err(format!("git failed: {status}")),
+            }
+        }
+        let said = String::from_utf8_lossy(said.as_deref().unwrap_or_default());
         let last = said.lines().map(str::trim).rfind(|line| !line.is_empty());
         if last.is_some_and(|line| line.contains("not a git repository")) {
             return Err(format!("{} isn't in a Git repository.", dir.display()));
@@ -300,11 +315,11 @@ pub fn list(git: &Git, dir: &Path) -> Result<Inventory, String> {
     let common_dir = common_dir(git, dir)?;
     let out = git.run(&common_dir, &["worktree", "list", "--porcelain", "-z"])?;
     let mut worktrees = parse_list(&out);
-    for worktree in &mut worktrees {
-        worktree.state = state(worktree);
-    }
     if let Some(first) = worktrees.first_mut() {
         first.main = true;
+    }
+    for worktree in &mut worktrees {
+        worktree.state = state(worktree, &common_dir);
     }
     Ok(Inventory {
         common_dir,
@@ -313,8 +328,19 @@ pub fn list(git: &Git, dir: &Path) -> Result<Inventory, String> {
 }
 
 /// The changes in the worktree at `dir`, read without taking Git's locks.
+/// Refuses a repository whose own config gives a filter a command, since
+/// status runs it on any file whose times changed. Submodules are compared
+/// by commit only, so status never runs git, and their filters, inside them.
 pub fn status(git: &Git, dir: &Path) -> Result<Status, String> {
     folder(dir)?;
+    let config = git.run(dir, &["config", "--list", "--show-scope", "-z"])?;
+    let filters = own_filters(&config);
+    if !filters.is_empty() {
+        return Err(format!(
+            "This repository's own config sets filters that run commands ({}), so Monodrive skipped status.",
+            filters.join(", ")
+        ));
+    }
     let out = git.run(
         dir,
         &[
@@ -323,9 +349,33 @@ pub fn status(git: &Git, dir: &Path) -> Result<Status, String> {
             "-z",
             "--branch",
             "--untracked-files=normal",
+            "--ignore-submodules=dirty",
         ],
     )?;
     Ok(parse_status(&out))
+}
+
+/// The filters the repository's config, not the user's own, gives a clean
+/// or process command, from `git config --list --show-scope -z`: a scope,
+/// then `key` and value split by a newline.
+fn own_filters(config: &[u8]) -> Vec<String> {
+    let mut fields = config.split(|b| *b == 0);
+    let mut names: Vec<String> = Vec::new();
+    while let (Some(scope), Some(entry)) = (fields.next(), fields.next()) {
+        let entry = String::from_utf8_lossy(entry);
+        let (key, value) = entry.split_once('\n').unwrap_or((&entry, ""));
+        let Some((name, var)) = key.strip_prefix("filter.").and_then(|k| k.rsplit_once('.')) else {
+            continue;
+        };
+        if matches!(scope, b"local" | b"worktree")
+            && matches!(var, "clean" | "process")
+            && !value.is_empty()
+            && !names.iter().any(|known| known == name)
+        {
+            names.push(name.into());
+        }
+    }
+    names
 }
 
 /// Remembers the repository `dir` is in, once however it's reached, and
@@ -394,19 +444,54 @@ fn parse_list(out: &[u8]) -> Vec<Worktree> {
 }
 
 /// Whether the worktree's folder is there and still its checkout.
-fn state(worktree: &Worktree) -> State {
+fn state(worktree: &Worktree, common_dir: &Path) -> State {
     if worktree.bare {
         return State::Ok;
     }
-    let checkout = std::fs::metadata(&worktree.path)
-        .and_then(|_| std::fs::symlink_metadata(worktree.path.join(".git")));
-    match checkout {
-        Ok(_) if worktree.prunable.is_none() => State::Ok,
-        Ok(_) => State::Stale,
+    match is_checkout(worktree, common_dir) {
+        Ok(true) if worktree.prunable.is_none() => State::Ok,
+        Ok(true) => State::Stale,
+        Ok(false) => State::Replaced,
         Err(e) if e.kind() == io::ErrorKind::NotFound && !worktree.path.exists() => State::Missing,
         Err(e) if e.kind() == io::ErrorKind::NotFound => State::Stale,
         Err(e) => State::Unreadable(e.to_string()),
     }
+}
+
+/// Whether the folder's `.git` leads to this worktree's Git folder: the
+/// common one for the main worktree, or the one Git keeps for a linked
+/// worktree under `worktrees/`, whose `gitdir` file leads back.
+fn is_checkout(worktree: &Worktree, common_dir: &Path) -> io::Result<bool> {
+    std::fs::metadata(&worktree.path)?;
+    let dot_git = worktree.path.join(".git");
+    let git_dir = if std::fs::metadata(&dot_git)?.is_dir() {
+        std::fs::canonicalize(&dot_git)?
+    } else {
+        match link(&dot_git, b"gitdir: ")? {
+            Some(git_dir) => git_dir,
+            None => return Ok(false),
+        }
+    };
+    if worktree.main {
+        return Ok(git_dir == common_dir);
+    }
+    if git_dir.parent() != Some(&common_dir.join("worktrees")) {
+        return Ok(false);
+    }
+    let back = link(&git_dir.join("gitdir"), b"")?;
+    Ok(back == Some(std::fs::canonicalize(&dot_git)?))
+}
+
+/// The real path a one-line link file such as `.git` names after `prefix`,
+/// relative to the file's folder unless it's absolute.
+fn link(file: &Path, prefix: &[u8]) -> io::Result<Option<PathBuf>> {
+    let text = std::fs::read(file)?;
+    let text = text.strip_suffix(b"\n").unwrap_or(&text);
+    let Some(to) = text.strip_prefix(prefix) else {
+        return Ok(None);
+    };
+    let base = file.parent().unwrap_or(Path::new("/"));
+    std::fs::canonicalize(base.join(std::ffi::OsStr::from_bytes(to))).map(Some)
 }
 
 /// `git status --porcelain=v2 -z --branch`: headers, then a record per
