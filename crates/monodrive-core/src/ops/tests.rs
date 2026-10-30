@@ -747,7 +747,7 @@ fn read(path: &Path) -> String {
 }
 
 /// Takes what a test sent to the Trash back out, so the Trash ends as it was.
-fn untrash(trashed: &Path, into: &Path) {
+pub(super) fn untrash(trashed: &Path, into: &Path) {
     std::fs::rename(trashed, free_name(&into.join("untrashed"))).unwrap();
 }
 
@@ -1704,7 +1704,7 @@ fn modified(path: &Path, seconds: u64) {
 }
 
 /// Takes the unfinished item a failure names back out of the Trash.
-fn untrash_unfinished(why: &str, into: &Path) {
+pub(super) fn untrash_unfinished(why: &str, into: &Path) {
     let (_, rest) = why
         .split_once("went to the Trash at ")
         .unwrap_or_else(|| panic!("{why}"));

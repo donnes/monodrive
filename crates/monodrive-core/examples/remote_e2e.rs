@@ -5,8 +5,8 @@
 //! key, a user key, known_hosts and an ssh config passed with `-F`, so the
 //! user's own `~/.ssh` is never read. The sshd listens only on loopback, takes
 //! only that key and is stopped by the handle it was started with. Nothing else
-//! is connected to. Cancelling a download in the measurements sends its few MB
-//! of partial copy to the real Trash, as cancelling any download does.
+//! is connected to. A cancelled download's partial copy goes to the real Trash,
+//! as any does, and this takes it back out by the path the job reports.
 
 use monodrive_core::entries::Kind;
 use monodrive_core::ops::{self, Conflict, Origin, Request, State};
@@ -284,6 +284,12 @@ fn measure(name: &str, connector: Connector, source: &str, store: &places::Store
             }
         };
         assert_eq!(job.state, State::Cancelled, "{job:?}");
+        if let Some(ops::Done::Failed(why)) = &job.tasks[0].done
+            && let Some((_, trashed)) = why.split_once("went to the Trash at ")
+        {
+            let trashed = Path::new(trashed.trim_end_matches('.'));
+            std::fs::rename(trashed, root.join("untrashed")).unwrap();
+        }
         let way = if upload { "upload" } else { "download" };
         println!(
             "  cancel a running {way:<8} {:>9.2?}, with its temp removed",

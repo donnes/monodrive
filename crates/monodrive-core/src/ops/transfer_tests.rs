@@ -1,3 +1,4 @@
+use super::tests::{untrash, untrash_unfinished};
 use super::*;
 use crate::remote::{Connector, RemoteError, Source, fixture};
 use std::collections::VecDeque;
@@ -247,6 +248,9 @@ fn a_download_copies_files_folders_and_links_and_undo_trashes_the_copy() {
         .unwrap();
     assert_eq!(outcome.title, "Undo Download");
     assert_eq!(b.here(), Vec::<String>::new());
+    for item in outcome.items {
+        untrash(&item.result.unwrap(), &b.root);
+    }
     // And the server still has it all.
     assert_eq!(b.on_server(), ["big.bin", "folder"]);
 }
@@ -280,7 +284,8 @@ fn a_downloads_conflicts_act_on_this_macs_side() {
     assert_eq!(replaced.state, State::Completed, "{replaced:?}");
     assert_eq!(std::fs::read(b.local.join("a.txt")).unwrap(), b"new");
     // Undo brings back what it replaced, from the Trash.
-    b.shared
+    let undone = b
+        .shared
         .lock()
         .submit(Submission {
             id: "undo-replace".into(),
@@ -289,6 +294,9 @@ fn a_downloads_conflicts_act_on_this_macs_side() {
         })
         .unwrap();
     assert_eq!(std::fs::read(b.local.join("a.txt")).unwrap(), b"old");
+    let copy_in_trash = undone.items[0].result.clone().unwrap();
+    assert_eq!(std::fs::read(&copy_in_trash).unwrap(), b"new");
+    untrash(&copy_in_trash, &b.root);
 }
 
 #[test]
@@ -411,6 +419,7 @@ fn cancelling_a_download_sends_its_partial_copy_to_the_trash_and_leaves_the_serv
     assert_eq!(job.state, State::Cancelled, "{job:?}");
     let why = first_failure(&job);
     assert!(why.contains("went to the Trash"), "{why}");
+    untrash_unfinished(why, &b.root);
     assert_eq!(b.here(), ["keep.txt"]);
     assert_eq!(b.on_server(), ["big.bin"]);
     assert!(!job.undoable);
@@ -497,7 +506,7 @@ fn losing_the_connection_interrupts_a_download_and_continuing_checks_the_source(
     b.next.lock().unwrap().push_back(Next::Lost(256 << 10));
     let job = b.run(b.download(&["big.bin"], Conflict::Stop));
     assert_eq!(job.state, State::Interrupted, "{job:?}");
-    assert!(first_failure(&job).contains("went to the Trash"), "{job:?}");
+    untrash_unfinished(first_failure(&job), &b.root);
     assert_eq!(b.here(), Vec::<String>::new());
 
     let done = b.resume(job.id, None);
@@ -509,6 +518,7 @@ fn losing_the_connection_interrupts_a_download_and_continuing_checks_the_source(
     b.next.lock().unwrap().push_back(Next::Lost(256 << 10));
     let job = b.run(b.download(&["other.bin"], Conflict::Stop));
     assert_eq!(job.state, State::Interrupted, "{job:?}");
+    untrash_unfinished(first_failure(&job), &b.root);
     std::fs::write(b.server.join("other.bin"), "edited").unwrap();
     let refused = b.resume(job.id, None);
     assert_eq!(refused.state, State::Failed, "{refused:?}");
