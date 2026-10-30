@@ -5,6 +5,8 @@ Terminology: "Work3" is interpreted as "worktree".
 
 ## Goal and order
 
+Maintainer's goal, which overrides the order below where they conflict: one place to manage all worktrees. Monodrive scans for them, lists them together, and can delete them. Deleting still needs the reviewed design this plan describes: dirty files, untracked files, branches and locks are preserved or explicitly confirmed, and removal is reversible through the Trash where possible.
+
 Make Monodrive useful for managing existing Git worktrees first. Design and implement worktree creation through Monodrive MCP only after the management foundation is usable and its behavior has been reviewed. Agent launch and broader agent management follow the separate [agent features plan](23-agent-features.md). They are deferred, not excluded.
 
 Git remains authoritative for repositories, branches and worktree registration. `monodrive-core` owns worktree behavior. GPUI and MCP call the same services. Keep filesystem mutations explicit, keep disk I/O off the UI thread, and preserve worktrees created by other applications.

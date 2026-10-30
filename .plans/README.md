@@ -18,7 +18,7 @@ Update a plan's row when its work lands on `main`.
 | 08 Tabs and panes | Waiting for UI picks | |
 | 09 Drag and drop | Waiting for UI picks | |
 | 10 Open With and Get Info | Core on main; UI waiting for picks | |
-| 11 Search | Core on main; UI waiting for picks | |
+| 11 Search | Core and MCP filters on main; UI picked, filter UI skipped for now | |
 | 12 Batch rename | Core on main; UI waiting for picks | |
 | 13 Archives | Core on main; UI waiting for picks | |
 | 14 Remote locations | Core on main; UI waiting for picks | |
@@ -27,10 +27,31 @@ Update a plan's row when its work lands on `main`.
 | 17 Storage inspection | Core on main; UI waiting for picks | |
 | 18 Cloud storage | Local slice core on main; UI waiting for picks; direct providers deferred | |
 | 19 More views | Waiting for UI picks | |
-| 20 Browsing workspaces | Waiting for tabs, panes and UI picks | |
 | 21 Extensions | User commands core on main; UI waiting for picks; runtime deferred | |
-| 22 Worktree management | Inventory on main; UI waiting for picks; creation needs a design review | |
+| 22 Worktree management | Inventory on main; goal changed to one place to scan and manage all worktrees; deletion needs a design review | |
 | 23 Agent features | Later | |
+
+## UI picks
+
+The maintainer chose these from drawn options. Mockups are not in the repo. Show 3 to 4 options before any other UI work.
+
+- 03 to 05: Monocode popover for the context menu, a title bar ring and popover for jobs, rename errors in the title bar, toasts with Undo, an in-app Empty Trash card.
+- 07: a capacity bar under each drive, an Edit mode for Favorites, a Finder-style Connect to Server sheet, the Settings icon at the bottom right of the sidebar with a Trash icon button at the bottom left.
+- 08: compact tabs in the title bar; two equal panes with their own path lines, plus a way to collapse the sidebar.
+- 09: an outline on the target and a pill by the pointer that says what will happen.
+- 10: a docked inspector that follows the selection, like Spacedrive's (large icon, name and kind, then Details, Dates and Storage sections), and Open With as a context menu submenu.
+- 11: no filter UI for now; the maintainer will rethink it. Core and MCP filters stay. Matching lines under each file, and saved and recent searches in the search field's menu.
+- 12: rename in the list, with a bar across it.
+- 13: browse a ZIP like a folder, with a read-only header and Extract buttons.
+- 14: servers under Locations.
+- 15: an aligned two-pane list with a status column.
+- 16, 18: options still to be shown.
+- 17: a report of largest files and verified duplicates, with a review before anything goes to the Trash.
+- 19: columns with a preview in the last column; gallery as a large preview above a thumbnail strip.
+- 21: a Commands page in Settings.
+- 22: one place to manage all worktrees: scan for them, then manage and delete them.
+
+Saved browsing workspaces were dropped.
 
 ## Current state
 
@@ -78,7 +99,6 @@ Numbers give the recommended sequence, not a requirement to finish unrelated opt
 These are separate follow-on tracks. They do not require every storage backend to ship first.
 
 - [Column and gallery views](19-more-views.md), after selection and previews.
-- [Saved browsing workspaces](20-browsing-workspaces.md), after tabs, panes and source identity.
 - [User commands and extensions](21-extensions.md), after stable commands and operation services.
 - [Worktree management](22-worktree-management.md) stays separate: inspect existing worktrees first, then reviewed management and creation. Read-only inventory can proceed independently; mutations and setup reuse the shared jobs foundation.
 - [Agent handoff and agent management](23-agent-features.md), after reliable shared operations and the relevant worktree lifecycle. Agent features are planned for later, not excluded from Monodrive.
