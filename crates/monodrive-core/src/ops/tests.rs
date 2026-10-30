@@ -165,9 +165,15 @@ fn undo_refuses_to_trash_a_new_file_or_copied_folder_once_it_was_edited() {
     assert!(refused.contains("changed since"), "{refused}");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "work");
 
-    // An edit deep inside a copied folder counts too.
+    // An edit deep inside a copied folder counts too, even one that keeps
+    // the size and is older than another item's time.
     std::fs::create_dir_all(files.join("docs/deep")).unwrap();
     std::fs::write(files.join("docs/deep/inner.md"), "a").unwrap();
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(86_400 * 365);
+    File::create(files.join("docs/later.md"))
+        .unwrap()
+        .set_modified(future)
+        .unwrap();
     let [copy] = moved(run(
         &mut engine,
         Request::Duplicate {
@@ -176,7 +182,7 @@ fn undo_refuses_to_trash_a_new_file_or_copied_folder_once_it_was_edited() {
     ))
     .try_into()
     .unwrap();
-    std::fs::write(copy.join("deep/inner.md"), "edited").unwrap();
+    std::fs::write(copy.join("deep/inner.md"), "b").unwrap();
     let refused = run(&mut engine, Request::Undo).unwrap_err();
     assert!(refused.contains("changed since"), "{refused}");
     assert!(copy.join("deep/inner.md").exists());

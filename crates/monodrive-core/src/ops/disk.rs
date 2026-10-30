@@ -22,8 +22,9 @@ pub struct FileId {
 pub struct Stamp {
     entries: u64,
     size: u64,
-    /// The latest modification time, in seconds and nanoseconds.
-    modified: (i64, i64),
+    /// Every item's inode, size and modification time, mixed so that one
+    /// edit changes it whatever the other times are.
+    digest: u64,
 }
 
 /// The item at `path` itself, not what a link there points to.
@@ -46,7 +47,7 @@ pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
     let mut stamp = Stamp {
         entries: 0,
         size: meta.size(),
-        modified: (meta.mtime(), meta.mtime_nsec()),
+        digest: mix(&meta),
     };
     let mut folders = Vec::new();
     if meta.is_dir() {
@@ -61,13 +62,29 @@ pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
             let Ok(meta) = item.metadata() else { continue };
             stamp.entries += 1;
             stamp.size += meta.size();
-            stamp.modified = stamp.modified.max((meta.mtime(), meta.mtime_nsec()));
+            stamp.digest = stamp.digest.wrapping_add(mix(&meta));
             if meta.is_dir() {
                 folders.push(item.path());
             }
         }
     }
     Ok((id, stamp))
+}
+
+/// One item's share of a stamp's digest. Summed, so the order a folder lists
+/// in doesn't matter; std's hasher isn't stable across releases, and the
+/// journal keeps stamps.
+fn mix(meta: &std::fs::Metadata) -> u64 {
+    [
+        meta.ino(),
+        meta.size(),
+        meta.mtime() as u64,
+        meta.mtime_nsec() as u64,
+    ]
+    .into_iter()
+    .fold(0xcbf2_9ce4_8422_2325, |hash, part| {
+        (hash ^ part).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// Moves `path` to its volume's Trash and returns where it landed. Fails
