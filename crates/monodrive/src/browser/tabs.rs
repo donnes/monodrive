@@ -2,10 +2,11 @@
 //! panes; only the active tab's are drawn, listed or told about the disk.
 
 use super::pane::{Opening, Pane, Stop};
-use super::{Browser, drag_area};
-use crate::theme::{self, content, icon_button, row_icon_button};
+use super::{Browser, drag_area, pane_room};
+use crate::theme::{self, accent, content, icon_button, row_icon_button};
 use gpui::{
-    App, Context, Entity, FontWeight, MouseButton, Role, Stateful, Window, div, prelude::*, px,
+    App, Context, CursorStyle, DispatchPhase, Entity, FontWeight, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Role, Stateful, Window, canvas, div, prelude::*, px,
 };
 use std::path::PathBuf;
 
@@ -15,19 +16,69 @@ const TAB_NARROWEST: f32 = 96.;
 /// What the top bar always leaves for dragging the window.
 const DRAG_ROOM: f32 = 24.;
 
+/// The narrowest a pane gets while dragging the divider.
+const NARROWEST_PANE: f32 = 240.;
+/// The gap between two cards, which is the divider. Boxy's panes touch.
+pub(super) const CARD_GAP: f32 = 8.;
+
 pub(super) struct Tab {
+    /// The left pane.
     pub(super) pane: Entity<Pane>,
+    /// The right pane, with Split View on.
+    pub(super) second: Option<Entity<Pane>>,
+    /// The commands are for the right pane.
+    pub(super) second_focused: bool,
+    /// The left pane's share of the room.
+    pub(super) ratio: f32,
 }
 
 impl Tab {
+    pub(super) fn new(pane: Entity<Pane>) -> Self {
+        Self {
+            pane,
+            second: None,
+            second_focused: false,
+            ratio: 0.5,
+        }
+    }
+
     /// The pane commands act on.
     pub(super) fn focused(&self) -> &Entity<Pane> {
-        &self.pane
+        match &self.second {
+            Some(second) if self.second_focused => second,
+            _ => &self.pane,
+        }
+    }
+
+    /// The pane commands don't act on, with Split View on.
+    pub(super) fn other(&self) -> Option<&Entity<Pane>> {
+        let second = self.second.as_ref()?;
+        Some(if self.second_focused {
+            &self.pane
+        } else {
+            second
+        })
     }
 
     pub(super) fn panes(&self) -> impl Iterator<Item = &Entity<Pane>> {
-        std::iter::once(&self.pane)
+        std::iter::once(&self.pane).chain(&self.second)
     }
+}
+
+/// How wide the left pane is, of `total` to share.
+pub(super) fn left_width(ratio: f32, total: f32) -> f32 {
+    (total * ratio).round().clamp(
+        NARROWEST_PANE.min(total / 2.),
+        (total - NARROWEST_PANE).max(total / 2.),
+    )
+}
+
+/// A drag of the divider: the left pane's width less the pointer's x at the
+/// press, so the divider stays under the pointer, and the room being shared.
+#[derive(Clone, Copy)]
+pub(super) struct SplitDrag {
+    grab: f32,
+    total: f32,
 }
 
 /// A tab being dragged to a new place in the strip.
@@ -72,8 +123,181 @@ impl Browser {
         };
         let pane = self.add_pane(Opening::at(stop, view, sort), cx);
         let at = self.active + 1;
-        self.tabs.insert(at, Tab { pane });
+        self.tabs.insert(at, Tab::new(pane));
         self.show_tab(at, window, cx);
+    }
+
+    /// ⌥⌘S: opens a second pane on this folder and moves there, or closes the
+    /// pane commands act on, and the keys go to the one left.
+    pub(super) fn toggle_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (stop, view, sort) = {
+            let pane = self.pane().read(cx);
+            (pane.stop().clone(), pane.view, pane.sort)
+        };
+        if self.tabs[self.active].second.is_some() {
+            self.pane()
+                .clone()
+                .update(cx, |pane, cx| pane.commit_rename(window, cx));
+            let tab = &mut self.tabs[self.active];
+            if let Some(second) = tab.second.take()
+                && !tab.second_focused
+            {
+                tab.pane = second;
+            }
+            tab.second_focused = false;
+        } else {
+            let second = self.add_pane(Opening::at(stop, view, sort), cx);
+            second.update(cx, |pane, cx| {
+                pane.set_shown(true);
+                pane.reload(cx);
+            });
+            let tab = &mut self.tabs[self.active];
+            tab.second = Some(second);
+            tab.second_focused = true;
+        }
+        self.pane()
+            .update(cx, |pane, cx| pane.focus_list(window, cx));
+        self.mirror_pane(cx);
+        cx.notify();
+    }
+
+    /// Copy or Move to Other Pane: what's selected, into the other pane's
+    /// folder, as a job.
+    pub(super) fn send_to_other_pane(
+        &mut self,
+        moving: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = &self.tabs[self.active];
+        let Some(into) = tab
+            .other()
+            .map(|other| other.read(cx).folder().to_path_buf())
+        else {
+            return;
+        };
+        tab.focused().clone().update(cx, |pane, cx| {
+            let paths = pane.chosen();
+            pane.send(paths, into, moving, window, cx);
+        });
+    }
+
+    /// The panes on screen, and what shares the room between two.
+    pub(super) fn split_view(
+        &self,
+        boxy: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let tab = &self.tabs[self.active];
+        let room = pane_room(window, cx);
+        let gap = if boxy { 0. } else { CARD_GAP };
+        let card = |pane: &Entity<Pane>, focused: bool| {
+            div()
+                .relative()
+                .h_full()
+                .min_w_0()
+                .overflow_hidden()
+                .border_color(if focused && tab.second.is_some() {
+                    accent()
+                } else {
+                    content(0.06)
+                })
+                .when(!boxy || tab.second.is_some(), |d| d.border_1())
+                .when(!boxy, |d| {
+                    d.rounded(px(theme::RADIUS_CARD)).bg(theme::pane_fill())
+                })
+                .child(pane.clone())
+        };
+        let row = div()
+            .id("panes")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .gap(px(gap));
+        let Some(second) = &tab.second else {
+            return row.child(card(&tab.pane, true).flex_1());
+        };
+        let total = room - gap;
+        let left = left_width(tab.ratio, total);
+        row.child(
+            card(&tab.pane, !tab.second_focused)
+                .w(px(left))
+                .flex_shrink_0(),
+        )
+        .child(card(second, tab.second_focused).flex_1())
+        .child(
+            div()
+                .id("split-divider")
+                .debug_selector(|| "split-divider".into())
+                .role(Role::Splitter)
+                .aria_label("Resize panes")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(left + (gap - CARD_GAP) / 2.))
+                .w(px(CARD_GAP))
+                .cursor(CursorStyle::ResizeLeftRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if event.click_count == 2 {
+                            this.tabs[this.active].ratio = 0.5;
+                        } else {
+                            this.split_drag = Some(SplitDrag {
+                                grab: left - event.position.x.as_f32(),
+                                total,
+                            });
+                        }
+                        cx.notify();
+                    }),
+                ),
+        )
+    }
+
+    /// Follows a drag of the divider through the window, as `sidebar_drag`
+    /// does.
+    pub(super) fn split_drag_listener(
+        &self,
+        drag: SplitDrag,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let this = cx.weak_entity();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                window.set_window_cursor_style(CursorStyle::ResizeLeftRight);
+                let moved = this.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = moved.update(cx, |this, cx| {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            let left = event.position.x.as_f32() + drag.grab;
+                            let left = left_width(left / drag.total, drag.total);
+                            this.tabs[this.active].ratio = left / drag.total;
+                        } else {
+                            this.split_drag = None;
+                        }
+                        cx.notify();
+                    });
+                });
+                let released = this.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        let _ = released.update(cx, |this, cx| {
+                            this.split_drag = None;
+                            cx.notify();
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
     }
 
     /// Open in New Tab, on what may be a link, which reads the disk to tell
@@ -101,13 +325,15 @@ impl Browser {
     /// Makes tab `at` the one on screen: its panes list again, and the one
     /// it left stops following the disk.
     pub(super) fn show_tab(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let left = (at != self.active)
-            .then(|| self.tabs.get(self.active).map(|tab| tab.pane.clone()))
-            .flatten();
-        self.active = at;
-        if let Some(left) = left {
-            left.update(cx, |pane, _| pane.set_shown(false));
+        if at != self.active
+            && let Some(left) = self.tabs.get(self.active)
+        {
+            let left: Vec<_> = left.panes().cloned().collect();
+            for pane in left {
+                pane.update(cx, |pane, _| pane.set_shown(false));
+            }
         }
+        self.active = at;
         let panes: Vec<_> = self.tabs[at].panes().cloned().collect();
         for pane in panes {
             pane.update(cx, |pane, cx| {

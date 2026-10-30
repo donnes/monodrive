@@ -55,6 +55,10 @@ A crumb has 4 pt of side padding, and its 12 pt chevron has 1 pt on each side. P
 
 A name that can't be used turns the rename field's outline red and shows one short line right under it, over the row below. No row moves, and the line stays in the window.
 
+### Two panes
+
+Split View (⌥⌘S) puts two panes side by side, equal to begin with, each with its own column titles, files and path bar. In Rounded each is its own card with an 8 pt gap, and that gap is the divider; in Boxy they touch. Each pane has a 1 pt border: `accent()` on the one commands act on, 0.06 on the other, so turning it on moves nothing else. The divider drags, stops 240 pt from either side, and a double-click makes them equal again. A narrow list drops columns rather than the name, which keeps 160 pt: Kind goes first, then Date Modified, then Size.
+
 ### Type
 
 The system font. Menlo only for code, paths in code boxes and tool names.

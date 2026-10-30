@@ -25,7 +25,8 @@
 //! over a picture that runs from bright to dark, `narrow.png`, where the path
 //! collapses, and `no-path-bar.png`.
 //!
-//! `tabs-one.png`, `tabs-three.png` and `tabs-many.png` show the top bar.
+//! `tabs-one.png`, `tabs-three.png` and `tabs-many.png` show the top bar, and
+//! `split.png` and `split-boxy.png` two panes with the keys on the right one.
 //!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
@@ -35,10 +36,11 @@ use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
     EnclosingFolder, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings,
-    Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves, Undo,
+    Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves,
+    ToggleSplit, Undo,
 };
 use monodrive::connect;
-use monodrive::preferences::{Preferences, Theme, View};
+use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
 use monodrive_core::cloud::{Availability, CloudFolder};
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::index::Index;
@@ -369,6 +371,29 @@ fn shoot_tabs(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpu
         dispatch(cx, window, &NewTab)?;
     }
     save(cx, window, out, "tabs-many")?;
+    for (name, style) in [
+        ("split", WorkspaceStyle::Rounded),
+        ("split-boxy", WorkspaceStyle::Boxy),
+    ] {
+        cx.update(|cx| {
+            cx.set_global(Preferences {
+                workspace_style: style,
+                ..base.clone()
+            })
+        });
+        let window = open(cx, folder)?;
+        cx.run_until_parked();
+        for action in [
+            &SelectNext as &dyn Action,
+            &SelectNext,
+            &ToggleSplit,
+            &SelectNext,
+            &OpenSelected,
+        ] {
+            dispatch(cx, window, action)?;
+        }
+        save(cx, window, out, name)?;
+    }
     Ok(())
 }
 

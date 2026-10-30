@@ -41,7 +41,7 @@ use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
-use tabs::Tab;
+use tabs::{CARD_GAP, SplitDrag, Tab};
 
 actions!(
     browser,
@@ -127,6 +127,9 @@ actions!(
         NextTab,
         PreviousTab,
         OpenInNewTab,
+        ToggleSplit,
+        CopyToOtherPane,
+        MoveToOtherPane,
     ]
 );
 
@@ -193,8 +196,6 @@ const FRAME_SETTLE: Duration = Duration::from_millis(300);
 const INDEX_POLL: Duration = Duration::from_millis(500);
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
-/// The pane's margin and border across when it's a card.
-const PANE_CARD_INSET: f32 = 10.;
 
 pub struct Browser {
     /// Keeps the browser's keys working wherever focus is.
@@ -217,6 +218,8 @@ pub struct Browser {
     tab_scroll: ScrollHandle,
     /// The tab under the pointer, which shows its ✕.
     hovered_tab: Option<usize>,
+    /// The divider between two panes, while it's dragged.
+    split_drag: Option<SplitDrag>,
     /// Started with the window; searches wait on it.
     index: Arc<OnceLock<Result<Index, String>>>,
     /// Saves the window's frame once a move or resize settles.
@@ -299,6 +302,7 @@ impl Browser {
             active: 0,
             tab_scroll: ScrollHandle::new(),
             hovered_tab: None,
+            split_drag: None,
             index,
             frame_save: Task::ready(()),
             _changes: Task::ready(()),
@@ -328,7 +332,7 @@ impl Browser {
             pane.set_shown(true);
             pane.reload(cx);
         });
-        browser.tabs.push(Tab { pane });
+        browser.tabs.push(Tab::new(pane));
         browser.load_volumes(cx);
         browser
     }
@@ -356,8 +360,40 @@ impl Browser {
         });
     }
 
+    /// Tab, or a click, may have moved the keys to the other pane: the commands
+    /// go with them.
+    fn follow_keys(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(other) = self.tabs[self.active].other() else {
+            return;
+        };
+        if other.read(cx).list_focus.contains_focused(window, cx) {
+            let tab = &mut self.tabs[self.active];
+            tab.second_focused = !tab.second_focused;
+            cx.defer_in(window, |this, _, cx| this.mirror_pane(cx));
+        }
+    }
+
+    /// The panes on screen, each with its width inside its borders.
+    fn pane_widths(&self, window: &Window, cx: &App) -> Vec<(Entity<Pane>, f32)> {
+        let tab = &self.tabs[self.active];
+        let room = pane_room(window, cx);
+        let boxy = cx.global::<Preferences>().workspace_style == WorkspaceStyle::Boxy;
+        match &tab.second {
+            None => vec![(tab.pane.clone(), if boxy { room } else { room - 2. })],
+            Some(second) => {
+                let total = if boxy { room } else { room - CARD_GAP };
+                let left = tabs::left_width(tab.ratio, total);
+                vec![
+                    (tab.pane.clone(), left - 2.),
+                    (second.clone(), total - left - 2.),
+                ]
+            }
+        }
+    }
+
     /// What the window tells `pane` this frame.
-    fn chrome_for(&self, pane: Entity<Pane>, width: f32, cx: &App) -> Chrome {
+    fn chrome_for(&self, pane: &Entity<Pane>, width: f32, cx: &App) -> Chrome {
+        let focused = pane == self.pane();
         let pane = pane.read(cx);
         let volume = pane
             .showing_folder()
@@ -365,6 +401,7 @@ impl Browser {
             .flatten();
         Chrome {
             width,
+            focused,
             covered: self.sheet_open() || self.menu.is_some(),
             menu_here: self
                 .menu
@@ -373,7 +410,9 @@ impl Browser {
             space: volume
                 .filter(|volume| volume.total > 0)
                 .map(|volume| format!("{} free", format_bytes(volume.free))),
-            ejectable: self.ejectable_here(cx),
+            ejectable: volume
+                .filter(|volume| !volume.startup)
+                .map(|volume| volume.mount.clone()),
         }
     }
 
@@ -1168,6 +1207,7 @@ impl Render for Browser {
             });
         }
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
+        let split = self.tabs[self.active].second.is_some();
         // The menu gives way to whatever took the keys from it.
         if self
             .menu
@@ -1200,18 +1240,28 @@ impl Render for Browser {
         let regions = !sheet;
         self.sidebar_focus.clone().tab_stop(regions);
         self.settings_focus.clone().tab_stop(regions);
-        let width = pane_room(window, cx);
-        let chrome = self.chrome_for(self.pane().clone(), width, cx);
-        let (lone_folder, renaming, selected) = self.pane().clone().update(cx, |pane, cx| {
-            pane.chrome = chrome;
-            pane.search.focus_handle(cx).tab_stop(regions);
-            pane.list_focus.clone().tab_stop(regions);
+        self.follow_keys(window, cx);
+        let widths = self.pane_widths(window, cx);
+        for (pane, width) in widths {
+            let chrome = self.chrome_for(&pane, width, cx);
+            pane.update(cx, |pane, cx| {
+                pane.chrome = chrome;
+                pane.search.focus_handle(cx).tab_stop(regions);
+                pane.list_focus.clone().tab_stop(regions);
+            });
+        }
+        let (lone_folder, renaming, selected) = self.pane().clone().update(cx, |pane, _| {
             (
                 pane.lone_folder(),
                 pane.renaming.is_some(),
                 !pane.selection.is_empty(),
             )
         });
+        let other_takes = self.tabs[self.active].other().is_some_and(|other| {
+            let other = other.read(cx);
+            other.showing_folder() && !other.in_trash(cx)
+        }) && selected
+            && !renaming;
         let root = div()
             // A sheet or the context menu takes the keys while it's open:
             // the menu's commands act on what it was opened on.
@@ -1252,6 +1302,19 @@ impl Render for Browser {
                 .on_action(
                     cx.listener(|this, _: &EmptyTrash, window, cx| this.empty_trash(window, cx)),
                 )
+                .on_action(
+                    cx.listener(|this, _: &ToggleSplit, window, cx| this.toggle_split(window, cx)),
+                )
+                .when(other_takes, |d| {
+                    d.on_action(cx.listener(|this, _: &CopyToOtherPane, window, cx| {
+                        this.send_to_other_pane(false, window, cx)
+                    }))
+                    .on_action(cx.listener(
+                        |this, _: &MoveToOtherPane, window, cx| {
+                            this.send_to_other_pane(true, window, cx)
+                        },
+                    ))
+                })
                 .on_action(
                     cx.listener(|this, _: &NewTab, window, cx| this.open_tab_here(window, cx)),
                 )
@@ -1333,22 +1396,16 @@ impl Render for Browser {
                             .relative()
                             .flex_1()
                             .min_h_0()
+                            .flex()
                             .border_color(content(0.06))
                             .map(|d| {
                                 if boxy {
-                                    d.border_t_1()
+                                    d.when(!split, |d| d.border_t_1())
                                 } else {
-                                    d.mr_2()
-                                        .mb_2()
-                                        .rounded(px(theme::RADIUS_CARD))
-                                        .border_1()
-                                        .bg(theme::pane_fill())
+                                    d.mr_2().mb_2()
                                 }
                             })
-                            .overflow_hidden()
-                            .flex()
-                            .flex_col()
-                            .child(self.pane().clone())
+                            .child(self.split_view(boxy, window, cx))
                             .children(self.toast_view(cx)),
                     ),
             )
@@ -1366,18 +1423,22 @@ impl Render for Browser {
                 self.resizing_sidebar
                     .map(|offset| self.sidebar_drag(offset, cx)),
             )
+            .children(
+                self.split_drag
+                    .map(|drag| self.split_drag_listener(drag, cx)),
+            )
     }
 }
 
-/// How wide the panes' area is, inside the sidebar and the card's margin and
-/// borders.
+/// How wide the panes' area is, inside the sidebar and the margin beside the
+/// cards, or Boxy's border.
 fn pane_room(window: &Window, cx: &App) -> f32 {
     let prefs = cx.global::<Preferences>();
-    let margins = match prefs.workspace_style {
-        WorkspaceStyle::Rounded => PANE_CARD_INSET,
+    let margin = match prefs.workspace_style {
+        WorkspaceStyle::Rounded => 8.,
         WorkspaceStyle::Boxy => 1.,
     };
-    window.viewport_size().width.as_f32() - sidebar_width(prefs.sidebar_width, window) - margins
+    window.viewport_size().width.as_f32() - sidebar_width(prefs.sidebar_width, window) - margin
 }
 
 /// Runs `work` with the operation owner off the UI thread, then `done` with

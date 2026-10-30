@@ -1379,3 +1379,159 @@ fn the_tab_strip_keeps_the_name_in_place_and_reorders(cx: &mut TestAppContext) {
     let pill = at("tab-0", cx);
     assert!(pill.size.width >= px(96.), "{pill:?}");
 }
+
+/// Both panes' folders, and which the commands act on.
+fn split(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> (Vec<PathBuf>, bool) {
+    browser.read_with(cx, |b, cx| {
+        let tab = &b.tabs[b.active];
+        let folders = tab
+            .panes()
+            .map(|pane| pane.read(cx).folder().to_path_buf())
+            .collect();
+        (folders, tab.second_focused)
+    })
+}
+
+#[gpui::test]
+fn two_panes_keep_their_own_folder_history_and_selection(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "down");
+    press(cx, "cmd-alt-s");
+    // A second pane on the same folder, with the keys and nothing selected.
+    assert_eq!(
+        split(&browser, cx),
+        (vec![project.clone(), project.clone()], true)
+    );
+    assert!(shown(&browser, cx).1.is_empty());
+    // Commands act on it alone.
+    press(cx, "alt-down cmd-up");
+    let parent = project.parent().unwrap().to_path_buf();
+    assert_eq!(split(&browser, cx).0, [project.clone(), parent.clone()]);
+    // A press in the other pane takes the commands there, its selection intact.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let left = browser.read_with(cx, |b, cx| {
+        b.tabs[b.active].pane.read(cx).list_bounds.get().center()
+    });
+    cx.simulate_mouse_move(left, None, with(""));
+    cx.simulate_mouse_down(left, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(left, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!split(&browser, cx).1);
+    press(cx, "cmd-down");
+    // Tab moves the keys on to the other pane too.
+    assert_eq!(location(&browser, cx), project);
+    press(cx, "tab");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(split(&browser, cx).1);
+    assert_eq!(location(&browser, cx), parent);
+    press(cx, "cmd-[");
+    assert_eq!(location(&browser, cx), project);
+    // Closing a pane gives the keys to its sibling.
+    press(cx, "cmd-alt-s");
+    assert_eq!(split(&browser, cx), (vec![project.clone()], false));
+    press(cx, "alt-down");
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+}
+
+#[gpui::test]
+fn the_divider_drags_and_double_click_shares_equally(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-alt-s");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let ratio = |cx: &mut VisualTestContext| browser.read_with(cx, |b, _| b.tabs[b.active].ratio);
+    let at = cx.debug_bounds("split-divider").unwrap().center();
+    let to = at - gpui::point(px(40.), px(0.));
+    cx.simulate_mouse_down(at, MouseButton::Left, with(""));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert!(ratio(cx) < 0.5, "{}", ratio(cx));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let at = cx.debug_bounds("split-divider").unwrap().center();
+    cx.simulate_event(gpui::MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: with(""),
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_mouse_up(at, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert_eq!(ratio(cx), 0.5);
+}
+
+#[gpui::test]
+fn copy_and_move_to_the_other_pane_are_jobs_with_undo(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let mut owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    let docs = project.join("docs");
+    // With one pane, there's nowhere to send it.
+    press(cx, "down down down");
+    let offered = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.is_action_available(&CopyToOtherPane, cx))
+    };
+    assert!(!offered(cx));
+    // Right into docs, then back left, whose a.txt the commands take.
+    press(cx, "cmd-alt-s alt-up cmd-down shift-tab");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!split(&browser, cx).1);
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    assert!(offered(cx));
+    press(cx, "alt-f5");
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(docs.join("a.txt").exists() && project.join("a.txt").exists());
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Copied \"a.txt\" to docs".into(), false, true))
+    );
+    // What it made is selected where it landed, and the shared Undo takes it out.
+    let right = browser.read_with(cx, |b, _| b.tabs[b.active].other().cloned().unwrap());
+    let chosen = right.read_with(cx, |pane, _| pane.chosen());
+    assert_eq!(chosen, [docs.join("a.txt")]);
+    click(cx, "toast-undo");
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(!docs.join("a.txt").exists());
+    // A move goes through the same way, and leaves the source listing.
+    press(cx, "alt-f6");
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(docs.join("a.txt").exists() && !project.join("a.txt").exists());
+    assert_eq!(shown(&browser, cx).0, ["docs", "zeta"]);
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn closing_the_tab_that_started_a_job_leaves_the_job_running(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let mut owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    let docs = project.join("docs");
+    press(cx, "cmd-t cmd-alt-s alt-up cmd-down shift-tab");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    press(cx, "alt-down alt-f5 cmd-w");
+    assert_eq!(tabs(&browser, cx), (1, 0));
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(docs.join("a.txt").exists());
+    assert!(toast(&browser, cx).is_some_and(|(_, failed, undo)| !failed && undo));
+    release(owned, cx);
+}

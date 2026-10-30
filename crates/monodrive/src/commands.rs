@@ -8,14 +8,15 @@
 //! as in AppKit: a text field acts on its text, the file list on its files.
 
 use crate::browser::{
-    AddToSidebar, Back, ClearRecents, CloseTab, ConnectToServer, CopyPath, DeselectAll, Duplicate,
-    EditFavorites, Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GoApplications,
-    GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents, GoToFolder, GoTrash,
-    MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab,
-    OpenInNewTab, OpenInTerminal, OpenSelected, OpenSettings, PreviousTab, PutBack, QuickLook,
-    Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort, ShowCopiesAndMoves,
-    ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
-    TogglePathBar, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    AddToSidebar, Back, ClearRecents, CloseTab, ConnectToServer, CopyPath, CopyToOtherPane,
+    DeselectAll, Duplicate, EditFavorites, Eject, EmptyTrash, EnclosingFolder, FocusSearch,
+    Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents,
+    GoToFolder, GoTrash, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
+    NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInTerminal, OpenSelected,
+    OpenSettings, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom,
+    RevealInFinder, ReverseSort, ShowCopiesAndMoves, ShowPackageContents, SortByKind,
+    SortByModified, SortByName, SortBySize, ToggleHiddenFiles, TogglePathBar, ToggleSplit, Undo,
+    ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{browser, connect, empty_trash, goto, jobs, menu, palette, settings, text_field};
@@ -301,6 +302,23 @@ pub fn all() -> Vec<Command> {
                 Box::new(QuickLook)
             }),
         ),
+        // Function keys, as two-pane file managers have long used them.
+        on(
+            SELECTION,
+            separated(command(
+                "Copy to Other Pane",
+                File,
+                &["alt-f5"],
+                BROWSER,
+                || Box::new(CopyToOtherPane),
+            )),
+        ),
+        on(
+            SELECTION,
+            command("Move to Other Pane", File, &["alt-f6"], BROWSER, || {
+                Box::new(MoveToOtherPane)
+            }),
+        ),
         on(
             SELECTION,
             destructive(separated(command(
@@ -407,6 +425,9 @@ pub fn all() -> Vec<Command> {
             FOLDER,
             command("as Grid", View, &["cmd-2"], None, || Box::new(ViewAsGrid)),
         ),
+        separated(command("Split View", View, &["cmd-alt-s"], BROWSER, || {
+            Box::new(ToggleSplit)
+        })),
         separated(command(
             "Command Palette…",
             View,
@@ -951,6 +972,8 @@ mod tests {
                 "| Rename ↩",
                 "Duplicate ⌘D",
                 "Quick Look ⌘Y",
+                "| Copy to Other Pane ⌥F5",
+                "Move to Other Pane ⌥F6",
                 "| Move to Trash ⌘⌫",
                 "Put Back",
                 "| Copy ⌘C",

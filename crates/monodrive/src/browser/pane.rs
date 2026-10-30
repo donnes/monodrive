@@ -79,8 +79,10 @@ pub(super) enum PaneEvent {
 /// What the window tells a pane each frame, before the pane draws.
 #[derive(Clone, Default)]
 pub(super) struct Chrome {
-    /// The pane's width, borders included.
+    /// The pane's width inside its borders.
     pub(super) width: f32,
+    /// Commands act on this pane.
+    pub(super) focused: bool,
     /// A sheet or the context menu is over the window.
     pub(super) covered: bool,
     /// The context menu is open on this pane's list.
@@ -1563,6 +1565,18 @@ impl Pane {
         };
         let paths = board.files();
         let into = self.folder().to_path_buf();
+        self.send(paths, into, moving, window, cx);
+    }
+
+    /// Copies or moves `paths` into `into` as one job, followed until it ends.
+    pub(super) fn send(
+        &mut self,
+        paths: Vec<PathBuf>,
+        into: PathBuf,
+        moving: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
@@ -2074,6 +2088,7 @@ impl Pane {
         let searching = !self.showing_folder();
         let tree = !searching;
         let today = Local::now().date_naive();
+        let (date, size, kind) = columns(self.chrome.width);
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
         // Finder greys the selection when the list isn't where keys go.
         let active = self.list_active(window, cx);
@@ -2139,21 +2154,27 @@ impl Pane {
                                     div().min_w_0().truncate().text_color(muted).child(parent)
                                 })),
                         )
-                        .child(column(180., false).text_color(muted).child(if missing {
-                            "--".to_string()
-                        } else {
-                            format_date(entry.modified, today)
-                        }))
-                        .child(
-                            column(80., true)
-                                .text_color(muted)
-                                .child(format_size(entry)),
-                        )
-                        .child(column(110., false).text_color(muted).child(if missing {
-                            "Missing".to_string()
-                        } else {
-                            entry.kind_label()
-                        }))
+                        .when(date, |d| {
+                            d.child(column(180., false).text_color(muted).child(if missing {
+                                "--".to_string()
+                            } else {
+                                format_date(entry.modified, today)
+                            }))
+                        })
+                        .when(size, |d| {
+                            d.child(
+                                column(80., true)
+                                    .text_color(muted)
+                                    .child(format_size(entry)),
+                            )
+                        })
+                        .when(kind, |d| {
+                            d.child(column(110., false).text_color(muted).child(if missing {
+                                "Missing".to_string()
+                            } else {
+                                entry.kind_label()
+                            }))
+                        })
                         .when(missing, |d| d.opacity(0.5))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_entry(ix, event, window, cx)
@@ -2387,6 +2408,18 @@ pub fn sorted_by(current: Sort, by: SortBy) -> Sort {
         },
         ..current
     }
+}
+
+/// Which of Date Modified, Size and Kind a list `width` wide shows. Names keep
+/// at least 160 pt: Kind goes first, then the date, then the size.
+fn columns(width: f32) -> (bool, bool, bool) {
+    // Each column with its gap, after the list's and the row's padding.
+    let (name, date, size, kind) = (32. + 160., 192., 92., 122.);
+    (
+        width >= name + size + date,
+        width >= name + size,
+        width >= name + size + date + kind,
+    )
 }
 
 pub(super) fn column(width: f32, right: bool) -> gpui::Div {
@@ -2974,9 +3007,16 @@ impl Render for Pane {
         self.backdrop
             .update(cx, |backdrop, cx| backdrop.set(look, cx));
         let list = self.file_list(window, cx);
+        let (date, size, kind) = columns(self.chrome.width);
         div()
             .relative()
             .size_full()
+            // A press anywhere in the other pane moves the commands here.
+            .when(!self.chrome.focused, |d| {
+                d.capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                    this.focus_list(window, cx);
+                }))
+            })
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -2993,16 +3033,22 @@ impl Render for Pane {
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(content(0.65))
                         .child(sort_header(SortBy::Name, "Name", sort_shown, cx).flex_1())
-                        .child(
-                            sort_header(SortBy::Modified, "Date Modified", sort_shown, cx)
-                                .w(px(180.)),
-                        )
-                        .child(
-                            sort_header(SortBy::Size, "Size", sort_shown, cx)
-                                .w(px(80.))
-                                .justify_end(),
-                        )
-                        .child(sort_header(SortBy::Kind, "Kind", sort_shown, cx).w(px(110.))),
+                        .when(date, |d| {
+                            d.child(
+                                sort_header(SortBy::Modified, "Date Modified", sort_shown, cx)
+                                    .w(px(180.)),
+                            )
+                        })
+                        .when(size, |d| {
+                            d.child(
+                                sort_header(SortBy::Size, "Size", sort_shown, cx)
+                                    .w(px(80.))
+                                    .justify_end(),
+                            )
+                        })
+                        .when(kind, |d| {
+                            d.child(sort_header(SortBy::Kind, "Kind", sort_shown, cx).w(px(110.)))
+                        }),
                 )
             })
             .child(list)

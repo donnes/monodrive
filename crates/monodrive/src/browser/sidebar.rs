@@ -443,13 +443,6 @@ impl Browser {
         }
     }
 
-    /// The volume to eject for the folder on screen, if any.
-    pub(super) fn ejectable_here(&self, cx: &App) -> Option<PathBuf> {
-        volumes::holding(&self.sidebar.volumes, self.pane().read(cx).folder())
-            .filter(|volume| !volume.startup)
-            .map(|volume| volume.mount.clone())
-    }
-
     /// Ejects off the UI thread; a refusal comes back with macOS's reason.
     pub(super) fn eject(&mut self, mount: PathBuf, cx: &mut Context<Self>) {
         let (Some(drives), Some(owner)) = (
