@@ -59,11 +59,7 @@ impl Drives for Fake {
     }
 
     fn needs_consent(&self, path: &Path) -> bool {
-        self.gated
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|g| path.starts_with(g))
+        monodrive_core::sizes::leads_into(path, &self.gated.lock().unwrap())
     }
 
     fn cloud(&self) -> Vec<CloudFolder> {
@@ -1543,7 +1539,8 @@ fn a_restored_folder_that_would_ask_for_permission_waits_for_a_person(cx: &mut T
     let (_dir, project) = folder();
     let docs = project.join("docs");
     let world = world(vec![startup()], cx);
-    world.fake.gated.lock().unwrap().push(docs.clone());
+    let real = docs.canonicalize().unwrap();
+    world.fake.gated.lock().unwrap().push(real);
     let (browser, cx) = reopen(&world, saved_pane(vec![plain(&docs)]), cx);
     let why = in_pane(&browser, cx, |pane, _| pane.unavailable.clone());
     assert_eq!(why, Some(Unavailable::NeedsConsent));
@@ -1732,4 +1729,44 @@ fn close_window_closes_from_the_keys_and_the_menu_and_forgets_that_window(cx: &m
         .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
     assert_eq!(session::load(&saved).unwrap().windows.len(), 1);
+}
+
+#[gpui::test]
+fn a_restored_place_on_a_drive_is_checked_for_consent_before_it_is_touched(
+    cx: &mut TestAppContext,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    // A temp home whose Documents is gated, and locked so a stat inside it
+    // fails another way than asking.
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let documents = home.join("Documents");
+    std::fs::create_dir_all(documents.join("deep")).unwrap();
+    std::fs::write(documents.join("deep/mine.txt"), "").unwrap();
+    // The drive now mounts somewhere other than where it was saved.
+    let drive = tempfile::tempdir().unwrap();
+    let mount = drive.path().canonicalize().unwrap();
+    std::os::unix::fs::symlink(documents.join("deep"), mount.join("link")).unwrap();
+    let world = world(
+        vec![startup(), volume("Backup", &mount, "B", 1000, 500)],
+        cx,
+    );
+    world.fake.gated.lock().unwrap().push(documents.clone());
+    let saved = |inside: &str| Favorite {
+        path: Path::new("/Volumes/Backup").join(inside),
+        volume: Some(Pinned {
+            id: VolumeId::Uuid("B".into()),
+            name: "Backup".into(),
+            mount: "/Volumes/Backup".into(),
+        }),
+    };
+    std::fs::set_permissions(&documents, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (browser, cx) = reopen(&world, saved_pane(vec![saved("link")]), cx);
+    let why = in_pane(&browser, cx, |pane, _| pane.unavailable.clone());
+    std::fs::set_permissions(&documents, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(why, Some(Unavailable::NeedsConsent));
+    // Asked, it opens through the link, where the drive is now.
+    click(cx, "unavailable-open");
+    assert_eq!(shown(&browser, cx).0, ["mine.txt"]);
+    assert_eq!(here(&browser, cx), mount.join("link"));
 }

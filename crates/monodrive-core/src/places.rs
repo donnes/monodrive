@@ -102,6 +102,18 @@ struct Saved {
     servers: Vec<String>,
 }
 
+/// `path` if there's a folder there now, or why not. Reads the disk.
+pub fn folder_at(path: PathBuf) -> Availability {
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => Availability::Available(path),
+        Ok(_) => Availability::Unavailable(format!("{} isn't a folder.", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Availability::Unavailable(format!("{} no longer exists.", path.display()))
+        }
+        Err(e) => Availability::Unavailable(format!("{}: {e}", path.display())),
+    }
+}
+
 impl Favorite {
     /// The folder at `path` as it's on `volumes` now.
     pub fn of(path: &Path, volumes: &[Volume]) -> Self {
@@ -120,35 +132,28 @@ impl Favorite {
     }
 
     pub fn resolve(&self, volumes: &[Volume]) -> Availability {
-        let path = match &self.volume {
-            None => self.path.clone(),
-            Some(pinned) => {
-                let Some(volume) = volumes
-                    .iter()
-                    .find(|volume| volume.id.as_ref() == Some(&pinned.id))
-                else {
-                    return Availability::Unavailable(format!("{} isn't connected.", pinned.name));
-                };
-                match self.path.strip_prefix(&pinned.mount) {
-                    Ok(inside) if inside.as_os_str().is_empty() => volume.mount.clone(),
-                    Ok(inside) => volume.mount.join(inside),
-                    Err(_) => {
-                        return Availability::Unavailable(format!(
-                            "{} isn't on {}.",
-                            self.path.display(),
-                            pinned.name
-                        ));
-                    }
-                }
-            }
+        match self.located(volumes) {
+            Ok(path) => folder_at(path),
+            Err(why) => Availability::Unavailable(why),
+        }
+    }
+
+    /// Where it is on `volumes` now, by volume identity, or why it can't be
+    /// told. Touches no disk, so a privacy check can come before anything does.
+    pub fn located(&self, volumes: &[Volume]) -> Result<PathBuf, String> {
+        let Some(pinned) = &self.volume else {
+            return Ok(self.path.clone());
         };
-        match std::fs::metadata(&path) {
-            Ok(meta) if meta.is_dir() => Availability::Available(path),
-            Ok(_) => Availability::Unavailable(format!("{} isn't a folder.", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Availability::Unavailable(format!("{} no longer exists.", path.display()))
-            }
-            Err(e) => Availability::Unavailable(format!("{}: {e}", path.display())),
+        let Some(volume) = volumes
+            .iter()
+            .find(|volume| volume.id.as_ref() == Some(&pinned.id))
+        else {
+            return Err(format!("{} isn't connected.", pinned.name));
+        };
+        match self.path.strip_prefix(&pinned.mount) {
+            Ok(inside) if inside.as_os_str().is_empty() => Ok(volume.mount.clone()),
+            Ok(inside) => Ok(volume.mount.join(inside)),
+            Err(_) => Err(format!("{} isn't on {}.", self.path.display(), pinned.name)),
         }
     }
 

@@ -137,7 +137,7 @@ pub fn needs_consent(path: &Path) -> bool {
 /// at a time, reading each link's own target and stopping at the gate, so
 /// nothing inside a gated folder is ever touched. Links that never end count,
 /// since where they lead can't be told.
-fn leads_into(path: &Path, gated: &[PathBuf]) -> bool {
+pub fn leads_into(path: &Path, gated: &[PathBuf]) -> bool {
     const MOST_LINKS: usize = 40;
     let mut left: Vec<OsString> = Vec::new();
     let push_front = |left: &mut Vec<OsString>, path: &Path| {

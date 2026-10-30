@@ -37,7 +37,7 @@ use gpui::{
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::Index;
 use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
-use monodrive_core::places::{Availability, Favorite};
+use monodrive_core::places::{self, Availability, Favorite};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -605,26 +605,24 @@ impl Pane {
             }
             let mut verified = None;
             if let Some(place) = check {
-                let gated = |path: &Path| {
-                    !consented && drives.as_ref().is_some_and(|d| d.needs_consent(path))
-                };
-                // Before anything stats it, unless it's on a drive that may
-                // have moved.
-                if place.volume.is_none() && gated(&place.path) {
-                    return Err(Failed::Unavailable(Unavailable::NeedsConsent));
-                }
                 let volumes = match (&place.volume, &drives) {
                     (Some(_), Some(drives)) => drives.list(),
                     _ => Vec::new(),
                 };
-                match place.resolve(&volumes) {
+                let there = place
+                    .located(&volumes)
+                    .map_err(|why| Failed::Unavailable(Unavailable::Gone(why)))?;
+                // Before anything touches it: even a stat through a link could
+                // reach a protected folder.
+                let gated = drives.as_ref().is_some_and(|d| d.needs_consent(&there));
+                if gated && !consented {
+                    return Err(Failed::Unavailable(Unavailable::NeedsConsent));
+                }
+                match places::folder_at(there) {
                     Availability::Unavailable(why) => {
                         return Err(Failed::Unavailable(Unavailable::Gone(why)));
                     }
                     Availability::Available(there) => folder = there,
-                }
-                if gated(&folder) {
-                    return Err(Failed::Unavailable(Unavailable::NeedsConsent));
                 }
                 verified = Some(folder.clone());
             }
