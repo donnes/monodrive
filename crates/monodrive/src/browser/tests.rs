@@ -1103,14 +1103,19 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
     assert_eq!(menu(&browser, cx), None);
     assert_eq!(shown(&browser, cx).1, ["c.txt"]);
     // Inside the selection it keeps it, and the menu has what runs on
-    // several: New Folder with Selection, and no Rename.
+    // several: New Folder with Selection, and Rename, which opens the bar.
     cx.simulate_click(rows[1], with("cmd"));
     right_click(cx, rows[1]);
     assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
     let (titles, _) = menu(&browser, cx).unwrap();
     assert_eq!(
-        titles[3..6],
-        ["Open in Terminal", "Get Info", "New Folder with Selection"]
+        titles[3..7],
+        [
+            "Open in Terminal",
+            "Get Info",
+            "New Folder with Selection",
+            "Rename"
+        ]
     );
     // A press outside closes it and reaches nothing behind it. The menu
     // opened rightward from the pointer, so this is left of it.

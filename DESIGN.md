@@ -65,6 +65,12 @@ The field's leading icon button opens its menu (⇧⌘S), a 360 pt `Popover` und
 
 A content search's matching lines are rows under their file, up to 5 a file. A line's row is the height of every file row, so `uniform_list` still measures one row, and the row stands for its file: a press selects, opens or drags the file, and the keys step from file to file. A selection or stripe covers the file and its lines as one block, with the row radius only at its ends. The line number is `TEXT_CAPTION` at 0.65, right-aligned in a 40 pt column, and the line is Menlo `TEXT_SMALL` at 0.65 with each match bold in primary ink, without its indent and cut at the start when the first match is far along. Lines only fit the list, so a grid pane shows these results as a list. `, more not shown` in the status says a limit or the time budget left matches out.
 
+### Batch rename
+
+Rename with several selected puts a bar across the pane, above the column titles, and a grid pane shows its rows as a list until it closes. The first line is the rule: Replace or Number as 24 pt pills, its fields, and its options as pills (0.14 fill and semibold when on, as a tab is). Find and Replace With change the name before its extension, or all of it with Include Extension. Number has Name and Start At, whose typed width pads the count, so 001 counts 001, 002. The line wraps in a narrow pane. The second line is what the rule comes to, then Cancel and Apply.
+
+Each selected row shows its new name, medium, with the old one after it at 0.65. A name that can't be used is `danger()` with the reason after it. Selected rows stay at the 0.14 fill wherever the keys are, so that red reads, and they don't open or drag. Sorting or changing the selection counts again in the new order. With a problem on screen, ↩ in a field does nothing and the button says `Skip 2 and Apply`. Esc and Cancel change nothing, and going to another folder or search closes the bar.
+
 ### Inspector
 
 ⌘I, or Get Info in a menu, opens a 260 pt panel to the right of the panes, under the top bar, and it stays open from then on; ⌘I again, Hide Inspector or its ✕ closes it. It takes its width from the panes and moves nothing else, and it stays out when the list would keep under 200 pt. It's a card beside the pane's in Rounded, with the 8 pt gap, and a region with a hairline in Boxy.

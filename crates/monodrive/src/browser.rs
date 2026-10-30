@@ -1,6 +1,7 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
+mod batch_rename;
 mod drag;
 mod inspector;
 mod open_with;
@@ -10,6 +11,8 @@ mod sidebar;
 mod tabs;
 mod trash;
 
+#[cfg(test)]
+mod batch_rename_tests;
 #[cfg(test)]
 mod drag_tests;
 #[cfg(test)]
@@ -1580,7 +1583,7 @@ impl Render for Browser {
         let (lone_folder, renaming, selected) = self.pane().clone().update(cx, |pane, _| {
             (
                 pane.lone_folder(),
-                pane.renaming.is_some(),
+                pane.changing_names(),
                 !pane.selection.is_empty(),
             )
         });

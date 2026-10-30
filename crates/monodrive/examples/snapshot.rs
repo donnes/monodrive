@@ -50,6 +50,11 @@
 //! `search-menu.png` the search field's menu over it, with made-up saved and
 //! recent searches, and `search-save.png` that menu naming a new one.
 //!
+//! `batch-rename.png` is rename in the list with several selected, replacing
+//! text, `batch-rename-number.png` numbering them, `batch-rename-problem.png`
+//! a name that's taken, `batch-rename-grid.png` the bar from a grid and
+//! `batch-rename-narrow.png` in a narrow pane. Nothing is applied.
+//!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
 
@@ -61,9 +66,10 @@ use gpui::{
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
-    EnclosingFolder, ExtendNext, FocusSearch, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected,
-    OpenSettings, OpenWith, Operations, Places, Rename, SaveSearch, SearchContents, SelectLast,
-    SelectNext, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, ToggleSplit, Undo,
+    EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch, GoRecents, GoToFolder,
+    GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations, Places, Rename, SaveSearch,
+    SearchContents, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves, ShowSearches,
+    ToggleSplit, Undo,
 };
 use monodrive::connect;
 use monodrive::native::{self, Native, SizeDone};
@@ -396,7 +402,76 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     save(&mut cx, window, out, "background")?;
     shoot_tabs(&mut cx, out, folder, &base)?;
     shoot_drags(&mut cx, out, folder, &base)?;
+    shoot_batch_rename(&mut cx, out, folder, &base)?;
     shoot_inspector(&mut cx, out, folder, &base)
+}
+
+/// The last five rows selected, in the bar that renames them.
+fn batch_rename_in(cx: &mut Cx, window: gpui::WindowHandle<Browser>) -> gpui::Result<()> {
+    dispatch(cx, window, &SelectLast)?;
+    for _ in 0..4 {
+        dispatch(cx, window, &ExtendPrevious)?;
+    }
+    dispatch(cx, window, &Rename)
+}
+
+fn open_batch_rename(cx: &mut Cx, folder: &Path) -> gpui::Result<gpui::WindowHandle<Browser>> {
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    batch_rename_in(cx, window)?;
+    Ok(window)
+}
+
+fn shoot_batch_rename(
+    cx: &mut Cx,
+    out: &Path,
+    folder: &Path,
+    base: &Preferences,
+) -> gpui::Result<()> {
+    let click = |cx: &mut Cx, window, at: Point<Pixels>| {
+        let events = vec![
+            press_at(at, Modifiers::none()),
+            release_at(at, Modifiers::none()),
+        ];
+        mouse(cx, window, events)
+    };
+    let window = open_batch_rename(cx, folder)?;
+    type_text(cx, window, "o")?;
+    dispatch(cx, window, &FocusNext)?;
+    type_text(cx, window, "0")?;
+    save(cx, window, out, "batch-rename")?;
+    // Number, in the bar's first line, which puts the keys in Name.
+    click(cx, window, point(px(362.), px(61.)))?;
+    type_text(cx, window, "Trip")?;
+    dispatch(cx, window, &FocusNext)?;
+    type_text(cx, window, "001")?;
+    save(cx, window, out, "batch-rename-number")?;
+
+    // Include Extension, at the end of that line, then a name that's taken.
+    let window = open_batch_rename(cx, folder)?;
+    click(cx, window, point(px(1016.), px(61.)))?;
+    type_text(cx, window, "notes.md")?;
+    dispatch(cx, window, &FocusNext)?;
+    type_text(cx, window, "Brief.pdf")?;
+    save(cx, window, out, "batch-rename-problem")?;
+
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            view: View::Grid,
+            ..base.clone()
+        })
+    });
+    let window = open_batch_rename(cx, folder)?;
+    type_text(cx, window, "o")?;
+    save(cx, window, out, "batch-rename-grid")?;
+    cx.update(|cx| cx.set_global(base.clone()));
+
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    dispatch(cx, window, &ToggleSplit)?;
+    batch_rename_in(cx, window)?;
+    type_text(cx, window, "o")?;
+    save(cx, window, out, "batch-rename-narrow")
 }
 
 /// Past the inspector's wait, with its read drawn.

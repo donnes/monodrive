@@ -3,6 +3,7 @@
 //! What's window-wide (toasts, sheets, the jobs ring, the sidebar) belongs to
 //! `Browser`, which a pane reaches through `PaneEvent`.
 
+use super::batch_rename::BatchRename;
 use super::drag::{Drag, Spot, Target, offers};
 use super::searches::{CONTENT_SETTLE, Matches};
 use super::{
@@ -206,7 +207,7 @@ pub struct Pane {
     pub(super) across: usize,
     pub(super) cell_width: f32,
     /// Scroll to the selection once the layout settles (after a view switch).
-    reveal_pending: bool,
+    pub(super) reveal_pending: bool,
     /// Every thumbnail asked for and not yet given back, loaded or not.
     pub(super) thumbs: HashMap<Thumb, Option<Arc<RenderImage>>>,
     /// The thumbnails the last frame drew; the rest are given back.
@@ -224,6 +225,8 @@ pub struct Pane {
     consented: bool,
     /// The name being edited in place.
     pub(super) renaming: Option<Renaming>,
+    /// Rename in the list: the bar, and the selected rows' new names.
+    pub(super) batch: Option<BatchRename>,
     /// What's selected stays when the next listing lands, as it was put back.
     pub(super) keep_selection: bool,
     /// What a change made, to select once the listing that has it lands.
@@ -343,6 +346,7 @@ impl Pane {
             unavailable: None,
             consented: false,
             renaming: None,
+            batch: None,
             keep_selection: false,
             select_after: Vec::new(),
             query: String::new(),
@@ -392,9 +396,10 @@ impl Pane {
     /// Where the keys go on arriving at this pane: a name left being edited,
     /// or the list.
     pub(super) fn take_keys(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.renaming {
-            Some(renaming) => window.focus(&renaming.field.focus_handle(cx), cx),
-            None => self.focus_list(window, cx),
+        match (&self.renaming, &self.batch) {
+            (Some(renaming), _) => window.focus(&renaming.field.focus_handle(cx), cx),
+            (None, Some(batch)) => window.focus(&batch.first_field(cx), cx),
+            (None, None) => self.focus_list(window, cx),
         }
     }
 
@@ -817,6 +822,8 @@ impl Pane {
                 {
                     this.renaming = None;
                 }
+                // The disk may have changed under the preview.
+                this.preview_batch(cx);
                 // A refresh leaves the view where it was.
                 match this.cursor_ix() {
                     _ if quiet => {}
@@ -830,9 +837,10 @@ impl Pane {
         });
     }
 
-    /// The layout on screen: a content search's lines only fit the list.
+    /// The layout on screen: a content search's lines and a batch's new
+    /// names only fit the list.
     pub(super) fn layout(&self) -> View {
-        if self.matches.is_empty() {
+        if self.matches.is_empty() && self.batch.is_none() {
             self.view
         } else {
             View::List
@@ -1092,7 +1100,7 @@ impl Pane {
     }
 
     /// Scrolls entry `ix` into view: in the grid, its row of the grid.
-    fn reveal(&self, ix: usize, strategy: ScrollStrategy) {
+    pub(super) fn reveal(&self, ix: usize, strategy: ScrollStrategy) {
         let item = match self.layout() {
             View::Grid => ix / self.grid_columns(),
             // Going down brings a file's lines in with it; its own row stays
@@ -1158,7 +1166,7 @@ impl Pane {
             self.selection.extend(&self.entries, ix);
         } else {
             self.selection.select(entry);
-            if event.click_count() == 2 {
+            if event.click_count() == 2 && self.batch.is_none() {
                 self.open_selection(window, cx);
             }
         }
@@ -1178,6 +1186,9 @@ impl Pane {
     ) {
         cx.stop_propagation();
         window.prevent_default();
+        if self.batch.is_some() {
+            return;
+        }
         self.focus_list(window, cx);
         match ix.and_then(|ix| self.entries.get(ix)) {
             Some(entry) if !self.selection.contains(&entry.path) => self.selection.select(entry),
@@ -1329,9 +1340,11 @@ impl Pane {
     /// Whether the keys go to the list, the search over it, or a context
     /// menu opened on it, which leaves the selection looking as it was.
     fn list_active(&self, window: &Window, cx: &App) -> bool {
-        self.list_focus.contains_focused(window, cx)
-            || self.search.focus_handle(cx).is_focused(window)
-            || self.chrome.menu_here
+        // A batch's rows stay grey, where its problems read in red.
+        self.batch.is_none()
+            && (self.list_focus.contains_focused(window, cx)
+                || self.search.focus_handle(cx).is_focused(window)
+                || self.chrome.menu_here)
     }
 
     /// A point in the window as a point in the listing, measured from the
@@ -1539,6 +1552,9 @@ impl Pane {
     /// `OPEN_WITHOUT_ASKING` files it asks first, as Finder does, so ⌘A then
     /// ↩ can't launch a whole folder.
     pub(super) fn open_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.batch.is_some() {
+            return;
+        }
         let chosen = self.selection.in_order(&self.entries);
         if let [only] = chosen.as_slice() {
             let ix = self.entries.iter().position(|e| e.path == only.path);
@@ -1693,7 +1709,7 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         // A name being edited takes its own typing.
-        let Some(text) = typed(&event.keystroke).filter(|_| self.renaming.is_none()) else {
+        let Some(text) = typed(&event.keystroke).filter(|_| !self.changing_names()) else {
             return;
         };
         let text = text.to_owned();
@@ -1790,7 +1806,15 @@ impl Pane {
         };
         if let Some(why) = outcome.failures().next() {
             let why = short_reason(why, [self.folder()]);
-            self.toast(why, true, None, cx);
+            let renamed = outcome.items.iter().filter(|i| i.result.is_ok()).count();
+            if matches!(request, Request::RenameMany { .. }) && renamed > 0 {
+                // A batch isn't atomic: what it did rename can still go back.
+                let of = outcome.items.len();
+                let said = format!("Renamed {renamed} of {of} items. {why}");
+                self.toast(said, true, Some(outcome.op), cx);
+            } else {
+                self.toast(why, true, None, cx);
+            }
         } else if let Some(said) = said(&request, &outcome) {
             // Undo from the toast undoes this change or nothing.
             let changed = !outcome.items.is_empty();
@@ -1969,8 +1993,15 @@ impl Pane {
         );
     }
 
-    /// ↩: edits the selected item's name in place.
+    /// ↩: edits the selected item's name in place, or with several selected
+    /// opens the bar. From the list while it's open, the keys go back to it.
     pub(super) fn rename_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.batch.is_some() {
+            return self.take_keys(window, cx);
+        }
+        if self.selection.len() > 1 {
+            return self.start_batch(window, cx);
+        }
         let chosen = self.selection.in_order(&self.entries);
         let [only] = chosen.as_slice() else {
             return;
@@ -2519,7 +2550,8 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let searching = !self.showing_folder();
-        let tree = !searching;
+        // A grid pane's batch shows its rows as they are, flat.
+        let tree = !searching && self.view == View::List;
         let today = Local::now().date_naive();
         let (date, size, kind) = columns(self.chrome.width);
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
@@ -2554,7 +2586,12 @@ impl Pane {
                     content(0.65)
                 };
                 let rename = self.rename_field(&entry.path, 260., cx);
-                let grabs = !missing && rename.is_none();
+                let grabs = !missing && rename.is_none() && self.batch.is_none();
+                let new = self
+                    .batch
+                    .as_ref()
+                    .filter(|_| selected)
+                    .and_then(|batch| batch.row(&entry.path, &entry.name, self.folder()));
                 Some(
                     div()
                         .id(row)
@@ -2601,10 +2638,27 @@ impl Pane {
                                                 .flex_shrink_0()
                                                 .max_w(px(360.))
                                                 .truncate()
-                                                .child(entry.name.clone())
+                                                .map(|d| match &new {
+                                                    Some(new) if new.problem => {
+                                                        d.text_color(danger())
+                                                    }
+                                                    Some(new) if new.renamed => {
+                                                        d.font_weight(FontWeight::MEDIUM)
+                                                    }
+                                                    _ => d,
+                                                })
+                                                .child(new.as_ref().map_or_else(
+                                                    || entry.name.clone(),
+                                                    |new| new.name.clone(),
+                                                ))
                                                 .into_any_element(),
                                         }),
                                 )
+                                .children(new.and_then(|new| {
+                                    let ink = if new.problem { danger() } else { content(0.65) };
+                                    let note = new.note?;
+                                    Some(div().min_w_0().truncate().text_color(ink).child(note))
+                                }))
                                 .children(parent.map(|parent| {
                                     div().min_w_0().truncate().text_color(muted).child(parent)
                                 })),
@@ -2665,6 +2719,7 @@ pub(super) fn said(request: &Request, outcome: &Outcome) -> Option<String> {
         Request::Trash { .. } => format!("Moved {what} to the Trash"),
         Request::Duplicate { .. } => format!("Duplicated {what}"),
         Request::Rename { name, .. } => format!("Renamed to \"{name}\""),
+        Request::RenameMany { .. } => format!("Renamed {what}"),
         Request::NewFolder { path } | Request::NewFile { path } => {
             format!("Made {}", jobs::quoted(path))
         }
@@ -3117,6 +3172,9 @@ pub fn format_bytes(size: u64) -> String {
 impl Pane {
     /// Esc: leaves search, or else lets go of the selection.
     pub(super) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.batch.is_some() {
+            return self.end_batch(window, cx);
+        }
         if self.query.is_empty() {
             if self.search_mode_is_plain() {
                 self.selection.clear();
@@ -3138,7 +3196,7 @@ impl Pane {
         let can_make_here = self.takes_files(cx);
         let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
         let selected = !self.selection.is_empty();
-        let renaming = self.renaming.is_some();
+        let renaming = self.changing_names();
         // While a sheet is open, its commands (from the menu bar too) wait.
         root.when(!sheet, |d| {
             d.on_action(cx.listener(|this, _: &Back, _, cx| this.step_history(-1, cx)))
@@ -3473,7 +3531,7 @@ impl Pane {
             // Only here, so the menu bar's items are off and can't change the
             // selection's files while the keys are somewhere else, such as the
             // sidebar.
-            .when(self.renaming.is_none() && !self.selection.is_empty(), |d| {
+            .when(!self.changing_names() && !self.selection.is_empty(), |d| {
                 d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
                     let paths = this.chosen();
                     this.submit(Request::Trash { paths }, window, cx)
@@ -3488,7 +3546,7 @@ impl Pane {
                     },
                 ))
             })
-            .when(self.renaming.is_none() && self.selection.len() == 1, |d| {
+            .when(self.renaming.is_none() && !self.selection.is_empty(), |d| {
                 d.on_action(
                     cx.listener(|this, _: &Rename, window, cx| this.rename_selected(window, cx)),
                 )
@@ -3504,7 +3562,7 @@ impl Pane {
                 )
             })
             .on_action(cx.listener(|this, _: &ShowContextMenu, _, cx| {
-                if this.renaming.is_none() {
+                if !this.changing_names() {
                     let at = this.menu_point(cx);
                     let scopes = this.scopes();
                     cx.emit(PaneEvent::Menu { scopes, at });
@@ -3563,6 +3621,7 @@ impl Focusable for Pane {
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.follow_batch(window, cx);
         let prefs = cx.global::<Preferences>();
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
         // Search results stay in relevance order, so no column shows a sort.
@@ -3598,6 +3657,7 @@ impl Render for Pane {
             .flex_col()
             .child(self.backdrop.clone())
             .children(self.trash_bar(cx))
+            .children(self.batch_bar(window, cx))
             // The grid sorts from the View menu and Settings.
             .when(
                 self.layout() == View::List && self.unavailable.is_none(),
