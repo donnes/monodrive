@@ -30,7 +30,11 @@ pub const SIDEBAR_ROW_HEIGHT: f32 = 32.;
 pub const ROW_GAP: f32 = 2.;
 /// The group a [`row_slot`] hovers its row through.
 pub const ROW_GROUP: &str = "row";
-pub const PATH_BAR_HEIGHT: f32 = 22.;
+pub const PATH_BAR_HEIGHT: f32 = 28.;
+/// From a pane's edges to the text and controls in its bars and rows.
+pub const PANE_INSET: f32 = 16.;
+/// The side padding of a path crumb, so a crumb's text can sit on the inset.
+pub const CRUMB_INSET: f32 = 6.;
 pub const BUTTON_HEIGHT: f32 = 24.;
 pub const FIELD_HEIGHT: f32 = 28.;
 
@@ -472,6 +476,17 @@ pub fn row_muted(active: bool) -> Hsla {
 /// Secondary ink in a [`destructive_row`], which stays one color.
 pub fn destructive_ink(active: bool) -> Hsla {
     if active { on_danger() } else { danger() }
+}
+
+/// A bar at a pane's top or bottom, `height` tall: its contents are centered
+/// and sit `PANE_INSET` from the pane's edges.
+pub fn pane_bar(height: f32) -> Div {
+    div()
+        .h(px(height))
+        .flex_shrink_0()
+        .px(px(PANE_INSET))
+        .flex()
+        .items_center()
 }
 
 /// A progress bar's 4 pt track. `h_full` fills belong inside it.

@@ -430,10 +430,7 @@ fn the_trash_opens_with_its_bar_and_back_returns(cx: &mut TestAppContext) {
     assert_eq!(browser.read_with(cx, |b, _| b.trash_header.count), Some(2));
     assert!(on_screen(cx, "put-back"));
     assert!(on_screen(cx, "empty-trash"));
-    assert_eq!(
-        browser.read_with(cx, |b, _| b.put_back().1),
-        Some("Select items to put back.".to_string())
-    );
+    assert_eq!(browser.read_with(cx, |b, _| b.put_back().1), None);
 
     // Monodrive didn't trash this, so it never guesses where it came from.
     press(cx, "down");

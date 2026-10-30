@@ -191,11 +191,12 @@ impl Browser {
         }));
     }
 
-    /// What's selected that Put Back can take, and if not all of it, why.
+    /// What's selected that Put Back can take, and if a selection can't all
+    /// go, why. With nothing selected, the disabled button says enough.
     pub(super) fn put_back(&self) -> (Vec<PathBuf>, Option<String>) {
         let header = &self.trash_header;
         if header.asked.is_empty() {
-            return (Vec::new(), Some("Select items to put back.".into()));
+            return (Vec::new(), None);
         }
         let origins = match &header.origins {
             None => return (Vec::new(), None),
@@ -247,12 +248,7 @@ impl Browser {
         let (known, why) = self.put_back();
         let can_empty = self.trash_header.count.is_some_and(|count| count > 0);
         Some(
-            div()
-                .h(px(theme::TITLE_BAR_HEIGHT))
-                .flex_shrink_0()
-                .px_4()
-                .flex()
-                .items_center()
+            theme::pane_bar(theme::TITLE_BAR_HEIGHT)
                 .gap_2()
                 .border_b_1()
                 .border_color(content(0.06))

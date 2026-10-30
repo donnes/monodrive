@@ -199,12 +199,12 @@ const TOAST_FOR: Duration = Duration::from_secs(4);
 /// What stands for the path levels that don't fit.
 const COLLAPSED: &str = "…";
 /// A crumb's side padding.
-const CRUMB_PADDING: f32 = 12.;
+const CRUMB_PADDING: f32 = 2. * theme::CRUMB_INSET;
 /// A crumb's chevron and the gaps either side of it.
 const CRUMB_CHEVRON: f32 = 16.;
-/// The path bar's side padding, a point of slack, and the pane's margin and
-/// border when it's a card.
-const PATH_BAR_CHROME: f32 = 18.;
+/// The path bar's side padding and a point of slack.
+const PATH_BAR_CHROME: f32 = theme::PANE_INSET * 2. - theme::CRUMB_INSET + 2.;
+/// The pane's margin and border when it's a card.
 const PANE_CARD_INSET: f32 = 10.;
 
 pub struct Browser {
@@ -2463,7 +2463,7 @@ impl Browser {
                 d.child(
                     div()
                         .flex_shrink_0()
-                        .px(px(6.))
+                        .px(px(theme::CRUMB_INSET))
                         .text_color(content(0.65))
                         .child(COLLAPSED),
                 )
@@ -2496,7 +2496,7 @@ impl Browser {
                                     .id(("path-step", ix))
                                     .role(gpui::Role::Link)
                                     .aria_label(name.clone())
-                                    .px(px(6.))
+                                    .px(px(theme::CRUMB_INSET))
                                     .rounded_full()
                                     .line_height(px(18.))
                                     .truncate()
@@ -2655,13 +2655,13 @@ impl Browser {
         let most = width.max(0.);
         let taken = text_width(&status, theme::TEXT_SMALL, FontWeight::NORMAL, window) + 2. * 12.;
         Some(
-            div()
+            theme::pane_bar(theme::PATH_BAR_HEIGHT)
                 .debug_selector(|| "path-bar".into())
-                .h(px(theme::PATH_BAR_HEIGHT))
-                .flex_shrink_0()
-                .px_2()
-                .flex()
-                .items_center()
+                // The first crumb's padding is part of the inset, so its text
+                // lines up with the bars above.
+                .when(self.showing_folder(), |d| {
+                    d.pl(px(theme::PANE_INSET - theme::CRUMB_INSET))
+                })
                 .gap_3()
                 .border_t_1()
                 .border_color(content(0.06))
@@ -3508,12 +3508,7 @@ impl Render for Browser {
                             // The grid sorts from the View menu and Settings.
                             .when(self.view == View::List, |d| {
                                 d.child(
-                                    div()
-                                        .h(px(theme::ROW_HEIGHT))
-                                        .flex_shrink_0()
-                                        .px_4()
-                                        .flex()
-                                        .items_center()
+                                    theme::pane_bar(theme::ROW_HEIGHT)
                                         .gap_3()
                                         .border_b_1()
                                         .border_color(content(0.06))
@@ -4811,11 +4806,11 @@ mod tests {
         assert_eq!(field, before);
         assert!(note.top() >= field.bottom(), "{note:?} {field:?}");
         // Even on the window's last visible row.
-        cx.simulate_resize(gpui::size(px(800.), px(170.)));
+        cx.simulate_resize(gpui::size(px(800.), px(190.)));
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         let note = cx.debug_bounds("rename-error").unwrap();
-        assert!(note.bottom() <= px(170.), "{note:?}");
+        assert!(note.bottom() <= px(190.), "{note:?}");
         press(cx, "escape");
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
