@@ -2809,20 +2809,18 @@ impl Browser {
                     (row * across..((row + 1) * across).min(self.entries.len())).map(|ix| {
                         let entry = &self.entries[ix];
                         let selected = self.selection.contains(&entry.path);
-                        let picture = (thumbs_on
-                            && entry.kind == Kind::File
-                            && thumbnails::is_picture(&entry.path))
-                        .then(|| Thumb {
-                            path: entry.path.clone(),
-                            side: pixels,
-                            modified: entry.modified,
-                        })
-                        .and_then(|thumb| {
-                            let image = thumbnails::get(&thumb, window, cx);
-                            self.drawn.insert(thumb.clone());
-                            self.thumbs.insert(thumb, image.clone());
-                            image
-                        });
+                        let picture = (thumbs_on && thumbnails::wanted(entry))
+                            .then(|| Thumb {
+                                path: entry.path.clone(),
+                                side: pixels,
+                                modified: entry.modified,
+                            })
+                            .and_then(|thumb| {
+                                let image = thumbnails::get(&thumb, window, cx);
+                                self.drawn.insert(thumb.clone());
+                                self.thumbs.insert(thumb, image.clone());
+                                image
+                            });
                         let art = match picture {
                             // A square box: without one, `img` takes the
                             // picture's own shape, and a tall one spills

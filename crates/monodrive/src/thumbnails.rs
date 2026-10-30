@@ -4,6 +4,8 @@
 
 use gpui::{App, Asset, RenderImage, Window};
 use image::ImageReader;
+use monodrive_core::cloud::Availability;
+use monodrive_core::entries::{Entry, Kind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,10 +23,17 @@ const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", 
 /// Bigger files aren't worth reading for a thumbnail.
 const LARGEST: u64 = 64 * 1024 * 1024;
 
-pub fn is_picture(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| PICTURES.contains(&ext.to_lowercase().as_str()))
+/// Whether the grid draws `entry` as a thumbnail: a picture file whose
+/// contents are on this Mac. Reading a cloud placeholder would download it,
+/// so it, and anything whose availability isn't known, keeps its icon.
+pub fn wanted(entry: &Entry) -> bool {
+    entry.kind == Kind::File
+        && entry.availability == Availability::Local
+        && entry
+            .path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| PICTURES.contains(&ext.to_lowercase().as_str()))
 }
 
 struct Thumbnail;
@@ -123,15 +132,39 @@ mod tests {
         image::RgbaImage::from_pixel(400, 200, image::Rgba([10, 20, 30, 255]))
             .save_with_format(&path, image::ImageFormat::Png)
             .unwrap();
-        assert!(is_picture(&path));
         let thumb = decode(&path, 100).unwrap();
         assert_eq!(thumb.size(0).width.0, 100);
         assert_eq!(thumb.size(0).height.0, 50);
         // Red and blue swap places for GPUI.
         let bytes = thumb.as_bytes(0).unwrap();
         assert_eq!(&bytes[..4], &[30, 20, 10, 255]);
-        assert!(!is_picture(Path::new("notes.md")));
         std::fs::write(dir.path().join("fake.png"), b"no").unwrap();
         assert!(decode(&dir.path().join("fake.png"), 100).is_none());
+    }
+
+    #[test]
+    fn only_local_picture_files_get_thumbnails() {
+        let entry = |name: &str, kind, availability| Entry {
+            path: PathBuf::from("/x").join(name),
+            name: name.into(),
+            kind,
+            size: 10,
+            modified: 0,
+            availability,
+        };
+        assert!(wanted(&entry("wide.PNG", Kind::File, Availability::Local)));
+        for availability in [
+            Availability::Placeholder,
+            Availability::Downloading,
+            Availability::Unknown,
+        ] {
+            assert!(!wanted(&entry("wide.png", Kind::File, availability)));
+        }
+        assert!(!wanted(&entry("notes.md", Kind::File, Availability::Local)));
+        assert!(!wanted(&entry(
+            "photos.png",
+            Kind::Dir,
+            Availability::Local
+        )));
     }
 }
