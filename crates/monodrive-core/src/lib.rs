@@ -2,6 +2,7 @@
 //! anything a user can do from the window an agent can do through MCP.
 
 pub mod apps;
+pub mod archives;
 pub mod entries;
 pub mod index;
 pub mod info;

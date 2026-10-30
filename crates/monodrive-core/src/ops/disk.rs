@@ -242,6 +242,17 @@ pub fn tally(path: &Path) -> io::Result<(u64, u64)> {
     Ok(tally)
 }
 
+/// The bytes this user may still write on the volume `path` is on.
+pub fn free(path: &Path) -> io::Result<u64> {
+    let path = c_path(path)?;
+    // SAFETY: an all-zero statfs is valid, and the call writes only into it.
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(path.as_ptr(), &mut fs) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(fs.f_bavail.saturating_mul(u64::from(fs.f_bsize)))
+}
+
 /// The volume `path` is on.
 pub fn volume(path: &Path) -> io::Result<u64> {
     std::fs::symlink_metadata(path).map(|meta| meta.dev())

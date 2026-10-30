@@ -1,12 +1,14 @@
-//! Copy and move jobs. The owner queues them and runs at most `RUNNING` at
-//! once, each on its own thread, one item at a time, so its socket keeps
-//! answering while they work. Every change an item makes is a `Step`, written
-//! to the journal before and after it happens, so undo reverses a job and a
-//! crash leaves it settled from the disk rather than repeated.
+//! Copy, move, compress and extract jobs. The owner queues them and runs at
+//! most `RUNNING` at once, each on its own thread, one item at a time, so its
+//! socket keeps answering while they work. Every change an item makes is a
+//! `Step`, written to the journal before and after it happens, so undo
+//! reverses a job and a crash leaves it settled from the disk rather than
+//! repeated.
 
 use super::{
     Engine, FileId, Origin, Outcome, Record, Request, Spot, Stamp, Step, Submission, disk, existing,
 };
+use crate::archives::{self, Archive};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
@@ -66,13 +68,14 @@ impl State {
     }
 }
 
-/// A copy or move, as clients see it.
+/// A copy, move, compression or extraction, as clients see it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: u64,
-    /// "Copy" or "Move".
+    /// "Copy", "Move", "Compress" or "Extract".
     pub title: String,
     pub origin: Origin,
+    /// Where its items go: the archive's folder for Compress.
     pub into: PathBuf,
     pub state: State,
     pub tasks: Vec<Task>,
@@ -93,6 +96,9 @@ pub struct Job {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
+    /// What it copies or moves. A compression has one task, the item or
+    /// the folder of items it compresses; an extraction one for each entry
+    /// or folder it extracts, as a path inside the archive.
     pub source: PathBuf,
     /// `None` until the item is done, or for good if the job stopped first.
     pub done: Option<Done>,
@@ -113,6 +119,19 @@ pub enum Done {
 pub(super) enum Kind {
     Copy,
     Move,
+    Compress,
+    Extract,
+}
+
+impl Kind {
+    /// What an item is made as, before it's put in place.
+    fn made(self) -> &'static str {
+        match self {
+            Kind::Copy | Kind::Move => "copy",
+            Kind::Compress => "archive",
+            Kind::Extract => "extraction",
+        }
+    }
 }
 
 /// A job as accepted: what goes where.
@@ -121,11 +140,106 @@ pub(super) struct Spec {
     kind: Kind,
     into: PathBuf,
     conflict: Conflict,
+    /// For an extraction, the entries it takes, as paths inside `archive`.
     sources: Vec<PathBuf>,
     /// Which item each source was when the job was accepted, so a source
-    /// replaced while the job waits is refused rather than moved.
+    /// replaced while the job waits is refused rather than moved. For an
+    /// extraction, each is the archive's.
     #[serde(default)]
     ids: Vec<FileId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archive: Option<PathBuf>,
+}
+
+impl Spec {
+    /// What a copy, move, compression or extraction asks for, checked now.
+    fn new(request: &Request) -> Result<Self, String> {
+        fn absolute<'a>(mut paths: impl Iterator<Item = &'a PathBuf>) -> Result<(), String> {
+            match paths.find(|path| !path.is_absolute()) {
+                Some(path) => Err(format!("{}: paths must be absolute.", path.display())),
+                None => Ok(()),
+            }
+        }
+        // Only the item, not a stamp: walking a big folder here would hold
+        // the engine while the owner waits.
+        let ids = |paths: &[PathBuf]| -> Result<Vec<FileId>, String> {
+            if paths.is_empty() {
+                return Err("Name at least one item.".into());
+            }
+            paths
+                .iter()
+                .map(|path| disk::lookup(path).map_err(|e| format!("{}: {e}", path.display())))
+                .collect()
+        };
+        match request {
+            Request::Copy {
+                paths,
+                into,
+                conflict,
+            }
+            | Request::Move {
+                paths,
+                into,
+                conflict,
+            } => {
+                absolute(paths.iter().chain([into]))?;
+                Ok(Self {
+                    kind: if matches!(request, Request::Copy { .. }) {
+                        Kind::Copy
+                    } else {
+                        Kind::Move
+                    },
+                    into: into.clone(),
+                    conflict: *conflict,
+                    sources: paths.clone(),
+                    ids: ids(paths)?,
+                    archive: None,
+                })
+            }
+            Request::Compress { paths } => {
+                absolute(paths.iter())?;
+                let ids = ids(paths)?;
+                let into = paths[0].parent().unwrap_or(&paths[0]);
+                if paths.iter().any(|path| path.parent() != Some(into)) {
+                    return Err(
+                        "Compress items from one folder; the archive goes beside them.".into(),
+                    );
+                }
+                Ok(Self {
+                    kind: Kind::Compress,
+                    into: into.to_path_buf(),
+                    conflict: Conflict::KeepBoth,
+                    sources: paths.clone(),
+                    ids,
+                    archive: None,
+                })
+            }
+            Request::Extract {
+                archive,
+                entries,
+                into,
+                conflict,
+            } => {
+                absolute([archive, into].into_iter())?;
+                let id = ids(std::slice::from_ref(archive))?[0];
+                let items = Archive::open(archive)?.plan(entries, disk::free(into).ok())?;
+                Ok(Self {
+                    kind: Kind::Extract,
+                    into: into.clone(),
+                    conflict: *conflict,
+                    ids: vec![id; items.len()],
+                    sources: items.iter().map(|item| archive.join(item)).collect(),
+                    archive: Some(archive.clone()),
+                })
+            }
+            _ => unreachable!("only jobs have a spec"),
+        }
+    }
+
+    /// The entry name an extraction's source stands for.
+    fn entry<'a>(&self, source: &'a Path) -> Option<&'a str> {
+        source.strip_prefix(self.archive.as_ref()?).ok()?.to_str()
+    }
 }
 
 /// One item of a job, as the journal keeps it.
@@ -172,20 +286,31 @@ pub(super) struct Entry {
     cancel: Arc<AtomicBool>,
     /// The running item's bytes copied so far.
     copied: Arc<AtomicU64>,
+    /// An extraction's archive, read once while the job runs.
+    pub(super) archive: Option<Arc<Archive>>,
 }
 
 impl Entry {
     pub(super) fn new(id: u64, origin: Origin, spec: Spec, started: u64) -> Self {
-        let work: Vec<Work> = spec
-            .sources
-            .iter()
-            .enumerate()
-            .map(|(i, source)| Work {
-                source: source.clone(),
-                id: spec.ids.get(i).copied(),
+        let work: Vec<Work> = match (spec.kind, spec.sources.as_slice()) {
+            // One archive, so one item.
+            (Kind::Compress, sources) => vec![Work {
+                source: match sources {
+                    [one] => one.clone(),
+                    _ => spec.into.clone(),
+                },
                 ..Work::default()
-            })
-            .collect();
+            }],
+            (_, sources) => sources
+                .iter()
+                .enumerate()
+                .map(|(i, source)| Work {
+                    source: source.clone(),
+                    id: spec.ids.get(i).copied(),
+                    ..Work::default()
+                })
+                .collect(),
+        };
         Self {
             id,
             origin,
@@ -197,6 +322,7 @@ impl Entry {
             started,
             cancel: Arc::default(),
             copied: Arc::default(),
+            archive: None,
         }
     }
 
@@ -208,6 +334,7 @@ impl Entry {
         self.spec.conflict = conflict;
         self.state = State::Queued;
         self.cancel = Arc::default();
+        self.archive = None;
         for (work, fresh) in self.work.iter_mut().zip(&mut self.fresh) {
             *fresh = work.untouched();
             if *fresh {
@@ -236,6 +363,8 @@ impl Entry {
         match self.spec.kind {
             Kind::Copy => "Copy",
             Kind::Move => "Move",
+            Kind::Compress => "Compress",
+            Kind::Extract => "Extract",
         }
     }
 
@@ -348,17 +477,36 @@ pub(super) fn start(shared: &Arc<Shared>) {
 /// Works through a job's items until it's done, stopped or cancelled.
 pub(super) fn run(shared: &Shared, op: u64) {
     // The totals, for progress; reading the disk, so outside the lock.
-    let sources: Vec<(usize, PathBuf)> = shared.lock().job_mut(op).map_or_else(Vec::new, |job| {
-        job.work
+    let Some((spec, sources)) = shared.lock().job_mut(op).map(|job| {
+        let sources: Vec<(usize, PathBuf)> = job
+            .work
             .iter()
             .enumerate()
             .filter(|(_, work)| work.done.is_none())
             .map(|(i, work)| (i, work.source.clone()))
-            .collect()
-    });
+            .collect();
+        (job.spec.clone(), sources)
+    }) else {
+        return;
+    };
+    let tally = |path: &Path| disk::tally(path).map_or(0, |(_, bytes)| bytes);
+    let archive = match spec.kind {
+        Kind::Extract => opened(shared, op, &spec).ok(),
+        _ => None,
+    };
     let sizes: Vec<(usize, u64)> = sources
         .into_iter()
-        .map(|(i, source)| (i, disk::tally(&source).map_or(0, |(_, bytes)| bytes)))
+        .map(|(i, source)| {
+            let bytes = match spec.kind {
+                Kind::Copy | Kind::Move => tally(&source),
+                Kind::Compress => spec.sources.iter().map(|source| tally(source)).sum(),
+                Kind::Extract => archive
+                    .as_ref()
+                    .zip(spec.entry(&source))
+                    .map_or(0, |(archive, entry)| archive.bytes(entry)),
+            };
+            (i, bytes)
+        })
         .collect();
     if let Some(job) = shared.lock().job_mut(op) {
         for (i, bytes) in sizes {
@@ -440,8 +588,43 @@ struct Item<'a> {
     work: Work,
 }
 
+/// An extraction's archive, read once and kept while the job runs.
+fn opened(shared: &Shared, op: u64, spec: &Spec) -> Result<Arc<Archive>, String> {
+    if let Some(open) = shared
+        .lock()
+        .job_mut(op)
+        .and_then(|job| job.archive.clone())
+    {
+        return Ok(open);
+    }
+    let open = Arc::new(Archive::open(
+        spec.archive.as_deref().unwrap_or(Path::new("")),
+    )?);
+    if let Some(job) = shared.lock().job_mut(op) {
+        job.archive = Some(open.clone());
+    }
+    Ok(open)
+}
+
+/// "{path}: a different item...", for a source replaced since the job was
+/// queued.
+fn replaced(path: &Path) -> String {
+    format!(
+        "{}: a different item is there now than when the job was queued, so it was left alone.",
+        path.display()
+    )
+}
+
 impl Item<'_> {
     fn transfer(&mut self, cancel: &AtomicBool, copied: &AtomicU64) -> Next {
+        match self.spec.kind {
+            Kind::Copy | Kind::Move => self.copy_or_move(cancel, copied),
+            Kind::Compress => self.compress(cancel, copied),
+            Kind::Extract => self.extract(cancel, copied),
+        }
+    }
+
+    fn copy_or_move(&mut self, cancel: &AtomicBool, copied: &AtomicU64) -> Next {
         let source = self.work.source.clone();
         let fail = |why: String| Next::Done(Done::Failed(why));
         let (id, stamp) = match existing(&source) {
@@ -449,10 +632,7 @@ impl Item<'_> {
             Err(e) => return fail(e),
         };
         if self.work.id.is_some_and(|accepted| accepted != id) {
-            return fail(format!(
-                "{}: a different item is there now than when the job was queued, so it was left alone.",
-                source.display()
-            ));
+            return fail(replaced(&source));
         }
         let into = &self.spec.into;
         if !into.is_dir() {
@@ -470,7 +650,7 @@ impl Item<'_> {
                 source.display()
             ));
         }
-        let mut to = into.join(name);
+        let to = into.join(name);
         if self.spec.kind == Kind::Move && to == source {
             return fail(format!(
                 "{}: already in {}.",
@@ -478,46 +658,10 @@ impl Item<'_> {
                 into.display()
             ));
         }
-        let mut replacing = None;
-        if let Ok((there, there_stamp)) = disk::stamp(&to) {
-            match self.spec.conflict {
-                Conflict::Skip => {
-                    return Next::Done(Done::Skipped(format!(
-                        "{} already exists, so {} was skipped.",
-                        to.display(),
-                        source.display()
-                    )));
-                }
-                Conflict::Stop => {
-                    return Next::Stop(format!(
-                        "{} already exists. Continue the job with keep_both, replace or skip.",
-                        to.display()
-                    ));
-                }
-                Conflict::KeepBoth => {
-                    let Some(free) = numbered(&to) else {
-                        return fail(format!("{}: no free name for it.", to.display()));
-                    };
-                    to = free;
-                }
-                Conflict::Replace => {
-                    if there == id || source.starts_with(&to) {
-                        return fail(format!(
-                            "{}: can't be replaced by {}, which it is or holds.",
-                            to.display(),
-                            source.display()
-                        ));
-                    }
-                    replacing = Some(Step {
-                        id: there,
-                        undone: Spot::Path(to.clone()),
-                        done: Spot::Trash(None),
-                        applied: false,
-                        stamp: there_stamp,
-                    });
-                }
-            }
-        }
+        let (to, replacing) = match self.claim(to, &source, &source, id) {
+            Ok(claimed) => claimed,
+            Err(next) => return next,
+        };
         self.work.to = Some(to.clone());
         self.work.bytes = disk::tally(&source).map_or(self.work.bytes, |(_, bytes)| bytes);
         // The destination folder may be a link to another volume.
@@ -529,6 +673,156 @@ impl Item<'_> {
             self.copy_here(id, stamp, &to, replacing, cancel, copied)
         };
         Next::Done(match result {
+            Ok(()) => Done::To(to),
+            Err(why) => Done::Failed(why),
+        })
+    }
+
+    /// Where an item meant for `to` goes under the job's conflict choice,
+    /// and what it replaces. It comes from `source`, read from the item
+    /// `id` at `read`, which is never replaced, nor anything holding it.
+    fn claim(
+        &self,
+        mut to: PathBuf,
+        source: &Path,
+        read: &Path,
+        id: FileId,
+    ) -> Result<(PathBuf, Option<Step>), Next> {
+        let Ok((there, there_stamp)) = disk::stamp(&to) else {
+            return Ok((to, None));
+        };
+        match self.spec.conflict {
+            Conflict::Skip => Err(Next::Done(Done::Skipped(format!(
+                "{} already exists, so {} was skipped.",
+                to.display(),
+                source.display()
+            )))),
+            Conflict::Stop => Err(Next::Stop(format!(
+                "{} already exists. Continue the job with keep_both, replace or skip.",
+                to.display()
+            ))),
+            Conflict::KeepBoth => {
+                let Some(free) = numbered(&to) else {
+                    return Err(Next::Done(Done::Failed(format!(
+                        "{}: no free name for it.",
+                        to.display()
+                    ))));
+                };
+                to = free;
+                Ok((to, None))
+            }
+            Conflict::Replace if there == id || read.starts_with(&to) => {
+                Err(Next::Done(Done::Failed(format!(
+                    "{}: can't be replaced by {}, which it is or holds.",
+                    to.display(),
+                    source.display()
+                ))))
+            }
+            Conflict::Replace => {
+                let replacing = Step {
+                    id: there,
+                    undone: Spot::Path(to.clone()),
+                    done: Spot::Trash(None),
+                    applied: false,
+                    stamp: there_stamp,
+                };
+                Ok((to, Some(replacing)))
+            }
+        }
+    }
+
+    /// Compresses the job's items into a new archive beside them, named as
+    /// Finder does and never replacing anything.
+    fn compress(&mut self, cancel: &AtomicBool, copied: &AtomicU64) -> Next {
+        let fail = |why: String| Next::Done(Done::Failed(why));
+        let spec = self.spec;
+        for (source, accepted) in spec.sources.iter().zip(&spec.ids) {
+            match disk::lookup(source) {
+                Ok(id) if id == *accepted => {}
+                Ok(_) => return fail(replaced(source)),
+                Err(e) => return fail(format!("{}: {e}", source.display())),
+            }
+        }
+        if !spec.into.is_dir() {
+            return fail(format!("{}: not a folder.", spec.into.display()));
+        }
+        let name = match spec.sources.as_slice() {
+            [one] => format!(
+                "{}.zip",
+                one.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            _ => "Archive.zip".into(),
+        };
+        let mut to = spec.into.join(name);
+        if disk::id(&to).is_some() {
+            let Some(free) = numbered(&to) else {
+                return fail(format!("{}: no free name for it.", to.display()));
+            };
+            to = free;
+        }
+        self.work.to = Some(to.clone());
+        self.work.bytes = spec
+            .sources
+            .iter()
+            .map(|source| disk::tally(source).map_or(0, |(_, bytes)| bytes))
+            .sum();
+        let made = self.make_here(&to, None, cancel, |temp| {
+            archives::create(&spec.sources, temp, cancel, copied)
+        });
+        Next::Done(match made {
+            Ok(()) => Done::To(to),
+            Err(why) => Done::Failed(why),
+        })
+    }
+
+    /// Extracts one entry, or folder of them, into the job's folder.
+    fn extract(&mut self, cancel: &AtomicBool, copied: &AtomicU64) -> Next {
+        let fail = |why: String| Next::Done(Done::Failed(why));
+        let spec = self.spec;
+        let path = spec.archive.as_deref().unwrap_or(Path::new(""));
+        let id = match disk::lookup(path) {
+            Ok(id) => id,
+            Err(e) => return fail(format!("{}: {e}", path.display())),
+        };
+        if self.work.id.is_some_and(|accepted| accepted != id) {
+            return fail(replaced(path));
+        }
+        if !spec.into.is_dir() {
+            return fail(format!("{}: not a folder.", spec.into.display()));
+        }
+        let archive = match opened(self.shared, self.op, spec) {
+            Ok(archive) => archive,
+            Err(e) => return fail(e),
+        };
+        let source = self.work.source.clone();
+        let (Some(entry), Some(name)) = (spec.entry(&source), source.file_name()) else {
+            return fail(format!(
+                "{}: isn't in {}.",
+                source.display(),
+                path.display()
+            ));
+        };
+        let (to, replacing) = match self.claim(spec.into.join(name), &source, path, id) {
+            Ok(claimed) => claimed,
+            Err(next) => return next,
+        };
+        self.work.to = Some(to.clone());
+        self.work.bytes = archive.bytes(entry);
+        let free = disk::free(&spec.into).unwrap_or(u64::MAX);
+        if self.work.bytes > free {
+            return fail(format!(
+                "{}: needs {} bytes once extracted, more than the {free} free in {}.",
+                source.display(),
+                self.work.bytes,
+                spec.into.display()
+            ));
+        }
+        let made = self.make_here(&to, replacing, cancel, |temp| {
+            archive
+                .extract(entry, temp, cancel, copied)
+                .map_err(|why| format!("{}: {why}", path.display()))
+        });
+        Next::Done(match made {
             Ok(()) => Done::To(to),
             Err(why) => Done::Failed(why),
         })
@@ -570,50 +864,18 @@ impl Item<'_> {
         copied: &AtomicU64,
     ) -> Result<(), String> {
         let source = self.work.source.clone();
-        let temp = self
-            .spec
-            .into
-            .join(format!(".monodrive-{}-{}", self.op, self.index));
-        if disk::id(&temp).is_some() {
-            return Err(format!("{}: already exists.", temp.display()));
-        }
-        self.work.temp = Some(temp.clone());
-        self.shared.record(self.op, self.index, &self.work)?;
         let meter = disk::Meter { copied, cancel };
-        let made = disk::copy(&source, &temp, Some(&meter));
-        let whole = made.as_ref().is_ok_and(|()| {
-            disk::tally(&source).ok() == disk::tally(&temp).ok()
-                && disk::stamp(&source).ok() == Some((id, stamp))
-        });
-        let made = match (made, whole) {
-            (Ok(()), true) => disk::stamp(&temp).map_err(|e| e.to_string()),
-            (Ok(()), false) => Err(format!("{} changed during the copy.", source.display())),
-            (Err(_), _) if cancel.load(Ordering::Relaxed) => {
-                Err(format!("{}: cancelled partway.", source.display()))
+        self.make_here(to, replacing, cancel, |temp| {
+            disk::copy(&source, temp, Some(&meter))
+                .map_err(|e| format!("{}: {e}", source.display()))?;
+            let whole = disk::tally(&source).ok() == disk::tally(temp).ok()
+                && disk::stamp(&source).ok() == Some((id, stamp));
+            if whole {
+                Ok(())
+            } else {
+                Err(format!("{} changed during the copy.", source.display()))
             }
-            (Err(e), _) => Err(format!("{}: {e}", source.display())),
-        };
-        let (copy, copy_stamp) = match made {
-            Ok(made) => made,
-            Err(why) => return Err(self.without_temp(why)),
-        };
-        if let Some(old) = replacing
-            && let Err(e) = self.apply(old)
-        {
-            return Err(self.without_temp(format!("{e} So {} wasn't replaced.", to.display())));
-        }
-        let mut placed = Step {
-            id: copy,
-            undone: Spot::Path(temp),
-            done: Spot::Path(to.to_path_buf()),
-            applied: false,
-            stamp: copy_stamp,
-        };
-        // Undoing a copy sends it to the Trash, not back to its hidden name.
-        if let Err(e) = self.apply_then(&mut placed, |step| step.undone = Spot::Trash(None)) {
-            let e = self.with_replaced(e);
-            return Err(self.without_temp(e));
-        }
+        })?;
         if self.spec.kind == Kind::Move {
             self.apply(Step {
                 id,
@@ -629,6 +891,56 @@ impl Item<'_> {
                     source.display()
                 )
             })?;
+        }
+        Ok(())
+    }
+
+    /// Makes the item at a hidden name beside `to` with `make`, then puts
+    /// it in place, sending what it replaces to the Trash first, so nothing
+    /// partial ever sits at `to`.
+    fn make_here(
+        &mut self,
+        to: &Path,
+        replacing: Option<Step>,
+        cancel: &AtomicBool,
+        make: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let temp = self
+            .spec
+            .into
+            .join(format!(".monodrive-{}-{}", self.op, self.index));
+        if disk::id(&temp).is_some() {
+            return Err(format!("{}: already exists.", temp.display()));
+        }
+        self.work.temp = Some(temp.clone());
+        self.shared.record(self.op, self.index, &self.work)?;
+        let made = match make(&temp) {
+            Err(_) if cancel.load(Ordering::Relaxed) => Err(format!(
+                "{}: cancelled partway.",
+                self.work.source.display()
+            )),
+            made => made.and_then(|()| disk::stamp(&temp).map_err(|e| e.to_string())),
+        };
+        let (made, made_stamp) = match made {
+            Ok(made) => made,
+            Err(why) => return Err(self.without_temp(why)),
+        };
+        if let Some(old) = replacing
+            && let Err(e) = self.apply(old)
+        {
+            return Err(self.without_temp(format!("{e} So {} wasn't replaced.", to.display())));
+        }
+        let mut placed = Step {
+            id: made,
+            undone: Spot::Path(temp),
+            done: Spot::Path(to.to_path_buf()),
+            applied: false,
+            stamp: made_stamp,
+        };
+        // Undoing it sends it to the Trash, not back to its hidden name.
+        if let Err(e) = self.apply_then(&mut placed, |step| step.undone = Spot::Trash(None)) {
+            let e = self.with_replaced(e);
+            return Err(self.without_temp(e));
         }
         Ok(())
     }
@@ -676,15 +988,25 @@ impl Item<'_> {
     /// `why`, after sending this item's unfinished hidden copy to the Trash.
     fn without_temp(&self, why: String) -> String {
         match self.work.temp.as_deref() {
-            Some(temp) if disk::id(temp).is_some() => match disk::trash(temp) {
-                Ok(landed) => format!(
-                    "{why} The unfinished copy went to the Trash at {}.",
-                    landed.display()
-                ),
-                Err(e) => format!("{why} The unfinished copy is still at {e}"),
-            },
-            _ => why,
+            Some(temp) => unfinished(why, temp, self.spec.kind),
+            None => why,
         }
+    }
+}
+
+/// `why`, after sending the unfinished item at `temp`, if it's there, to the
+/// Trash.
+fn unfinished(why: String, temp: &Path, kind: Kind) -> String {
+    if disk::id(temp).is_none() {
+        return why;
+    }
+    let made = kind.made();
+    match disk::trash(temp) {
+        Ok(landed) => format!(
+            "{why} The unfinished {made} went to the Trash at {}.",
+            landed.display()
+        ),
+        Err(e) => format!("{why} The unfinished {made} is still at {e}"),
     }
 }
 
@@ -708,51 +1030,11 @@ pub(super) fn numbered(path: &Path) -> Option<PathBuf> {
 }
 
 impl Engine {
-    /// Accepts a copy or move as a queued job, or queues a stopped one again.
+    /// Accepts a copy, move, compression or extraction as a queued job, or
+    /// queues a stopped one again.
     pub(super) fn queue(&mut self, submission: Submission) -> Result<Outcome, String> {
         let op = self.next;
         let record = match &submission.request {
-            Request::Copy {
-                paths,
-                into,
-                conflict,
-            }
-            | Request::Move {
-                paths,
-                into,
-                conflict,
-            } => {
-                let kind = if matches!(submission.request, Request::Copy { .. }) {
-                    Kind::Copy
-                } else {
-                    Kind::Move
-                };
-                if let Some(path) = paths.iter().chain([into]).find(|p| !p.is_absolute()) {
-                    return Err(format!("{}: paths must be absolute.", path.display()));
-                }
-                if paths.is_empty() {
-                    return Err("Name at least one item.".into());
-                }
-                let ids = paths
-                    .iter()
-                    // Only the item, not a stamp: walking a big folder here
-                    // would hold the engine while the owner waits.
-                    .map(|path| disk::lookup(path).map_err(|e| format!("{}: {e}", path.display())))
-                    .collect::<Result<_, _>>()?;
-                let spec = Spec {
-                    kind,
-                    into: into.clone(),
-                    conflict: *conflict,
-                    sources: paths.clone(),
-                    ids,
-                };
-                Record::Job {
-                    op,
-                    submission: submission.clone(),
-                    spec,
-                    at: now(),
-                }
-            }
             Request::Retry { job, conflict } => {
                 let old = self.job_mut(*job).ok_or_else(|| format!("No job {job}."))?;
                 if old.state.active() {
@@ -769,7 +1051,12 @@ impl Engine {
                     at: now(),
                 }
             }
-            _ => unreachable!("only jobs are queued"),
+            request => Record::Job {
+                op,
+                submission: submission.clone(),
+                spec: Spec::new(request)?,
+                at: now(),
+            },
         };
         self.write(&record)?;
         self.fold(&record);
@@ -821,7 +1108,7 @@ impl Engine {
 
     /// For each job the last owner didn't finish, where each of its items
     /// got to, from the disk. Nothing is repeated, and an unfinished hidden
-    /// copy goes to the Trash.
+    /// copy, archive or extraction goes to the Trash.
     pub(super) fn settle_jobs(&self) -> Vec<Record> {
         let mut records = Vec::new();
         for job in self.jobs.iter().filter(|job| job.state.active()) {
@@ -852,21 +1139,13 @@ impl Engine {
                     .steps
                     .iter()
                     .any(|step| step.undone == Spot::Path(work.source.clone()));
-                let whole = placed && (job.spec.kind == Kind::Copy || left);
+                let whole = placed && (job.spec.kind != Kind::Move || left);
                 let mut why = format!(
                     "Monodrive stopped partway through {}; undo reverses what it changed.",
                     work.source.display()
                 );
-                if let Some(temp) = work.temp.as_deref()
-                    && disk::id(temp).is_some()
-                {
-                    why = match disk::trash(temp) {
-                        Ok(landed) => format!(
-                            "{why} The unfinished copy went to the Trash at {}.",
-                            landed.display()
-                        ),
-                        Err(e) => format!("{why} The unfinished copy is still at {e}"),
-                    };
+                if let Some(temp) = work.temp.as_deref() {
+                    why = unfinished(why, temp, job.spec.kind);
                 }
                 work.done = Some(if whole {
                     Done::To(to)

@@ -1,5 +1,6 @@
 //! File operations: move to Trash, put back, rename, batch rename, new
-//! folder and file, duplicate, copy and move jobs, undo and redo. One owner
+//! folder and file, duplicate, copy, move, compress and extract jobs, undo
+//! and redo. One owner
 //! process runs them for the window and every `monodrive mcp` server, so
 //! they share one journal, one list of jobs and one undo history.
 //! docs/operations.md records why.
@@ -92,6 +93,23 @@ pub enum Request {
         #[serde(default)]
         conflict: Conflict,
     },
+    /// Compresses the items, all in one folder, into a new ZIP archive
+    /// beside them, as a job: "name.zip" for one item, "Archive.zip" for
+    /// more, numbered as Finder does when the name is taken.
+    Compress {
+        paths: Vec<PathBuf>,
+    },
+    /// Extracts the ZIP archive's `entries`, each entry or folder by its
+    /// name in the archive, or all of it when empty, into a folder, as a
+    /// job. `conflict` applies to each item it makes there.
+    Extract {
+        archive: PathBuf,
+        #[serde(default)]
+        entries: Vec<String>,
+        into: PathBuf,
+        #[serde(default)]
+        conflict: Conflict,
+    },
     /// Continues a job that stopped, as the same job: it keeps what it
     /// finished and runs the rest, with `conflict` instead of the job's own
     /// when given.
@@ -148,6 +166,8 @@ impl Request {
             Request::Duplicate { .. } => "Duplicate",
             Request::Copy { .. } => "Copy",
             Request::Move { .. } => "Move",
+            Request::Compress { .. } => "Compress",
+            Request::Extract { .. } => "Extract",
             Request::Retry { .. } => "Retry",
             Request::Cancel { .. } => "Cancel",
             Request::Undo | Request::UndoOf { .. } => "Undo",
@@ -371,7 +391,7 @@ enum Record {
         outcome: Outcome,
         steps: Vec<Step>,
     },
-    /// A copy or move job, accepted and queued.
+    /// A copy, move, compress or extract job, accepted and queued.
     Job {
         op: u64,
         submission: Submission,
@@ -448,7 +468,7 @@ struct Engine {
     history: Vec<Undoable>,
     /// How many at the end of `history` are undone, for redo.
     undone: usize,
-    /// Copy and move jobs, oldest first.
+    /// Copy, move, compress and extract jobs, oldest first.
     jobs: Vec<jobs::Entry>,
 }
 
@@ -637,6 +657,7 @@ impl Engine {
                 // stopped; cancelling it adds nothing.
                 let ran = job.state.active();
                 job.state = state;
+                job.archive = None;
                 let (op, title, steps) = (job.run, job.title(), job.run_steps());
                 if ran && !steps.is_empty() {
                     self.history.truncate(self.history.len() - self.undone);
@@ -752,9 +773,11 @@ impl Engine {
             Request::Undo => self.reverse(submission, false, None),
             Request::UndoOf { op } => self.reverse(submission, false, Some(op)),
             Request::Redo => self.reverse(submission, true, None),
-            Request::Copy { .. } | Request::Move { .. } | Request::Retry { .. } => {
-                self.queue(submission)
-            }
+            Request::Copy { .. }
+            | Request::Move { .. }
+            | Request::Compress { .. }
+            | Request::Extract { .. }
+            | Request::Retry { .. } => self.queue(submission),
             Request::Cancel { job } => self.cancel(job),
             Request::RenameMany { .. } => self.rename_many(submission),
             _ => self.run(submission),

@@ -1,8 +1,9 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
-//! service method; the behavior lives in `entries`, `index`, `info`, `ops`,
-//! `places`, `search`, `sizes` and `volumes`.
+//! service method; the behavior lives in `archives`, `entries`, `index`,
+//! `info`, `ops`, `places`, `search`, `sizes` and `volumes`.
 
+use crate::archives::{self, Archive};
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, Caps, GrepMode, Index, Status};
@@ -29,7 +30,8 @@ by name, grep to search inside files, and list_dir to see one folder. index_stat
 whether the index is ready. stat describes items, and folder_size adds up a folder. \
 trash, put_back, rename, rename_many, create_folder, create_folder_with, create_file, duplicate, \
 undo and redo change files through the same undo history as the Monodrive window; rename_preview \
-shows what rename_many would do. \
+shows what rename_many would do. copy, move, archive_create and archive_extract run as jobs that \
+job_status follows; archive_list shows what a ZIP holds without extracting it. \
 list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches.";
 
@@ -154,6 +156,24 @@ enum ToolCall {
         #[serde(default)]
         conflict: Conflict,
     },
+    ArchiveList {
+        path: String,
+        #[serde(default)]
+        folder: String,
+        #[serde(default = "archive_limit")]
+        limit: usize,
+    },
+    ArchiveCreate {
+        paths: Vec<String>,
+    },
+    ArchiveExtract {
+        path: String,
+        into: String,
+        #[serde(default)]
+        entries: Vec<String>,
+        #[serde(default)]
+        conflict: Conflict,
+    },
     JobStatus {
         job: Option<u64>,
     },
@@ -201,6 +221,10 @@ fn default_limit() -> usize {
 
 fn default_timeout() -> u64 {
     10
+}
+
+fn archive_limit() -> usize {
+    200
 }
 
 impl Server {
@@ -396,6 +420,26 @@ impl Server {
                 conflict,
             } => self.queue(Request::Move {
                 paths: expand(&paths),
+                into: expand_home(&into),
+                conflict,
+            }),
+            ToolCall::ArchiveList {
+                path,
+                folder,
+                limit,
+            } => Archive::open(&expand_home(&path))
+                .map(|archive| archive_list(&archive, &folder, limit)),
+            ToolCall::ArchiveCreate { paths } => self.queue(Request::Compress {
+                paths: expand(&paths),
+            }),
+            ToolCall::ArchiveExtract {
+                path,
+                into,
+                entries,
+                conflict,
+            } => self.queue(Request::Extract {
+                archive: expand_home(&path),
+                entries,
                 into: expand_home(&into),
                 conflict,
             }),
@@ -743,6 +787,52 @@ fn describe(job: &Job) -> String {
     out
 }
 
+/// A line an entry: its name as stored, links ending in @, then what it
+/// holds, and why it can't be extracted when it can't.
+fn archive_list(archive: &Archive, folder: &str, limit: usize) -> String {
+    let mut out = String::new();
+    let mut shown = 0;
+    for entry in archive.under(folder) {
+        shown += 1;
+        if shown > limit {
+            continue;
+        }
+        let name = archives::printable(&entry.name);
+        let _ = match entry.kind {
+            Kind::Dir => write!(out, "{name}"),
+            Kind::Link => write!(out, "{name}@"),
+            Kind::File | Kind::Other => write!(
+                out,
+                "{name}  {} bytes, {} compressed",
+                entry.size, entry.compressed
+            ),
+        };
+        if let Some(modified) = entry.modified {
+            let _ = write!(out, "  {}", utc(modified));
+        }
+        if let Some(why) = entry.problem() {
+            let _ = write!(out, "  (can't extract: {why})");
+        }
+        out.push('\n');
+    }
+    if shown > limit {
+        let _ = writeln!(
+            out,
+            "({} more; pass folder or a larger limit)",
+            shown - limit
+        );
+    }
+    if archive.total > archive.entries.len() as u64 {
+        let _ = writeln!(
+            out,
+            "(the archive lists {} entries; Monodrive read the first {})",
+            archive.total,
+            archive.entries.len()
+        );
+    }
+    out
+}
+
 /// `old path → new name` a line, with the status unless it's ok.
 fn rename_table(plan: &rename::Plan) -> String {
     plan.rows.iter().fold(String::new(), |mut out, row| {
@@ -785,7 +875,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 30] = [
+pub const TOOLS: [Tool; 33] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -966,9 +1056,51 @@ pub const TOOLS: [Tool; 30] = [
         input_schema: transfer_schema,
     },
     Tool {
+        name: "archive_list",
+        description: "List what a ZIP archive holds without extracting it, an entry a line as stored: \
+    folders end in /, links in @, then sizes and modified time (UTC), and why an entry can't be \
+    extracted, such as encryption. folder lists one folder inside.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The archive. Absolute; ~ is your home."},
+                    "folder": {"type": "string", "description": "A folder inside, such as docs/."},
+                    "limit": {"type": "integer", "minimum": 1, "default": 200}
+                },
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "archive_create",
+        description: "Compress files or folders from one folder into a new ZIP beside them: name.zip \
+    for one item, Archive.zip for more, numbered if taken. Links are stored as links. Returns a job \
+    id; job_status prints the archive's path.",
+        input_schema: paths_schema,
+    },
+    Tool {
+        name: "archive_extract",
+        description: "Extract a ZIP archive into the folder into, as a job: everything, or the entries \
+    named, each coming out under its own name. Refuses paths leading out, encrypted entries and zip \
+    bombs. conflict applies to each item. Returns a job id.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The archive. Absolute; ~ is your home."},
+                    "into": {"type": "string", "description": "The folder they go into."},
+                    "entries": {"type": "array", "items": {"type": "string"}, "description": "Entries or folders as archive_list prints them; all by default."},
+                    "conflict": conflict_schema()
+                },
+                "required": ["path", "into"]
+            })
+        },
+    },
+    Tool {
         name: "job_status",
-        description: "A copy or move job's state and progress, then each finished item's resulting \
-    path or error. Without job, one line per recent job.",
+        description: "A copy, move or archive job's state and progress, then each finished item's \
+    resulting path or error. Without job, one line per recent job.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -1598,6 +1730,103 @@ mod tests {
         drop(server);
         serving.join().unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(into.join("a 2.txt")).unwrap(), "a");
+    }
+
+    #[test]
+    fn archive_tools_list_without_extracting_and_create_and_extract_as_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ops::Paths {
+            state: dir.path().join("state"),
+            settings: dir.path().join("settings.json"),
+            trash: dir.path().join("Trash"),
+        };
+        // Each owner runs its jobs to the end before it exits.
+        let serve = || {
+            let owner = ops::Owner::bind(paths.clone()).unwrap();
+            let serving = std::thread::spawn(move || owner.serve());
+            (
+                serving,
+                Server::new(ops::Client::new(paths.clone(), None), places(dir.path())),
+            )
+        };
+        let (proj, out) = (dir.path().join("proj"), dir.path().join("out"));
+        std::fs::create_dir_all(proj.join("docs")).unwrap();
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(proj.join("docs/a.txt"), "hello").unwrap();
+        std::fs::write(proj.join("docs/b.txt"), "").unwrap();
+        let (serving, mut server) = serve();
+        let reply = call(
+            &mut server,
+            json!({"name": "archive_create", "arguments": {"paths": [proj]}}),
+        );
+        assert_eq!(text(&reply), "job 1 queued\n");
+        drop(server);
+        serving.join().unwrap().unwrap();
+
+        let (serving, mut server) = serve();
+        let archive = dir.path().join("proj.zip");
+        let reply = call(
+            &mut server,
+            json!({"name": "job_status", "arguments": {"job": 1}}),
+        );
+        assert!(
+            text(&reply).ends_with(&format!(
+                ": completed, 1 of 1 items, 5 of 5 bytes, by an agent\n{}\n",
+                archive.display()
+            )),
+            "{reply}"
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "archive_list", "arguments": {"path": archive, "folder": "proj/docs", "limit": 1}}),
+        );
+        let lines: Vec<&str> = text(&reply).lines().collect();
+        assert!(
+            lines[0].starts_with("proj/docs/a.txt  5 bytes, "),
+            "{lines:?}"
+        );
+        assert!(lines[0].ends_with('Z'), "{lines:?}");
+        assert_eq!(lines[1..], ["(1 more; pass folder or a larger limit)"]);
+        for bad in [
+            json!({"name": "archive_extract", "arguments": {"path": archive}}),
+            json!({"name": "archive_extract", "arguments": {"path": archive, "into": out, "conflict": "merge"}}),
+            json!({"name": "archive_list", "arguments": {}}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
+        let extract =
+            json!({"name": "archive_extract", "arguments": {"path": archive, "into": out}});
+        assert_eq!(text(&call(&mut server, extract.clone())), "job 2 queued\n");
+        drop(server);
+        serving.join().unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out.join("proj/docs/a.txt")).unwrap(),
+            "hello"
+        );
+
+        // Extracted again, it waits at the name, as conflict defaults to stop.
+        let (serving, mut server) = serve();
+        assert_eq!(text(&call(&mut server, extract)), "job 3 queued\n");
+        drop(server);
+        serving.join().unwrap().unwrap();
+        let (serving, mut server) = serve();
+        let reply = call(
+            &mut server,
+            json!({"name": "job_status", "arguments": {"job": 3}}),
+        );
+        assert!(text(&reply).contains(": waiting, 1 of 1 items"), "{reply}");
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"agents_change_files": false}"#,
+        )
+        .unwrap();
+        let reply = call(
+            &mut server,
+            json!({"name": "archive_create", "arguments": {"paths": [proj]}}),
+        );
+        assert!(text(&reply).starts_with("Agents can't"), "{reply}");
+        drop(server);
+        serving.join().unwrap().unwrap();
     }
 
     #[test]

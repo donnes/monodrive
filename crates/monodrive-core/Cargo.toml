@@ -20,6 +20,11 @@ block2 = "0.6"
 unicode-normalization = "0.1"
 # No crates.io release yet, so it's pinned to a commit. Bump deliberately.
 fsearch = { git = "https://github.com/noahdunnagan/fsearch", rev = "88e63fdf850cf7749deae8198b187accd21f8ba5" }
+# Writes ZIP archives, deflate only. Monodrive reads them itself, so it can
+# bound what it loads; flate2 and crc32fast are zip's own, for that.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+crc32fast = "1.5"
 
 [dev-dependencies]
 tempfile = "3"
