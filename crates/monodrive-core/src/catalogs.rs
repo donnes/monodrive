@@ -346,6 +346,9 @@ impl Store {
             path.push(b'/');
             let base = path.len();
             let catalog = &searched.catalog;
+            // Its own until its whole body reads, so a damaged one never
+            // pushes out another's.
+            let mut own: Vec<Hit> = Vec::new();
             let read = self.each(&catalog.id, catalog.entries, |inside, kind, size, mtime| {
                 path.truncate(base);
                 path.extend_from_slice(inside);
@@ -358,7 +361,7 @@ impl Store {
                     return;
                 };
                 let full = PathBuf::from(OsStr::from_bytes(&path));
-                hits.push(Hit {
+                own.push(Hit {
                     catalog: at,
                     entry: Entry {
                         name: full
@@ -374,16 +377,19 @@ impl Store {
                     inside: PathBuf::from(OsStr::from_bytes(inside)),
                     score,
                 });
-                if hits.len() >= limit.max(64) * 4 {
-                    keep(&mut hits);
+                if own.len() >= limit.max(64) * 4 {
+                    keep(&mut own);
                 }
             });
-            if let Err(why) = read {
-                hits.retain(|hit| hit.catalog != at);
-                broken.push(Unreadable {
+            match read {
+                Ok(()) => {
+                    hits.append(&mut own);
+                    keep(&mut hits);
+                }
+                Err(why) => broken.push(Unreadable {
                     id: catalog.id.clone(),
                     why,
-                });
+                }),
             }
         }
         keep(&mut hits);

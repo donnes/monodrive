@@ -509,6 +509,29 @@ fn a_folder_replaced_by_a_link_is_neither_resolved_through_nor_walked() {
     );
 }
 
+/// A catalog file with these records, this header and a body length, or
+/// the body's own.
+fn forge(records: &[u8], header: &[u8], len: Option<u64>) -> Vec<u8> {
+    let mut body = DeflateEncoder::new(Vec::new(), Compression::default());
+    body.write_all(records).unwrap();
+    let body = body.finish().unwrap();
+    let mut out = MAGIC.to_vec();
+    out.extend(len.unwrap_or(body.len() as u64).to_le_bytes());
+    out.extend(body);
+    out.extend(header);
+    out
+}
+
+/// A file's record: `shared` bytes of the last path, then `more` of `name`.
+fn entry(shared: u64, more: u64, name: &[u8]) -> Vec<u8> {
+    let mut record = Vec::new();
+    put_varint(&mut record, shared);
+    put_varint(&mut record, more);
+    record.extend(name);
+    record.extend([KIND_FILE, 0, 0]);
+    record
+}
+
 #[test]
 fn a_damaged_catalog_file_reads_as_unreadable_without_panicking() {
     let (_tmp, dir) = real_tempdir();
@@ -518,26 +541,6 @@ fn a_damaged_catalog_file_reads_as_unreadable_without_panicking() {
     let file = store.file(&good.id).unwrap();
     let original = std::fs::read(&file).unwrap();
     let header = serde_json::to_vec(&good).unwrap();
-    // A file with these records, this header and a body length, or the
-    // body's own.
-    let forge = |records: &[u8], header: &[u8], len: Option<u64>| {
-        let mut body = DeflateEncoder::new(Vec::new(), Compression::default());
-        body.write_all(records).unwrap();
-        let body = body.finish().unwrap();
-        let mut out = MAGIC.to_vec();
-        out.extend(len.unwrap_or(body.len() as u64).to_le_bytes());
-        out.extend(body);
-        out.extend(header);
-        out
-    };
-    let entry = |shared: u64, more: u64, name: &[u8]| {
-        let mut record = Vec::new();
-        put_varint(&mut record, shared);
-        put_varint(&mut record, more);
-        record.extend(name);
-        record.extend([KIND_FILE, 0, 0]);
-        record
-    };
     let seven: Vec<u8> = (0..7).flat_map(|_| entry(0, 1, b"a")).collect();
     let mut padded = header.clone();
     padded.extend(vec![b' '; 100_000]);
@@ -610,4 +613,34 @@ fn a_damaged_catalog_file_reads_as_unreadable_without_panicking() {
         );
     }
     assert_eq!(store.forget(&good.id), Ok(()));
+}
+
+#[test]
+fn a_damaged_catalogs_hits_never_push_out_a_healthy_ones() {
+    let (_tmp, dir) = real_tempdir();
+    let store = store(&dir);
+    let (healthy, damaged) = (dir.join("Z"), dir.join("A"));
+    write(&healthy.join("report"), 1);
+    write(&damaged.join("report"), 1);
+    let mounted = [
+        root(),
+        volume("Alpha", &healthy, Some("U1")),
+        volume("Beta", &damaged, Some("U2")),
+    ];
+    let good = create(&store, &healthy, &mounted);
+    let mut bad = create(&store, &damaged, &mounted);
+    // Enough matches to fill the search's limit many times over, each
+    // sorting ahead of the healthy one, in a body one entry short.
+    let reports: Vec<u8> = (0..300).flat_map(|_| entry(0, 6, b"report")).collect();
+    bad.entries = 301;
+    let header = serde_json::to_vec(&bad).unwrap();
+    std::fs::write(store.file(&bad.id).unwrap(), forge(&reports, &header, None)).unwrap();
+
+    let found = store
+        .search(&Query::parse("report").unwrap(), &[root()], 2)
+        .unwrap();
+    assert_eq!(paths(&found), [healthy.join("report")]);
+    assert_eq!(found.catalogs[0].catalog.id, good.id);
+    assert_eq!(found.unreadable.len(), 1);
+    assert_eq!(found.unreadable[0].id, bad.id);
 }
