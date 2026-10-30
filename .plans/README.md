@@ -11,7 +11,7 @@ Update a plan's row when its work lands on `main`.
 | 01 Performance baseline | Done | |
 | 02 Selection | Done | |
 | 03 File operations | Done | f932352, 3876a60, 41570a7, 2cacc36, 091c83c, 7bb3e34 |
-| 04 Editing commands | Planned | |
+| 04 Editing commands | Done | 62d9772, c8b03d7, a8293ff, 2ff9f13 |
 | 05 Context menu | Planned | |
 | 06 Quick Look | Planned | |
 | 07 Places, drives and NAS | Planned | |
