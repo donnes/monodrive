@@ -989,6 +989,35 @@ fn enter_runs_duplicate_on_the_selection_and_focus_comes_back(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_paste_finishing_under_the_palette_stops_move_to_trash(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "down down down cmd-c cmd-k");
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    // It was asked for before the palette opened, and its job ends now.
+    browser.update_in(cx, |browser, window, cx| browser.paste(false, window, cx));
+    cx.run_until_parked();
+    assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
+    cx.simulate_input("move to trash");
+    cx.run_until_parked();
+    let view = palette(&browser, cx);
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("Move to Trash"));
+    press(cx, "enter");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    assert_eq!(
+        toast(&browser, cx),
+        Some((
+            "The selection changed while the palette was open.".into(),
+            true,
+            false
+        ))
+    );
+    release(owned, cx);
+    assert!(project.join("a.txt").exists() && project.join("a copy.txt").exists());
+}
+
+#[gpui::test]
 fn the_palette_over_another_sheet_still_knows_what_would_run(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let world = world(vec![startup()], cx);

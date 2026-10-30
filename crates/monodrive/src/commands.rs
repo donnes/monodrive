@@ -537,6 +537,15 @@ pub fn is_shortcut_of(stroke: &Keystroke, id: &str, cx: &App) -> bool {
     })
 }
 
+/// Whether command `id` acts on what's selected or the folder shown: anything
+/// a context menu offers, past the View menu's display settings, and Move Here.
+pub(crate) fn acts_on_target(id: &str) -> bool {
+    id == MoveHere.name()
+        || all().iter().any(|command| {
+            command.id() == id && !command.scopes.is_empty() && command.group != Group::View
+        })
+}
+
 /// The shortcuts command `id` runs on now.
 pub(crate) fn shortcuts_of(id: &str, cx: &App) -> Vec<String> {
     let overrides = &cx.global::<Preferences>().shortcuts;
@@ -793,6 +802,26 @@ mod tests {
             .map(|row| row.title)
             .collect();
         assert_eq!(marked, ["Move to Trash"]);
+    }
+
+    #[test]
+    fn what_acts_on_the_selection_or_folder_is_told_from_display_settings() {
+        for acts in [
+            MoveToTrash.name(),
+            Duplicate.name(),
+            NewFolder.name(),
+            MoveHere.name(),
+        ] {
+            assert!(acts_on_target(acts), "{acts}");
+        }
+        for not in [
+            ViewAsGrid.name(),
+            SortByName.name(),
+            GoHome.name(),
+            Undo.name(),
+        ] {
+            assert!(!acts_on_target(not), "{not}");
+        }
     }
 
     #[test]

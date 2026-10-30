@@ -225,6 +225,8 @@ pub struct Browser {
     focus_before_sheet: Option<FocusHandle>,
     /// What waits for the first frame drawn without the sheet.
     after_sheet: Option<AfterSheet>,
+    /// The folder and selection as the palette opened.
+    palette_target: Option<(PathBuf, Vec<PathBuf>)>,
     /// The folder just left, to select once its parent lists.
     reselect: Option<PathBuf>,
     search: Entity<TextField>,
@@ -401,6 +403,7 @@ impl Browser {
             sidebar_cursor: 0,
             focus_before_sheet: None,
             after_sheet: None,
+            palette_target: None,
             reselect: None,
             search,
             index: Arc::default(),
@@ -1934,10 +1937,37 @@ impl Browser {
             servers: self.sidebar.servers.clone(),
             index: self.index.clone(),
         };
+        self.palette_target = Some(self.target());
         let view = cx.new(|cx| PaletteView::new(now, cx));
         cx.subscribe_in(&view, window, Self::palette_event).detach();
         window.focus(&view.focus_handle(cx), cx);
         self.set_sheet(Some(Sheet::Palette(view)), cx);
+    }
+
+    /// The folder shown and what's selected, whatever order the rows are in.
+    fn target(&self) -> (PathBuf, Vec<PathBuf>) {
+        let mut chosen = self.chosen();
+        chosen.sort();
+        (self.folder().to_path_buf(), chosen)
+    }
+
+    /// Runs a command chosen in the palette, unless it would act on something
+    /// other than what was there when the palette opened: a job that finishes
+    /// meanwhile selects what it made, and that isn't what the person chose for.
+    fn run_from_palette(
+        &mut self,
+        action: Box<dyn gpui::Action>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opened_on = self.palette_target.take();
+        if commands::acts_on_target(action.name())
+            && opened_on.is_some_and(|target| target != self.target())
+        {
+            let said = "The selection changed while the palette was open.";
+            return self.toast(said.into(), true, None, cx);
+        }
+        window.dispatch_action(action, cx);
     }
 
     /// What the palette asked for, once it has closed and focus is back.
@@ -3159,7 +3189,7 @@ impl Render for Browser {
         }
         if let Some(next) = self.after_sheet.take() {
             cx.defer_in(window, move |this, window, cx| match next {
-                AfterSheet::Run(action) => window.dispatch_action(action, cx),
+                AfterSheet::Run(action) => this.run_from_palette(action, window, cx),
                 AfterSheet::OpenPalette => this.open_palette(window, cx),
             });
         }

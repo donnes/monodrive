@@ -136,6 +136,17 @@ enum Saved {
     Server(String),
 }
 
+/// What a row is, wherever it sits in the list.
+#[derive(Debug, PartialEq)]
+enum RowId {
+    Command(&'static str),
+    Page(Page),
+    Path(PathBuf),
+    Remote(String),
+    Server(String),
+    AddRemote,
+}
+
 pub(crate) struct Row {
     pub(crate) section: &'static str,
     glyph: &'static str,
@@ -175,6 +186,19 @@ impl Row {
             eject: None,
             forget: None,
             found_by: String::new(),
+        }
+    }
+
+    fn id(&self) -> RowId {
+        match (&self.forget, &self.target) {
+            (Some(Saved::Remote(id)), _) => RowId::Remote(id.clone()),
+            (Some(Saved::Server(address)), _) => RowId::Server(address.clone()),
+            (None, Target::Command(action)) => RowId::Command(action.name()),
+            (None, Target::Page(page)) => RowId::Page(*page),
+            (None, Target::Folder(path) | Target::File(path)) => RowId::Path(path.clone()),
+            (None, Target::Remote(host)) => RowId::Remote(host.clone()),
+            (None, Target::Server(address)) => RowId::Server(address.clone()),
+            (None, Target::AddRemote) => RowId::AddRemote,
         }
     }
 
@@ -313,11 +337,13 @@ impl PaletteView {
 
     /// What's behind the rows changed: new rows, staying on the same one.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        let was = self.active_row().map(Row::id);
         self.rows = self.build(cx);
-        let kept = self
-            .active
-            .filter(|&ix| self.rows.get(ix).is_some_and(|row| row.enabled));
+        let kept = was.and_then(|id| self.rows.iter().position(|r| r.enabled && r.id() == id));
         self.active = kept.or_else(|| self.first_enabled());
+        if let Some(ix) = self.active {
+            self.scroll.scroll_to_item(ix);
+        }
         cx.notify();
     }
 
@@ -1070,7 +1096,8 @@ fn glyph_for(command: &Command) -> &'static str {
         "Open" => "external-link",
         "Quick Look" => "eye",
         "Rename" => "pencil",
-        "Duplicate" | "Copy" | "Copy Path" => "copy",
+        "Duplicate" | "Copy" => "copy",
+        "Copy Path" => "link",
         "New Folder" | "New Folder with Selection" | "Add to Sidebar" | "Go to Folder…" => {
             "folder-01"
         }
@@ -1079,7 +1106,7 @@ fn glyph_for(command: &Command) -> &'static str {
         "Macintosh HD" => "hard-drive",
         "Downloads" | "Copies and Moves" => "arrow-down-circle",
         "Applications" => "app-window",
-        "Open in Terminal" => "keyboard",
+        "Open in Terminal" => "terminal",
         "New File" => "file",
         _ => match command.group {
             Group::App | Group::Window => "app-window",
@@ -1234,6 +1261,47 @@ fn score(query: &str, text: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn rows_that_arrive_late_leave_the_keys_on_the_same_row(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Preferences::default());
+            commands::apply(cx);
+        });
+        let now = Now {
+            available: HashSet::new(),
+            scopes: Vec::new(),
+            favorites: Vec::new(),
+            volumes: Vec::new(),
+            servers: vec!["smb://nas/media".into(), "smb://nas/photos".into()],
+            index: Arc::default(),
+        };
+        let (view, cx) = cx.add_window_view(|_, cx| PaletteView::new(now, cx));
+        view.update(cx, |view, cx| view.open_page(Page::Remote, cx));
+        cx.run_until_parked();
+        let under_keys =
+            |view: &PaletteView, _: &App| view.active_row().map(|row| row.title.to_string());
+        // The second SMB server, which is the second row here.
+        view.update(cx, |view, cx| view.step(true, cx));
+        let server = Some("smb://nas/photos".to_string());
+        assert_eq!(view.read_with(cx, under_keys), server);
+        // The saved SFTP servers land above it, where its index now is another's.
+        view.update(cx, |view, cx| {
+            view.remotes = vec![
+                Source::new("a", "a.local", None).unwrap(),
+                Source::new("b", "b.local", None).unwrap(),
+            ];
+            view.refresh(cx);
+        });
+        assert_eq!(view.read_with(cx, under_keys), server);
+        // When it's gone, the keys go to the first row that would run.
+        view.update(cx, |view, cx| {
+            view.now.servers.pop();
+            view.refresh(cx);
+        });
+        assert_eq!(view.read_with(cx, under_keys).as_deref(), Some("a.local"));
+    }
 
     #[test]
     fn letters_in_order_match_and_word_starts_rank_first() {

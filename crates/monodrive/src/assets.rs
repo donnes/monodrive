@@ -41,6 +41,7 @@ icons!(
     "grip-vertical",
     "hard-drive",
     "keyboard",
+    "link",
     "palette",
     "pencil",
     "rotate-ccw",
@@ -48,6 +49,7 @@ icons!(
     "server",
     "settings",
     "sliders",
+    "terminal",
     "trash",
 );
 
