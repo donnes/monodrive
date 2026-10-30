@@ -130,6 +130,8 @@ pub struct Preferences {
     /// Agents may change files over MCP. The operation owner reads it from
     /// the saved file, by this name.
     pub agents_change_files: bool,
+    /// The onboarding last finished; a later version can show itself again.
+    pub onboarding_version: u32,
 }
 
 /// How narrow and wide the sidebar can be dragged.
@@ -168,6 +170,7 @@ impl Default for Preferences {
             grid_label: RowSize::Medium,
             thumbnails: true,
             agents_change_files: true,
+            onboarding_version: 0,
         }
     }
 }
@@ -211,6 +214,7 @@ impl Preferences {
             grid_label: self.grid_label,
             thumbnails: self.thumbnails,
             agents_change_files: self.agents_change_files,
+            onboarding_version: self.onboarding_version,
             ..Self::default()
         };
     }

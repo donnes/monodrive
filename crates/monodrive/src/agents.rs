@@ -158,6 +158,17 @@ impl Harness {
         }
     }
 
+    /// Whether the harness looks installed under `home`: its config, or the
+    /// folder for it, is there. Reads the disk.
+    fn present_in(self, home: &Path) -> bool {
+        let (Registry::Json { file, .. } | Registry::Toml { file, .. }) = self.registry();
+        let config = home.join(file);
+        config.exists()
+            || config
+                .parent()
+                .is_some_and(|dir| dir != home && dir.exists())
+    }
+
     fn registry(self) -> Registry {
         let json = |file, key| Registry::Json {
             file,
@@ -344,6 +355,17 @@ pub fn added() -> Vec<Harness> {
         .collect()
 }
 
+/// The harnesses that look installed. Reads the disk.
+pub fn detected() -> Vec<Harness> {
+    let Some(home) = home() else {
+        return Vec::new();
+    };
+    Harness::ALL
+        .into_iter()
+        .filter(|harness| harness.present_in(&home))
+        .collect()
+}
+
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -400,6 +422,23 @@ mod tests {
             .filter(|harness| harness.added_in(home))
             .collect();
         assert_eq!(added, [Harness::ClaudeCode, Harness::Codex, Harness::Amp]);
+    }
+
+    #[test]
+    fn a_harness_is_detected_by_its_config_or_the_folder_for_it() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let detected = || -> Vec<_> {
+            Harness::ALL
+                .into_iter()
+                .filter(|harness| harness.present_in(home))
+                .collect()
+        };
+        // The home folder itself isn't a sign of Claude Code.
+        assert_eq!(detected(), []);
+        write(home, ".claude.json", "{}");
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        assert_eq!(detected(), [Harness::ClaudeCode, Harness::Cursor]);
     }
 
     #[test]

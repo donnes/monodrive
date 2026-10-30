@@ -167,6 +167,12 @@ pub fn saved() -> bool {
     std::env::var("HOME").is_ok_and(|home| fsearch::default_dir(&home).join("index.bin").is_file())
 }
 
+/// Whether this process has Full Disk Access. Fails at once where it doesn't,
+/// with no prompt.
+pub fn has_full_disk_access() -> bool {
+    fsearch::has_full_disk_access()
+}
+
 /// Used inodes on the data volume, which is close to what the first crawl
 /// lists (it skips what it can't read, so it can fall short).
 fn disk_entries() -> Option<usize> {

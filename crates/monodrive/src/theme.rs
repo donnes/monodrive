@@ -413,6 +413,27 @@ pub fn row_icon_button(
         .child(icon(path, 12.).text_color(ink))
 }
 
+/// A switch's look: its handlers and role belong to whoever uses it.
+pub fn switch(on: bool) -> Div {
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(34.))
+        .h(px(20.))
+        .rounded_full()
+        .bg(if on { accent() } else { content(0.2) })
+        .child(
+            div()
+                .absolute()
+                .top(px(2.))
+                .left(px(if on { 16. } else { 2. }))
+                .size(px(16.))
+                .rounded_full()
+                .bg(knob())
+                .shadow(knob_shadow()),
+        )
+}
+
 /// A text field's outline: a pill with a 1 pt `border`. The accent when it has
 /// the keys, `danger` when what's typed can't be used, else `content(0.12)`.
 pub fn field(border: Hsla) -> Div {

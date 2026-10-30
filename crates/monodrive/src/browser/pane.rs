@@ -18,6 +18,7 @@ use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
 use crate::file_icons;
 use crate::jobs;
+use crate::onboarding::IndexGate;
 use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, View, WorkspaceStyle};
 use crate::selection::Selection;
@@ -201,7 +202,7 @@ pub struct Pane {
     /// A refresh waiting out the first change of a burst; later changes fold
     /// into it, so a folder that never stops changing still refreshes.
     refresh: Option<Task<()>>,
-    error: Option<String>,
+    pub(super) error: Option<String>,
     /// A restored location that can't be opened as it is, and why.
     pub(super) unavailable: Option<Unavailable>,
     /// A person asked to open the folder that needs consent.
@@ -563,6 +564,7 @@ impl Pane {
         let mut folder = self.folder().to_path_buf();
         let query = self.query.clone();
         let index = self.index.clone();
+        let gate = cx.try_global::<IndexGate>().cloned();
         let recents = self
             .showing_recents()
             .then(|| cx.try_global::<Places>().map(|places| places.store.clone()));
@@ -591,10 +593,14 @@ impl Pane {
                     clippy::disallowed_methods,
                     reason = "a search before launch started the index starts it"
                 )]
-                let hits = match index.get_or_init(Index::start) {
-                    Ok(index) => index.find(&query, SEARCH_LIMIT),
-                    Err(e) => Err(e.clone()),
+                let started = match &gate {
+                    Some(gate) => gate.for_search(&index),
+                    None => index
+                        .get_or_init(Index::start)
+                        .as_ref()
+                        .map_err(Clone::clone),
                 };
+                let hits = started.and_then(|index| index.find(&query, SEARCH_LIMIT));
                 return hits
                     .map(|hits| (hits, HashMap::new(), Watch::default(), HashSet::new(), None))
                     .map_err(Failed::Error);

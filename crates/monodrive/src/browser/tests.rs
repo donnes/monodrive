@@ -1719,3 +1719,53 @@ fn a_thumbnail_stays_until_the_last_pane_showing_it_lets_go(cx: &mut TestAppCont
     cx.run_until_parked();
     assert!(!cached(cx));
 }
+
+#[gpui::test]
+fn a_search_while_the_crawl_waits_says_why_and_starts_nothing(cx: &mut TestAppContext) {
+    use crate::onboarding::tests::Fake;
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let gate = IndexGate::new(fake.clone(), true);
+    cx.update(|cx| cx.set_global(gate.clone()));
+    let (browser, cx) = browse(dir.path(), cx);
+
+    cx.simulate_input("notes");
+    cx.run_until_parked();
+    let error = in_pane(&browser, cx, |pane, _| pane.error.clone());
+    assert_eq!(
+        error.as_deref(),
+        Some("Search starts when you finish setting up Monodrive.")
+    );
+    assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
+}
+
+#[gpui::test]
+fn the_no_access_notice_stays_after_indexing_and_opens_that_step(cx: &mut TestAppContext) {
+    use crate::onboarding::tests::Fake;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| cx.set_global(IndexGate::new(Arc::new(Fake::default()), false)));
+    let (browser, cx) = browse(dir.path(), cx);
+    assert!(cx.debug_bounds("no-full-disk-access").is_none());
+
+    browser.update(cx, |browser, cx| {
+        browser.index_status = Some(Status {
+            progress: Progress::Ready { entries: 1 },
+            full_disk_access: Some(false),
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let notice = cx.debug_bounds("no-full-disk-access").unwrap();
+    cx.simulate_click(notice.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    let opened = cx.update(|window, cx| {
+        let this = window.window_handle();
+        cx.windows()
+            .into_iter()
+            .find(|other| other.window_id() != this.window_id())
+    });
+    let mut onboarding = VisualTestContext::from_window(opened.unwrap(), cx);
+    assert!(onboarding.debug_bounds("access-app").is_some());
+}

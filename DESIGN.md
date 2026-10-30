@@ -67,6 +67,10 @@ Split View (⌥⌘S) puts two panes side by side, equal to begin with, each with
 
 A restored tab whose drive or folder is gone, or that would raise a privacy prompt, shows what's wrong in the middle of the pane: its name in `TEXT_TITLE`, one line of why, then Back and Go to Folder, and Open when a person has to ask. No file shows and nothing can land there, and the path bar hides, so nothing reaches for a path another drive may have taken. It opens by itself when its drive comes back.
 
+### Onboarding
+
+A fixed 760 by 520 pt window of its own, not a sheet, because no main window is behind it on first launch: a step list on the left, then the step's title, one or two lines of why, a picture and the buttons, with the primary one bottom right. ↩ does what the primary button does, Esc goes back a step and never closes it, and ⌘W closes it for now, so it comes back next launch. The Full Disk Access picture is drawn from elements, schematic, so it stays crisp in both themes and doesn't date with macOS.
+
 ### Type
 
 The system font. Menlo only for code, paths in code boxes and tool names.
@@ -153,6 +157,7 @@ All in `theme.rs`. Each returns an element the caller extends.
 - `icon_button(id, label, path, enabled)` in chrome, `row_icon_button(id, label, path, ink)` inside a row, `circle_button(id, label, side)` for a circle with other contents, such as the jobs ring.
 - `pane_bar(height)`: a bar at a pane's top or bottom.
 - `field(border)`: a text field's outline.
+- `switch(on)`: a switch's look, without its role or handlers.
 - `row_slot(id)`: where a stacked row's role and handlers go, gap included. `row(active)`: the row inside it, in a menu, picker or popover. `row_muted(active)` is its secondary ink. `destructive_row(active)` and `destructive_ink(active)` are the same for a command marked `destructive`.
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.

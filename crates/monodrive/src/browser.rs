@@ -22,6 +22,7 @@ use crate::empty_trash::{self, EmptyTrashView};
 use crate::goto::{GotoEvent, GotoView};
 use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
+use crate::onboarding::{self, IndexGate, Step};
 use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
 use crate::quick_look::{self, Preview};
@@ -31,10 +32,10 @@ use crate::text_field;
 use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
 use crate::traffic_lights;
 use gpui::{
-    App, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight, Global,
-    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, ScrollHandle, Task, Window, WindowAppearance, WindowControlArea, actions, canvas, div,
-    prelude::*, px,
+    AnyElement, App, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
+    FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window, WindowAppearance, WindowControlArea,
+    actions, canvas, div, prelude::*, px,
 };
 use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Request};
@@ -636,18 +637,21 @@ impl Browser {
     /// current search runs again.
     pub fn start_index(&mut self, cx: &mut Context<Self>) {
         let index = self.index.clone();
+        let gate = cx.global::<IndexGate>().clone();
         self._index_watch = cx.spawn(async move |this, cx| {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "the app starts the index at launch"
-            )]
+            let waited = gate.held();
+            gate.wait().await;
             let started = cx.background_executor().spawn({
                 let index = index.clone();
-                async move { index.get_or_init(Index::start).is_ok() }
+                async move { gate.start(&index).is_ok() }
             });
             // A search shows why it couldn't start.
             if !started.await {
                 return;
+            }
+            // A search that asked while it waited was told to come back.
+            if waited {
+                let _ = this.update(cx, |this, cx| this.search_again(cx));
             }
             let changes = index
                 .get()
@@ -687,13 +691,7 @@ impl Browser {
                     if this.index_status != Some(status) {
                         this.index_status = Some(status);
                         if ready {
-                            for pane in this.shown_panes() {
-                                pane.update(cx, |pane, cx| {
-                                    if !pane.query.is_empty() {
-                                        pane.reload(cx);
-                                    }
-                                });
-                            }
+                            this.search_again(cx);
                         }
                         cx.notify();
                     }
@@ -706,17 +704,61 @@ impl Browser {
         });
     }
 
-    /// A bar of how much of the disk is indexed, shown only while the index
-    /// builds; hovering swaps it for words.
-    fn index_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let status = self
-            .index_status
-            .filter(|s| matches!(s.progress, Progress::Listing { .. } | Progress::Following))?;
-        let mut label = status.progress.to_string();
-        let no_access = status.full_disk_access == Some(false);
-        if no_access {
-            label.push_str(". No Full Disk Access, so some folders are skipped.");
+    /// The panes showing a search run it again.
+    fn search_again(&self, cx: &mut Context<Self>) {
+        for pane in self.shown_panes() {
+            pane.update(cx, |pane, cx| {
+                if !pane.query.is_empty() {
+                    pane.reload(cx);
+                }
+            });
         }
+    }
+
+    /// What the index is short of: a button that leads to Full Disk Access
+    /// for as long as the index runs without it, or else a bar of how much of
+    /// the disk is indexed, shown only while it builds. Hovering either while
+    /// it builds says how far it's got.
+    fn index_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = self.index_status?;
+        let building = matches!(
+            status.progress,
+            Progress::Listing { .. } | Progress::Following
+        );
+        let hovered = self.index_hovered && building;
+        let on_hover = cx.listener(|this, hovered: &bool, _, cx| {
+            this.index_hovered = *hovered;
+            cx.notify();
+        });
+        if status.full_disk_access == Some(false) {
+            let words = if hovered {
+                status.progress.to_string()
+            } else {
+                "No Full Disk Access".to_string()
+            };
+            return Some(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        theme::button("index-status", ButtonLook::Ghost)
+                            .flex_shrink(1.)
+                            .min_w_0()
+                            .debug_selector(|| "no-full-disk-access".into())
+                            .aria_label("No Full Disk Access, so some folders are skipped. Show how to turn it on.")
+                            .child(div().min_w_0().truncate().child(words))
+                            .on_hover(on_hover)
+                            .on_click(|_, _, cx| onboarding::show(Step::FullDiskAccess, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if !building {
+            return None;
+        }
+        let label = status.progress.to_string();
         let bar = div()
             .id("index-status")
             .role(gpui::Role::ProgressIndicator)
@@ -727,36 +769,17 @@ impl Browser {
             .flex()
             .items_center()
             .justify_end()
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.index_hovered = *hovered;
-                cx.notify();
-            }))
+            .on_hover(on_hover)
             .map(|d| {
-                if self.index_hovered {
+                if hovered {
                     d.child(
                         div()
                             .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .items_end()
+                            .max_w_full()
+                            .truncate()
                             .text_size(px(theme::TEXT_CAPTION))
-                            .line_height(px(14.))
                             .text_color(content(0.65))
-                            .child(
-                                div()
-                                    .max_w_full()
-                                    .truncate()
-                                    .child(status.progress.to_string()),
-                            )
-                            .when(no_access, |d| {
-                                d.child(
-                                    div()
-                                        .max_w_full()
-                                        .truncate()
-                                        .text_color(content(0.65))
-                                        .child("No Full Disk Access"),
-                                )
-                            }),
+                            .child(status.progress.to_string()),
                     )
                 } else {
                     d.child(
@@ -766,7 +789,7 @@ impl Browser {
                     )
                 }
             });
-        Some(bar)
+        Some(bar.into_any_element())
     }
 
     /// Moves the sidebar's cursor, repainting only when it moved.
@@ -1722,7 +1745,7 @@ fn sidebar_width(wanted: f32, window: &Window) -> f32 {
 /// Blank title bar space that drags the window, and zooms it on double-click,
 /// as AppKit's titlebar would. GPUI owns the titlebar, so buttons inside it
 /// never start a drag.
-fn drag_area() -> gpui::Div {
+pub(crate) fn drag_area() -> gpui::Div {
     div()
         .window_control_area(WindowControlArea::Drag)
         .on_mouse_down(MouseButton::Left, |event, window, cx| {

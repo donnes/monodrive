@@ -1,7 +1,7 @@
 //! The Monodrive app. `main.rs` decodes the command line; benchmarks build
 //! views from here.
 
-mod agents;
+pub mod agents;
 pub mod assets;
 mod background;
 pub mod browser;
@@ -13,6 +13,7 @@ mod frame;
 mod goto;
 mod jobs;
 mod menu;
+pub mod onboarding;
 mod palette;
 mod palettes;
 mod pasteboard;
@@ -29,7 +30,7 @@ mod thumbnails;
 mod traffic_lights;
 mod workspace;
 
-use commands::{CloseWindow, Hide, HideOthers, Minimize, NewWindow, Quit, ShowAll};
+use commands::{CloseWindow, Hide, HideOthers, Minimize, NewWindow, Quit, ShowAll, ShowWelcome};
 use gpui::{
     App, Focusable, Global, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
     WindowOptions, point, prelude::*, px, size,
@@ -76,8 +77,9 @@ enum Opening {
     Restored(WindowState),
 }
 
-/// Opens a window, or those of the last session, and starts the index. With a
-/// `folder` the session stays as it was, for the next launch without one.
+/// Opens the app: onboarding if it's due, else the windows. With a `folder`,
+/// only the window, and the session stays as it was for the next launch
+/// without one.
 pub fn run(folder: Option<PathBuf>) {
     let platform = gpui_platform::current_platform(false);
     gpui::Application::with_platform(platform)
@@ -86,7 +88,9 @@ pub fn run(folder: Option<PathBuf>) {
             #[cfg(feature = "profile")]
             profile::start(cx);
             preferences::init(cx);
-            cx.set_global(browser::SharedIndex(Arc::default()));
+            let index: browser::SharedIndex = browser::SharedIndex(Arc::default());
+            let setup = Arc::new(onboarding::System::new(index.0.clone()));
+            cx.set_global(index);
             let (jobs, volumes, lists) = (Hub::default(), Hub::default(), Hub::default());
             // Connects on the first change or look at the jobs, starting the
             // owner if needed. The watch on its journal connects to nothing.
@@ -134,30 +138,41 @@ pub fn run(folder: Option<PathBuf>) {
             cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
             cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
             cx.on_action(|_: &NewWindow, cx| {
-                open_window(Opening::Folder(browser::home()), false, cx);
+                // During first launch, the windows onboarding is holding back.
+                if !onboarding::open_windows_now(cx) {
+                    open_window(Opening::Folder(browser::home()), false, cx);
+                }
                 cx.activate(true);
             });
+            cx.on_action(|_: &ShowWelcome, cx| onboarding::show(onboarding::Step::Welcome, cx));
             window_commands(cx);
-            let openings = match folder {
-                Some(folder) => vec![Opening::Folder(folder)],
-                None => {
-                    let saved = session::path().and_then(|path| {
-                        let saved = session::load(&path);
-                        session::init(path, cx);
-                        saved
-                    });
-                    match saved {
-                        Some(saved) => saved.windows.into_iter().map(Opening::Restored).collect(),
-                        None => vec![Opening::Folder(browser::home())],
-                    }
-                }
-            };
-            let several = openings.len() > 1;
-            for opening in openings {
-                open_window(opening, several, cx);
-            }
-            cx.activate(true);
+            let explicit = folder.is_some();
+            onboarding::launch(explicit, setup, move |cx| open_windows(folder, cx), cx);
         });
+}
+
+/// Opens `folder`, or the windows of the last session. The session starts
+/// saving only here, so quitting during onboarding leaves the last one alone.
+fn open_windows(folder: Option<PathBuf>, cx: &mut App) {
+    let openings = match folder {
+        Some(folder) => vec![Opening::Folder(folder)],
+        None => {
+            let saved = session::path().and_then(|path| {
+                let saved = session::load(&path);
+                session::init(path, cx);
+                saved
+            });
+            match saved {
+                Some(saved) => saved.windows.into_iter().map(Opening::Restored).collect(),
+                None => vec![Opening::Folder(browser::home())],
+            }
+        }
+    };
+    let several = openings.len() > 1;
+    for opening in openings {
+        open_window(opening, several, cx);
+    }
+    cx.activate(true);
 }
 
 /// Runs `act` on the window in front, once the command that asked has returned:
@@ -177,6 +192,7 @@ fn window_commands(cx: &mut App) {
     cx.on_action(|_: &Minimize, cx| on_front_window(cx, |window| window.minimize_window()));
     cx.on_window_closed(|cx, window| {
         session::forget(window.as_u64(), cx);
+        onboarding::closed(window, cx);
         if cx.windows().is_empty() {
             cx.quit();
         }

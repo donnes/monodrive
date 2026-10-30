@@ -2224,27 +2224,12 @@ fn toggle(
     on: bool,
     set: fn(&mut Preferences, bool),
 ) -> Stateful<Div> {
-    div()
+    theme::switch(on)
         .id(id)
         .role(Role::Switch)
         .aria_label(label)
         .aria_toggled(if on { Toggled::True } else { Toggled::False })
-        .relative()
-        .w(px(34.))
-        .h(px(20.))
-        .rounded_full()
-        .bg(if on { accent() } else { content(0.2) })
         .cursor_pointer()
-        .child(
-            div()
-                .absolute()
-                .top(px(2.))
-                .left(px(if on { 16. } else { 2. }))
-                .size(px(16.))
-                .rounded_full()
-                .bg(knob())
-                .shadow(knob_shadow()),
-        )
         .on_click(move |_, _, cx| preferences::update(cx, |p| set(p, !on)))
 }
 

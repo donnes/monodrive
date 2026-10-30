@@ -55,8 +55,16 @@ icons!(
     "trash",
 );
 
+/// The app's mark in full color, for `img`.
+pub const LOGO: &str = "logo";
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == LOGO {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../../assets/prod/logo.svg"
+            ))));
+        }
         Ok(ICONS
             .iter()
             .find(|(name, _)| *name == path)

@@ -19,7 +19,9 @@ use crate::browser::{
     ToggleSplit, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
-use crate::{browser, connect, empty_trash, goto, jobs, menu, palette, settings, text_field};
+use crate::{
+    browser, connect, empty_trash, goto, jobs, menu, onboarding, palette, settings, text_field,
+};
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
     OsAction, actions,
@@ -38,7 +40,8 @@ actions!(
         Minimize,
         CloseWindow,
         OpenPalette,
-        NewWindow
+        NewWindow,
+        ShowWelcome
     ]
 );
 
@@ -53,16 +56,18 @@ pub enum Group {
     Go,
     View,
     Window,
+    Help,
 }
 
 impl Group {
-    pub const ALL: [Group; 6] = [
+    pub const ALL: [Group; 7] = [
         Group::App,
         Group::File,
         Group::Edit,
         Group::Go,
         Group::View,
         Group::Window,
+        Group::Help,
     ];
 
     pub fn label(self) -> &'static str {
@@ -73,6 +78,7 @@ impl Group {
             Group::Go => "Go",
             Group::View => "View",
             Group::Window => "Window",
+            Group::Help => "Help",
         }
     }
 }
@@ -524,6 +530,7 @@ pub fn all() -> Vec<Command> {
             None,
             || Box::new(ShowCopiesAndMoves),
         )),
+        command("Show Welcome…", Help, &[], None, || Box::new(ShowWelcome)),
     ]
 }
 
@@ -725,6 +732,7 @@ pub fn apply(cx: &mut App) {
     jobs::bind(cx);
     empty_trash::bind(cx);
     menu::bind(cx);
+    onboarding::bind(cx);
     let mut bindings = Vec::new();
     for command in all() {
         let predicate = command
@@ -833,6 +841,7 @@ fn install_menus(cx: &mut App) {
         menu(Group::Go, items(Group::Go)),
         menu(Group::View, items(Group::View)),
         menu(Group::Window, items(Group::Window)),
+        menu(Group::Help, items(Group::Help)),
     ]);
     cx.global_mut::<MenusReady>().checked = Some(ticked);
 }

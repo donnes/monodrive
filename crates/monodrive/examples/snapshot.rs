@@ -30,11 +30,17 @@
 //! `sidebar-closed.png` and `sidebar-closed-split.png` have no sidebar, and
 //! `unavailable.png` is a restored tab whose drive is gone.
 //!
+//! `onboarding-welcome.png`, `onboarding-access.png`,
+//! `onboarding-access-asked.png`, `onboarding-access-granted.png`,
+//! `onboarding-access-reopen.png`, `onboarding-agents.png` and
+//! `onboarding-ready.png` show each step, with a made-up Mac behind them.
+//!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
 
 use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
+use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
     EnclosingFolder, FocusSearch, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected,
@@ -42,6 +48,7 @@ use monodrive::browser::{
     ShowCopiesAndMoves, ToggleSplit, Undo,
 };
 use monodrive::connect;
+use monodrive::onboarding::{Onboarding, Setup, Step};
 use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
 use monodrive::session::{PaneState, StopState, TabState, WindowState};
 use monodrive_core::cloud::{Availability, CloudFolder};
@@ -85,6 +92,7 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     std::fs::create_dir_all(&trash)?;
     let places = made_up_places(scratch.path(), &trash)?;
     cx.update(|cx| cx.set_global(places));
+    onboarding(&mut cx, out, &base)?;
     for (name, view) in [("list", View::List), ("grid", View::Grid)] {
         cx.update(|cx| {
             cx.set_global(Preferences {
@@ -575,6 +583,90 @@ impl Drives for MadeUp {
             })
             .collect())
     }
+}
+
+/// A Mac for onboarding to ask about: no real permission, index or agent is
+/// looked at.
+struct MadeUpSetup {
+    granted: bool,
+    index_lacks: bool,
+}
+
+impl Setup for MadeUpSetup {
+    fn full_disk_access(&self) -> bool {
+        self.granted
+    }
+
+    fn index_lacks_access(&self) -> bool {
+        self.index_lacks
+    }
+
+    fn saved_index(&self) -> bool {
+        false
+    }
+
+    fn start_index(&self) -> Result<Index, String> {
+        Err("Nothing here starts.".into())
+    }
+
+    fn open_privacy_settings(&self, _: &gpui::App) {}
+
+    fn app(&self) -> PathBuf {
+        "/Applications/Monodrive.app".into()
+    }
+
+    fn reveal(&self, _: &Path, _: &gpui::App) {}
+
+    fn relaunch(&self, _: &mut gpui::App) {}
+
+    fn agents(&self) -> (Vec<Harness>, Vec<Harness>) {
+        (
+            vec![Harness::ClaudeCode, Harness::Codex, Harness::Cursor],
+            vec![Harness::Codex],
+        )
+    }
+
+    fn apply_agent(&self, _: Harness, _: agents::Action) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Each step of onboarding, in its own window.
+fn onboarding(cx: &mut Cx, out: &Path, base: &Preferences) -> gpui::Result<()> {
+    cx.update(|cx| cx.set_global(base.clone()));
+    for (name, step, granted, index_lacks, asked) in [
+        ("welcome", Step::Welcome, false, false, false),
+        ("access", Step::FullDiskAccess, false, false, false),
+        ("access-asked", Step::FullDiskAccess, false, false, true),
+        ("access-granted", Step::FullDiskAccess, true, false, false),
+        ("access-reopen", Step::FullDiskAccess, true, true, false),
+        ("agents", Step::Agents, true, false, false),
+        ("ready", Step::Ready, true, false, false),
+    ] {
+        let setup = Arc::new(MadeUpSetup {
+            granted,
+            index_lacks,
+        });
+        let window = cx.open_window(size(px(760.), px(520.)), |_, cx| {
+            cx.new(|cx| {
+                let mut view = Onboarding::new(step, setup, cx);
+                if asked {
+                    view.open_settings(cx);
+                }
+                view
+            })
+        })?;
+        // The logo decodes, then a second pass draws it.
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, _| window.refresh())?;
+        }
+        cx.run_until_parked();
+        let path = out.join(format!("onboarding-{name}.png"));
+        cx.capture_screenshot(window.into())?.save(&path)?;
+        println!("{}", path.display());
+    }
+    Ok(())
 }
 
 /// A temp folder's places: the default favorites, one on a drive that isn't
