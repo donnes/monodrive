@@ -15,7 +15,7 @@ Update a plan's row when its work lands on `main`.
 | 05 Context menu | Done | d6f31e9, 74b996e |
 | 06 Quick Look | Done | 4c901ec |
 | 07 Places, drives and NAS | Done; a real SMB share still needs a check | ae1cead, 532d2b7, 4a396e1, f3bfa68 |
-| 08 Tabs and panes | Waiting for UI picks | |
+| 08 Tabs and panes | Done; drag between panes is in plan 09 | 45d069b, ceac6c6, 0a9c58e, 96b1b0d, ab46328 |
 | 09 Drag and drop | Waiting for UI picks | |
 | 10 Open With and Get Info | Core on main; UI waiting for picks | |
 | 11 Search | Core and MCP filters on main; UI picked, filter UI skipped for now | |
@@ -57,7 +57,7 @@ Saved browsing workspaces were dropped.
 
 ## Next up, in order
 
-1. Plans 08 to 19, 21 and 22 with the picks above, following DESIGN.md. The palette (⌘K) is on main; its Remote locations and Cloud storage pages grow as plans 14 and 18 land. Choosing an SFTP server only says browsing isn't available yet, and every server reads "Not connected", until plan 14's UI connects from the window.
+1. Plans 09 to 19, 21 and 22 with the picks above, following DESIGN.md. The palette (⌘K) is on main; its Remote locations and Cloud storage pages grow as plans 14 and 18 land. Choosing an SFTP server only says browsing isn't available yet, and every server reads "Not connected", until plan 14's UI connects from the window.
 
 ## Current state
 
