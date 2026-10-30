@@ -22,7 +22,7 @@ pub const RECENTS: usize = 50;
 #[derive(Clone, Debug)]
 pub struct Store {
     /// `places.json`: the favorites, saved searches, registered repositories,
-    /// saved commands and remote sources.
+    /// saved commands, remote sources and saved servers.
     pub places: PathBuf,
     /// `recents.json`, newest first.
     pub recents: PathBuf,
@@ -64,6 +64,16 @@ pub struct Place {
     pub availability: Availability,
 }
 
+impl Place {
+    /// Where it is now, if it can be opened.
+    pub fn at(&self) -> Option<&Path> {
+        match &self.availability {
+            Availability::Available(path) => Some(path),
+            Availability::Unavailable(_) => None,
+        }
+    }
+}
+
 /// A search kept in the sidebar. Saving one never runs it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedSearch {
@@ -87,6 +97,9 @@ struct Saved {
     commands: Vec<Definition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remotes: Vec<Source>,
+    /// Connect to Server's addresses, never with a password.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    servers: Vec<String>,
 }
 
 impl Favorite {
@@ -155,7 +168,8 @@ impl Store {
 
     /// Pins the folder at `path` at position `at`, or last, and returns
     /// where it really is. A folder that's already pinned moves to `at`, or
-    /// stays where it is without one.
+    /// stays where it is without one. One saved at `path` with no folder
+    /// there now moves to `at` all the same.
     pub fn pin(
         &self,
         path: &Path,
@@ -164,6 +178,13 @@ impl Store {
     ) -> Result<PathBuf, String> {
         if !path.is_absolute() {
             return Err(format!("{}: give an absolute path.", path.display()));
+        }
+        if let Some(at) = at
+            && !path.is_dir()
+            && let Some(saved) = self.favorites()?.into_iter().find(|f| f.path == path)
+        {
+            self.move_favorite(&saved, at)?;
+            return Ok(path.into());
         }
         // Where the folder really is, so a link to a folder on another
         // volume pins that volume.
@@ -193,6 +214,21 @@ impl Store {
             favorites.insert(at, favorite);
             self.save_favorites(favorites)?;
             Ok(path)
+        })
+    }
+
+    /// Moves this saved favorite to position `at`, whether it's available or
+    /// not: a folder at its path now may be another drive's.
+    pub fn move_favorite(&self, favorite: &Favorite, at: usize) -> Result<(), String> {
+        locked(&self.places, || {
+            let mut favorites = self.favorites()?;
+            let ix = favorites
+                .iter()
+                .position(|f| f == favorite)
+                .ok_or_else(|| format!("{} isn't in Favorites.", favorite.path.display()))?;
+            let favorite = favorites.remove(ix);
+            favorites.insert(at.min(favorites.len()), favorite);
+            self.save_favorites(favorites)
         })
     }
 
@@ -443,6 +479,47 @@ impl Store {
         })
     }
 
+    /// Connect to Server's saved addresses in the order they were saved.
+    pub fn servers(&self) -> Result<Vec<String>, String> {
+        Ok(self.saved()?.servers)
+    }
+
+    /// Keeps `address`, as `servers::address` wrote it, unless it's saved.
+    pub fn save_server(&self, address: &str) -> Result<(), String> {
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            if saved.servers.iter().any(|known| known == address) {
+                return Ok(());
+            }
+            saved.servers.push(address.into());
+            write(&self.places, &saved)
+        })
+    }
+
+    /// Forgets the saved `address`. A share mounted from it stays mounted.
+    pub fn forget_server(&self, address: &str) -> Result<(), String> {
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            let ix = saved
+                .servers
+                .iter()
+                .position(|known| known == address)
+                .ok_or_else(|| format!("{address} isn't a saved server."))?;
+            saved.servers.remove(ix);
+            write(&self.places, &saved)
+        })
+    }
+
+    /// Calls `changed` on its own thread each time a list here changes,
+    /// whoever changed it. Other files in the folder count too, so read the
+    /// lists again to see. Dropping it stops the thread.
+    pub fn watch(&self, changed: impl Fn() + Send + 'static) -> std::io::Result<ops::Watch> {
+        let name = self.places.file_name().unwrap_or_default().to_owned();
+        let folder = self.places.parent().unwrap_or(Path::new("/"));
+        std::fs::create_dir_all(folder)?;
+        ops::Watch::start(folder, &name, changed)
+    }
+
     /// Files opened through Monodrive, newest first. A file that doesn't
     /// read is an error, so `opened` never replaces it.
     pub fn recents(&self) -> Result<Vec<PathBuf>, String> {
@@ -682,6 +759,51 @@ mod tests {
         // Found where it is now, it can be forgotten from there.
         store.unpin(&second.join("Photos"), &remounted).unwrap();
         assert_eq!(paths(&store, &remounted).len(), 5);
+    }
+
+    #[test]
+    fn an_unavailable_favorite_still_moves_and_a_saved_server_is_forgotten() {
+        let (_dir, dir) = real_tempdir();
+        let store = store(&dir);
+        let root = [volume("Macintosh HD", "/".as_ref(), Some("R"))];
+        let gone = dir.join("Gone");
+        std::fs::create_dir(&gone).unwrap();
+        store.pin(&gone, None, &root).unwrap();
+        std::fs::rename(&gone, dir.join("Moved")).unwrap();
+        assert_eq!(store.pin(&gone, Some(0), &root), Ok(gone.clone()));
+        assert_eq!(paths(&store, &root)[0], gone);
+        // With nowhere to go, it's still not a folder to pin.
+        assert!(store.pin(&gone, None, &root).is_err());
+        let saved = store.places(&root).unwrap().remove(0).favorite;
+        store.move_favorite(&saved, 2).unwrap();
+        assert_eq!(paths(&store, &root)[2], gone);
+
+        store.save_server("smb://nas/media").unwrap();
+        store.save_server("smb://nas/media").unwrap();
+        store.save_server("smb://nas/photos").unwrap();
+        store.forget_server("smb://nas/media").unwrap();
+        assert_eq!(store.servers(), Ok(vec!["smb://nas/photos".into()]));
+        assert!(store.forget_server("smb://nas/media").is_err());
+        // Saving servers leaves the favorites as they were.
+        assert_eq!(paths(&store, &root)[2], gone);
+    }
+
+    #[test]
+    fn a_watch_hears_another_client_pin_and_stops_when_dropped() {
+        let (_dir, dir) = real_tempdir();
+        let window = store(&dir);
+        let (heard, hear) = std::sync::mpsc::channel();
+        let watch = window
+            .watch(move || {
+                let _ = heard.send(());
+            })
+            .unwrap();
+        let agent = store(&dir);
+        agent.pin(&dir, None, &[]).unwrap();
+        hear.recv().unwrap();
+        drop(watch);
+        // The thread let go of its sender.
+        while hear.recv().is_ok() {}
     }
 
     #[test]

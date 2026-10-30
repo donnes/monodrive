@@ -974,13 +974,11 @@ impl Engine {
         }
     }
 
-    /// Puts back an item from where Monodrive's history last left it in
-    /// the Trash.
-    fn plan_put_back(&self, path: &Path) -> Result<Plan, String> {
-        let (id, stamp) = existing(path)?;
+    /// Where Monodrive's history says the item `id`, at `path` in the Trash,
+    /// came from.
+    fn origin(&self, path: &Path, id: FileId) -> Option<PathBuf> {
         let trashed = Spot::Trash(Some(path.to_path_buf()));
-        let original = self
-            .history
+        self.history
             .iter()
             .rev()
             .flat_map(|u| &u.steps)
@@ -989,15 +987,30 @@ impl Engine {
                 Spot::Path(original) => Some(original.clone()),
                 Spot::Trash(_) => None,
             })
-            .ok_or_else(|| {
-                format!(
-                    "{}: Monodrive didn't move this to the Trash, so it doesn't know where it came from.",
-                    path.display()
-                )
-            })?;
+    }
+
+    /// What `plan_put_back` would find for each path, reading only each
+    /// item's identity.
+    fn origins(&self, paths: &[PathBuf]) -> Vec<Option<PathBuf>> {
+        paths
+            .iter()
+            .map(|path| self.origin(path, disk::id(path)?))
+            .collect()
+    }
+
+    /// Puts back an item from where Monodrive's history last left it in
+    /// the Trash.
+    fn plan_put_back(&self, path: &Path) -> Result<Plan, String> {
+        let (id, stamp) = existing(path)?;
+        let original = self.origin(path, id).ok_or_else(|| {
+            format!(
+                "{}: Monodrive didn't move this to the Trash, so it doesn't know where it came from.",
+                path.display()
+            )
+        })?;
         movable(Step {
             id,
-            undone: trashed,
+            undone: Spot::Trash(Some(path.to_path_buf())),
             done: Spot::Path(original),
             applied: false,
             stamp,

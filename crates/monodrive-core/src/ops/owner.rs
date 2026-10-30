@@ -49,6 +49,9 @@ enum Message {
     Runs,
     /// Answered with a `Result<(), String>`.
     CancelRun { run: u64 },
+    /// Answered with a `Result<Vec<Option<PathBuf>>, String>`: where each
+    /// of these items in the Trash came from, if Monodrive knows.
+    Origins { paths: Vec<PathBuf> },
 }
 
 pub struct Owner {
@@ -192,6 +195,9 @@ impl Owner {
             }) => serde_json::to_string(&self.run_command(id, origin, &name, &paths)),
             Ok(Message::Runs) => serde_json::to_string(&Ok::<_, String>(self.runs.list())),
             Ok(Message::CancelRun { run }) => serde_json::to_string(&self.runs.cancel(run)),
+            Ok(Message::Origins { paths }) => {
+                serde_json::to_string(&Ok::<_, String>(self.shared.lock().origins(&paths)))
+            }
             Err(e) => serde_json::to_string(&Err::<Outcome, _>(format!(
                 "Monodrive couldn't read the request: {e}"
             ))),
@@ -354,6 +360,14 @@ impl Client {
         super::trash_items(&self.paths.trash)
     }
 
+    /// Where each of these items in the Trash came from, if this history
+    /// says: what Put Back would put them back to.
+    pub fn origins(&mut self, paths: &[PathBuf]) -> Result<Vec<Option<PathBuf>>, String> {
+        self.ask(&Message::Origins {
+            paths: paths.to_vec(),
+        })
+    }
+
     /// Every job still going and the latest finished, newest first.
     pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
         self.ask(&Message::Jobs)
@@ -393,7 +407,8 @@ impl Client {
 
     /// Calls `changed` each time the owner's journal changes; see `Watch`.
     pub fn watch(&self, changed: impl Fn() + Send + 'static) -> io::Result<Watch> {
-        Watch::start(&self.paths.state, changed)
+        private_dir(&self.paths.state).map_err(io::Error::other)?;
+        Watch::start(&self.paths.state, JOURNAL.as_ref(), changed)
     }
 
     /// Sends `message`, again on a new connection if the first is lost.
@@ -428,11 +443,12 @@ impl Client {
     }
 }
 
-/// Calls `changed` on its own thread each time the owner's journal is
-/// written, made or replaced: someone asked for a change, maybe an agent
-/// for a new job. The window checks its jobs then, instead of asking the
-/// owner all the time. It reads nothing and holds no connection, so it never
-/// keeps an owner running. Dropping it stops the thread.
+/// Calls `changed` on its own thread each time a file is written, made or
+/// replaced, or anything else changes in its folder. For the owner's journal
+/// that means someone asked for a change, maybe an agent for a new job: the
+/// window checks its jobs then, instead of asking the owner all the time. It
+/// reads nothing and holds no connection, so it never keeps an owner running.
+/// Dropping it stops the thread.
 pub struct Watch {
     queue: OwnedFd,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -442,8 +458,12 @@ pub struct Watch {
 const STOP: usize = 0;
 
 impl Watch {
-    fn start(state: &Path, changed: impl Fn() + Send + 'static) -> io::Result<Self> {
-        private_dir(state).map_err(io::Error::other)?;
+    /// Watches the file `name` in `folder`, which must exist.
+    pub(crate) fn start(
+        folder: &Path,
+        name: &std::ffi::OsStr,
+        changed: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
         // SAFETY: kqueue has no preconditions; the descriptor is owned here.
         let queue = match unsafe { libc::kqueue() } {
             -1 => return Err(io::Error::last_os_error()),
@@ -451,16 +471,16 @@ impl Watch {
         };
         let raw = queue.as_raw_fd();
         listen(raw, STOP, libc::EVFILT_USER, 0)?;
-        // The folder tells when the journal is made or replaced (a trim
-        // renames a new one into place); the file when it's written.
-        let folder = open_events(state)?;
+        // The folder tells when the file is made or replaced (a trim of the
+        // journal renames a new one into place); the file when it's written.
+        let at = folder.join(name);
+        let folder = open_events(folder)?;
         listen(
             raw,
             folder.as_raw_fd() as usize,
             libc::EVFILT_VNODE,
             libc::NOTE_WRITE,
         )?;
-        let at = state.join(JOURNAL);
         let mut journal = follow(raw, &at);
         let thread = std::thread::spawn(move || {
             let _folder = folder;

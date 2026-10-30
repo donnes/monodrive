@@ -120,6 +120,11 @@ fn trash_puts_back_and_undoing_a_new_folder_trashes_it_until_redo() {
     .unwrap();
     assert!(!notes.exists());
     assert!(trashed.components().any(|c| c.as_os_str() == ".Trash"));
+    // Put Back's button asks first: this one's known, what's elsewhere isn't.
+    assert_eq!(
+        engine.origins(&[trashed.clone(), files.clone()]),
+        [Some(notes.clone()), None]
+    );
     assert_eq!(
         moved(run(
             &mut engine,

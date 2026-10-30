@@ -166,24 +166,36 @@ pub fn list_dir(dir: &Path, show_hidden: bool, order: Sort) -> std::io::Result<V
             }
             // DirEntry::metadata doesn't follow symlinks, so links stay links.
             let meta = item.metadata().ok()?;
-            let kind = Kind::of(meta.file_type());
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_secs());
-            Some(Entry {
-                path: item.path(),
-                name,
-                kind,
-                size: meta.len(),
-                modified,
-                availability: Availability::of(&meta),
-            })
+            Some(entry(item.path(), name, &meta))
         })
         .collect();
     sort(&mut entries, order);
     Ok(entries)
+}
+
+/// The entry at `path`, as a listing of its folder would show it.
+pub fn entry_at(path: &Path) -> std::io::Result<Entry> {
+    let meta = std::fs::symlink_metadata(path)?;
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    Ok(entry(path.into(), name, &meta))
+}
+
+fn entry(path: PathBuf, name: String, meta: &std::fs::Metadata) -> Entry {
+    Entry {
+        path,
+        name,
+        kind: Kind::of(meta.file_type()),
+        size: meta.len(),
+        modified: meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs()),
+        availability: Availability::of(meta),
+    }
 }
 
 #[cfg(test)]

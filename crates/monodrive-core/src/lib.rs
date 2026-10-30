@@ -15,6 +15,7 @@ pub mod paths;
 pub mod places;
 pub mod remote;
 pub mod search;
+pub mod servers;
 pub mod sizes;
 pub mod storage;
 pub mod user_commands;

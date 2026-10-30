@@ -18,6 +18,7 @@ use crate::ops::{self, Conflict, Done, Job, Origin, Request, rename};
 use crate::places::{self, Availability, Place, SavedSearch};
 use crate::remote::{self, Connection, Connections, RemoteEntry, RemoteError, RemotePath, Source};
 use crate::search::{Query, Scope};
+use crate::servers::{self, Prompt};
 use crate::sizes::{self, FolderSize};
 use crate::storage::{self, Cleanup, Duplicates, Match, Report, Stop, Usage};
 use crate::user_commands::{self, Cwd, Definition, Ended, Run, Sources};
@@ -47,7 +48,9 @@ job_status follows; archive_list shows what a ZIP holds without extracting it. \
 compare compares two files or folders, diff shows two text files' differences, and compare_copy \
 copies differences one way as a job. storage_scan shows what takes up space in a folder, duplicates \
 finds identical files there, and cleanup_duplicates trashes the copies you choose. \
-list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them. \
+list_places shows the sidebar's favorites, the mounted volumes and the saved servers; pin, unpin and eject \
+manage them, connect mounts an smb:// share with credentials macOS already has, disconnect unmounts it, and \
+forget_server forgets a saved address. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches. \
 Items iCloud Drive or a cloud app hasn't downloaded show (not downloaded); nothing but download \
 fetches them, and remove_download frees a downloaded copy. catalog_create keeps a searchable list \
@@ -309,6 +312,15 @@ enum ToolCall {
     },
     Eject {
         path: String,
+    },
+    Connect {
+        address: String,
+    },
+    Disconnect {
+        address: String,
+    },
+    ForgetServer {
+        address: String,
     },
     Download {
         paths: Vec<String>,
@@ -811,9 +823,10 @@ impl Server {
             }),
             ToolCall::ListPlaces {} => {
                 let volumes = volumes::list();
-                self.places
-                    .places(&volumes)
-                    .map(|places| list_places(&places, &volumes))
+                let places = self.places.places(&volumes);
+                places.and_then(|places| {
+                    Ok(list_places(&places, &volumes, &self.places.servers()?))
+                })
             }
             ToolCall::Pin { path, at } => {
                 let path = expand_home(&path);
@@ -833,6 +846,32 @@ impl Server {
                 };
                 volumes::eject(&expand_home(&path), &origin, &mut self.ops).map(|done| done + "\n")
             }
+            ToolCall::Connect { address } if !self.ops.agents_change_files() => Err(format!(
+                "Agents can't connect to {address}: Let agents change files is off in Monodrive's Agents settings."
+            )),
+            ToolCall::Connect { address } => {
+                let cancel = Arc::default();
+                servers::connect(&self.places, &address, |address| {
+                    servers::mount(address, Prompt::Never, &cancel)
+                })
+                .map(|(address, at)| format!("{address} is at {}\n", at.display()))
+            }
+            ToolCall::Disconnect { address } => {
+                let origin = Origin::Agent {
+                    client: self.client.clone(),
+                };
+                servers::address(&address).and_then(|address| {
+                    let volumes = volumes::list();
+                    let volume = servers::mounted(&address, &volumes)
+                        .ok_or_else(|| format!("{address} isn't connected."))?;
+                    volumes::eject(&volume.mount, &origin, &mut self.ops).map(|done| done + "\n")
+                })
+            }
+            ToolCall::ForgetServer { address } => servers::address(&address).and_then(|address| {
+                self.places
+                    .forget_server(&address)
+                    .map(|()| format!("Forgot {address}; a share it mounted stays mounted.\n"))
+            }),
             ToolCall::Download { paths } => self.ask_cloud(
                 &paths,
                 cloud::download,
@@ -1566,9 +1605,9 @@ fn saved_search(search: &SavedSearch) -> String {
     }
 }
 
-/// Favorites, then volumes: one path a line, with what's worth knowing
-/// about it in brackets.
-fn list_places(places: &[Place], volumes: &[Volume]) -> String {
+/// Favorites, then volumes, then saved servers: one path or address a line,
+/// with what's worth knowing about it in brackets.
+fn list_places(places: &[Place], volumes: &[Volume], servers: &[String]) -> String {
     let mut out = String::from("Favorites\n");
     for place in places {
         let _ = match &place.availability {
@@ -1604,6 +1643,13 @@ fn list_places(places: &[Place], volumes: &[Volume]) -> String {
             None => {}
         }
         let _ = writeln!(out, "{} ({})", volume.mount.display(), about.join(", "));
+    }
+    out.push_str("Servers\n");
+    for address in servers {
+        let _ = match servers::mounted(address, volumes) {
+            Some(volume) => writeln!(out, "{address} (connected at {})", volume.mount.display()),
+            None => writeln!(out, "{address}"),
+        };
     }
     out
 }
@@ -2582,7 +2628,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 66] = [
+pub const TOOLS: [Tool; 69] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2958,7 +3004,7 @@ pub const TOOLS: [Tool; 66] = [
     Tool {
         name: "list_places",
         description: "The Monodrive sidebar's favorite folders, then the mounted volumes with free space, \
-    read-only, network and removable flags, and their identity. Never reads a volume's contents.",
+    read-only, network and removable flags, and their identity, then the saved servers. Never reads a volume's contents.",
         input_schema: || json!({"type": "object", "properties": {}}),
     },
     Tool {
@@ -2993,6 +3039,24 @@ pub const TOOLS: [Tool; 66] = [
                 "required": ["path"]
             })
         },
+    },
+    Tool {
+        name: "connect",
+        description: "Mount an smb:// share, or say where it's already mounted, and save its address. \
+    Uses credentials macOS already has; one that needs a prompt reports that, since only the user can answer \
+    one, from Monodrive's window. Takes no password. Lists nothing.",
+        input_schema: address_schema,
+    },
+    Tool {
+        name: "disconnect",
+        description: "Unmount the share at address, as eject does for its mount point. Refuses while a \
+    Monodrive copy or move is using it, or when macOS says it's busy; never forces.",
+        input_schema: address_schema,
+    },
+    Tool {
+        name: "forget_server",
+        description: "Forget a saved server address. A share it mounted stays mounted.",
+        input_schema: address_schema,
     },
     Tool {
         name: "download",
@@ -3452,6 +3516,14 @@ fn path_schema() -> Value {
         "type": "object",
         "properties": {"path": {"type": "string", "description": "Absolute; ~ is your home."}},
         "required": ["path"]
+    })
+}
+
+fn address_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"address": {"type": "string", "description": "Such as smb://nas.local/media. No password."}},
+        "required": ["address"]
     })
 }
 
@@ -4285,6 +4357,11 @@ mod tests {
         assert!(text(&reply).starts_with("Agents can't eject"), "{reply}");
         let reply = call(
             &mut server,
+            json!({"name": "connect", "arguments": {"address": "smb://nas/media"}}),
+        );
+        assert!(text(&reply).starts_with("Agents can't connect"), "{reply}");
+        let reply = call(
+            &mut server,
             json!({"name": "download", "arguments": {"paths": [&made, &renamed]}}),
         );
         assert_eq!(reply["result"]["isError"], true);
@@ -4593,6 +4670,50 @@ mod tests {
         ] {
             assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
         }
+        // Addresses are checked before anything mounts, and nothing here does.
+        server
+            .places
+            .save_server("smb://nas.invalid/media")
+            .unwrap();
+        let reply = call(&mut server, json!({"name": "list_places"}));
+        assert!(
+            text(&reply).ends_with("Servers\nsmb://nas.invalid/media\n"),
+            "{reply}"
+        );
+        for (tool, address, refusal) in [
+            (
+                "connect",
+                "smb://me:secret@nas/media",
+                "Leave the password out",
+            ),
+            ("connect", "afp://nas/media", "Monodrive connects to smb://"),
+            (
+                "disconnect",
+                "smb://nas.invalid/media",
+                "smb://nas.invalid/media isn't connected.",
+            ),
+            (
+                "forget_server",
+                "smb://nas.invalid/other",
+                "smb://nas.invalid/other isn't a saved server.",
+            ),
+        ] {
+            let reply = call(
+                &mut server,
+                json!({"name": tool, "arguments": {"address": address}}),
+            );
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            assert!(text(&reply).starts_with(refusal), "{reply}");
+        }
+        let reply = call(
+            &mut server,
+            json!({"name": "forget_server", "arguments": {"address": "nas.invalid/media"}}),
+        );
+        assert!(
+            text(&reply).starts_with("Forgot smb://nas.invalid/media"),
+            "{reply}"
+        );
+        assert_eq!(server.places.servers(), Ok(Vec::new()));
         for (path, refusal) in [
             (dir.path().to_path_buf(), " isn't a mounted volume."),
             ("/".into(), " is the startup disk."),
