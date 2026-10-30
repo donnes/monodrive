@@ -21,8 +21,9 @@ pub struct FolderSize {
     pub files: u64,
     /// Folders inside it, itself not included.
     pub folders: u64,
-    /// Folders inside it that couldn't be listed, such as one the user may
-    /// not read. Their contents aren't counted.
+    /// Folders, itself included, that couldn't be listed or had items that
+    /// couldn't be read, such as one the user may not read or search. What
+    /// couldn't be read isn't counted.
     pub unreadable: u64,
     /// False when it stopped early: the totals are then what it had counted.
     pub complete: bool,
@@ -59,17 +60,21 @@ pub fn measure(
                 continue;
             }
         };
+        let mut hidden = false;
         for item in listing {
             if stopped() {
                 return Ok(size);
             }
-            // Gone since the listing began: nothing to count. DirEntry's
-            // metadata doesn't follow links.
-            let Some((item, meta)) = item
-                .ok()
-                .and_then(|item| Some((item.path(), item.metadata().ok()?)))
-            else {
-                continue;
+            // DirEntry's metadata doesn't follow links. An item gone since
+            // the listing began has nothing to count; any other failure,
+            // such as a folder without search permission, hides some.
+            let (item, meta) = match item.and_then(|item| Ok((item.path(), item.metadata()?))) {
+                Ok(found) => found,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    hidden = true;
+                    continue;
+                }
             };
             if meta.is_dir() {
                 size.folders += 1;
@@ -89,6 +94,7 @@ pub fn measure(
             size.bytes += meta.len();
             size.on_disk += meta.blocks() * 512;
         }
+        size.unreadable += u64::from(hidden);
     }
     size.complete = true;
     Ok(size)
@@ -224,18 +230,23 @@ mod tests {
         // A link to a big folder outside counts as one small link.
         write(&dir.path().join("outside/big.bin"), 10_000);
         std::os::unix::fs::symlink(dir.path().join("outside"), root.join("outside")).unwrap();
-        let locked = root.join("locked");
+        // One it can't list, and one it can list but not look inside.
+        let (locked, listed) = (root.join("locked"), root.join("listed"));
         write(&locked.join("secret.txt"), 5_000);
+        write(&listed.join("hidden.txt"), 123);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&listed, std::fs::Permissions::from_mode(0o400)).unwrap();
 
         let size = measure(&root, &AtomicBool::new(false), None);
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for folder in [&locked, &listed] {
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let size = size.unwrap();
         let link = std::fs::symlink_metadata(root.join("outside"))
             .unwrap()
             .len();
         assert_eq!(size.bytes, 60 + link);
-        assert_eq!((size.files, size.folders, size.unreadable), (4, 3, 1));
+        assert_eq!((size.files, size.folders, size.unreadable), (4, 4, 2));
         assert!(size.on_disk > 0 && size.complete);
 
         let file = root.join("a.txt");

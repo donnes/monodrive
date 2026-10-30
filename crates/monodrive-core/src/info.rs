@@ -192,11 +192,21 @@ fn last_opened(path: &Path) -> Option<SystemTime> {
     if n != 16 {
         return None;
     }
-    // A `timespec`: seconds, then nanoseconds, each 8 bytes little-endian.
+    // A `timespec`: signed seconds, then nanoseconds, each 8 bytes
+    // little-endian. Anything else written there is no date.
     let (seconds, nanos) = stamp.split_at(8);
-    let seconds = u64::from_le_bytes(seconds.try_into().ok()?);
+    let seconds = i64::from_le_bytes(seconds.try_into().ok()?);
     let nanos = u64::from_le_bytes(nanos.try_into().ok()?);
-    Some(UNIX_EPOCH + Duration::new(seconds, u32::try_from(nanos).ok()?))
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    let whole = Duration::from_secs(seconds.unsigned_abs());
+    let second = if seconds < 0 {
+        UNIX_EPOCH.checked_sub(whole)
+    } else {
+        UNIX_EPOCH.checked_add(whole)
+    };
+    second?.checked_add(Duration::from_nanos(nanos))
 }
 
 /// Whether the current user may read or write the item itself, as the
@@ -260,7 +270,7 @@ fn group_name(gid: u32) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -328,15 +338,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn opened_is_the_date_launch_services_recorded() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("report.pdf");
-        std::fs::write(&file, "%PDF").unwrap();
-        // 2026-10-29 22:56:28.405290008 UTC, as macOS writes it.
-        let stamp: [u8; 16] = [
-            0x1c, 0xcf, 0xe3, 0x6a, 0, 0, 0, 0, 0x18, 0x3c, 0x28, 0x18, 0, 0, 0, 0,
-        ];
+    /// Writes the attribute LaunchServices keeps the last-opened date in.
+    pub(crate) fn record_opened(file: &Path, seconds: i64, nanos: u64) {
+        let mut stamp = [0u8; 16];
+        stamp[..8].copy_from_slice(&seconds.to_le_bytes());
+        stamp[8..].copy_from_slice(&nanos.to_le_bytes());
         let path = CString::new(file.as_os_str().as_bytes()).unwrap();
         // SAFETY: NUL-terminated strings and a buffer of the length given.
         let set = unsafe {
@@ -350,9 +356,25 @@ mod tests {
             )
         };
         assert_eq!(set, 0);
+    }
+
+    #[test]
+    fn opened_is_the_date_launch_services_recorded_when_its_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("report.pdf");
+        std::fs::write(&file, "%PDF").unwrap();
+        let opened = |seconds, nanos| {
+            record_opened(&file, seconds, nanos);
+            info(&file).unwrap().opened
+        };
+        // 2026-10-29 22:56:28.405290008 UTC, as macOS writes it.
         assert_eq!(
-            info(&file).unwrap().opened,
+            opened(1_793_314_588, 405_290_008),
             Some(UNIX_EPOCH + Duration::new(1_793_314_588, 405_290_008))
         );
+        // The seconds are signed, as in a timespec.
+        assert_eq!(opened(-1, 0), Some(UNIX_EPOCH - Duration::from_secs(1)));
+        assert_eq!(opened(0, 1_000_000_000), None);
+        assert_eq!(opened(0, u64::MAX), None);
     }
 }

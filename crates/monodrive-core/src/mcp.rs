@@ -524,7 +524,7 @@ fn folder_size(folder: &std::path::Path, size: &FolderSize, timeout: u64) -> Str
     if size.unreadable > 0 {
         let _ = writeln!(
             out,
-            "unreadable folders: {} (their contents aren't counted)",
+            "unreadable folders: {} (what couldn't be read isn't counted)",
             size.unreadable
         );
     }
@@ -537,21 +537,26 @@ fn folder_size(folder: &std::path::Path, size: &FolderSize, timeout: u64) -> Str
     out
 }
 
-/// ISO 8601 in UTC, to the second.
+/// ISO 8601 in UTC, to the second. A date too far out for a calendar year
+/// prints as seconds from the epoch.
 fn utc(time: SystemTime) -> String {
-    let seconds = match time.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(since) => since.as_secs() as libc::time_t,
-        Err(before) => -(before.duration().as_secs() as libc::time_t),
+    let seconds: libc::time_t = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+        Err(before) => 0i64
+            .checked_sub_unsigned(before.duration().as_secs())
+            .unwrap_or(i64::MIN),
     };
     // SAFETY: an all-zero tm is valid, and gmtime_r writes only into it.
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::gmtime_r(&seconds, &mut tm);
-        tm
+        (!libc::gmtime_r(&seconds, &mut tm).is_null()).then_some(tm)
+    };
+    let Some(tm) = tm else {
+        return format!("{seconds} seconds from 1970-01-01T00:00:00Z");
     };
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        tm.tm_year + 1900,
+        i64::from(tm.tm_year) + 1900,
         tm.tm_mon + 1,
         tm.tm_mday,
         tm.tm_hour,
@@ -1118,6 +1123,23 @@ mod tests {
             utc(std::time::UNIX_EPOCH + Duration::from_secs(1_793_314_588)),
             "2026-10-29T22:56:28Z"
         );
+
+        // Any date the attribute holds prints, however odd.
+        for (seconds, shown) in [
+            (-1, "opened: 1969-12-31T23:59:59Z"),
+            (
+                i64::MIN,
+                "opened: -9223372036854775808 seconds from 1970-01-01T00:00:00Z",
+            ),
+        ] {
+            info::tests::record_opened(&file, seconds, 0);
+            let reply = call(
+                &mut server,
+                json!({"name": "stat", "arguments": {"paths": [file]}}),
+            );
+            assert_eq!(reply["result"]["isError"], false, "{reply}");
+            assert!(text(&reply).lines().any(|line| line == shown), "{reply}");
+        }
 
         let reply = call(
             &mut server,
