@@ -227,6 +227,47 @@ impl Store {
         })
     }
 
+    /// Pins the folders at `paths`, in order, before what's at position `at`
+    /// in the list as it is now, as a line drawn between two rows shows. One
+    /// already pinned moves, and leaving from above `at` takes one off it.
+    /// All of them or none.
+    pub fn pin_before(
+        &self,
+        paths: &[PathBuf],
+        at: usize,
+        volumes: &[Volume],
+    ) -> Result<(), String> {
+        let mut folders = Vec::with_capacity(paths.len());
+        for path in paths {
+            let real =
+                std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if !real.is_dir() {
+                return Err(format!("{} isn't a folder.", real.display()));
+            }
+            folders.push(real);
+        }
+        locked(&self.places, || {
+            let mut favorites = self.favorites()?;
+            let mut at = at.min(favorites.len());
+            let mut pinned = Vec::with_capacity(folders.len());
+            for folder in &folders {
+                pinned.push(
+                    match favorites.iter().position(|f| f.is_at(folder, volumes)) {
+                        Some(ix) => {
+                            if ix < at {
+                                at -= 1;
+                            }
+                            favorites.remove(ix)
+                        }
+                        None => Favorite::of(folder, volumes),
+                    },
+                );
+            }
+            favorites.splice(at..at, pinned);
+            self.save_favorites(favorites)
+        })
+    }
+
     /// Moves this saved favorite to position `at`, whether it's available or
     /// not: a folder at its path now may be another drive's.
     pub fn move_favorite(&self, favorite: &Favorite, at: usize) -> Result<(), String> {
@@ -796,6 +837,46 @@ mod tests {
         assert!(store.forget_server("smb://nas/media").is_err());
         // Saving servers leaves the favorites as they were.
         assert_eq!(paths(&store, &root)[2], gone);
+    }
+
+    #[test]
+    fn pinning_before_a_position_counts_what_leaves_from_above_it() {
+        let (_dir, real) = real_tempdir();
+        let store = store(&real.join("support"));
+        let [a, b, c, d, e] = ["a", "b", "c", "d", "e"].map(|name| {
+            let path = real.join(name);
+            std::fs::create_dir(&path).unwrap();
+            path
+        });
+        for path in [&a, &b, &c, &d] {
+            store.pin(path, Some(99), &[]).unwrap();
+        }
+        let shown = |store: &Store| paths(store, &[])[..].to_vec();
+        let start = shown(&store).len() - 4;
+        let tail = |store: &Store| shown(store)[start..].to_vec();
+        // A to the line between C and D.
+        store.pin_before(&[a.clone()], start + 3, &[]).unwrap();
+        assert_eq!(tail(&store), [b.clone(), c.clone(), a.clone(), d.clone()]);
+        // Downward by one line stays put, and upward needs no adjusting.
+        store.pin_before(&[c.clone()], start + 2, &[]).unwrap();
+        assert_eq!(tail(&store), [b.clone(), c.clone(), a.clone(), d.clone()]);
+        store.pin_before(&[d.clone()], start, &[]).unwrap();
+        assert_eq!(tail(&store), [d.clone(), b.clone(), c.clone(), a.clone()]);
+        // Several at once, one from each side, and a new one among them.
+        store
+            .pin_before(&[a.clone(), e.clone(), d.clone()], start + 2, &[])
+            .unwrap();
+        assert_eq!(tail(&store)[..3], [b.clone(), a.clone(), e.clone()]);
+        assert_eq!(tail(&store)[3..], [d.clone(), c.clone()]);
+        // Past the end is the end.
+        store.pin_before(&[b.clone()], 99, &[]).unwrap();
+        assert_eq!(tail(&store).last(), Some(&b));
+        // One that can't be pinned leaves the list as it was.
+        let before = shown(&store);
+        let file = real.join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(store.pin_before(&[a.clone(), file], 0, &[]).is_err());
+        assert_eq!(shown(&store), before);
     }
 
     #[test]

@@ -1889,3 +1889,43 @@ fn a_drive_takes_a_copy_as_another_volume_and_a_read_only_one_takes_nothing(
     assert!(drive.join("a.txt").exists() && project.join("a.txt").exists());
     release(owned, cx);
 }
+
+#[gpui::test]
+fn pinning_folders_already_in_favorites_lands_where_the_line_showed(cx: &mut TestAppContext) {
+    let world = world(vec![startup()], cx);
+    let (one, two) = two_favorites(&world);
+    let root = world.dir.path().canonicalize().unwrap();
+    let three = root.join("Three");
+    std::fs::create_dir(&three).unwrap();
+    world.store.pin(&three, Some(2), &[startup()]).unwrap();
+    let (browser, cx) = open(&world, &root, cx);
+    let row_of = |name: &str, cx: &mut VisualTestContext| {
+        let ix = in_pane(&browser, cx, |pane, _| {
+            pane.entries.iter().position(|e| e.name == name).unwrap()
+        });
+        row(&browser, ix, cx)
+    };
+    // One, to the line between Two and Three.
+    let edge = cx.debug_bounds("place-3").unwrap().top_center() + point(px(0.), px(2.));
+    let from = row_of("One", cx);
+    carry(from, edge, "", cx);
+    assert_eq!(browser.read_with(cx, |b, _| b.drag.pins_at()), Some(2));
+    cx.simulate_mouse_up(edge, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert_eq!(
+        saved(&world.store)[..3],
+        [two.clone(), one.clone(), three.clone()]
+    );
+    // Two together, above the line they're dragged to: they end up right
+    // above what's under it, in the order shown.
+    let fourth = saved(&world.store)[3].clone();
+    let (from, also) = (row_of("One", cx), row_of("Three", cx));
+    cx.simulate_click(from, with(""));
+    cx.simulate_click(also, with("cmd"));
+    let edge = cx.debug_bounds("place-4").unwrap().top_center() + point(px(0.), px(2.));
+    carry(from, edge, "", cx);
+    assert_eq!(browser.read_with(cx, |b, _| b.drag.pins_at()), Some(3));
+    cx.simulate_mouse_up(edge, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert_eq!(saved(&world.store)[..4], [two, one, three, fourth]);
+}

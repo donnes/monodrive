@@ -399,13 +399,10 @@ impl Browser {
         });
     }
 
-    /// A drop between favorites: pins `paths` from position `at`.
+    /// A drop between favorites: pins `paths` before the row at position `at`.
     pub(super) fn pin_folders(&mut self, paths: Vec<PathBuf>, at: usize, cx: &mut Context<Self>) {
         self.change_places(cx, move |store, volumes| {
-            for (offset, path) in paths.iter().enumerate() {
-                store.pin(path, Some(at + offset), volumes)?;
-            }
-            Ok(())
+            store.pin_before(&paths, at, volumes)
         });
     }
 
