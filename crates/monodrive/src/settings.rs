@@ -2,6 +2,7 @@
 //! of macOS controls, after T3 Code's settings modal and Monocode's pages.
 //! Every control writes straight to [`Preferences`], so changes apply live.
 
+use crate::agents::{self, Action, Harness, Setup};
 use crate::background::{self, Backdrop, Effect, Look, Scope};
 use crate::commands::{self, Group};
 use crate::frame;
@@ -19,6 +20,7 @@ use gpui::{
     div, point, prelude::*, px, relative, rgb,
 };
 use monodrive_core::entries::SortBy;
+use monodrive_core::mcp::TOOLS;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -202,7 +204,20 @@ pub struct SettingsView {
     /// The open menu's highlighted item, moved by the arrows or the pointer.
     menu_active: usize,
     menu_focus: FocusHandle,
-    copied: bool,
+    /// The copy button last pressed, which reads Copied.
+    copied: Option<&'static str>,
+    /// The agent the Agents page shows setup for, and those whose config
+    /// already has Monodrive.
+    harness: Harness,
+    added: Vec<Harness>,
+    /// The Add or Remove last pressed, while it runs and after it fails.
+    job: Option<Job>,
+    /// Whether the pointer came onto the Add button since it last changed;
+    /// an added agent's button reads Remove only then, so a second click
+    /// on Add can't take it straight back out.
+    over_action: bool,
+    /// Whether "Do it yourself" shows the manual steps.
+    by_hand: bool,
     /// The command whose shortcut is being recorded, and why the last key
     /// pressed for it was refused.
     recording: Option<&'static str>,
@@ -214,6 +229,14 @@ pub struct SettingsView {
     /// Where each control was last laid out, to scroll the focused one into view.
     probes: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
     page_scroll: ScrollHandle,
+}
+
+/// An Add or Remove on one agent's config.
+struct Job {
+    harness: Harness,
+    action: Action,
+    /// Why it failed, once it has; it's running until then.
+    failed: Option<String>,
 }
 
 /// One choice in a pop-up menu.
@@ -245,7 +268,12 @@ impl SettingsView {
             menu: None,
             menu_active: 0,
             menu_focus: cx.focus_handle(),
-            copied: false,
+            copied: None,
+            harness: Harness::ClaudeCode,
+            added: Vec::new(),
+            job: None,
+            over_action: false,
+            by_hand: false,
             recording: None,
             recording_error: None,
             recorder: None,
@@ -356,11 +384,232 @@ impl SettingsView {
     fn show(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
         self.menu = None;
-        self.copied = false;
+        self.copied = None;
         self.recording = None;
         self.recording_error = None;
         self.recorder = None;
+        if page == Page::Agents {
+            self.check_agents(cx);
+        }
         cx.notify();
+    }
+
+    /// Reads the agents' configs off the UI thread to mark the ones that
+    /// already have Monodrive.
+    fn check_agents(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let added = cx
+                .background_executor()
+                .spawn(async { agents::added() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.added = added;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Adds Monodrive to `harness`'s config or removes it, off the UI thread.
+    fn apply(&mut self, harness: Harness, action: Action, cx: &mut Context<Self>) {
+        if self.job.as_ref().is_some_and(|job| job.failed.is_none()) {
+            return;
+        }
+        self.job = Some(Job {
+            harness,
+            action,
+            failed: None,
+        });
+        cx.notify();
+        let exe = agents::exe();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let home = agents::home().ok_or("HOME isn't set.")?;
+                    harness.apply(action, &exe, &home)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.job = None;
+                        this.over_action = false;
+                        // Show the result now; the check confirms it from disk.
+                        this.added.retain(|h| *h != harness);
+                        if action == Action::Add {
+                            this.added.push(harness);
+                        }
+                        this.check_agents(cx);
+                    }
+                    Err(error) => {
+                        if let Some(job) = &mut this.job {
+                            job.failed = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The Add button, which shows how the last Add or Remove is going.
+    fn action_button(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let harness = self.harness;
+        let job = self.job.as_ref().filter(|job| job.harness == harness);
+        let added = self.added.contains(&harness);
+        let id = "agent-action";
+        let keyboard = self.handle(id, cx).is_focused(window) && window.last_input_was_keyboard();
+        let error = if theme::is_light() {
+            0xdc2626
+        } else {
+            0xf87171
+        };
+        let button = div()
+            .id(id)
+            .role(Role::Button)
+            .h(px(28.))
+            .min_w(px(112.))
+            .px(px(14.))
+            .flex_shrink_0()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.))
+            .text_size(px(12.5))
+            .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                this.over_action = *over;
+                cx.notify();
+            }));
+        let (button, next) = match job {
+            Some(Job {
+                action,
+                failed: None,
+                ..
+            }) => {
+                let label = match action {
+                    Action::Add => "Adding…",
+                    Action::Remove => "Removing…",
+                };
+                let button = button
+                    .aria_label(label)
+                    .bg(content(0.08))
+                    .text_color(content(0.6))
+                    .child(label);
+                (button, None)
+            }
+            Some(Job {
+                action,
+                failed: Some(_),
+                ..
+            }) => {
+                let button = button
+                    .aria_label("Try again")
+                    .bg(rgb(error).opacity(0.14))
+                    .text_color(rgb(error))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(error).opacity(0.22)))
+                    .child("Try again");
+                (button, Some(*action))
+            }
+            None if added => {
+                let remove = self.over_action || keyboard;
+                let label = if remove { "Remove" } else { "Added" };
+                let button = button
+                    .aria_label(format!("Remove from {}", harness.name()))
+                    .bg(content(if remove { 0.14 } else { 0.08 }))
+                    .cursor_pointer()
+                    .when(!remove, |d| {
+                        d.child(icon("check-hi", 12.).text_color(rgb(0x10b981)))
+                    })
+                    .child(label);
+                (button, remove.then_some(Action::Remove))
+            }
+            None => {
+                let button = button
+                    .aria_label(format!("Add to {}", harness.name()))
+                    .bg(accent())
+                    .text_color(on_accent())
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.9))
+                    .child(format!("Add to {}", harness.name()));
+                (button, Some(Action::Add))
+            }
+        };
+        let button = match next {
+            Some(action) => {
+                button.on_click(cx.listener(move |this, _, _, cx| this.apply(harness, action, cx)))
+            }
+            None => button,
+        };
+        let running = job.is_some_and(|job| job.failed.is_none());
+        self.focusable(id, !running, button, cx).into_any_element()
+    }
+
+    fn pick_harness(&mut self, harness: Harness, cx: &mut Context<Self>) {
+        self.harness = harness;
+        self.copied = None;
+        cx.notify();
+    }
+
+    /// Text in a code box with a Copy button that reads Copied once pressed.
+    fn code_box(&self, id: &'static str, text: String, cx: &mut Context<Self>) -> AnyElement {
+        let copied = self.copied == Some(id);
+        let copy = text.clone();
+        let button = div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(if copied { "Copied" } else { "Copy" })
+            .h(px(22.))
+            .px(px(8.))
+            .flex_shrink_0()
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(11.))
+            .bg(content(0.08))
+            .cursor_pointer()
+            .hover(|s| s.bg(content(0.14)))
+            .when(copied, |d| {
+                d.child(icon("check-hi", 12.).text_color(content(0.8)))
+            })
+            .child(if copied { "Copied" } else { "Copy" })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                this.copied = Some(id);
+                cx.notify();
+            }));
+        div()
+            .w_full()
+            .min_h(px(36.))
+            .py(px(7.))
+            .pl(px(12.))
+            .pr(px(7.))
+            .rounded(px(8.))
+            .bg(black(if theme::is_light() { 0.04 } else { 0.2 }))
+            .border_1()
+            .border_color(content(0.08))
+            .flex()
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pt(px(3.))
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(11.))
+                    .line_height(px(16.))
+                    .text_color(content(0.85))
+                    .child(text),
+            )
+            .child(self.focusable(id, true, button, cx))
+            .into_any_element()
     }
 
     fn slide(&mut self, kind: Slider, x: Pixels, cx: &mut Context<Self>) {
@@ -743,39 +992,225 @@ impl SettingsView {
         ]
     }
 
-    fn agents(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let exe = std::env::current_exe()
-            .map(|exe| exe.display().to_string())
-            .unwrap_or_else(|_| "monodrive".into());
-        let command = format!("claude mcp add monodrive -- {} mcp", shell_quote(&exe));
+    fn agents(&self, p: &Preferences, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let exe = agents::exe();
+        let harness = self.harness;
+        let (step, code) = match harness.setup(&exe) {
+            Setup::Command(command) => ("Run in a terminal".to_string(), command),
+            Setup::Config { file, json } => (format!("Add to {file}"), json),
+        };
+        let server = div()
+            .py(px(14.))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(32.))
+                            .flex_shrink_0()
+                            .rounded(px(8.))
+                            .bg(content(0.08))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("bot", 18.).text_color(content(0.8))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().text_size(px(13.)).child("Local MCP server"))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .line_height(px(15.))
+                                    .text_color(content(0.5))
+                                    .child(
+                                        "Works with any agent that runs MCP servers over stdio. \
+                                         Each agent session starts its own.",
+                                    ),
+                            ),
+                    ),
+            )
+            .child(self.code_box(
+                "copy-server",
+                format!("{} mcp", agents::shell_quote(&exe)),
+                cx,
+            ));
+        let harnesses = Harness::ALL;
+        let at = harnesses.iter().position(|h| *h == harness).unwrap_or(0);
+        let picker = div()
+            .id("agent-harness")
+            .role(Role::RadioGroup)
+            .aria_label("Agent")
+            // One Tab stop; the arrows pick, as in a macOS radio group.
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if let Some(step) = arrow(&event.keystroke.key) {
+                    let next = at.saturating_add_signed(step).min(harnesses.len() - 1);
+                    this.pick_harness(harnesses[next], cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .rounded(px(8.))
+            .flex()
+            .flex_wrap()
+            .gap(px(6.))
+            .children(harnesses.into_iter().enumerate().map(|(ix, each)| {
+                let selected = each == harness;
+                div()
+                    .id(("agent-harness", ix))
+                    .role(Role::RadioButton)
+                    .aria_label(each.name())
+                    .aria_selected(selected)
+                    .h(px(26.))
+                    .px(px(10.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .border_1()
+                    .map(|d| {
+                        if selected {
+                            d.bg(content(0.12))
+                                .border_color(content(0.14))
+                                .font_weight(FontWeight::MEDIUM)
+                        } else {
+                            d.border_color(content(0.06))
+                                .text_color(content(0.7))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(content(0.05)).text_color(content(1.)))
+                        }
+                    })
+                    .child(icon(each.icon(), 13.).text_color(content(if selected {
+                        0.95
+                    } else {
+                        0.6
+                    })))
+                    .child(each.name())
+                    .when(self.added.contains(&each), |d| d.child(added_dot()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_harness(each, cx)))
+            }));
+        let failed = self
+            .job
+            .as_ref()
+            .filter(|job| job.harness == harness)
+            .and_then(|job| job.failed.clone());
+        let about = match &failed {
+            Some(error) => div()
+                .text_color(rgb(if theme::is_light() {
+                    0xdc2626
+                } else {
+                    0xf87171
+                }))
+                .child(error.clone()),
+            None if self.added.contains(&harness) => {
+                div().text_color(content(0.5)).child(harness.then())
+            }
+            None => div().text_color(content(0.5)).child(harness.adds()),
+        };
+        let by_hand = self.by_hand;
+        let disclosure = div()
+            .id("agent-by-hand")
+            .role(Role::Button)
+            .aria_label("Do it yourself")
+            .aria_expanded(by_hand)
+            .self_start()
+            .rounded(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(11.))
+            .text_color(content(0.5))
+            .cursor_pointer()
+            .hover(|s| s.text_color(content(0.8)))
+            .child(
+                icon(
+                    if by_hand {
+                        "chevron-down-hi"
+                    } else {
+                        "chevron-right"
+                    },
+                    10.,
+                )
+                .text_color(content(0.5)),
+            )
+            .child("Do it yourself")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.by_hand = !this.by_hand;
+                cx.notify();
+            }));
+        let setup = div()
+            .py(px(14.))
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(self.focusable("agent-harness", true, picker, cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().text_size(px(13.)).child(harness.name()))
+                            .child(about.text_size(px(11.)).line_height(px(15.))),
+                    )
+                    .child(self.action_button(window, cx)),
+            )
+            .child(self.focusable("agent-by-hand", true, disclosure, cx))
+            .when(by_hand, |d| {
+                d.child(step_row(
+                    1,
+                    step,
+                    Some(self.code_box("copy-setup", code, cx)),
+                ))
+                .child(step_row(2, harness.then().to_string(), None))
+            });
+        let tools = TOOLS
+            .iter()
+            .map(|tool| {
+                div()
+                    .py(px(10.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(12.))
+                            .child(tool.name),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .line_height(px(15.))
+                            .text_color(content(0.5))
+                            .child(tool.description),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         vec![
             group(
                 "MCP",
                 Some(
                     "Agents run Monodrive as an MCP server and search the same index as this window.",
                 ),
-                vec![row(
-                    "Claude Code",
-                    Some("Copies the command that adds Monodrive to Claude Code."),
-                    self.focusable(
-                        "copy-mcp-command",
-                        true,
-                        push_button(
-                            "copy-mcp-command",
-                            if self.copied {
-                                "Copied"
-                            } else {
-                                "Copy Command"
-                            },
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
-                            this.copied = true;
-                            cx.notify();
-                        })),
-                        cx,
-                    ),
-                )],
+                vec![server.into_any_element(), setup.into_any_element()],
             ),
             group(
                 "Files",
@@ -797,6 +1232,11 @@ impl SettingsView {
                         cx,
                     ),
                 )],
+            ),
+            group(
+                "Tools",
+                Some("What agents can call. The ones that change files need the setting above."),
+                tools,
             ),
         ]
     }
@@ -1658,7 +2098,7 @@ impl Render for SettingsView {
             Page::Window => self.window_page(&prefs, cx),
             Page::Appearance => self.appearance(&prefs, window, cx),
             Page::Keyboard => self.keyboard(&prefs, cx),
-            Page::Agents => self.agents(&prefs, cx),
+            Page::Agents => self.agents(&prefs, window, cx),
         };
         let card = div()
             .id("settings")
@@ -1785,14 +2225,6 @@ fn slider_value((min, max): (u32, u32), offset: f32, width: f32) -> u32 {
     let travel = (width - KNOB).max(1.);
     let fraction = ((offset - KNOB / 2.) / travel).clamp(0., 1.);
     min + ((max - min) as f32 * fraction).round() as u32
-}
-
-fn shell_quote(text: &str) -> String {
-    if text.contains(|c: char| c.is_whitespace() || "'\"$\\".contains(c)) {
-        format!("'{}'", text.replace('\'', r"'\''"))
-    } else {
-        text.into()
-    }
 }
 
 fn knob_shadow() -> Vec<gpui::BoxShadow> {
@@ -2062,6 +2494,52 @@ fn swatch(surface: u32, accent: u32) -> impl IntoElement {
         .items_center()
         .justify_center()
         .child(div().size(px(6.)).rounded_full().bg(rgb(accent)))
+}
+
+/// A numbered step of a setup, with what it shows below its text.
+fn step_row(number: u32, text: String, below: Option<AnyElement>) -> impl IntoElement {
+    div()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .size(px(18.))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(content(0.08))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.))
+                .text_color(content(0.7))
+                .child(number.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .pt(px(1.))
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .child(text),
+                )
+                .children(below),
+        )
+}
+
+/// The green dot by an agent whose config already has Monodrive.
+fn added_dot() -> impl IntoElement {
+    div()
+        .size(px(6.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(rgb(0x10b981))
 }
 
 /// A capsule push button.

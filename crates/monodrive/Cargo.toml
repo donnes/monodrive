@@ -19,7 +19,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes", "UTType"] }
 raw-window-handle = "0.6"
 serde.workspace = true
-serde_json.workspace = true
+# preserve_order: adding an agent rewrites its config without reordering it.
+serde_json = { workspace = true, features = ["preserve_order"] }
 # Decodes and bakes background effects; GPUI's features decide the formats.
 image = { version = "0.25", default-features = false }
 # The patched Metal renderer's background mask.

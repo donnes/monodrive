@@ -11,6 +11,7 @@ use gpui::{
 use std::cell::Cell;
 
 pub const UI_FONT: &str = ".SystemUIFont";
+pub const MONO_FONT: &str = "Menlo";
 pub const TITLE_BAR_HEIGHT: f32 = 40.;
 pub const ROW_HEIGHT: f32 = 28.;
 

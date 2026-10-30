@@ -2,6 +2,7 @@
 //! views from here.
 
 mod activity;
+mod agents;
 pub mod assets;
 mod background;
 pub mod browser;

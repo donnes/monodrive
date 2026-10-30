@@ -13,6 +13,15 @@ macro_rules! icons {
 }
 
 icons!(
+    "agent-amp",
+    "agent-antigravity",
+    "agent-claude",
+    "agent-codex",
+    "agent-cursor",
+    "agent-gemini",
+    "agent-grok",
+    "agent-opencode",
+    "agent-pi",
     "app-window",
     "arrow-down-circle",
     "bot",

@@ -415,27 +415,36 @@ fn suffix(kind: Kind) -> &'static str {
     }
 }
 
-fn tools() -> Value {
-    json!([
-        {
-            "name": "find_files",
-            "description": "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
+/// A tool agents can call, as `tools/list` describes it and Settings lists it.
+pub struct Tool {
+    pub name: &'static str,
+    pub description: &'static str,
+    input_schema: fn() -> Value,
+}
+
+pub const TOOLS: [Tool; 17] = [
+    Tool {
+        name: "find_files",
+        description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
     Filters go inline: ext:rs, in:~/Work, type:image, size:>5mb, mtime:<7d, src/**/*.ts, !node_modules/. \
     Best matches first.",
-            "inputSchema": {
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "default": 50}
                 },
                 "required": ["query"]
-            }
+            })
         },
-        {
-            "name": "grep",
-            "description": "Search inside files with the content index. Smart case. mode is literal (default), \
+    },
+    Tool {
+        name: "grep",
+        description: "Search inside files with the content index. Smart case. mode is literal (default), \
     regex, or symbol (where a name is defined). Pass path to search one folder.",
-            "inputSchema": {
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
@@ -444,13 +453,15 @@ fn tools() -> Value {
                     "limit": {"type": "integer", "minimum": 1, "default": 50, "description": "Most files to return."}
                 },
                 "required": ["pattern"]
-            }
+            })
         },
-        {
-            "name": "list_dir",
-            "description": "List one folder. Folders end in /, links in @. Names sort as people read \
+    },
+    Tool {
+        name: "list_dir",
+        description: "List one folder. Folders end in /, links in @. Names sort as people read \
     them (file2 before file10). For the newest or largest first, sort by modified or size with descending: true.",
-            "inputSchema": {
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Folder to list; ~ is your home."},
@@ -460,103 +471,122 @@ fn tools() -> Value {
                     "folders_first": {"type": "boolean", "default": true}
                 },
                 "required": ["path"]
-            }
+            })
         },
-        {
-            "name": "index_status",
-            "description": "Whether the index is ready, how far its first build has got, and whether it \
+    },
+    Tool {
+        name: "index_status",
+        description: "Whether the index is ready, how far its first build has got, and whether it \
     can see the whole disk. Never starts indexing.",
-            "inputSchema": {"type": "object", "properties": {}}
-        },
-        {
-            "name": "trash",
-            "description": "Move files or folders to the Trash; never deletes. Prints where each went in \
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "trash",
+        description: "Move files or folders to the Trash; never deletes. Prints where each went in \
     the Trash. put_back or undo restores them.",
-            "inputSchema": paths_schema()
-        },
-        {
-            "name": "put_back",
-            "description": "Restore items Monodrive moved to the Trash, given their paths in the Trash. \
+        input_schema: paths_schema,
+    },
+    Tool {
+        name: "put_back",
+        description: "Restore items Monodrive moved to the Trash, given their paths in the Trash. \
     Prints where each went back to.",
-            "inputSchema": paths_schema()
-        },
-        {
-            "name": "rename",
-            "description": "Rename a file or folder where it is. name is the new name, not a path. \
+        input_schema: paths_schema,
+    },
+    Tool {
+        name: "rename",
+        description: "Rename a file or folder where it is. name is the new name, not a path. \
     Never replaces an existing item.",
-            "inputSchema": {
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Absolute; ~ is your home."},
                     "name": {"type": "string"}
                 },
                 "required": ["path", "name"]
-            }
+            })
         },
-        {
-            "name": "create_folder",
-            "description": "Create an empty folder at path. Its parent must exist.",
-            "inputSchema": path_schema()
-        },
-        {
-            "name": "create_file",
-            "description": "Create an empty file at path. Its parent must exist; never replaces a file.",
-            "inputSchema": path_schema()
-        },
-        {
-            "name": "duplicate",
-            "description": "Copy files or folders beside themselves, named as Finder does (\"name copy\"), \
+    },
+    Tool {
+        name: "create_folder",
+        description: "Create an empty folder at path. Its parent must exist.",
+        input_schema: path_schema,
+    },
+    Tool {
+        name: "create_file",
+        description: "Create an empty file at path. Its parent must exist; never replaces a file.",
+        input_schema: path_schema,
+    },
+    Tool {
+        name: "duplicate",
+        description: "Copy files or folders beside themselves, named as Finder does (\"name copy\"), \
     keeping metadata. Prints each copy's path.",
-            "inputSchema": paths_schema()
-        },
-        {
-            "name": "undo",
-            "description": "Undo the last file change, whether this agent, another agent or the Monodrive \
+        input_schema: paths_schema,
+    },
+    Tool {
+        name: "undo",
+        description: "Undo the last file change, whether this agent, another agent or the Monodrive \
     window made it. Refuses if the files changed since.",
-            "inputSchema": {"type": "object", "properties": {}}
-        },
-        {
-            "name": "redo",
-            "description": "Redo the last undone file change. Refuses if the files changed since.",
-            "inputSchema": {"type": "object", "properties": {}}
-        },
-        {
-            "name": "copy",
-            "description": "Copy files or folders into a folder, keeping metadata. Returns a job id at once; \
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "redo",
+        description: "Redo the last undone file change. Refuses if the files changed since.",
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "copy",
+        description: "Copy files or folders into a folder, keeping metadata. Returns a job id at once; \
     job_status follows it. conflict says what to do when a name is taken there.",
-            "inputSchema": transfer_schema()
-        },
-        {
-            "name": "move",
-            "description": "Move files or folders into a folder; across volumes it copies, checks the copy, \
+        input_schema: transfer_schema,
+    },
+    Tool {
+        name: "move",
+        description: "Move files or folders into a folder; across volumes it copies, checks the copy, \
     then trashes the source. Returns a job id at once; job_status follows it.",
-            "inputSchema": transfer_schema()
-        },
-        {
-            "name": "job_status",
-            "description": "A copy or move job's state and progress, then each finished item's resulting \
+        input_schema: transfer_schema,
+    },
+    Tool {
+        name: "job_status",
+        description: "A copy or move job's state and progress, then each finished item's resulting \
     path or error. Without job, one line per recent job.",
-            "inputSchema": {
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {"job": {"type": "integer"}}
-            }
+            })
         },
-        {
-            "name": "cancel_job",
-            "description": "Stop a job after the item it's on. Finished items stay; undo reverses them.",
-            "inputSchema": job_schema()
-        },
-        {
-            "name": "retry_job",
-            "description": "Run again the items a stopped job didn't change, optionally with another \
+    },
+    Tool {
+        name: "cancel_job",
+        description: "Stop a job after the item it's on. Finished items stay; undo reverses them.",
+        input_schema: job_schema,
+    },
+    Tool {
+        name: "retry_job",
+        description: "Run again the items a stopped job didn't change, optionally with another \
     conflict choice. Returns the new job's id.",
-            "inputSchema": {
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {"job": {"type": "integer"}, "conflict": conflict_schema()},
                 "required": ["job"]
-            }
-        }
-    ])
+            })
+        },
+    },
+];
+
+fn tools() -> Value {
+    TOOLS
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": (tool.input_schema)(),
+            })
+        })
+        .collect()
 }
 
 fn conflict_schema() -> Value {
