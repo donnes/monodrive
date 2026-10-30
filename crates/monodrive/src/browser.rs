@@ -26,7 +26,7 @@ use gpui::{
 };
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::{Index, Progress, Status};
-use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
+use monodrive_core::ops::{self, Conflict, Done, Job, Origin, Outcome, Request, State};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -157,6 +157,8 @@ const FRAME_SETTLE: Duration = Duration::from_millis(300);
 const REFRESH_DELAY: Duration = Duration::from_millis(150);
 /// How often the sidebar checks on an index that is still building.
 const INDEX_POLL: Duration = Duration::from_millis(500);
+/// How often a pasted job is checked on until it ends, as Activity does.
+const JOB_CHECK: Duration = Duration::from_secs(1);
 
 pub struct Browser {
     /// Keeps the browser's keys working wherever focus is.
@@ -1682,9 +1684,7 @@ impl Browser {
     }
 
     /// Paste, or with `moving` Move Here: the files on the pasteboard, from
-    /// any app, into this folder as one job. A job that reaches a name
-    /// that's taken waits in Activity for a choice, so Activity opens when
-    /// one will.
+    /// any app, into this folder as one job, followed until it ends.
     fn paste(&mut self, moving: bool, window: &Window, cx: &mut Context<Self>) {
         let Some(board) = cx.try_global::<Pasteboard>() else {
             return;
@@ -1706,36 +1706,84 @@ impl Browser {
             return;
         }
         self.notice = None;
+        let conflict = Conflict::Stop;
+        let request = if moving {
+            Request::Move {
+                paths,
+                into,
+                conflict,
+            }
+        } else {
+            Request::Copy {
+                paths,
+                into,
+                conflict,
+            }
+        };
         self.with_owner(
             window,
             cx,
-            move |owner| {
-                let taken = paths.iter().any(|path| {
-                    path.file_name()
-                        .is_some_and(|name| into.join(name).symlink_metadata().is_ok())
-                });
-                let conflict = Conflict::Stop;
-                let request = if moving {
-                    Request::Move {
-                        paths,
-                        into,
-                        conflict,
-                    }
-                } else {
-                    Request::Copy {
-                        paths,
-                        into,
-                        conflict,
-                    }
-                };
-                owner.submit(Origin::Window, request).map(|_| taken)
-            },
-            |this, taken, window, cx| match taken {
-                Ok(true) => this.open_activity(window, cx),
-                Ok(false) => {}
+            move |owner| owner.submit(Origin::Window, request),
+            |this, outcome, window, cx| match outcome {
+                Ok(outcome) => this.follow_job(outcome.op, window, cx),
                 Err(e) => this.notice = Some(e),
             },
         );
+    }
+
+    /// Checks on a pasted job off the UI thread, at once and then every
+    /// `JOB_CHECK`, until it ends; nothing repaints until then. The owner is
+    /// taken afresh each time, so a closed window or a gone owner ends it.
+    fn follow_job(&self, job: u64, window: &Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let Ok(Some(ops)) =
+                    cx.update(|_, cx| cx.try_global::<Operations>().map(|ops| ops.0.clone()))
+                else {
+                    return;
+                };
+                let jobs = cx
+                    .background_executor()
+                    .spawn(async move { lock(&ops).jobs() })
+                    .await;
+                let Some(found) = jobs
+                    .ok()
+                    .and_then(|jobs| jobs.into_iter().find(|j| j.id == job))
+                else {
+                    return;
+                };
+                if !found.state.active() {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.job_ended(found, window, cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+                cx.background_executor().timer(JOB_CHECK).await;
+            }
+        })
+        .detach();
+    }
+
+    /// How a pasted job ended: one that stopped at a name that's taken, or
+    /// failed, opens Activity, where it can be settled or retried; a
+    /// finished one shows here with its items selected.
+    fn job_ended(&mut self, job: Job, window: &mut Window, cx: &mut Context<Self>) {
+        match job.state {
+            State::Completed if self.query.is_empty() => {
+                self.select_after = job
+                    .tasks
+                    .into_iter()
+                    .filter_map(|task| match task.done {
+                        Some(Done::To(path)) => Some(path),
+                        _ => None,
+                    })
+                    .collect();
+                self.list(false, cx);
+            }
+            State::Waiting | State::Failed | State::Interrupted => self.open_activity(window, cx),
+            _ => {}
+        }
     }
 
     /// Empty Trash: erases what's in the Trash for good, once a person has
@@ -1772,7 +1820,7 @@ impl Browser {
                 cx.spawn_in(window, async move |this, cx| {
                     if answer.await == Ok(0) {
                         let _ = this.update_in(cx, |this, window, cx| {
-                            this.submit(Request::EmptyTrash { paths: items }, window, cx)
+                            this.submit(Request::EmptyTrash { items }, window, cx)
                         });
                     }
                 })
@@ -4090,7 +4138,6 @@ mod tests {
     #[gpui::test]
     fn copy_and_paste_carry_files_through_the_pasteboard(cx: &mut TestAppContext) {
         let (_dir, project) = folder();
-        std::fs::write(project.join("zeta/a.txt"), "theirs").unwrap();
         let owned = own(cx);
         let (browser, cx) = browse(&project, cx);
         press(cx, "down down down cmd-c");
@@ -4099,15 +4146,51 @@ mod tests {
         // Pasted where it is, it's duplicated.
         press(cx, "cmd-v");
         assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
-        // Into a folder where the name is taken, the copy waits for a
-        // choice, and Activity shows it.
-        press(cx, "up cmd-down cmd-v");
-        let activity = browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Activity(_))));
-        assert!(activity);
-        press(cx, "escape cmd-[ up cmd-down cmd-alt-v");
+        // Elsewhere it's a job, here a move. When it ends is the owner
+        // thread's business, so `job_ended` is tested on its own below.
+        press(cx, "up up cmd-down cmd-alt-v");
+        assert_eq!(notice(&browser, cx), None);
         release(owned, cx);
-        assert_eq!(read(&project.join("zeta/a.txt")), "theirs");
         assert!(project.join("docs/a.txt").exists() && !project.join("a.txt").exists());
+    }
+
+    #[gpui::test]
+    fn a_pasted_job_that_stops_opens_activity_and_one_that_finishes_is_selected(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, project) = folder();
+        let (browser, cx) = browse(&project, cx);
+        let ended = |state: State, done: Option<Done>| Job {
+            id: 1,
+            title: "Copy".into(),
+            origin: Origin::Window,
+            into: project.clone(),
+            state,
+            tasks: vec![ops::Task {
+                source: "/elsewhere/a.txt".into(),
+                done,
+            }],
+            bytes: 0,
+            total_bytes: 0,
+        };
+        let end = |job: Job, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| browser.update(cx, |b, cx| b.job_ended(job, window, cx)));
+            cx.run_until_parked();
+        };
+        let activity = |cx: &mut VisualTestContext| {
+            browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Activity(_))))
+        };
+        end(
+            ended(State::Completed, Some(Done::To(project.join("a.txt")))),
+            cx,
+        );
+        assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+        assert!(!activity(cx));
+        for state in [State::Waiting, State::Failed] {
+            end(ended(state, None), cx);
+            assert!(activity(cx), "{state:?}");
+            press(cx, "escape");
+        }
     }
 
     #[gpui::test]
@@ -4134,9 +4217,5 @@ mod tests {
         assert!(!cx.has_pending_prompt());
         assert_eq!(notice(&browser, cx).as_deref(), Some("The Trash is empty."));
         release(owned, cx);
-    }
-
-    fn read(path: &Path) -> String {
-        std::fs::read_to_string(path).unwrap()
     }
 }

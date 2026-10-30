@@ -8,10 +8,11 @@ mod disk;
 mod jobs;
 mod owner;
 
+pub use disk::FileId;
 pub use jobs::{Conflict, Done, Job, State, Task};
 pub use owner::{Client, Owner, run_owner};
 
-use disk::{FileId, Stamp};
+use disk::Stamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -104,8 +105,16 @@ pub enum Request {
     /// Erases these items in the Trash for good, with no undo. Only the
     /// window asks, once a person has confirmed it.
     EmptyTrash {
-        paths: Vec<PathBuf>,
+        items: Vec<TrashItem>,
     },
+}
+
+/// An item in the Trash as Empty Trash counted it. Only that same item is
+/// erased, never another put there under its name since.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashItem {
+    pub path: PathBuf,
+    pub id: FileId,
 }
 
 impl Request {
@@ -735,7 +744,10 @@ impl Engine {
             Request::Duplicate { paths } => each(paths, &|path| {
                 existing(path).map(|_| Plan::Create(Make::Copy))
             }),
-            Request::EmptyTrash { paths } => each(paths, &|path| self.plan_erase(path)),
+            Request::EmptyTrash { items } => items
+                .iter()
+                .map(|item| (item.path.clone(), self.plan_erase(item)))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -770,13 +782,27 @@ impl Engine {
         })
     }
 
-    /// Only what's directly in the Trash, never the Trash itself.
-    fn plan_erase(&self, path: &Path) -> Result<Plan, String> {
-        existing(path)?;
-        if path.parent() != Some(self.paths.trash.as_path()) {
+    /// Only the counted item, directly in a Trash that's a real folder:
+    /// one that became a link would lead the erase somewhere else.
+    fn plan_erase(&self, item: &TrashItem) -> Result<Plan, String> {
+        let (trash, path) = (&self.paths.trash, &item.path);
+        if !std::fs::symlink_metadata(trash).is_ok_and(|meta| meta.is_dir()) {
+            return Err(format!(
+                "{}: isn't the Trash folder it was, so nothing was erased.",
+                trash.display()
+            ));
+        }
+        if path.parent() != Some(trash.as_path()) {
             return Err(format!("{}: not in the Trash.", path.display()));
         }
-        Ok(Plan::Erase)
+        match disk::id(path) {
+            Some(id) if id == item.id => Ok(Plan::Erase),
+            Some(_) => Err(format!(
+                "{}: skipped, since it isn't the item that was counted.",
+                path.display()
+            )),
+            None => Err(format!("{}: no longer in the Trash.", path.display())),
+        }
     }
 
     fn reverse(&mut self, submission: Submission, redo: bool) -> Result<Outcome, String> {
@@ -1054,7 +1080,7 @@ fn erase(path: &Path) -> Result<(), String> {
 
 /// What's in the Trash at `trash`, as Empty Trash would erase it. Finder's
 /// own .DS_Store isn't counted or erased.
-pub fn trash_items(trash: &Path) -> Result<Vec<PathBuf>, String> {
+pub fn trash_items(trash: &Path) -> Result<Vec<TrashItem>, String> {
     let fail = |e: std::io::Error| {
         let why = match e.kind() {
             std::io::ErrorKind::PermissionDenied => {
@@ -1064,13 +1090,17 @@ pub fn trash_items(trash: &Path) -> Result<Vec<PathBuf>, String> {
         };
         format!("{}: {why}", trash.display())
     };
-    let mut items: Vec<PathBuf> = std::fs::read_dir(trash)
+    let mut items: Vec<TrashItem> = std::fs::read_dir(trash)
         .map_err(fail)?
         .filter_map(Result::ok)
         .filter(|item| item.file_name() != ".DS_Store")
-        .map(|item| item.path())
+        .filter_map(|item| {
+            let path = item.path();
+            let id = disk::id(&path)?;
+            Some(TrashItem { path, id })
+        })
         .collect();
-    items.sort();
+    items.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(items)
 }
 

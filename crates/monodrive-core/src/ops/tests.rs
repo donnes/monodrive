@@ -364,22 +364,78 @@ fn empty_trash_erases_only_what_was_listed_in_the_trash_and_only_for_the_window(
     std::fs::write(&keep, "keep").unwrap();
     assert!(run(&mut engine, rename(&keep, "kept.txt")).is_ok());
     let listed = trash_items(&trash).unwrap();
-    assert_eq!(listed, [trash.join("old folder"), trash.join("old.txt")]);
+    let paths =
+        |items: &[TrashItem]| -> Vec<PathBuf> { items.iter().map(|i| i.path.clone()).collect() };
+    assert_eq!(
+        paths(&listed),
+        [trash.join("old folder"), trash.join("old.txt")]
+    );
     // Something that arrives after the count isn't erased with it.
     std::fs::write(trash.join("new.txt"), "new").unwrap();
-    let empty = |paths: Vec<PathBuf>| Request::EmptyTrash { paths };
+    let empty = |items: Vec<TrashItem>| Request::EmptyTrash { items };
     let agent = Origin::Agent { client: None };
     let refused = engine
         .submit(submission(agent, empty(listed.clone())))
         .unwrap_err();
     assert!(refused.starts_with("Only a person"), "{refused}");
-    assert!(run(&mut engine, empty(vec![files.join("kept.txt")])).is_err());
-    assert_eq!(moved(run(&mut engine, empty(listed.clone()))), listed);
-    assert_eq!(trash_items(&trash).unwrap(), [trash.join("new.txt")]);
+    let outside = TrashItem {
+        path: files.join("kept.txt"),
+        id: disk::id(&files.join("kept.txt")).unwrap(),
+    };
+    assert!(run(&mut engine, empty(vec![outside])).is_err());
+    assert_eq!(
+        moved(run(&mut engine, empty(listed.clone()))),
+        paths(&listed)
+    );
+    assert_eq!(
+        paths(&trash_items(&trash).unwrap()),
+        [trash.join("new.txt")]
+    );
     assert!(trash.join(".DS_Store").exists() && files.join("kept.txt").exists());
     // It joins no history: undo still reaches the rename before it.
     assert!(run(&mut engine, Request::Undo).is_ok());
     assert!(keep.exists());
+}
+
+/// A temp Trash holding `old.txt` and `old folder/x.txt`, counted.
+fn counted_trash(dir: &Path) -> (PathBuf, Vec<TrashItem>) {
+    let trash = dir.join("Trash");
+    std::fs::create_dir_all(trash.join("old folder")).unwrap();
+    std::fs::write(trash.join("old folder/x.txt"), "x").unwrap();
+    std::fs::write(trash.join("old.txt"), "old").unwrap();
+    let listed = trash_items(&trash).unwrap();
+    (trash, listed)
+}
+
+#[test]
+fn empty_trash_leaves_an_item_swapped_in_under_a_counted_name() {
+    let (dir, files, mut engine) = engine();
+    let (trash, listed) = counted_trash(dir.path());
+    // While the person reads the count, old.txt is put back and another
+    // file is trashed under its name.
+    std::fs::rename(trash.join("old.txt"), files.join("old.txt")).unwrap();
+    std::fs::write(trash.join("old.txt"), "newer").unwrap();
+    let outcome = run(&mut engine, Request::EmptyTrash { items: listed }).unwrap();
+    assert_eq!(read(&trash.join("old.txt")), "newer");
+    assert!(!trash.join("old folder").exists());
+    let skipped: Vec<&str> = outcome.failures().collect();
+    assert!(
+        skipped.len() == 1 && skipped[0].contains("old.txt"),
+        "{skipped:?}"
+    );
+}
+
+#[test]
+fn empty_trash_refuses_a_trash_that_became_a_link() {
+    let (dir, _files, mut engine) = engine();
+    let (trash, listed) = counted_trash(dir.path());
+    // The same items, but the Trash now points somewhere else.
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::rename(&trash, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &trash).unwrap();
+    let refused = run(&mut engine, Request::EmptyTrash { items: listed }).unwrap_err();
+    assert!(refused.contains("isn't the Trash folder"), "{refused}");
+    assert!(elsewhere.join("old.txt").exists() && elsewhere.join("old folder/x.txt").exists());
 }
 
 #[test]

@@ -294,7 +294,7 @@ impl Client {
 
     /// What Empty Trash would erase now. Read here, not by the owner, so it
     /// needs no connection.
-    pub fn trash_items(&self) -> Result<Vec<PathBuf>, String> {
+    pub fn trash_items(&self) -> Result<Vec<super::TrashItem>, String> {
         super::trash_items(&self.paths.trash)
     }
 
