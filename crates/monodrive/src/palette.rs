@@ -162,7 +162,8 @@ pub(crate) struct Row {
     eject: Option<PathBuf>,
     /// What ⌘⌫ or the row's button forgets.
     forget: Option<Saved>,
-    /// What else it's found by, besides its title.
+    /// What else it's found by, besides its title: a command's menu. Not a
+    /// path, whose letters would match nearly anything in order.
     found_by: String,
 }
 
@@ -202,11 +203,8 @@ impl Row {
         }
     }
 
-    /// A subtitle, which it's also found by.
     fn about(mut self, subtitle: impl Into<SharedString>) -> Self {
-        let subtitle = subtitle.into();
-        self.found_by = subtitle.to_string();
-        self.subtitle = Some(subtitle);
+        self.subtitle = Some(subtitle.into());
         self
     }
 }
@@ -1118,7 +1116,7 @@ fn glyph_for(command: &Command) -> &'static str {
 }
 
 fn add_remote_row(query: &str) -> Row {
-    let row = if query.is_empty() {
+    if query.is_empty() {
         Row {
             enabled: false,
             ..Row::new(SFTP, "server", "Add Server…", Target::AddRemote)
@@ -1132,10 +1130,6 @@ fn add_remote_row(query: &str) -> Row {
             Target::AddRemote,
         )
         .about("Saves it. Nothing connects until you open it.")
-    };
-    Row {
-        found_by: String::new(),
-        ..row
     }
 }
 

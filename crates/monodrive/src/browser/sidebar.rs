@@ -121,6 +121,14 @@ pub(super) enum Row {
     Volume(usize),
 }
 
+/// What a sidebar row stands for, wherever the rows above it have gone.
+#[derive(PartialEq)]
+pub(super) enum RowTarget {
+    Recents,
+    Favorite(PathBuf),
+    Volume(PathBuf),
+}
+
 /// A favorite being dragged by its handle.
 #[derive(Clone)]
 struct DraggedFavorite {
@@ -354,6 +362,17 @@ impl Browser {
                 (volume < self.sidebar.volumes.len()).then_some(Row::Volume(volume))
             }
         }
+    }
+
+    /// What the row the sidebar's keys are on stands for.
+    pub(super) fn sidebar_target(&self) -> Option<RowTarget> {
+        Some(match self.row_at(self.sidebar_cursor)? {
+            Row::Recents => RowTarget::Recents,
+            Row::Favorite(ix) => {
+                RowTarget::Favorite(self.sidebar.places.get(ix)?.favorite.path.clone())
+            }
+            Row::Volume(ix) => RowTarget::Volume(self.sidebar.volumes.get(ix)?.mount.clone()),
+        })
     }
 
     /// The volume to eject for the row the sidebar's keys are on, if any.

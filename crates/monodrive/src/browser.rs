@@ -225,8 +225,8 @@ pub struct Browser {
     focus_before_sheet: Option<FocusHandle>,
     /// What waits for the first frame drawn without the sheet.
     after_sheet: Option<AfterSheet>,
-    /// The folder and selection as the palette opened.
-    palette_target: Option<(PathBuf, Vec<PathBuf>)>,
+    /// What commands would act on as the palette opened.
+    palette_target: Option<PaletteTarget>,
     /// The folder just left, to select once its parent lists.
     reselect: Option<PathBuf>,
     search: Entity<TextField>,
@@ -1937,18 +1937,26 @@ impl Browser {
             servers: self.sidebar.servers.clone(),
             index: self.index.clone(),
         };
-        self.palette_target = Some(self.target());
+        self.palette_target = Some(self.target(window));
         let view = cx.new(|cx| PaletteView::new(now, cx));
         cx.subscribe_in(&view, window, Self::palette_event).detach();
         window.focus(&view.focus_handle(cx), cx);
         self.set_sheet(Some(Sheet::Palette(view)), cx);
     }
 
-    /// The folder shown and what's selected, whatever order the rows are in.
-    fn target(&self) -> (PathBuf, Vec<PathBuf>) {
+    /// What commands would act on now.
+    fn target(&self, window: &Window) -> PaletteTarget {
         let mut chosen = self.chosen();
         chosen.sort();
-        (self.folder().to_path_buf(), chosen)
+        PaletteTarget {
+            folder: self.folder().to_path_buf(),
+            chosen,
+            sidebar: self
+                .sidebar_focus
+                .is_focused(window)
+                .then(|| self.sidebar_target())
+                .flatten(),
+        }
     }
 
     /// Runs a command chosen in the palette, unless it would act on something
@@ -1962,7 +1970,7 @@ impl Browser {
     ) {
         let opened_on = self.palette_target.take();
         if commands::acts_on_target(action.name())
-            && opened_on.is_some_and(|target| target != self.target())
+            && opened_on.is_some_and(|target| target != self.target(window))
         {
             let said = "The selection changed while the palette was open.";
             return self.toast(said.into(), true, None, cx);
@@ -3745,6 +3753,16 @@ enum Sheet {
     Jobs,
     EmptyTrash(Entity<EmptyTrashView>),
     Connect(Entity<ConnectView>),
+}
+
+/// What a command chosen in the palette would act on.
+#[derive(PartialEq)]
+struct PaletteTarget {
+    folder: PathBuf,
+    /// What's selected, whatever order the rows are in.
+    chosen: Vec<PathBuf>,
+    /// The sidebar's row, while the sidebar has the keys.
+    sidebar: Option<sidebar::RowTarget>,
 }
 
 /// What needs the browser's commands back. A frame with a sheet holds them

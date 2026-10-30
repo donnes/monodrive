@@ -1018,6 +1018,52 @@ fn a_paste_finishing_under_the_palette_stops_move_to_trash(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn a_drive_going_under_the_palette_stops_eject_reaching_the_next_one(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let drive = |name: &str| volume(name, &Path::new("/Volumes").join(name), name, 1000, 250);
+    let world = world(vec![startup(), drive("A"), drive("B"), drive("C")], cx);
+    let owned = own(cx);
+    let (browser, cx) = open(&world, &project, cx);
+    let favorites = browser.read_with(cx, |b, _| b.sidebar.places.len());
+    // Recents, the favorites, the startup disk, A, then B.
+    browser.update_in(cx, |b, window, cx| {
+        b.sidebar_cursor = favorites + 3;
+        window.focus(&b.sidebar_focus, cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let eject_from_palette = |cx: &mut VisualTestContext| {
+        cx.simulate_input("eject");
+        cx.run_until_parked();
+        let view = palette(&browser, cx);
+        assert_eq!(under_keys(&view, cx).as_deref(), Some("Eject"));
+        press(cx, "enter");
+    };
+    press(cx, "cmd-k");
+    world.fake.volumes.lock().unwrap().remove(1);
+    world.volumes_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    eject_from_palette(cx);
+    assert!(world.fake.ejected.lock().unwrap().is_empty());
+    assert_eq!(
+        toast(&browser, cx),
+        Some((
+            "The selection changed while the palette was open.".into(),
+            true,
+            false
+        ))
+    );
+    // Opened on the row as it is now, it runs.
+    press(cx, "cmd-k");
+    eject_from_palette(cx);
+    assert_eq!(
+        world.fake.ejected.lock().unwrap()[0],
+        Path::new("/Volumes/C")
+    );
+    release(owned, cx);
+}
+
+#[gpui::test]
 fn the_palette_over_another_sheet_still_knows_what_would_run(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let world = world(vec![startup()], cx);
