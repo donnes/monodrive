@@ -30,6 +30,7 @@ pub const SIDEBAR_ROW_HEIGHT: f32 = 32.;
 pub const ROW_GAP: f32 = 2.;
 /// The group a [`row_slot`] hovers its row through.
 pub const ROW_GROUP: &str = "row";
+pub const PATH_BAR_HEIGHT: f32 = 22.;
 pub const BUTTON_HEIGHT: f32 = 24.;
 pub const FIELD_HEIGHT: f32 = 28.;
 

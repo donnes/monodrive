@@ -219,14 +219,7 @@ fn drives_show_how_full_each_is_with_marks_and_follow_the_watch(cx: &mut TestApp
     assert!(on_screen(cx, "volume-eject-1"));
     // The status line has the space of the volume the folder is on.
     let space = browser.read_with(cx, |browser, _| browser.space_here());
-    assert_eq!(
-        space,
-        Some(format!(
-            "{} free of {}",
-            format_bytes(400),
-            format_bytes(1000)
-        ))
-    );
+    assert_eq!(space, Some(format!("{} free", format_bytes(400),)));
 
     // Nothing new is listed until the watch speaks: no polling.
     world.fake.volumes.lock().unwrap().truncate(2);

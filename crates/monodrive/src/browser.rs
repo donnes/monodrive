@@ -85,6 +85,7 @@ actions!(
         GoComputer,
         OpenSettings,
         ToggleHiddenFiles,
+        TogglePathBar,
         GoToFolder,
         CopyPath,
         ViewAsList,
@@ -201,8 +202,10 @@ const COLLAPSED: &str = "…";
 const CRUMB_PADDING: f32 = 12.;
 /// A crumb's chevron and the gaps either side of it.
 const CRUMB_CHEVRON: f32 = 16.;
-/// The title bar's Back, Forward, gaps and right padding, and a point of slack.
-const BAR_CHROME: f32 = 74.;
+/// The path bar's side padding, a point of slack, and the pane's margin and
+/// border when it's a card.
+const PATH_BAR_CHROME: f32 = 18.;
+const PANE_CARD_INSET: f32 = 10.;
 
 pub struct Browser {
     /// Keeps the browser's keys working wherever focus is.
@@ -2352,6 +2355,7 @@ impl Browser {
             } else {
                 accent()
             })
+            .debug_selector(|| "rename-field".into())
             .key_context("Rename")
             .on_action(
                 cx.listener(|this, _: &CommitRename, window, cx| this.commit_rename(window, cx)),
@@ -2368,7 +2372,33 @@ impl Browser {
             .px(px(6.))
             .bg(fill)
             .text_color(content(1.))
-            .child(renaming.field.clone()),
+            .child(renaming.field.clone())
+            .children(renaming.error.clone().map(|why| {
+                // Over the row below, so no row moves, and kept in the window.
+                div().absolute().left_0().top(gpui::relative(1.)).child(
+                    gpui::deferred(
+                        gpui::anchored()
+                            .anchor(gpui::Anchor::TopLeft)
+                            .offset(gpui::point(px(0.), px(2.)))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(
+                                div()
+                                    .debug_selector(|| "rename-error".into())
+                                    .max_w(px(360.))
+                                    .px_2()
+                                    .rounded_full()
+                                    .bg(fill)
+                                    .border_1()
+                                    .border_color(content(0.12))
+                                    .text_size(px(theme::TEXT_SMALL))
+                                    .text_color(danger())
+                                    .truncate()
+                                    .child(why),
+                            ),
+                    )
+                    .with_priority(1),
+                )
+            })),
         )
     }
 
@@ -2389,7 +2419,7 @@ impl Browser {
     }
 
     /// The folder's path as clickable steps, from the disk to here.
-    fn path_bar(
+    fn crumbs(
         &self,
         room: f32,
         most: f32,
@@ -2399,12 +2429,6 @@ impl Browser {
         let current = self.folder().to_path_buf();
         let steps: Vec<PathBuf> = current.ancestors().map(Path::to_path_buf).collect();
         let last = steps.len().saturating_sub(1);
-        let step_name = |path: &Path| {
-            path.file_name().map_or_else(
-                || "Macintosh HD".to_string(),
-                |name| name.to_string_lossy().into_owned(),
-            )
-        };
         let widths: Vec<f32> = steps
             .iter()
             .rev()
@@ -2415,21 +2439,20 @@ impl Browser {
                 } else {
                     FontWeight::NORMAL
                 };
-                let text = text_width(&step_name(path), theme::TEXT_BODY, weight, window);
+                let text = text_width(&level_name(path), theme::TEXT_SMALL, weight, window);
                 text + CRUMB_PADDING + if ix > 0 { CRUMB_CHEVRON } else { 0. }
             })
             .collect();
         let ellipsis =
-            text_width(COLLAPSED, theme::TEXT_BODY, FontWeight::NORMAL, window) + CRUMB_PADDING;
+            text_width(COLLAPSED, theme::TEXT_SMALL, FontWeight::NORMAL, window) + CRUMB_PADDING;
         let hidden = hidden_levels(&widths, ellipsis, room);
         div()
-            .ml_1()
             .flex_shrink_0()
             .max_w(px(most))
             .flex()
             .items_center()
             .gap(px(2.))
-            .text_size(px(theme::TEXT_BODY))
+            .text_size(px(theme::TEXT_SMALL))
             .overflow_hidden()
             .when(hidden > 0, |d| {
                 d.child(
@@ -2448,7 +2471,7 @@ impl Browser {
                     .enumerate()
                     .skip(hidden)
                     .map(|(ix, path)| {
-                        let name = step_name(&path);
+                        let name = level_name(&path);
                         let here = ix == last;
                         // Clicking an ancestor selects the folder on the way back down.
                         let child = current
@@ -2470,7 +2493,7 @@ impl Browser {
                                     .aria_label(name.clone())
                                     .px(px(6.))
                                     .rounded_full()
-                                    .line_height(px(theme::BUTTON_HEIGHT))
+                                    .line_height(px(18.))
                                     .truncate()
                                     .map(|d| {
                                         if here {
@@ -2540,41 +2563,18 @@ impl Browser {
         .size_0()
     }
 
-    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // As Finder's status bar: what's selected and the size of its files.
-        let count = match (self.selection.len(), self.entries.len()) {
-            (0, 1) => "1 item".to_string(),
-            (0, n) => format!("{n} items"),
-            (chosen, _) => match self.selection.size() {
-                0 => format!("{chosen} of {} selected", self.entries.len()),
-                size => format!(
-                    "{chosen} of {} selected, {}",
-                    self.entries.len(),
-                    format_bytes(size)
-                ),
-            },
+    /// One job: where am I, among which tabs. The folder's name is where the
+    /// first tab will go, so it stays put when tabs arrive.
+    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = if !self.query.is_empty() {
+            "Search results".to_string()
+        } else if self.showing_recents() {
+            "Recents".to_string()
+        } else if self.in_trash(cx) {
+            "Trash".to_string()
+        } else {
+            level_name(self.folder())
         };
-        let space = self.space_here();
-        let error = self
-            .renaming
-            .as_ref()
-            .and_then(|renaming| renaming.error.clone());
-        let ring = self.jobs.read(cx).ring();
-        // The path gets what the status text leaves. Only when the folder's
-        // own name won't fit in that does the status text give way.
-        let sidebar = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
-        let bar = window.viewport_size().width.as_f32() - sidebar;
-        let status_width = |text: &String, most: f32| {
-            let width = text_width(text, theme::TEXT_SMALL, FontWeight::NORMAL, window);
-            width.min(most) + 12.
-        };
-        let status = status_width(&count, f32::MAX)
-            + space
-                .as_ref()
-                .map_or(0., |text| status_width(text, f32::MAX))
-            + error.as_ref().map_or(0., |text| status_width(text, 360.));
-        let most = (bar - BAR_CHROME).max(0.);
-        let room = most - status - if ring.is_some() { 28. } else { 0. };
         div()
             .h(px(theme::TITLE_BAR_HEIGHT))
             .flex_shrink_0()
@@ -2595,78 +2595,109 @@ impl Browser {
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.step_history(1, cx))),
             )
-            .map(|d| {
-                if self.showing_folder() {
-                    d.child(self.path_bar(room, most, window, cx))
-                } else {
-                    d.child(
-                        div()
-                            .ml_1()
-                            .text_size(px(theme::TEXT_BODY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(if self.query.is_empty() {
-                                "Recents"
-                            } else {
-                                "Search results"
-                            }),
-                    )
-                }
-            })
-            .child(drag_area().flex_1().h_full())
-            .children(error.map(|why| {
-                div()
-                    .min_w_0()
-                    .max_w(px(360.))
-                    .truncate()
-                    .text_size(px(theme::TEXT_SMALL))
-                    .text_color(danger())
-                    .child(why)
-            }))
             .child(
                 div()
+                    .ml_1()
+                    .px(px(6.))
                     .min_w_0()
                     .truncate()
-                    .text_size(px(theme::TEXT_SMALL))
-                    .text_color(content(0.65))
-                    .child(count),
+                    .text_size(px(theme::TEXT_BODY))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
             )
-            .children(space.map(|space| {
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .ml_2()
-                    .text_size(px(theme::TEXT_SMALL))
-                    .text_color(content(0.65))
-                    .child(space)
-            }))
-            .children(ring.map(|ring| {
+            .child(drag_area().flex_1().h_full())
+            .children(self.jobs.read(cx).ring().map(|ring| {
                 ring.on_click(cx.listener(|this, _, window, cx| this.toggle_jobs(window, cx)))
             }))
     }
 
-    /// The free and total space of the volume the folder on screen is on.
+    /// The thin bar under the files: the path on the left, what's selected
+    /// and the free space on the right. It belongs to the pane, so each pane
+    /// gets its own. The path has what the status leaves, and only when the
+    /// folder's own name won't fit in that does the status give way.
+    fn path_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let prefs = cx.global::<Preferences>();
+        if !prefs.show_path_bar {
+            return None;
+        }
+        let inset = match prefs.workspace_style {
+            WorkspaceStyle::Boxy => 0.,
+            _ => PANE_CARD_INSET,
+        };
+        let sidebar = sidebar_width(prefs.sidebar_width, window);
+        // As Finder's status bar: what's selected and the size of its files.
+        let count = match (self.selection.len(), self.entries.len()) {
+            (0, 1) => "1 item".to_string(),
+            (0, n) => format!("{n} items"),
+            (chosen, _) => match self.selection.size() {
+                0 => format!("{chosen} of {} selected", self.entries.len()),
+                size => format!(
+                    "{chosen} of {} selected, {}",
+                    self.entries.len(),
+                    format_bytes(size)
+                ),
+            },
+        };
+        let status = match self.space_here() {
+            Some(space) => format!("{count} · {space}"),
+            None => count,
+        };
+        let width = window.viewport_size().width.as_f32() - sidebar - inset - PATH_BAR_CHROME;
+        let most = width.max(0.);
+        let taken = text_width(&status, theme::TEXT_SMALL, FontWeight::NORMAL, window) + 2. * 12.;
+        Some(
+            div()
+                .debug_selector(|| "path-bar".into())
+                .h(px(theme::PATH_BAR_HEIGHT))
+                .flex_shrink_0()
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_3()
+                .border_t_1()
+                .border_color(content(0.06))
+                .text_size(px(theme::TEXT_SMALL))
+                .when(self.showing_folder(), |d| {
+                    d.child(self.crumbs(most - taken, most, window, cx))
+                })
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(content(0.65))
+                        .child(status),
+                ),
+        )
+    }
+
+    /// The free space of the volume the folder on screen is on.
     fn space_here(&self) -> Option<String> {
         if !self.showing_folder() {
             return None;
         }
         let volume = monodrive_core::volumes::holding(&self.sidebar.volumes, self.folder())?;
-        (volume.total > 0).then(|| {
-            format!(
-                "{} free of {}",
-                format_bytes(volume.free),
-                format_bytes(volume.total)
-            )
-        })
+        (volume.total > 0).then(|| format!("{} free", format_bytes(volume.free)))
     }
 
     /// The toast at the bottom of the files, with its Undo.
     fn toast_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let toast = self.toast.as_ref()?;
+        // Above the path bar, if it's showing.
+        let bar = if cx.global::<Preferences>().show_path_bar {
+            theme::PATH_BAR_HEIGHT
+        } else {
+            0.
+        };
         let ink = if toast.failed { danger() } else { content(1.) };
         Some(
             div()
                 .absolute()
-                .bottom(px(16.))
+                .bottom(px(16. + bar))
                 .left_0()
                 .right_0()
                 .flex()
@@ -3411,6 +3442,9 @@ impl Render for Browser {
             .on_action(|_: &ToggleHiddenFiles, _, cx| {
                 preferences::update(cx, |p| p.show_hidden = !p.show_hidden)
             })
+            .on_action(|_: &TogglePathBar, _, cx| {
+                preferences::update(cx, |p| p.show_path_bar = !p.show_path_bar)
+            })
             .on_action(|_: &ViewAsList, _, cx| preferences::update(cx, |p| p.view = View::List))
             .on_action(|_: &ViewAsGrid, _, cx| preferences::update(cx, |p| p.view = View::Grid))
             .on_action(|_: &SortByName, _, cx| sort_by(SortBy::Name, cx))
@@ -3443,7 +3477,7 @@ impl Render for Browser {
                             .border_l_1()
                             .border_color(content(0.06))
                     })
-                    .child(self.title_bar(window, cx))
+                    .child(self.title_bar(cx))
                     .child(
                         div()
                             .relative()
@@ -3504,6 +3538,7 @@ impl Render for Browser {
                                 )
                             })
                             .child(list)
+                            .children(self.path_bar(window, cx))
                             .children(self.toast_view(cx)),
                     ),
             )
@@ -3719,6 +3754,14 @@ fn sidebar_width(wanted: f32, window: &Window) -> f32 {
     wanted
         .min(room)
         .clamp(*SIDEBAR_WIDTHS.start(), *SIDEBAR_WIDTHS.end())
+}
+
+/// What a level of a path is called.
+fn level_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || "Macintosh HD".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 fn text_width(text: &str, size: f32, weight: FontWeight, window: &Window) -> f32 {
@@ -4749,15 +4792,51 @@ mod tests {
         let _owned = own(cx);
         let (browser, cx) = browse(&project, cx);
         press(cx, "down down down enter");
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let before = cx.debug_bounds("rename-field").unwrap();
         retype(cx, "zeta");
         press(cx, "enter");
         assert!(editing(&browser, cx).unwrap().1.is_some());
+        // The reason sits under the field, inside the window, and moves no row.
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let note = cx.debug_bounds("rename-error").unwrap();
+        let field = cx.debug_bounds("rename-field").unwrap();
+        assert_eq!(field, before);
+        assert!(note.top() >= field.bottom(), "{note:?} {field:?}");
+        // Even on the window's last visible row.
+        cx.simulate_resize(gpui::size(px(800.), px(170.)));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let note = cx.debug_bounds("rename-error").unwrap();
+        assert!(note.bottom() <= px(170.), "{note:?}");
         press(cx, "escape");
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("rename-error"), None);
         assert_eq!(editing(&browser, cx), None);
         assert!(project.join("a.txt").exists());
         // The keys are back on the list, not in a field that went away.
         press(cx, "up");
         assert_eq!(shown(&browser, cx).1, ["zeta"]);
+    }
+
+    #[gpui::test]
+    fn the_path_bar_shows_by_default_and_its_command_hides_it_for_good(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let (_browser, cx) = browse(&project, cx);
+        let shown = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            cx.debug_bounds("path-bar").is_some()
+        };
+        assert!(shown(cx));
+        press(cx, "alt-cmd-p");
+        assert!(!shown(cx));
+        assert!(!cx.update(|_, cx| cx.global::<Preferences>().show_path_bar));
+        press(cx, "alt-cmd-p");
+        assert!(shown(cx));
     }
 
     #[gpui::test]

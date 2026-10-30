@@ -5,7 +5,8 @@
 //! `cargo run -p monodrive --example snapshot -- [folder]` writes
 //! `target/snapshots/list.png`, `grid.png`, `rename.png`, `menu.png`,
 //! `menu-grid.png`, `menu-folder.png`, `jobs.png`, `ring-waiting.png`,
-//! `rename-error.png`, `toast.png` and `empty-trash.png`.
+//! `rename-error.png`, `rename-error-grid.png`, `toast.png` and
+//! `empty-trash.png`.
 //! Without a folder it draws a made-up one, so the pictures show nobody's
 //! files. Rename edits the fifth name in place. The menus are the context
 //! menu on the second entry, in the list and the grid, and on the folder.
@@ -18,8 +19,9 @@
 //! so nothing real is listed, mounted or ejected. The last pictures are
 //! `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
 //! `recents.png`. Then `palette.png`, `goto.png`, `settings-menu.png` and one
-//! `settings-<page>.png` for each Settings page, and `background.png`, the
-//! list over a picture that runs from bright to dark.
+//! `settings-<page>.png` for each Settings page, `background.png`, the list
+//! over a picture that runs from bright to dark, `narrow.png`, where the path
+//! collapses, and `no-path-bar.png`.
 //!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
@@ -193,6 +195,18 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     type_text(&mut cx, window, &taken)?;
     dispatch(&mut cx, window, &CommitRename)?;
     save(&mut cx, window, out, "rename-error")?;
+    dispatch(&mut cx, window, &CancelRename)?;
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            view: View::Grid,
+            ..base.clone()
+        })
+    });
+    dispatch(&mut cx, window, &Rename)?;
+    type_text(&mut cx, window, &taken)?;
+    dispatch(&mut cx, window, &CommitRename)?;
+    save(&mut cx, window, out, "rename-error-grid")?;
+    cx.update(|cx| cx.set_global(base.clone()));
     // A free name, then Undo once it's drawn.
     dispatch(&mut cx, window, &CancelRename)?;
     dispatch(&mut cx, window, &Rename)?;
@@ -256,6 +270,24 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     }
     press(&mut cx, window, "down")?;
     save(&mut cx, window, out, "settings-menu")?;
+
+    let window = cx.open_window(size(px(640.), px(420.)), |_, cx| {
+        let folder = folder.to_path_buf();
+        cx.new(|cx| Browser::new(folder, cx))
+    })?;
+    cx.run_until_parked();
+    dispatch(&mut cx, window, &SelectLast)?;
+    save(&mut cx, window, out, "narrow")?;
+
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            show_path_bar: false,
+            ..base.clone()
+        })
+    });
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    save(&mut cx, window, out, "no-path-bar")?;
 
     let picture = scratch.path().join("background.png");
     let (bright, dark) = (0xf4 as f32, 0x18 as f32);

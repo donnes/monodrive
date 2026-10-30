@@ -240,9 +240,9 @@ impl Browser {
             return None;
         }
         let title = match self.trash_header.count {
-            None => "Trash".to_string(),
-            Some(1) => "Trash · 1 item".to_string(),
-            Some(n) => format!("Trash · {n} items"),
+            None => String::new(),
+            Some(1) => "1 item".to_string(),
+            Some(n) => format!("{n} items"),
         };
         let (known, why) = self.put_back();
         let can_empty = self.trash_header.count.is_some_and(|count| count > 0);
@@ -260,7 +260,7 @@ impl Browser {
                     div()
                         .flex_shrink_0()
                         .text_size(px(theme::TEXT_BODY))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::MEDIUM)
                         .child(title),
                 )
                 .child(

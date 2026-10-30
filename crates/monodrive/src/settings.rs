@@ -854,22 +854,41 @@ impl SettingsView {
             group(
                 "View",
                 None,
-                vec![row(
-                    "View as",
-                    Some("⌘1 and ⌘2 switch it too."),
-                    self.focusable(
-                        "view",
-                        true,
-                        segmented(
+                vec![
+                    row(
+                        "View as",
+                        Some("⌘1 and ⌘2 switch it too."),
+                        self.focusable(
                             "view",
-                            "View as",
-                            p.view,
-                            &[(View::List, "List"), (View::Grid, "Grid")],
-                            |p, view| p.view = view,
+                            true,
+                            segmented(
+                                "view",
+                                "View as",
+                                p.view,
+                                &[(View::List, "List"), (View::Grid, "Grid")],
+                                |p, view| p.view = view,
+                            ),
+                            cx,
                         ),
-                        cx,
                     ),
-                )],
+                    row(
+                        "Show path bar",
+                        Some(
+                            "The path, selection and free space under the files. ⌥⌘P switches it too.",
+                        ),
+                        self.focusable(
+                            "show-path-bar",
+                            true,
+                            toggle(
+                                "show-path-bar",
+                                "Show path bar",
+                                p.show_path_bar,
+                                |p, on| p.show_path_bar = on,
+                            ),
+                            cx,
+                        ),
+                    ),
+                ],
             ),
             group(
                 "Grid",

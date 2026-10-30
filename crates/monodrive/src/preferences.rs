@@ -85,6 +85,8 @@ pub const UI_SCALE_PERCENTS: [u32; 16] = [
 #[serde(default)]
 pub struct Preferences {
     pub show_hidden: bool,
+    /// The thin bar under the files, with the path and the status.
+    pub show_path_bar: bool,
     pub theme: Theme,
     /// A preset from `palettes::PALETTES`.
     pub palette: String,
@@ -136,6 +138,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             show_hidden: false,
+            show_path_bar: true,
             theme: Theme::Dark,
             palette: "default".into(),
             accent: None,
@@ -174,6 +177,7 @@ impl Preferences {
         self.window_size = defaults.window_size;
         self.window_frame = defaults.window_frame;
         self.row_size = defaults.row_size;
+        self.show_path_bar = defaults.show_path_bar;
         self.view = defaults.view;
         self.grid_icon = defaults.grid_icon;
         self.grid_label = defaults.grid_label;
@@ -197,6 +201,7 @@ impl Preferences {
             window_size: self.window_size,
             window_frame: self.window_frame,
             row_size: self.row_size,
+            show_path_bar: self.show_path_bar,
             view: self.view,
             grid_icon: self.grid_icon,
             grid_label: self.grid_label,

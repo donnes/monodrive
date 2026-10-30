@@ -31,11 +31,17 @@ The header of a sheet with a query (palette, Go to Folder, Connect) is a bare fi
 - Every outlined text field is 28 pt high. The exception is rename, which fits inside the row it edits.
 - Rows in menus, pickers and popovers are 28 pt. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt.
 - Rows in a stacked list of highlightable rows have a 2 pt gap (`ROW_GAP`), so highlights never touch. The gap belongs to the row above it: `row_slot` holds the role and the handlers, the row inside holds the highlight, so a hover, click or drop in the gap lands on that row. Two lists differ. The file list is virtualized, its rows touch as in Finder, and a change to its row height touches `uniform_list`, marquee math and the scrolling budget. Settings' page list keeps a plain gap, because each page is a Tab stop whose focus ring has to fit the row.
-- The title bar, a sheet's header, the Trash bar and the sidebar's foot are 40 pt. A toast is 36 pt. A Settings row is at least 44 pt.
+- The top bar, a sheet's header, the Trash bar and the sidebar's foot are 40 pt. The path bar is 22 pt. A toast is 36 pt. A Settings row is at least 44 pt.
 
-### Path crumbs
+### Top bar and path bar
 
-The current folder and as many ancestors as fit, at full width, counted from the right. Everything else collapses into one "…", which is only a marker: Go to Folder reaches the hidden levels. No ancestor is shown cut short. The current folder's name doesn't truncate until the status text beside it has given way.
+The top bar has one job: where am I, among which tabs. It holds Back and Forward, the current folder's name in semibold, and the jobs ring at the right. Nothing else goes there. The name is where the first tab will go, so it doesn't move when tabs arrive.
+
+The path bar is 22 pt, under the files, and part of the pane, so each pane gets its own. ⌥⌘P or Settings hides it, and it's on by default. On the left, in a folder, are the path crumbs. On the right is the status: `1 of 7 selected, 6 bytes · 49.6 GB free`, or `2 items` for search results and Recents. Toasts sit above it.
+
+Path crumbs show the current folder and as many ancestors as fit, at full width, counted from the right. Everything else collapses into one "…", which is only a marker: Go to Folder reaches the hidden levels. No ancestor is shown cut short. The current folder's name doesn't truncate until the status text beside it has given way.
+
+A name that can't be used turns the rename field's outline red and shows one short line right under it, over the row below. No row moves, and the line stays in the window.
 
 ### Type
 
@@ -110,13 +116,13 @@ The SVGs in `crates/monodrive/assets/icons`, one stroke weight, tinted with `.te
 
 ### macOS conventions
 
-⌘ shortcuts shown with their symbols, Finder's sizes and sort order, Trash instead of delete, ↩ for what a sheet's primary button does, Esc to leave it, and the traffic lights in the 40 pt title bar. Buttons sit at the end of a card, with the primary one last.
+⌘ shortcuts shown with their symbols, Finder's sizes and sort order, Trash instead of delete, ↩ for what a sheet's primary button does, Esc to leave it, and the traffic lights in the 40 pt top bar. Buttons sit at the end of a card, with the primary one last.
 
 ## Primitives
 
 All in `theme.rs`. Each returns an element the caller extends.
 
-- `RADIUS_ROW`, `RADIUS_CARD`, `RADIUS_THUMB`; `TEXT_CAPTION`, `TEXT_SMALL`, `TEXT_BODY`, `TEXT_TITLE`; `TITLE_BAR_HEIGHT`, `ROW_HEIGHT`, `SIDEBAR_ROW_HEIGHT`, `ROW_GAP`, `BUTTON_HEIGHT`, `FIELD_HEIGHT`.
+- `RADIUS_ROW`, `RADIUS_CARD`, `RADIUS_THUMB`; `TEXT_CAPTION`, `TEXT_SMALL`, `TEXT_BODY`, `TEXT_TITLE`; `TITLE_BAR_HEIGHT`, `PATH_BAR_HEIGHT`, `ROW_HEIGHT`, `SIDEBAR_ROW_HEIGHT`, `ROW_GAP`, `BUTTON_HEIGHT`, `FIELD_HEIGHT`.
 - `content`, `accent`, `on_accent`, `danger`, `success`, `scrim`, `well`, `knob`, `raised`: colors. `focus_ring`, `knob_shadow`, `raised_shadow`: shadows.
 - `text_button(id, label, look)`: the usual button. `button(id, look)` is its frame, for a label with an icon or one that changes. `ButtonLook` is `Secondary`, `Primary`, `Destructive`, `Caution`, `Ghost` or `Disabled`.
 - `icon_button(id, label, path, enabled)` in chrome, `row_icon_button(id, label, path, ink)` inside a row, `circle_button(id, label, side)` for a circle with other contents, such as the jobs ring.
@@ -137,6 +143,7 @@ Add a primitive once two views need it. Until then, build from the scales.
 - **An error in the accent.** Go to Folder and the shortcut recorder used to do this. Failure is `danger()`.
 - **A local red or green.** Settings had its own for errors and for Added. Use the tokens, which are tuned for both themes.
 - **Touching highlights.** A hovered row against a selected one reads as one block. Stack rows in `row_slot`, so the gap is there and still answers.
+- **A crowded top bar.** A status, an error or a button added there squeezes the name that says where you are. Put it in the path bar, or next to what it's about.
 - **A second shadow.** Each surface once had its own. Use `floating`.
 - **Control heights that vary by screen.** A button in a card is the same height as one in Settings.
 - **Label mismatch.** A button whose visible label changes still needs an `aria_label` that says what it does.

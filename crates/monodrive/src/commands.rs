@@ -14,8 +14,8 @@ use crate::browser::{
     MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenInTerminal,
     OpenSelected, OpenSettings, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom,
     RevealInFinder, ReverseSort, ShowCopiesAndMoves, ShowPackageContents, SortByKind,
-    SortByModified, SortByName, SortBySize, ToggleHiddenFiles, Undo, ViewAsGrid, ViewAsList,
-    ZoomIn, ZoomOut,
+    SortByModified, SortByName, SortBySize, ToggleHiddenFiles, TogglePathBar, Undo, ViewAsGrid,
+    ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{browser, connect, empty_trash, goto, jobs, menu, palette, settings, text_field};
@@ -398,6 +398,9 @@ pub fn all() -> Vec<Command> {
                 Box::new(ToggleHiddenFiles)
             })),
         ),
+        command("Show Path Bar", View, &["alt-cmd-p"], None, || {
+            Box::new(TogglePathBar)
+        }),
         on(
             FOLDER,
             separated(command(
@@ -695,6 +698,9 @@ fn checked(prefs: &Preferences) -> Vec<&'static str> {
     let mut ids = vec![sort, view];
     if prefs.show_hidden {
         ids.push(ToggleHiddenFiles.name());
+    }
+    if prefs.show_path_bar {
+        ids.push(TogglePathBar.name());
     }
     ids
 }
