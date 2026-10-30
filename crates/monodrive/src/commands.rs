@@ -8,15 +8,16 @@
 //! as in AppKit: a text field acts on its text, the file list on its files.
 
 use crate::browser::{
-    AddToSidebar, Back, ClearRecents, CloseTab, ConnectToServer, CopyPath, CopyToOtherPane,
-    DeselectAll, Duplicate, EditFavorites, Eject, EmptyTrash, EnclosingFolder, FocusSearch,
-    Forward, GetInfo, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
-    GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile,
-    NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInTerminal, OpenSelected,
-    OpenSettings, OpenWith, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename,
-    ResetZoom, RevealInFinder, ReverseSort, ShowCopiesAndMoves, ShowPackageContents, SortByKind,
-    SortByModified, SortByName, SortBySize, ToggleHiddenFiles, TogglePathBar, ToggleSidebar,
-    ToggleSplit, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    AddToSidebar, Back, ClearRecentSearches, ClearRecents, CloseTab, ConnectToServer, CopyPath,
+    CopyToOtherPane, DeselectAll, Duplicate, EditFavorites, Eject, EmptyTrash, EnclosingFolder,
+    FocusSearch, Forward, GetInfo, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads,
+    GoHome, GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash,
+    NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInTerminal,
+    OpenSelected, OpenSettings, OpenWith, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar,
+    Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder,
+    ShowCopiesAndMoves, ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName,
+    SortBySize, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid,
+    ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -434,6 +435,19 @@ pub fn all() -> Vec<Command> {
         separated(command("Search", Go, &["cmd-f"], BROWSER, || {
             Box::new(FocusSearch)
         })),
+        command("Search File Contents", Go, &["cmd-alt-f"], BROWSER, || {
+            Box::new(SearchContents)
+        }),
+        command("Search This Folder", Go, &[], BROWSER, || {
+            Box::new(SearchThisFolder)
+        }),
+        command("Searches…", Go, &["cmd-shift-s"], BROWSER, || {
+            Box::new(ShowSearches)
+        }),
+        command("Save Search…", Go, &[], BROWSER, || Box::new(SaveSearch)),
+        command("Clear Recent Searches", Go, &[], BROWSER, || {
+            Box::new(ClearRecentSearches)
+        }),
         on(
             FOLDER,
             command("as List", View, &["cmd-1"], None, || Box::new(ViewAsList)),

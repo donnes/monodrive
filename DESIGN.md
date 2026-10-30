@@ -59,6 +59,12 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 ⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits at the sidebar's top right, then after Forward in the top bar. The traffic lights stay, with Back and Forward right after them. The sidebar opens and closes at once, with no animation: a width that moves lays out the whole window each frame. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
 
+### Search
+
+The field's leading icon button opens its menu (⇧⌘S), a 360 pt `Popover` under the field. From the top: what a search looks at (Search Names, Search File Contents ⌥⌘F), Search Only and the folder, then Saved, each 40 pt with its query as the subtitle and row icon buttons to rename (R) and remove (⌫), then Save Search… while something's typed, then Recent and Clear Recent Searches. A name is typed in place of the row. Saving never runs anything, and removing asks nothing, because a saved search is only words. The ✕ at the field's end or Esc leaves a search, and leaving goes back to names and everywhere; with nothing typed, the first Esc does that alone. The icon turns to primary ink while the mode isn't plain, and to a file while it looks at contents, and the prompt says the mode.
+
+A content search's matching lines are rows under their file, up to 5 a file. A line's row is the height of every file row, so `uniform_list` still measures one row, and the row stands for its file: a press selects, opens or drags the file, and the keys step from file to file. A selection or stripe covers the file and its lines as one block, with the row radius only at its ends. The line number is `TEXT_CAPTION` at 0.65, right-aligned in a 40 pt column, and the line is Menlo `TEXT_SMALL` at 0.65 with each match bold in primary ink, without its indent and cut at the start when the first match is far along. Lines only fit the list, so a grid pane shows these results as a list. `, more not shown` in the status says a limit or the time budget left matches out.
+
 ### Inspector
 
 ⌘I, or Get Info in a menu, opens a 260 pt panel to the right of the panes, under the top bar, and it stays open from then on; ⌘I again, Hide Inspector or its ✕ closes it. It takes its width from the panes and moves nothing else, and it stays out when the list would keep under 200 pt. It's a card beside the pane's in Rounded, with the 8 pt gap, and a region with a hairline in Boxy.
@@ -93,7 +99,7 @@ A fixed 760 by 520 pt window of its own, not a sheet, because no main window is 
 
 ### Type
 
-The system font. Menlo only for code, paths in code boxes and tool names.
+The system font. Menlo only for code, paths in code boxes, tool names and a file's matching lines.
 
 | Size | Constant | For |
 |---|---|---|

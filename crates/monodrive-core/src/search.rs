@@ -2,7 +2,9 @@
 //! fsearch's name matching plus typed filters, such as
 //! `report kind:document size:>1mb modified:7d in:~/Work`. A `Query` prints
 //! back as the text it parsed from, so chips can rebuild the search field.
-//! `index` runs one; docs/search.md has the rules.
+//! `index` runs one; docs/search.md has the rules. A `Search` is one as the
+//! window runs it: what's typed, whether it looks at names or inside files,
+//! and where.
 
 use crate::expand_home;
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,9 @@ pub enum Term {
     Modified(Modified),
     /// The folder to search under, as typed.
     In(PathBuf),
+    /// Text to look for inside files, as `grep` does, which makes the rest of
+    /// the query pick the files read. It's how a kept content search says so.
+    Contains(String),
 }
 
 /// What `kind:` names. The groups are fsearch's `type:` extension lists,
@@ -109,6 +114,95 @@ pub enum Day {
     Date { year: i32, month: u8, day: u8 },
 }
 
+/// What a search looks at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Looks {
+    #[default]
+    Names,
+    Contents,
+}
+
+/// A search as the window runs it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Search {
+    /// What's typed. Looking at contents, its plain words are the text to
+    /// look for, one phrase, and its filters pick the files read.
+    pub text: String,
+    pub looks: Looks,
+    pub scope: Scope,
+}
+
+impl Search {
+    /// The text a kept search stores, canonical, with `contains:` saying it
+    /// looks inside files, since `SavedSearch` and `RecentSearch` hold a query.
+    pub fn stored(&self) -> Result<String, String> {
+        let (pattern, filters) = self.parts()?;
+        let contains = pattern.map(Term::Contains);
+        Ok(Query {
+            terms: contains.into_iter().chain(filters.terms).collect(),
+        }
+        .to_string())
+    }
+
+    /// What `stored` kept, ready to type and run again. Words beside a
+    /// `contains:` pick files by name, which only the token can say, so that
+    /// stays as it's written.
+    pub fn from_stored(query: &str, scope: Scope) -> Search {
+        let mut search = Search {
+            text: query.into(),
+            looks: Looks::Names,
+            scope,
+        };
+        if let Ok(parsed) = Query::parse(query)
+            && parsed.contains().is_some()
+            && !parsed.terms.iter().any(|t| matches!(t, Term::Word(_)))
+        {
+            search.looks = Looks::Contents;
+            search.text = parsed
+                .terms
+                .iter()
+                .map(|term| match term {
+                    Term::Contains(text) => text.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        search
+    }
+
+    /// The text to look for inside files, if this looks inside files and has
+    /// any, and the query that's left to pick files with. Without any, it's
+    /// a name search, so filters alone still find something.
+    pub(crate) fn parts(&self) -> Result<(Option<String>, Query), String> {
+        let query = Query::parse(&self.text)?;
+        if let Some(text) = query.contains() {
+            let pattern = text.to_string();
+            let terms = query
+                .terms
+                .into_iter()
+                .filter(|term| !matches!(term, Term::Contains(_)))
+                .collect();
+            return Ok((Some(pattern), Query { terms }));
+        }
+        if self.looks == Looks::Names {
+            return Ok((None, query));
+        }
+        let mut words = Vec::new();
+        let mut terms = Vec::new();
+        for term in query.terms {
+            match term {
+                Term::Word(word) => words.push(word),
+                other => terms.push(other),
+            }
+        }
+        Ok((
+            (!words.is_empty()).then(|| words.join(" ")),
+            Query { terms },
+        ))
+    }
+}
+
 /// Where a search looks when its query has no `in:`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -157,6 +251,10 @@ impl Query {
             "give a range such as modified:2026-01-01..2026-01-31",
         )?;
         once(|t| matches!(t, Term::In(_)), "search one folder")?;
+        once(
+            |t| matches!(t, Term::Contains(_)),
+            "give one phrase in quotes",
+        )?;
         let kinds: Vec<Kind> = self
             .terms
             .iter()
@@ -173,6 +271,14 @@ impl Query {
             )),
             _ => Ok(()),
         }
+    }
+
+    /// The text its `contains:` looks for inside files.
+    pub fn contains(&self) -> Option<&str> {
+        self.terms.iter().find_map(|term| match term {
+            Term::Contains(text) => Some(text.as_str()),
+            _ => None,
+        })
     }
 
     /// The folder it searches under: its `in:`, from the scope's folder
@@ -236,6 +342,10 @@ fn term(word: &str) -> Result<Term, String> {
         "in" => (
             (!value.is_empty()).then(|| Term::In(value.into())),
             "give a folder such as ~/Work",
+        ),
+        "contains" => (
+            (!value.is_empty()).then(|| Term::Contains(value.into())),
+            "give the text to look for inside files",
         ),
         _ => return Ok(Term::Word(word.into())),
     };
@@ -523,6 +633,7 @@ impl fmt::Display for Term {
             Term::Size(size) => write!(f, "size:{size}"),
             Term::Modified(modified) => write!(f, "modified:{modified}"),
             Term::In(path) => quoted(f, "in:", &path.to_string_lossy()),
+            Term::Contains(text) => quoted(f, "contains:", text),
         }
     }
 }
@@ -659,8 +770,62 @@ mod tests {
     }
 
     #[test]
+    fn a_content_search_keeps_its_phrase_and_filters_and_comes_back_as_typed() {
+        let contents = |text: &str| Search {
+            text: text.into(),
+            looks: Looks::Contents,
+            scope: Scope::Everywhere,
+        };
+        let search = contents("fix me kind:code");
+        let stored = search.stored().unwrap();
+        assert_eq!(stored, "contains:\"fix me\" kind:code");
+        // Plain words are the phrase; only filters pick the files.
+        let (pattern, filters) = search.parts().unwrap();
+        assert_eq!(pattern.as_deref(), Some("fix me"));
+        assert_eq!(filters.to_string(), "kind:code");
+        // Stored, it parses as a saved search's query does, and runs the same.
+        assert_eq!(Query::parse(&stored).unwrap().to_string(), stored);
+        let back = Search::from_stored(&stored, Scope::Everywhere);
+        assert_eq!(back.looks, Looks::Contents);
+        assert_eq!(back.text, "fix me kind:code");
+        assert_eq!(back.parts().unwrap(), search.parts().unwrap());
+
+        // Filters alone have nothing to look for, so they find by name.
+        let (pattern, filters) = contents("kind:image").parts().unwrap();
+        assert_eq!(pattern, None);
+        assert_eq!(filters.to_string(), "kind:image");
+
+        // A name search stays one, and its words stay words.
+        let names = Search {
+            text: "Report   kind:doc".into(),
+            ..Search::default()
+        };
+        assert_eq!(names.stored().unwrap(), "Report kind:document");
+        let back = Search::from_stored("Report kind:document", Scope::Everywhere);
+        assert_eq!(back.looks, Looks::Names);
+        assert_eq!(back.text, "Report kind:document");
+
+        // Typed by hand it looks inside files in either mode, and the words
+        // beside it pick the files by name, so it keeps the token.
+        let (pattern, filters) = contents("contains:todo notes").parts().unwrap();
+        assert_eq!(pattern.as_deref(), Some("todo"));
+        assert_eq!(filters.to_string(), "notes");
+        let stored = contents("contains:todo notes").stored().unwrap();
+        let back = Search::from_stored(&stored, Scope::Everywhere);
+        assert_eq!(back.text, "contains:todo notes");
+        assert_eq!(back.parts().unwrap().0.as_deref(), Some("todo"));
+
+        assert_eq!(
+            contents("size:big").stored().unwrap_err(),
+            "size:big: give a size such as >10mb, <=1gb or 1mb..10mb"
+        );
+    }
+
+    #[test]
     fn a_bad_filter_names_its_token_and_says_why() {
         for (typed, error) in [
+            ("contains:", "contains:: give the text"),
+            ("contains:a contains:b", "contains:b: a search takes one"),
             ("kind:bogus", "kind:bogus: kinds are image, video"),
             ("kind:", "kind:: kinds are"),
             ("ext:", "ext:: give extensions"),

@@ -521,8 +521,10 @@ impl Browser {
         let (back, forward) = (pane.at > 0, pane.at + 1 < pane.history.len());
         let closed = !cx.global::<Preferences>().show_sidebar;
         // With no sidebar to hold it, the field shows while it's in use.
-        let searching =
-            closed && (!pane.query.is_empty() || pane.search.focus_handle(cx).is_focused(window));
+        let searching = closed
+            && (!pane.query.is_empty()
+                || pane.search.focus_handle(cx).is_focused(window)
+                || self.searches_open());
         let lights = (traffic_lights::REACH + LIGHTS_GAP) / window.content_zoom();
         let titles: Vec<String> = self.tabs.iter().map(|tab| tab.title(cx)).collect();
         let several = titles.len() > 1;

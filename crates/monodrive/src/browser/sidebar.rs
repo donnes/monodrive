@@ -5,6 +5,7 @@
 
 use super::drag::{Spot, Target, offers};
 use super::pane::Stop;
+use super::searches;
 use super::{
     Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, OpenInNewTab, OpenPlace,
     OpenSelected, Operations, PlaceNext, PlacePrevious, Sheet, drag_area, home, lock,
@@ -12,7 +13,9 @@ use super::{
 };
 use crate::commands::{self, Scope};
 use crate::preferences::Preferences;
-use crate::theme::{self, ButtonLook, accent, content, icon, icon_button, section_label};
+use crate::theme::{
+    self, ButtonLook, accent, content, icon, icon_button, row_icon_button, section_label,
+};
 use gpui::{
     Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, KeyDownEvent,
     MouseButton, MouseDownEvent, Pixels, Point, Render, Role, Stateful, Task, Window, div,
@@ -20,9 +23,10 @@ use gpui::{
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::Entry;
-use monodrive_core::index::Index;
+use monodrive_core::index::{Caps, Found, Index};
 use monodrive_core::ops::{self, Origin};
 use monodrive_core::places::{Availability, Place, Store};
+use monodrive_core::search::{Looks, Search};
 use monodrive_core::servers::{self, Cancel, Prompt};
 use monodrive_core::volumes::{self, Volume};
 use std::os::unix::fs::MetadataExt;
@@ -58,6 +62,14 @@ pub trait Drives: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<Entry>, String>;
+    /// What a search in the window finds, through `started`, which starts the
+    /// index if it may. Reads the disk, so call it off the UI thread.
+    fn search<'a>(
+        &self,
+        started: &dyn Fn() -> Result<&'a Index, String>,
+        search: &Search,
+        limit: usize,
+    ) -> Result<Found, String>;
 }
 
 /// The real thing.
@@ -98,6 +110,15 @@ impl Drives for System {
             Some(Ok(index)) => index.find(query, limit),
             _ => Ok(Vec::new()),
         }
+    }
+
+    fn search<'a>(
+        &self,
+        started: &dyn Fn() -> Result<&'a Index, String>,
+        search: &Search,
+        limit: usize,
+    ) -> Result<Found, String> {
+        started()?.run(search, limit, Caps::default())
     }
 }
 
@@ -956,17 +977,45 @@ impl Browser {
 
     /// The search field of the pane commands act on.
     pub(super) fn search_field(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        let search = self.pane().read(cx).search.clone();
+        let pane = self.pane().read(cx);
+        let search = pane.search.clone();
+        let (contents, plain, typed) = (
+            pane.looks == Looks::Contents,
+            pane.search_mode_is_plain(),
+            !pane.query.is_empty(),
+        );
         let focused = search.focus_handle(cx).is_focused(window);
         theme::field(if focused { accent() } else { content(0.12) })
             .debug_selector(|| "search-field".into())
             .key_context("Search")
+            .relative()
             .flex_shrink_0()
             .h(px(theme::FIELD_HEIGHT))
-            .px_2()
-            .gap_2()
-            .child(icon("search", 14.).text_color(content(0.55)))
+            .pl_1()
+            .pr_1()
+            .gap_1()
+            .child(searches::track_anchor(self.search_anchor.clone()))
+            .child(
+                row_icon_button(
+                    "search-menu-button",
+                    "Searches",
+                    if contents { "file" } else { "search" },
+                    content(if plain { 0.55 } else { 1. }),
+                )
+                .debug_selector(|| "search-menu-button".into())
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_searches(window, cx))),
+            )
             .child(div().flex_1().min_w_0().child(search))
+            .when(typed, |d| {
+                d.child(
+                    row_icon_button("clear-search", "Clear Search", "cancel-01", content(0.55))
+                        .debug_selector(|| "clear-search".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.pane()
+                                .update(cx, |pane, cx| pane.clear_search(window, cx));
+                        })),
+                )
+            })
             .when_some(
                 (!focused)
                     .then(|| commands::shortcut_label(FocusSearch.name(), cx))
@@ -976,6 +1025,7 @@ impl Browser {
                         div()
                             .text_size(px(theme::TEXT_CAPTION))
                             .text_color(content(0.65))
+                            .pr_1()
                             .child(keys),
                     )
                 },

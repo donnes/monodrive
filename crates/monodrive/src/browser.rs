@@ -5,6 +5,7 @@ mod drag;
 mod inspector;
 mod open_with;
 mod pane;
+mod searches;
 mod sidebar;
 mod tabs;
 mod trash;
@@ -15,6 +16,8 @@ mod drag_tests;
 mod inspector_tests;
 #[cfg(test)]
 mod places_tests;
+#[cfg(test)]
+mod search_tests;
 #[cfg(test)]
 mod tests;
 
@@ -39,7 +42,7 @@ use crate::text_field;
 use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
 use crate::traffic_lights;
 use gpui::{
-    AnyElement, App, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
+    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
     FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window, WindowAppearance, WindowControlArea,
     actions, canvas, div, prelude::*, px,
@@ -48,8 +51,11 @@ use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Request};
 use monodrive_core::places::Favorite;
 use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
+use searches::{SearchMenu, SearchMenuEvent};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 use tabs::{CARD_GAP, SplitDrag, Tab};
@@ -76,6 +82,11 @@ actions!(
         PageDown,
         OpenSelected,
         FocusSearch,
+        SearchContents,
+        SearchThisFolder,
+        ShowSearches,
+        SaveSearch,
+        ClearRecentSearches,
         ClearSearch,
         FocusNext,
         FocusPrevious,
@@ -280,6 +291,8 @@ pub struct Browser {
     resizing_sidebar: Option<f32>,
     /// What the inspector shows, while it's open.
     inspector: inspector::Inspector,
+    /// Where the search field was last drawn, for its menu to open under.
+    search_anchor: Rc<Cell<Bounds<Pixels>>>,
     /// The context menu, while it has the keys.
     menu: Option<OpenMenu>,
     /// A context menu asked for, opened once the next frame has drawn.
@@ -492,6 +505,7 @@ impl Browser {
             index_hovered: false,
             resizing_sidebar: None,
             inspector: inspector::Inspector::default(),
+            search_anchor: Rc::default(),
             menu: None,
             menu_request: None,
             preview: None,
@@ -1030,6 +1044,69 @@ impl Browser {
         self.set_sheet(Some(Sheet::Settings(view)), cx);
     }
 
+    fn searches_open(&self) -> bool {
+        matches!(self.sheet, Some(Sheet::Searches(_)))
+    }
+
+    /// ⇧⌘S and the field's button: the field's menu, with what it can look at,
+    /// saved searches and recent ones.
+    fn toggle_searches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.searches_open() {
+            return self.close_sheet(window, cx);
+        }
+        if self.sheet_open() {
+            return;
+        }
+        self.remember_focus(window, cx);
+        let pane = self.pane().read(cx);
+        let (current, folder) = (pane.current_search(), pane.folder().to_path_buf());
+        let anchor = self.search_anchor.clone();
+        let view = cx.new(|cx| SearchMenu::new(anchor, current, &folder, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &SearchMenuEvent, window, cx| {
+                this.close_sheet(window, cx);
+                let pane = this.pane().clone();
+                pane.update(cx, |pane, cx| match event {
+                    SearchMenuEvent::Dismissed => {}
+                    SearchMenuEvent::ToggleContents => pane.toggle_contents(window, cx),
+                    SearchMenuEvent::ToggleThisFolder => pane.toggle_this_folder(window, cx),
+                    SearchMenuEvent::Run(search) => pane.run_search(search.clone(), window, cx),
+                });
+            },
+        )
+        .detach();
+        window.focus(&view.focus_handle(cx), cx);
+        self.set_sheet(Some(Sheet::Searches(view)), cx);
+    }
+
+    /// Save Search…: the field's menu, on the name.
+    fn save_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_searches(window, cx);
+        if let Some(Sheet::Searches(view)) = &self.sheet {
+            view.update(cx, |menu, cx| menu.name_new(window, cx));
+        }
+    }
+
+    /// Clear Recent Searches, from the menu bar or the palette.
+    fn clear_recent_searches(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = cx.try_global::<Places>().map(|places| places.store.clone()) else {
+            return;
+        };
+        let cleared = cx
+            .background_executor()
+            .spawn(async move { store.clear_recent_searches() });
+        cx.spawn(async move |this, cx| {
+            let cleared = cleared.await;
+            let _ = this.update(cx, |this, cx| match cleared {
+                Ok(()) => this.toast("Cleared recent searches".into(), false, None, cx),
+                Err(why) => this.toast(why, true, None, cx),
+            });
+        })
+        .detach();
+    }
+
     /// ⌥⌘J and the ring: the copies and moves popover, under the ring.
     fn toggle_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.sheet, Some(Sheet::Jobs)) {
@@ -1507,6 +1584,7 @@ impl Render for Browser {
                 !pane.selection.is_empty(),
             )
         });
+        let has_query = !self.pane().read(cx).query.is_empty();
         let other_takes = self.tabs[self.active]
             .other()
             .is_some_and(|other| other.read(cx).takes_files(cx))
@@ -1538,6 +1616,19 @@ impl Render for Browser {
                     this.open_connect(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)))
+                .on_action(cx.listener(|this, _: &ShowSearches, window, cx| {
+                    this.toggle_searches(window, cx)
+                }))
+                .when(has_query, |d| {
+                    d.on_action(
+                        cx.listener(|this, _: &SaveSearch, window, cx| {
+                            this.save_search(window, cx)
+                        }),
+                    )
+                })
+                .on_action(cx.listener(|this, _: &ClearRecentSearches, _, cx| {
+                    this.clear_recent_searches(cx)
+                }))
                 // Esc ends a drag first, then closes Quick Look, then leaves
                 // search, then lets go of the selection.
                 .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
@@ -1686,6 +1777,7 @@ impl Render for Browser {
                 Sheet::Palette(view) => view.clone().into_any_element(),
                 Sheet::Goto(view) => view.clone().into_any_element(),
                 Sheet::Jobs => self.jobs_popover(cx).into_any_element(),
+                Sheet::Searches(view) => view.clone().into_any_element(),
                 Sheet::EmptyTrash(view) => view.clone().into_any_element(),
                 Sheet::Connect(view) => view.clone().into_any_element(),
             }))
@@ -1810,6 +1902,8 @@ enum Sheet {
     Goto(Entity<GotoView>),
     /// The copies and moves popover; `jobs` draws it.
     Jobs,
+    /// The search field's menu.
+    Searches(Entity<SearchMenu>),
     EmptyTrash(Entity<EmptyTrashView>),
     Connect(Entity<ConnectView>),
 }

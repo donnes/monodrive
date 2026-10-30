@@ -1085,7 +1085,7 @@ fn bare_card(
 }
 
 /// Keys and what they do, in a sheet's footer.
-fn key_hint(keys: &[&str], what: &'static str) -> impl IntoElement + use<> {
+pub(crate) fn key_hint(keys: &[&str], what: &'static str) -> impl IntoElement + use<> {
     div()
         .flex()
         .items_center()
@@ -1155,7 +1155,10 @@ fn glyph_for(command: &Command) -> &'static str {
         "Move to Trash" | "Empty Trash…" | "Trash" | "Put Back" => "trash",
         "Recents" => "clock",
         "Connect to Server…" => "server",
-        "Search" | "Reveal in Finder" => "search",
+        "Search" | "Search This Folder" | "Searches…" | "Save Search…" | "Reveal in Finder" => {
+            "search"
+        }
+        "Search File Contents" => "file",
         "Eject" => "eject",
         "Open" => "external-link",
         "Open With" => "app-window",

@@ -46,6 +46,10 @@
 //! Open With submenu on made-up choices of the system's own apps, and
 //! `settings-general.png` the Terminal row.
 //!
+//! `search-contents.png` is a content search with its matching lines,
+//! `search-menu.png` the search field's menu over it, with made-up saved and
+//! recent searches, and `search-save.png` that menu naming a new one.
+//!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
 
@@ -58,8 +62,8 @@ use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
     EnclosingFolder, ExtendNext, FocusSearch, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected,
-    OpenSettings, OpenWith, Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu,
-    ShowCopiesAndMoves, ToggleSplit, Undo,
+    OpenSettings, OpenWith, Operations, Places, Rename, SaveSearch, SearchContents, SelectLast,
+    SelectNext, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, ToggleSplit, Undo,
 };
 use monodrive::connect;
 use monodrive::native::{self, Native, SizeDone};
@@ -69,10 +73,11 @@ use monodrive::session::{PaneState, StopState, TabState, WindowState};
 use monodrive_core::apps::App as MacApp;
 use monodrive_core::cloud::{Availability, CloudFolder};
 use monodrive_core::entries::{Entry, Kind};
-use monodrive_core::index::Index;
+use monodrive_core::index::{Found, Hit, Index, LineMatch};
 use monodrive_core::info::{self, Info};
 use monodrive_core::ops::{self, Conflict, Origin, Request};
-use monodrive_core::places::{Favorite, Pinned, Store};
+use monodrive_core::places::{Favorite, Pinned, RecentSearch, SavedSearch, Store};
+use monodrive_core::search::{Looks, Scope, Search};
 use monodrive_core::servers::Cancel;
 use monodrive_core::sizes::FolderSize;
 use monodrive_core::volumes::{Volume, VolumeId};
@@ -114,6 +119,7 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
         cx.set_global(native::MadeUp(Arc::new(MadeUp)));
     });
     onboarding(&mut cx, out, &base)?;
+    shoot_search(&mut cx, out, folder, &base)?;
     for (name, view) in [("list", View::List), ("grid", View::Grid)] {
         cx.update(|cx| {
             cx.set_global(Preferences {
@@ -668,6 +674,54 @@ fn shoot_tabs(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpu
     Ok(())
 }
 
+/// A content search on made-up results, and the search field's menu over it.
+fn shoot_search(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
+    cx.update(|cx| cx.set_global(base.clone()));
+    let store = cx.update(|cx| cx.global::<Places>().store.clone());
+    let keep = |name: &str, query: &str, scope: Scope| SavedSearch {
+        name: name.into(),
+        query: query.into(),
+        scope,
+    };
+    for saved in [
+        keep("Open todos", "contains:todo kind:code", Scope::Everywhere),
+        keep(
+            "Big videos",
+            "kind:video size:>1gb",
+            Scope::Folder("/Users/you/Movies".into()),
+        ),
+    ] {
+        store
+            .save_search(saved, None)
+            .map_err(std::io::Error::other)?;
+    }
+    for query in ["invoice 2026", "contains:\"fix me\" ext:rs"] {
+        let recent = RecentSearch {
+            query: query.into(),
+            scope: Scope::Everywhere,
+        };
+        store.searched(recent).map_err(std::io::Error::other)?;
+    }
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    dispatch(cx, window, &SearchContents)?;
+    type_text(cx, window, "todo")?;
+    // A content search waits for the typing to stop.
+    rest(cx);
+    save(cx, window, out, "search-contents")?;
+    dispatch(cx, window, &ShowSearches)?;
+    let down = named(cx, "context_menu::Down")?;
+    for _ in 0..4 {
+        dispatch(cx, window, &*down)?;
+    }
+    save(cx, window, out, "search-menu")?;
+    let dismiss = named(cx, "context_menu::Dismiss")?;
+    dispatch(cx, window, &*dismiss)?;
+    dispatch(cx, window, &SaveSearch)?;
+    save(cx, window, out, "search-save")?;
+    Ok(())
+}
+
 /// Lets the Settings sheet finish fading in, which goes by the clock.
 #[expect(
     clippy::disallowed_methods,
@@ -859,6 +913,70 @@ impl Drives for MadeUp {
                 availability: Availability::Unknown,
             })
             .collect())
+    }
+
+    fn search<'a>(
+        &self,
+        _: &dyn Fn() -> Result<&'a Index, String>,
+        search: &Search,
+        _: usize,
+    ) -> Result<Found, String> {
+        let pattern = search.text.clone();
+        let hit = |name: &str, kind: &str, lines: &[(usize, &str)]| Hit {
+            entry: Entry {
+                path: Path::new("/Users/you/Work/monodrive").join(kind).join(name),
+                name: name.into(),
+                kind: Kind::File,
+                size: 18_400,
+                modified: 1_790_000_000,
+                availability: Availability::Unknown,
+            },
+            lines: if search.looks == Looks::Contents {
+                lines
+                    .iter()
+                    .map(|(line, text)| LineMatch {
+                        line: *line,
+                        text: (*text).into(),
+                        matches: text
+                            .match_indices(pattern.as_str())
+                            .map(|(at, found)| at..at + found.len())
+                            .collect(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        };
+        Ok(Found {
+            hits: vec![
+                hit(
+                    "pane.rs",
+                    "src",
+                    &[
+                        (118, "    // todo: keep the anchor when the tab moves"),
+                        (402, "        let todo = self.pending.take();"),
+                        (
+                            977,
+                            "    /// A long line whose match is far along the line, so the start goes: todo",
+                        ),
+                    ],
+                ),
+                hit(
+                    "notes.md",
+                    "docs",
+                    &[(12, "- todo: ask about the Trash on network drives")],
+                ),
+                hit(
+                    "release",
+                    "scripts",
+                    &[
+                        (41, "# todo sign the image"),
+                        (88, "echo \"todo: notarize\""),
+                    ],
+                ),
+            ],
+            complete: false,
+        })
     }
 }
 

@@ -12,8 +12,10 @@ use gpui::{Action, Keystroke, TestAppContext, VisualTestContext, point};
 use monodrive_core::cloud::CloudFolder;
 use monodrive_core::entries::Sort;
 use monodrive_core::entries::{Entry, Kind};
+use monodrive_core::index::Found;
 use monodrive_core::ops::Origin;
 use monodrive_core::places::{Favorite, Pinned, Store};
+use monodrive_core::search::Search;
 use monodrive_core::servers::Cancel;
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::cell::RefCell;
@@ -36,6 +38,10 @@ pub(super) struct Fake {
     files: Mutex<Vec<Entry>>,
     /// The paths whose device was asked for, in order.
     devices_asked: Mutex<Vec<PathBuf>>,
+    /// What a search in the window finds, by what's typed.
+    pub(super) found: Mutex<HashMap<String, Found>>,
+    /// The searches that ran, in order.
+    pub(super) searched: Mutex<Vec<Search>>,
 }
 
 impl Drives for Fake {
@@ -86,6 +92,17 @@ impl Drives for Fake {
     ) -> Result<Vec<Entry>, String> {
         Ok(self.files.lock().unwrap().clone())
     }
+
+    fn search<'a>(
+        &self,
+        _: &dyn Fn() -> Result<&'a Index, String>,
+        search: &Search,
+        _: usize,
+    ) -> Result<Found, String> {
+        self.searched.lock().unwrap().push(search.clone());
+        let found = self.found.lock().unwrap().get(&search.text).cloned();
+        found.ok_or_else(|| format!("Nothing made up for {}.", search.text))
+    }
 }
 
 fn volume(name: &str, mount: &Path, id: &str, total: u64, free: u64) -> Volume {
@@ -115,8 +132,8 @@ fn startup() -> Volume {
 
 pub(super) struct World {
     /// Keeps the store's and the Trash's folder.
-    dir: tempfile::TempDir,
-    store: Store,
+    pub(super) dir: tempfile::TempDir,
+    pub(super) store: Store,
     pub(super) fake: Arc<Fake>,
     volumes_changed: async_channel::Sender<()>,
     lists_changed: async_channel::Sender<()>,

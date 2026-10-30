@@ -4,16 +4,17 @@
 //! `Browser`, which a pane reaches through `PaneEvent`.
 
 use super::drag::{Drag, Spot, Target, offers};
+use super::searches::{CONTENT_SETTLE, Matches};
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, Eject,
     EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
     FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
     GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder,
     NewFolderWithSelection, OpenInTerminal, OpenSelected, PageDown, PageUp, Places, PutBack, Redo,
-    Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SelectFirst, SelectLast,
-    SelectNext, SelectPrevious, ShowContextMenu, ShowPackageContents, SortByKind, SortByModified,
-    SortByName, SortBySize, Undo, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash,
-    with_owner,
+    Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SearchContents,
+    SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious, ShowContextMenu,
+    ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, Undo, ViewAsGrid,
+    ViewAsList, home, short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -41,6 +42,7 @@ use monodrive_core::index::Index;
 use monodrive_core::info;
 use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
 use monodrive_core::places::{self, Availability, Favorite};
+use monodrive_core::search::{Looks, Scope as SearchScope};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -91,6 +93,8 @@ pub(super) struct SpringReturn {
     expanded: HashSet<PathBuf>,
     selection: Selection,
     query: String,
+    looks: Looks,
+    search_scope: SearchScope,
 }
 
 /// Why a restored pane shows no files.
@@ -226,6 +230,16 @@ pub struct Pane {
     select_after: Vec<PathBuf>,
     /// The trimmed search text; empty while showing the folder.
     pub(super) query: String,
+    /// What a search looks at. Leaving a search goes back to names.
+    pub(super) looks: Looks,
+    /// Where a search looks. Leaving a search goes back to everywhere.
+    pub(super) search_scope: SearchScope,
+    /// A content search's matching lines, and the rows that show them.
+    pub(super) matches: Matches,
+    /// How tall a row was last drawn.
+    list_row_height: f32,
+    /// Keeps the results on screen as a recent search, once they've stayed.
+    pub(super) remember: Task<()>,
     pub(super) selection: Selection,
     scroll: UniformListScrollHandle,
     /// The listing or search in flight. Replacing it drops the stale one.
@@ -332,6 +346,11 @@ impl Pane {
             keep_selection: false,
             select_after: Vec::new(),
             query: String::new(),
+            looks: Looks::default(),
+            search_scope: SearchScope::default(),
+            matches: Matches::default(),
+            list_row_height: 0.,
+            remember: Task::ready(()),
             selection: Selection::default(),
             scroll: UniformListScrollHandle::new(),
             loading: Task::ready(()),
@@ -514,7 +533,10 @@ impl Pane {
     /// What the top bar calls what's on screen.
     pub(super) fn title(&self, cx: &App) -> String {
         if !self.query.is_empty() {
-            "Search results".to_string()
+            match &self.search_scope {
+                SearchScope::Everywhere => "Search results".to_string(),
+                SearchScope::Folder(folder) => format!("Search results in {}", level_name(folder)),
+            }
         } else if self.showing_recents() {
             "Recents".to_string()
         } else if self.in_trash(cx) {
@@ -556,6 +578,8 @@ impl Pane {
             expanded: self.expanded.clone(),
             selection: self.selection.clone(),
             query: self.query.clone(),
+            looks: self.looks,
+            search_scope: self.search_scope.clone(),
         }
     }
 
@@ -570,6 +594,7 @@ impl Pane {
         self.selection = to.selection;
         self.keep_selection = true;
         self.query = to.query;
+        self.set_search_mode(to.looks, to.search_scope, cx);
         let (query, end) = (self.query.clone(), self.query.len());
         self.search
             .update(cx, |field, cx| field.set_text(&query, end..end, cx));
@@ -596,6 +621,7 @@ impl Pane {
         cx.emit(PaneEvent::Moved);
         self.query.clear();
         self.search.update(cx, |field, cx| field.clear(cx));
+        self.reset_search_mode(cx);
         self.reload(cx);
     }
 
@@ -622,8 +648,13 @@ impl Pane {
         if !self.shown {
             return;
         }
+        self.remember = Task::ready(());
         let mut folder = self.folder().to_path_buf();
         let query = self.query.clone();
+        let search = self.current_search();
+        // It reads files, so typing doesn't start one per key.
+        let settle = (search.looks == Looks::Contents || query.contains("contains:"))
+            .then(|| cx.background_executor().timer(CONTENT_SETTLE));
         let index = self.index.clone();
         let gate = cx.try_global::<IndexGate>().cloned();
         let recents = self
@@ -638,6 +669,10 @@ impl Pane {
         let drives = cx
             .try_global::<Places>()
             .map(|places| places.drives.clone());
+        let searcher: Arc<dyn sidebar::Drives> = match &drives {
+            Some(drives) => drives.clone(),
+            None => Arc::new(sidebar::System),
+        };
         let consented = std::mem::take(&mut self.consented);
         let show_hidden = cx.global::<Preferences>().show_hidden;
         self.show_hidden = show_hidden;
@@ -650,25 +685,41 @@ impl Pane {
         let open: Vec<PathBuf> = self.expanded.iter().cloned().collect();
         let work = cx.background_executor().spawn(async move {
             if !query.is_empty() {
+                if let Some(settle) = settle {
+                    settle.await;
+                }
                 #[expect(
                     clippy::disallowed_methods,
                     reason = "a search before launch started the index starts it"
                 )]
-                let started = match &gate {
+                let started = || match &gate {
                     Some(gate) => gate.for_search(&index),
                     None => index
                         .get_or_init(Index::start)
                         .as_ref()
                         .map_err(Clone::clone),
                 };
-                let hits = started.and_then(|index| index.find(&query, SEARCH_LIMIT));
-                return hits
-                    .map(|hits| (hits, HashMap::new(), Watch::default(), HashSet::new(), None))
-                    .map_err(Failed::Error);
+                let found = searcher.search(&started, &search, SEARCH_LIMIT)?;
+                let (hits, matches) = Matches::of(found);
+                return Ok((
+                    hits,
+                    HashMap::new(),
+                    Watch::default(),
+                    HashSet::new(),
+                    None,
+                    matches,
+                ));
             }
             if let Some(store) = recents {
                 let (rows, missing) = trash::recent_entries(trash::read_recents(store.as_ref())?);
-                return Ok((rows, HashMap::new(), Watch::default(), missing, None));
+                return Ok((
+                    rows,
+                    HashMap::new(),
+                    Watch::default(),
+                    missing,
+                    None,
+                    Matches::default(),
+                ));
             }
             let mut verified = None;
             if let Some(place) = check {
@@ -711,15 +762,23 @@ impl Pane {
                     (dir, list)
                 })
                 .collect();
-            Ok((root, children, watch, HashSet::new(), verified))
+            Ok((
+                root,
+                children,
+                watch,
+                HashSet::new(),
+                verified,
+                Matches::default(),
+            ))
         });
         self.loading = cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.listing = false;
                 match result {
-                    Ok((root, children, watch, missing, verified)) => {
+                    Ok((root, children, watch, missing, verified, matches)) => {
                         this.root = root;
+                        this.matches = matches;
                         this.children = children;
                         this.watch = watch;
                         this.missing = missing;
@@ -733,6 +792,7 @@ impl Pane {
                     }
                     Err(failed) => {
                         this.root.clear();
+                        this.matches = Matches::default();
                         this.children.clear();
                         this.missing.clear();
                         this.watch = Watch::default();
@@ -764,9 +824,19 @@ impl Pane {
                     None => this.scroll.scroll_to_item(0, ScrollStrategy::Top),
                 }
                 this.refresh_trash(cx);
+                this.remember_search(cx);
                 cx.notify();
             });
         });
+    }
+
+    /// The layout on screen: a content search's lines only fit the list.
+    pub(super) fn layout(&self) -> View {
+        if self.matches.is_empty() {
+            self.view
+        } else {
+            View::List
+        }
     }
 
     /// What a listing that's just landed selects. Search selects its best hit
@@ -920,7 +990,7 @@ impl Pane {
 
     /// → opens the selected folder in place, or steps into it if it's open.
     fn expand(&mut self, cx: &mut Context<Self>) {
-        if self.view == View::Grid {
+        if self.layout() == View::Grid {
             return self.select(Move::By(1), false, cx);
         }
         if !self.showing_folder() || self.listing {
@@ -943,7 +1013,7 @@ impl Pane {
             return;
         }
         cx.stop_propagation();
-        if self.view == View::Grid {
+        if self.layout() == View::Grid {
             return self.select(Move::By(-1), false, cx);
         }
         if !self.showing_folder() || self.listing {
@@ -1023,8 +1093,20 @@ impl Pane {
 
     /// Scrolls entry `ix` into view: in the grid, its row of the grid.
     fn reveal(&self, ix: usize, strategy: ScrollStrategy) {
-        let item = match self.view {
+        let item = match self.layout() {
             View::Grid => ix / self.grid_columns(),
+            // Going down brings a file's lines in with it; its own row stays
+            // the one to show when it's above the view.
+            View::List if !self.matches.is_empty() => {
+                let first = self.matches.row_of(ix);
+                let offset = self.scroll.0.borrow().base_handle.offset().y.as_f32();
+                let above = first as f32 * self.list_row_height < -offset;
+                if above || !matches!(strategy, ScrollStrategy::Nearest) {
+                    first
+                } else {
+                    self.matches.last_row_of(ix)
+                }
+            }
             View::List => ix,
         };
         self.scroll.scroll_to_item(item, strategy);
@@ -1054,7 +1136,7 @@ impl Pane {
 
     /// A click on row `ix`: ⌘ toggles it, ⇧ selects the range from the
     /// anchor, and a plain click selects it alone. A double click opens.
-    fn click_entry(
+    pub(super) fn click_entry(
         &mut self,
         ix: usize,
         event: &ClickEvent,
@@ -1169,10 +1251,11 @@ impl Pane {
         let Some(ix) = self.cursor_ix() else {
             return corner;
         };
-        let below = match self.view {
+        let below = match self.layout() {
             View::List => {
                 let height = cx.global::<Preferences>().row_size.metrics().0;
-                point(px(60.), px(4. + height * (ix as f32 + 1.)))
+                let row = self.matches.row_of(ix);
+                point(px(60.), px(4. + height * (row as f32 + 1.)))
             }
             View::Grid => {
                 let (across, height) = (self.across.max(1), grid_cell(self.grid_icon).1);
@@ -1186,7 +1269,11 @@ impl Pane {
     }
 
     /// A right-click on `element` opens the context menu on row `ix`.
-    fn context_target<E: InteractiveElement>(element: E, ix: usize, cx: &mut Context<Self>) -> E {
+    pub(super) fn context_target<E: InteractiveElement>(
+        element: E,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> E {
         element.on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1259,10 +1346,11 @@ impl Pane {
         let len = self.entries.len();
         // The list's padding, then in the grid each row's too.
         let (top, bottom) = (rect.top().as_f32() - 4., rect.bottom().as_f32() - 4.);
-        match self.view {
+        match self.layout() {
             View::List => {
                 let height = cx.global::<Preferences>().row_size.metrics().0;
-                span(top, bottom, height, len).collect()
+                let rows = span(top, bottom, height, self.matches.row_count(len));
+                self.matches.entries_in(rows)
             }
             View::Grid => {
                 let across = self.across;
@@ -1557,7 +1645,7 @@ impl Pane {
 
     /// ↑ and ↓: a row of the list, or of the grid.
     pub(super) fn select_vertically(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
-        let step = match (self.view, down) {
+        let step = match (self.layout(), down) {
             (View::List, true) => Move::Next,
             (View::List, false) => Move::Previous,
             (View::Grid, _) => {
@@ -1921,7 +2009,7 @@ impl Pane {
             .filter(|dot| *dot > 0 && !folder)
             .unwrap_or(name.len());
         let prefs = cx.global::<Preferences>();
-        let size = match self.view {
+        let size = match self.layout() {
             View::List => prefs.row_size.metrics().2,
             View::Grid => prefs.grid_label.metrics().2,
         };
@@ -2265,6 +2353,11 @@ impl Pane {
                 ),
             },
         };
+        let count = if self.matches.cut {
+            format!("{count}, more not shown")
+        } else {
+            count
+        };
         let status = match self.chrome.space.clone() {
             Some(space) => format!("{count} · {space}"),
             None => count,
@@ -2430,14 +2523,22 @@ impl Pane {
         let today = Local::now().date_naive();
         let (date, size, kind) = columns(self.chrome.width);
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
+        self.list_row_height = row_height;
         // Finder greys the selection when the list isn't where keys go.
         let active = self.list_active(window, cx);
         let drops = self.drag.active() && !self.in_trash(cx);
         let id = cx.entity_id();
         range
-            .filter_map(|ix| {
+            .filter_map(|row| {
+                let (ix, line) = self.matches.at(row);
                 let entry = self.entries.get(ix)?;
                 let selected = self.selection.contains(&entry.path);
+                if let Some(line) = line {
+                    return self
+                        .line_row(row, ix, line, selected, active, row_height, icon_size, cx)
+                        .map(IntoElement::into_any_element);
+                }
+                let has_lines = self.matches.last_row_of(ix) != row;
                 let missing = self.missing.contains(&entry.path);
                 let depth = self.depths.get(ix).copied().unwrap_or(0);
                 let open = self.is_open_folder(ix);
@@ -2456,25 +2557,24 @@ impl Pane {
                 let grabs = !missing && rename.is_none();
                 Some(
                     div()
-                        .id(ix)
+                        .id(row)
                         .w_full()
                         .h(px(row_height))
                         .px_3()
-                        .rounded(px(theme::RADIUS_ROW))
+                        // A file and its lines read as one block.
+                        .map(|d| {
+                            if has_lines {
+                                // design: the row radius, on the block's top corners.
+                                d.rounded_t(px(theme::RADIUS_ROW))
+                            } else {
+                                d.rounded(px(theme::RADIUS_ROW))
+                            }
+                        })
                         .flex()
                         .items_center()
                         .gap_3()
                         .text_size(px(text_size))
-                        .map(|d| {
-                            if selected {
-                                d.bg(if active { accent() } else { content(0.14) })
-                                    .text_color(selected_ink)
-                            } else if ix % 2 == 1 {
-                                d.bg(content(0.03))
-                            } else {
-                                d
-                            }
-                        })
+                        .map(|d| self.row_fill(d, ix, selected, active))
                         .child(
                             div()
                                 .flex_1()
@@ -3018,7 +3118,11 @@ impl Pane {
     /// Esc: leaves search, or else lets go of the selection.
     pub(super) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.query.is_empty() {
-            self.selection.clear();
+            if self.search_mode_is_plain() {
+                self.selection.clear();
+            } else {
+                self.reset_search_mode(cx);
+            }
             cx.notify();
         } else {
             self.show_folder(cx);
@@ -3081,11 +3185,14 @@ impl Pane {
                         this.open_selection(window, cx)
                     }),
                 )
-                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                    this.search.update(cx, |field, cx| {
-                        window.focus(&field.focus_handle(cx), cx);
-                        field.select_all(&text_field::SelectAll, window, cx);
-                    });
+                .on_action(
+                    cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &SearchContents, window, cx| {
+                    this.toggle_contents(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SearchThisFolder, window, cx| {
+                    this.toggle_this_folder(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &DeselectAll, _, cx| {
                     this.selection.clear();
@@ -3228,7 +3335,7 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         // The list's rows don't depend on its width, so it shows at once.
-        if self.view == View::List {
+        if self.layout() == View::List {
             self.take_pending_reveal();
         }
         let list = match &self.error {
@@ -3243,7 +3350,7 @@ impl Pane {
                 .text_color(content(0.65))
                 .child(error.clone())
                 .into_any_element(),
-            None if self.view == View::Grid => {
+            None if self.layout() == View::Grid => {
                 let icon = self.grid_icon;
                 let inset = self.grid_inset.clone();
                 // The grid's width this frame, from the window's, so a resize
@@ -3286,11 +3393,15 @@ impl Pane {
                     )
                     .into_any_element()
             }
-            None => uniform_list("entries", self.entries.len(), cx.processor(Self::rows))
-                .track_scroll(&self.scroll)
-                .flex_1()
-                .p_1()
-                .into_any_element(),
+            None => uniform_list(
+                "entries",
+                self.matches.row_count(self.entries.len()),
+                cx.processor(Self::rows),
+            )
+            .track_scroll(&self.scroll)
+            .flex_1()
+            .p_1()
+            .into_any_element(),
         };
         // Thumbnails the last frame didn't draw (scrolled away, another folder,
         // another size, the list view) are given back, loaded or not.
@@ -3316,7 +3427,7 @@ impl Pane {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| {
-                if let Some(last) = this.entries.len().checked_sub(1) {
+                if let Some(last) = this.matches.row_count(this.entries.len()).checked_sub(1) {
                     this.scroll
                         .scroll_to_item_strict(last, ScrollStrategy::Bottom);
                     cx.notify();
@@ -3333,12 +3444,12 @@ impl Pane {
                 cx.listener(|this, _: &ExtendNext, _, cx| this.select_vertically(true, true, cx)),
             )
             .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| {
-                if this.view == View::Grid {
+                if this.layout() == View::Grid {
                     this.select(Move::By(-1), true, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &ExtendRight, _, cx| {
-                if this.view == View::Grid {
+                if this.layout() == View::Grid {
                     this.select(Move::By(1), true, cx);
                 }
             }))
@@ -3488,34 +3599,39 @@ impl Render for Pane {
             .child(self.backdrop.clone())
             .children(self.trash_bar(cx))
             // The grid sorts from the View menu and Settings.
-            .when(self.view == View::List && self.unavailable.is_none(), |d| {
-                d.child(
-                    theme::pane_bar(theme::ROW_HEIGHT)
-                        .gap_3()
-                        .border_b_1()
-                        .border_color(content(0.06))
-                        .text_size(px(theme::TEXT_SMALL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(content(0.65))
-                        .child(sort_header(SortBy::Name, "Name", sort_shown, cx).flex_1())
-                        .when(date, |d| {
-                            d.child(
-                                sort_header(SortBy::Modified, "Date Modified", sort_shown, cx)
-                                    .w(px(180.)),
-                            )
-                        })
-                        .when(size, |d| {
-                            d.child(
-                                sort_header(SortBy::Size, "Size", sort_shown, cx)
-                                    .w(px(80.))
-                                    .justify_end(),
-                            )
-                        })
-                        .when(kind, |d| {
-                            d.child(sort_header(SortBy::Kind, "Kind", sort_shown, cx).w(px(110.)))
-                        }),
-                )
-            })
+            .when(
+                self.layout() == View::List && self.unavailable.is_none(),
+                |d| {
+                    d.child(
+                        theme::pane_bar(theme::ROW_HEIGHT)
+                            .gap_3()
+                            .border_b_1()
+                            .border_color(content(0.06))
+                            .text_size(px(theme::TEXT_SMALL))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(content(0.65))
+                            .child(sort_header(SortBy::Name, "Name", sort_shown, cx).flex_1())
+                            .when(date, |d| {
+                                d.child(
+                                    sort_header(SortBy::Modified, "Date Modified", sort_shown, cx)
+                                        .w(px(180.)),
+                                )
+                            })
+                            .when(size, |d| {
+                                d.child(
+                                    sort_header(SortBy::Size, "Size", sort_shown, cx)
+                                        .w(px(80.))
+                                        .justify_end(),
+                                )
+                            })
+                            .when(kind, |d| {
+                                d.child(
+                                    sort_header(SortBy::Kind, "Kind", sort_shown, cx).w(px(110.)),
+                                )
+                            }),
+                    )
+                },
+            )
             .child(list)
             .children(self.path_bar(window, cx))
             .when(dropping_here, |d| {

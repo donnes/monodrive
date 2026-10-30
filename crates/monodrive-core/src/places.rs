@@ -1,5 +1,5 @@
-//! Places: the sidebar's favorite folders and saved searches, the registered
-//! Git repositories, the user's saved commands, and the files recently opened
+//! Places: the sidebar's favorite folders, the saved and recent searches in
+//! the search field's menu, the registered Git repositories, the user's saved commands, and the files recently opened
 //! through Monodrive. They're
 //! Monodrive's own lists, kept beside settings.json rather than in it, because
 //! the window and every MCP server change them and only the window writes
@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// How many recently opened files are kept.
 pub const RECENTS: usize = 50;
+/// How many recent searches are kept.
+pub const RECENT_SEARCHES: usize = 10;
 
 /// Where the lists are saved.
 #[derive(Clone, Debug)]
@@ -74,11 +76,21 @@ impl Place {
     }
 }
 
-/// A search kept in the sidebar. Saving one never runs it.
+/// A search kept by name. Saving one never runs it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedSearch {
     pub name: String,
     /// As `Query` prints it.
+    pub query: String,
+    #[serde(default)]
+    pub scope: Scope,
+}
+
+/// A search the window ran and showed results for. Agents' searches aren't
+/// kept, so no tool reads these.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentSearch {
+    /// As `Search::stored` prints it.
     pub query: String,
     #[serde(default)]
     pub scope: Scope,
@@ -91,6 +103,9 @@ struct Saved {
     favorites: Option<Vec<Favorite>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     searches: Vec<SavedSearch>,
+    /// Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recent_searches: Vec<RecentSearch>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     repositories: Vec<Registration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -300,7 +315,7 @@ impl Store {
         })
     }
 
-    /// The saved searches in the sidebar's order.
+    /// The saved searches in their order.
     pub fn searches(&self) -> Result<Vec<SavedSearch>, String> {
         Ok(self.saved()?.searches)
     }
@@ -367,6 +382,31 @@ impl Store {
                 .ok_or_else(|| format!("{name} isn't a saved search."))?;
             searches.remove(ix);
             Ok(())
+        })
+    }
+
+    /// The searches run lately, newest first.
+    pub fn recent_searches(&self) -> Result<Vec<RecentSearch>, String> {
+        Ok(self.saved()?.recent_searches)
+    }
+
+    /// Records that `search` ran, keeping the newest `RECENT_SEARCHES`.
+    pub fn searched(&self, search: RecentSearch) -> Result<(), String> {
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            let recent = &mut saved.recent_searches;
+            recent.retain(|r| *r != search);
+            recent.insert(0, search);
+            recent.truncate(RECENT_SEARCHES);
+            write(&self.places, &saved)
+        })
+    }
+
+    pub fn clear_recent_searches(&self) -> Result<(), String> {
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            saved.recent_searches.clear();
+            write(&self.places, &saved)
         })
     }
 
@@ -901,6 +941,41 @@ mod tests {
         drop(watch);
         // The thread let go of its sender.
         while hear.recv().is_ok() {}
+    }
+
+    #[test]
+    fn recent_searches_keep_the_newest_once_each_and_clearing_leaves_saved_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let recent = |n: usize| RecentSearch {
+            query: format!("q{n}"),
+            scope: Scope::Everywhere,
+        };
+        let saved = SavedSearch {
+            name: "Todo".into(),
+            query: "contains:todo".into(),
+            scope: Scope::Everywhere,
+        };
+        assert_eq!(store.save_search(saved.clone(), None), Ok(saved.clone()));
+        for n in 0..RECENT_SEARCHES + 2 {
+            store.searched(recent(n)).unwrap();
+        }
+        store.searched(recent(5)).unwrap();
+        let recents = store.recent_searches().unwrap();
+        assert_eq!(recents.len(), RECENT_SEARCHES);
+        assert_eq!(recents[..2], [recent(5), recent(RECENT_SEARCHES + 1)]);
+        assert_eq!(recents.iter().filter(|r| **r == recent(5)).count(), 1);
+        // The same words in another folder are another search.
+        let here = RecentSearch {
+            scope: Scope::Folder("/tmp".into()),
+            ..recent(5)
+        };
+        store.searched(here.clone()).unwrap();
+        assert_eq!(store.recent_searches().unwrap()[..2], [here, recent(5)]);
+
+        store.clear_recent_searches().unwrap();
+        assert_eq!(store.recent_searches(), Ok(Vec::new()));
+        assert_eq!(store.searches(), Ok(vec![saved]));
     }
 
     #[test]

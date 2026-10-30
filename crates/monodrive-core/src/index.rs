@@ -4,8 +4,9 @@
 //! `~/Library/Application Support/FSearch`.
 
 use crate::cloud::Availability;
+use crate::entries;
 use crate::entries::{Entry, Kind};
-use crate::search::{self, Query, Scope, Term};
+use crate::search::{self, Query, Scope, Search, Term};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Range;
@@ -32,6 +33,39 @@ pub struct LineMatch {
     pub matches: Vec<Range<usize>>,
 }
 
+/// How much of a matching line a row shows before the first match, past
+/// which the start is cut so the match stays in view.
+const LEAD: usize = 24;
+
+impl LineMatch {
+    /// The line as a row shows it: without its indent, cut at the start if
+    /// the first match is far in, and with `matches` moved to suit. A range
+    /// fsearch's 400-byte cut left outside the text or inside a character
+    /// is dropped.
+    pub fn preview(&self) -> (String, Vec<Range<usize>>) {
+        let indent = self.text.len() - self.text.trim_start().len();
+        let first = self.matches.first().map_or(indent, |m| m.start);
+        let mut start = indent;
+        if first > indent + LEAD {
+            start = first - LEAD;
+            while !self.text.is_char_boundary(start) {
+                start -= 1;
+            }
+        }
+        let lead = if start > indent { "…" } else { "" };
+        let text = format!("{lead}{}", &self.text[start..]);
+        let matches = self
+            .matches
+            .iter()
+            .filter(|m| {
+                m.start >= start && m.start < m.end && self.text.get((*m).clone()).is_some()
+            })
+            .map(|m| (m.start - start + lead.len())..(m.end - start + lead.len()))
+            .collect();
+        (text, matches)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct GrepFile {
     pub path: PathBuf,
@@ -43,6 +77,21 @@ pub struct GrepResults {
     pub files: Vec<GrepFile>,
     /// False when the time budget ran out before every candidate was read,
     /// or `Caps::lines` left matches out.
+    pub complete: bool,
+}
+
+/// One result of a `Search`: the entry, with its matching lines when the
+/// search looked inside files.
+#[derive(Clone, Debug)]
+pub struct Hit {
+    pub entry: Entry,
+    pub lines: Vec<LineMatch>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Found {
+    pub hits: Vec<Hit>,
+    /// False when a content search left matches out, as in `GrepResults`.
     pub complete: bool,
 }
 
@@ -273,6 +322,28 @@ impl Index {
             .collect())
     }
 
+    /// What the window shows for `search`: names, best first, up to `limit`,
+    /// or each file with the lines that match, within `caps`. Reads the disk,
+    /// so call it off the UI thread.
+    pub fn run(&self, search: &Search, limit: usize, caps: Caps) -> Result<Found, String> {
+        let (pattern, filters) = search.parts()?;
+        let Some(pattern) = pattern else {
+            return Ok(Found {
+                hits: self
+                    .search(&filters, &search.scope, limit)?
+                    .into_iter()
+                    .map(|entry| Hit {
+                        entry,
+                        lines: Vec::new(),
+                    })
+                    .collect(),
+                complete: true,
+            });
+        };
+        let found = self.grep(&pattern, GrepMode::Literal, &filters, &search.scope, caps)?;
+        Ok(found_in_files(found))
+    }
+
     /// Content search, smart-case, ranked by how likely each file is wanted.
     /// `filters` picks the files read, with the same meaning as in `search`.
     pub fn grep(
@@ -319,6 +390,7 @@ pub(crate) fn fsearch_query(
     for term in &query.terms {
         match term {
             Term::Word(_) | Term::In(_) => {}
+            Term::Contains(_) => return Err(format!("{term}: that looks inside files; use grep")),
             Term::Kind(kinds) => {
                 for kind in kinds {
                     let entry = match kind {
@@ -383,6 +455,24 @@ pub(crate) fn now() -> i64 {
         })
 }
 
+/// Each file with its entry for the window's columns, read from the disk. A
+/// file gone since the index saw it has no row.
+fn found_in_files(found: GrepResults) -> Found {
+    Found {
+        hits: found
+            .files
+            .into_iter()
+            .filter_map(|file| {
+                Some(Hit {
+                    entry: entries::entry_at(&file.path).ok()?,
+                    lines: file.lines,
+                })
+            })
+            .collect(),
+        complete: found.complete,
+    }
+}
+
 /// fsearch's matches cut to `caps`, incomplete when that left any out.
 fn bounded(result: fsearch::GrepResult, caps: Caps) -> GrepResults {
     let mut complete = result.complete && result.files.len() <= caps.files;
@@ -436,6 +526,69 @@ mod tests {
 
     fn file(path: &str) -> (&str, u8, u64, i64) {
         (path, KIND_FILE, 1000, NOW)
+    }
+
+    fn matching(text: &str, matches: &[(usize, usize)]) -> LineMatch {
+        LineMatch {
+            line: 1,
+            text: text.into(),
+            matches: matches.iter().map(|(a, b)| *a..*b).collect(),
+        }
+    }
+
+    #[test]
+    fn a_preview_drops_the_indent_and_keeps_a_far_match_in_view() {
+        let (text, ranges) = matching("    let todo = 1;", &[(8, 12)]).preview();
+        assert_eq!(text, "let todo = 1;");
+        assert_eq!(&text[ranges[0].clone()], "todo");
+
+        // Far in, the start goes; the cut lands between characters.
+        let far = format!("{}TODO: end", "é".repeat(40));
+        let at = far.find("TODO").unwrap();
+        let (text, ranges) = matching(&far, &[(at, at + 4)]).preview();
+        assert!(text.starts_with('…') && text.len() < far.len());
+        assert_eq!(&text[ranges[0].clone()], "TODO");
+
+        // A range past the cut text or inside a character is no range.
+        let (text, ranges) = matching("é todo", &[(1, 2), (3, 7), (40, 44)]).preview();
+        assert_eq!(text, "é todo");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], 3..7);
+    }
+
+    #[test]
+    fn a_file_gone_since_the_index_saw_it_has_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let there = dir.path().join("there.txt");
+        std::fs::write(&there, "todo").unwrap();
+        let found = found_in_files(GrepResults {
+            files: vec![
+                GrepFile {
+                    path: dir.path().join("gone.txt"),
+                    lines: vec![matching("todo", &[(0, 4)])],
+                },
+                GrepFile {
+                    path: there.clone(),
+                    lines: vec![matching("todo", &[(0, 4)])],
+                },
+            ],
+            complete: false,
+        });
+        assert_eq!(found.hits.len(), 1);
+        assert_eq!(found.hits[0].entry.path, there);
+        assert_eq!(found.hits[0].entry.size, 4);
+        assert_eq!(found.hits[0].lines.len(), 1);
+        assert!(!found.complete);
+    }
+
+    #[test]
+    fn a_name_search_refuses_a_content_token_rather_than_matching_nothing() {
+        let query = Query::parse("contains:todo").unwrap();
+        let refused = fsearch_query(&query, &Scope::Everywhere, "/h", NOW).map(|_| ());
+        assert_eq!(
+            refused,
+            Err("contains:todo: that looks inside files; use grep".to_string())
+        );
     }
 
     #[test]
