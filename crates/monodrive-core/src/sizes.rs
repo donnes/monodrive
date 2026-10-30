@@ -130,7 +130,48 @@ fn paths(gated: Vec<Vec<u8>>) -> Vec<PathBuf> {
 /// Whether opening `path` could show a privacy prompt, which blocks until
 /// someone answers it. Reads the disk.
 pub fn needs_consent(path: &Path) -> bool {
-    guarded(path, &gated()).is_some()
+    leads_into(path, &gated())
+}
+
+/// Whether `path` is or leads into one of `gated`. It follows links a component
+/// at a time, reading each link's own target and stopping at the gate, so
+/// nothing inside a gated folder is ever touched. Links that never end count,
+/// since where they lead can't be told.
+fn leads_into(path: &Path, gated: &[PathBuf]) -> bool {
+    const MOST_LINKS: usize = 40;
+    let mut left: Vec<OsString> = Vec::new();
+    let push_front = |left: &mut Vec<OsString>, path: &Path| {
+        let parts = path.components().map(|part| part.as_os_str().to_owned());
+        left.splice(0..0, parts);
+    };
+    push_front(&mut left, path);
+    let (mut here, mut links) = (PathBuf::from("/"), 0);
+    while !left.is_empty() {
+        let part = left.remove(0);
+        match Path::new(&part).components().next() {
+            Some(std::path::Component::RootDir) => here = "/".into(),
+            Some(std::path::Component::ParentDir) => {
+                here.pop();
+            }
+            Some(std::path::Component::Normal(name)) => {
+                here.push(name);
+                if guarded(&here, gated).is_some() {
+                    return true;
+                }
+                let Ok(target) = std::fs::read_link(&here) else {
+                    continue;
+                };
+                links += 1;
+                if links > MOST_LINKS {
+                    return true;
+                }
+                here.pop();
+                push_front(&mut left, &target);
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Why a walk didn't open `path`, if it's at or under one of `gated`:
@@ -414,6 +455,53 @@ mod tests {
             refused,
             format!("{}: Not a directory (os error 20)", file.display())
         );
+    }
+
+    #[test]
+    fn a_link_that_leads_into_a_gated_folder_counts_and_nothing_in_it_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let gated = paths(fsearch::gated(home.to_str().unwrap()));
+        let documents = home.join("Documents");
+        write(&documents.join("deep/a.txt"), 1);
+        write(&home.join("Documentary/b.txt"), 1);
+        let link = |name: &str, to: &Path| {
+            let path = home.join(name);
+            std::os::unix::fs::symlink(to, &path).unwrap();
+            path
+        };
+        let direct = link("direct", &documents.join("deep"));
+        let chained = link("chained", &direct);
+        let relative = link("relative", Path::new("Documents/deep"));
+        let up = link("up", Path::new("Documentary/../Documents"));
+        let parent = link("parent", &home);
+        let through = parent.join("Documents/deep");
+        let fine = link("fine", &home.join("Documentary"));
+        let looping = home.join("looping");
+        std::os::unix::fs::symlink(&looping, &looping).unwrap();
+        // Locked, so a read of anything inside would fail another way, and
+        // what's past the gate isn't asked about: `missing` isn't there.
+        let missing = link("missing", &documents.join("no/such"));
+        std::fs::set_permissions(&documents, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let met: Vec<bool> = [
+            &documents,
+            &documents.join("deep"),
+            &direct,
+            &chained,
+            &relative,
+            &up,
+            &through,
+            &missing,
+            &looping,
+        ]
+        .into_iter()
+        .map(|path| leads_into(path, &gated))
+        .collect();
+        let clear = [&fine, &home.join("Documentary/b.txt"), &home.join("gone")]
+            .map(|path| leads_into(path, &gated));
+        std::fs::set_permissions(&documents, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(met, [true; 9]);
+        assert_eq!(clear, [false; 3]);
     }
 
     #[test]

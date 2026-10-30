@@ -582,6 +582,14 @@ impl Pane {
             }
             let mut verified = None;
             if let Some(place) = check {
+                let gated = |path: &Path| {
+                    !consented && drives.as_ref().is_some_and(|d| d.needs_consent(path))
+                };
+                // Before anything stats it, unless it's on a drive that may
+                // have moved.
+                if place.volume.is_none() && gated(&place.path) {
+                    return Err(Failed::Unavailable(Unavailable::NeedsConsent));
+                }
                 let volumes = match (&place.volume, &drives) {
                     (Some(_), Some(drives)) => drives.list(),
                     _ => Vec::new(),
@@ -592,8 +600,7 @@ impl Pane {
                     }
                     Availability::Available(there) => folder = there,
                 }
-                let gated = drives.as_ref().is_some_and(|d| d.needs_consent(&folder));
-                if gated && !consented {
+                if gated(&folder) {
                     return Err(Failed::Unavailable(Unavailable::NeedsConsent));
                 }
                 verified = Some(folder.clone());
