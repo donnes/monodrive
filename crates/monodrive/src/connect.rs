@@ -43,7 +43,7 @@ pub struct ConnectView {
     selected: Option<usize>,
     pub(crate) error: Option<String>,
     /// Stops the mount in flight when the card goes away.
-    connecting: Option<Arc<Cancel>>,
+    pub(crate) connecting: Option<Arc<Cancel>>,
     work: Task<()>,
 }
 
@@ -124,7 +124,7 @@ impl ConnectView {
 
     /// Mounts what's typed off the UI thread. The address saves only once
     /// it's connected; a failure stays in the card.
-    fn connect(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn connect(&mut self, cx: &mut Context<Self>) {
         if self.connecting.is_some() {
             return;
         }
@@ -140,7 +140,7 @@ impl ConnectView {
         cx.notify();
         let places = self.places.clone();
         let done = cx.background_executor().spawn(async move {
-            servers::connect(&places.store, &typed, |address| {
+            servers::connect(&places.store, &typed, &cancel, |address| {
                 places.drives.mount(address, &cancel)
             })
         });
@@ -158,10 +158,17 @@ impl ConnectView {
     }
 
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        cx.emit(ConnectEvent::Dismissed);
+    }
+}
+
+/// However the card goes (Esc, another sheet, the window closing), a mount
+/// it started goes with it.
+impl Drop for ConnectView {
+    fn drop(&mut self) {
         if let Some(cancel) = self.connecting.take() {
             cancel.cancel();
         }
-        cx.emit(ConnectEvent::Dismissed);
     }
 }
 

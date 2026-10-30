@@ -9,7 +9,8 @@ use block2::{Block, RcBlock};
 use objc2_foundation::{NSArray, NSMutableDictionary, NSString, NSURL};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Whether macOS may ask for credentials on screen. An MCP server has nobody
 /// to ask.
@@ -20,7 +21,8 @@ pub enum Prompt {
 }
 
 /// The address to mount for what was typed: `smb://` is assumed, a password
-/// is refused and a trailing `/` goes.
+/// is refused and a trailing `/` goes. Refusals never repeat what was typed,
+/// which may hold a password this didn't recognize as one.
 pub fn address(typed: &str) -> Result<String, String> {
     let typed = typed.trim();
     if typed.is_empty() {
@@ -28,28 +30,35 @@ pub fn address(typed: &str) -> Result<String, String> {
     }
     let rest = match typed.split_once("://") {
         Some((scheme, rest)) if scheme.eq_ignore_ascii_case("smb") => rest,
-        Some((scheme, _)) => {
-            return Err(format!(
-                "Monodrive connects to smb:// servers, not {scheme}://."
-            ));
-        }
+        Some(_) => return Err("Monodrive connects to smb:// servers.".into()),
         None => typed,
     };
     let (authority, share) = rest.split_once('/').unwrap_or((rest, ""));
     let (user, host) = authority
         .rsplit_once('@')
         .map_or((None, authority), |(user, host)| (Some(user), host));
-    if user.is_some_and(|user| user.contains(':')) {
+    let hides_colon = |user: &str| user.to_ascii_lowercase().contains("%3a");
+    if user.is_some_and(|user| user.contains(':') || hides_colon(user)) {
         return Err(
             "Leave the password out of the address. macOS asks for it and keeps it in the Keychain."
                 .into(),
         );
     }
     if host.is_empty() {
-        return Err(format!("{typed} doesn't name a server."));
+        return Err("That address doesn't name a server.".into());
     }
-    if authority.chars().any(char::is_whitespace) || typed.chars().any(char::is_control) {
-        return Err(format!("{typed} isn't a server address."));
+    // A port is digits, so `me:pass/word@nas` isn't a host and a port.
+    let bad_port = !host.starts_with('[')
+        && host
+            .rsplit_once(':')
+            .is_some_and(|(_, port)| !port.chars().all(|c| c.is_ascii_digit()));
+    if bad_port
+        || (authority.contains(':') && share.contains('@'))
+        || authority.chars().any(char::is_whitespace)
+        || typed.contains(['?', '#'])
+        || typed.chars().any(char::is_control)
+    {
+        return Err("That isn't a server address.".into());
     }
     let share = share.trim_end_matches('/').replace(' ', "%20");
     Ok(if share.is_empty() {
@@ -57,6 +66,22 @@ pub fn address(typed: &str) -> Result<String, String> {
     } else {
         format!("smb://{authority}/{share}")
     })
+}
+
+/// `url` without any password, as macOS's remount address could hold one
+/// for a share someone else mounted.
+pub fn without_password(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.into();
+    };
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    match authority.rsplit_once('@') {
+        Some((user, host)) => {
+            let user = user.split(':').next().unwrap_or_default();
+            format!("{scheme}://{user}@{host}{path}")
+        }
+        None => url.into(),
+    }
 }
 
 /// The mounted volume that's the share at `address`. macOS's remount address
@@ -77,17 +102,24 @@ pub fn mounted<'a>(address: &str, volumes: &'a [Volume]) -> Option<&'a Volume> {
 }
 
 /// Mounts with `mount`, then saves the address: only an address that
-/// connected is kept. Returns it and where it's mounted.
+/// connected, and whose attempt nobody cancelled, is kept. Returns it and
+/// where it's mounted.
 pub fn connect(
     store: &Store,
     typed: &str,
+    cancel: &Cancel,
     mount: impl FnOnce(&str) -> Result<PathBuf, String>,
 ) -> Result<(String, PathBuf), String> {
     let address = address(typed)?;
     let at = mount(&address)?;
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.into());
+    }
     store.save_server(&address)?;
     Ok((address, at))
 }
+
+const CANCELLED: &str = "Cancelled.";
 
 /// Stops a mount in flight, along with any prompt it has up.
 #[derive(Default)]
@@ -98,16 +130,54 @@ struct Attempt {
     cancelled: bool,
     /// NetFS's id while the mount is in flight.
     request: Option<usize>,
+    /// Whoever waits for the mount, until it has ended.
+    waiting: Option<Sender<Ended>>,
+}
+
+/// How a mount ended. NetFS never reports a cancelled one, so whichever of
+/// its report and a cancel comes first ends it, and the other does nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    Cancelled,
+    Reported { status: i32, at: Option<PathBuf> },
+}
+
+impl Attempt {
+    fn end(&mut self, ended: Ended) {
+        if let Some(waiting) = self.waiting.take() {
+            let _ = waiting.send(ended);
+        }
+    }
 }
 
 impl Cancel {
-    pub fn cancel(&self) {
-        let mut attempt = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+    fn attempt(&self) -> MutexGuard<'_, Attempt> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Ends the attempt at once, then asks NetFS to drop it on another
+    /// thread, so this never waits on macOS and is safe on the UI thread.
+    pub fn cancel(self: &Arc<Self>) {
+        let mut attempt = self.attempt();
         attempt.cancelled = true;
-        if let Some(request) = attempt.request {
-            // SAFETY: the lock keeps the id from finishing during the call.
-            unsafe { NetFSMountURLCancel(request as *mut c_void) };
+        attempt.end(Ended::Cancelled);
+        if attempt.request.is_none() {
+            return;
         }
+        drop(attempt);
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let mut attempt = this.attempt();
+            if let Some(request) = attempt.request.take() {
+                // SAFETY: NetFS's report clears the id under this lock, so
+                // it's still in flight here.
+                unsafe { NetFSMountURLCancel(request as *mut c_void) };
+            }
+        });
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.attempt().cancelled
     }
 }
 
@@ -135,24 +205,26 @@ pub fn mount(address: &str, prompt: Prompt, cancel: &Arc<Cancel>) -> Result<Path
     if let Some(volume) = mounted(address, &volumes::list()) {
         return Ok(volume.mount.clone());
     }
-    let (sent, done) = std::sync::mpsc::channel();
+    let (waiting, done) = mpsc::channel();
     let finished = {
         let cancel = cancel.clone();
         RcBlock::new(
             move |status: i32, _: *mut c_void, mounts: *const NSArray<NSString>| {
-                // Holding the lock waits for `start` to have noted the id.
-                let mut attempt = cancel.0.lock().unwrap_or_else(PoisonError::into_inner);
-                attempt.request = None;
-                drop(attempt);
                 // SAFETY: NetFS passes an array of paths, or null on failure.
                 let first = unsafe { mounts.as_ref() }.and_then(NSArray::firstObject);
-                let _ = sent.send((status, first.map(|path| PathBuf::from(path.to_string()))));
+                let at = first.map(|path| PathBuf::from(path.to_string()));
+                // Holding the lock waits for `start` to have noted the id.
+                let mut attempt = cancel.attempt();
+                attempt.request = None;
+                attempt.end(Ended::Reported { status, at });
             },
         )
     };
-    start(address, prompt, cancel, &finished)?;
-    let Ok((status, at)) = done.recv() else {
-        return Err(format!("{address}: macOS didn't answer."));
+    start(address, prompt, cancel, waiting, &finished)?;
+    let (status, at) = match done.recv() {
+        Ok(Ended::Reported { status, at }) => (status, at),
+        Ok(Ended::Cancelled) => return Err(CANCELLED.into()),
+        Err(_) => return Err(format!("{address}: macOS didn't answer.")),
     };
     match (status, at) {
         (0, Some(at)) => Ok(at),
@@ -169,6 +241,7 @@ fn start(
     address: &str,
     prompt: Prompt,
     cancel: &Cancel,
+    waiting: Sender<Ended>,
     finished: &Block<dyn Fn(i32, *mut c_void, *const NSArray<NSString>)>,
 ) -> Result<(), String> {
     objc2::rc::autoreleasepool(|_| {
@@ -187,9 +260,9 @@ fn start(
                 objc2::runtime::ProtocolObject::from_ref(&*NSString::from_str("UIOption")),
             );
         }
-        let mut attempt = cancel.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut attempt = cancel.attempt();
         if attempt.cancelled {
-            return Err("Cancelled.".into());
+            return Err(CANCELLED.into());
         }
         let mut request = std::ptr::null_mut();
         let url: *const NSURL = &*url;
@@ -215,6 +288,7 @@ fn start(
             return Err(failure(address, status, prompt));
         }
         attempt.request = Some(request as usize);
+        attempt.waiting = Some(waiting);
         Ok(())
     })
 }
@@ -238,7 +312,7 @@ fn failure(address: &str, status: i32, prompt: Prompt) -> String {
         );
     }
     let why = match status {
-        USER_CANCELLED | libc::ECANCELED => return "Cancelled.".into(),
+        USER_CANCELLED | libc::ECANCELED => return CANCELLED.into(),
         libc::EAUTH | libc::EACCES | libc::EPERM => {
             "the server refused these credentials, or this account has no permission.".to_string()
         }
@@ -280,9 +354,74 @@ mod tests {
         let refused = |typed: &str| address(typed).unwrap_err();
         assert!(refused("").starts_with("Type a server address"));
         assert!(refused("smb://donald:hunter2@nas/media").starts_with("Leave the password out"));
-        assert!(refused("afp://nas/media").contains("not afp://"));
+        assert!(refused("afp://nas/media").starts_with("Monodrive connects to smb://"));
         assert!(refused("smb:///media").contains("doesn't name a server"));
         assert!(refused("smb://nas local/media").contains("isn't a server address"));
+        assert!(refused("smb://nas/media?x=1").contains("isn't a server address"));
+        // However a password is written, no refusal repeats it.
+        for hidden in [
+            "smb://me:secret@nas/media",
+            "me:secret@nas/media",
+            "smb://me%3Asecret@nas/media",
+            "smb://me:secret/word@nas/media",
+            "smb://me:123/secret@nas/media",
+            "afp://me:secret@nas/media",
+            "me:secret://nas/media",
+            "smb://me:secret@/media",
+            "smb://me:secret@nas local/media",
+        ] {
+            let why = refused(hidden);
+            assert!(!why.contains("secret"), "{hidden}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_remount_address_loses_any_password_and_nothing_else() {
+        assert_eq!(
+            without_password("smb://me:secret@nas.local/media/"),
+            "smb://me@nas.local/media/"
+        );
+        assert_eq!(
+            without_password("smb://me@nas.local/media"),
+            "smb://me@nas.local/media"
+        );
+        assert_eq!(without_password("smb://nas/a@b"), "smb://nas/a@b");
+    }
+
+    /// An attempt in flight, as `start` leaves it, and its waiter.
+    fn in_flight() -> (Arc<Cancel>, mpsc::Receiver<Ended>) {
+        let cancel = Arc::new(Cancel::default());
+        let (waiting, done) = mpsc::channel();
+        cancel.attempt().waiting = Some(waiting);
+        (cancel, done)
+    }
+
+    #[test]
+    fn a_cancel_ends_the_wait_since_netfs_never_reports_a_cancelled_mount() {
+        let (cancel, done) = in_flight();
+        cancel.cancel();
+        assert_eq!(done.try_recv(), Ok(Ended::Cancelled));
+        assert!(cancel.is_cancelled());
+        // A report arriving anyway finds it over, and a second cancel too.
+        cancel.attempt().end(Ended::Reported {
+            status: 0,
+            at: None,
+        });
+        cancel.cancel();
+        assert!(done.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_report_ends_the_wait_and_a_later_cancel_changes_nothing() {
+        let (cancel, done) = in_flight();
+        let report = || Ended::Reported {
+            status: 0,
+            at: Some("/Volumes/media".into()),
+        };
+        cancel.attempt().end(report());
+        cancel.cancel();
+        assert_eq!(done.try_recv(), Ok(report()));
+        assert!(done.try_recv().is_err());
     }
 
     fn share(url: &str) -> Volume {
@@ -316,24 +455,37 @@ mod tests {
             places: dir.path().join("places.json"),
             recents: dir.path().join("recents.json"),
         };
-        let refused = connect(&store, "nas.local/media", |address| {
+        let refused = connect(&store, "nas.local/media", &Cancel::default(), |address| {
             assert_eq!(address, "smb://nas.local/media");
             Err("smb://nas.local/media: no.".into())
         });
         assert_eq!(refused, Err("smb://nas.local/media: no.".into()));
         assert_eq!(store.servers(), Ok(Vec::new()));
         // A password in the address never reaches the mount or the file.
-        let refused = connect(&store, "smb://me:secret@nas/media", |_| {
-            unreachable!("refused before mounting")
-        });
+        let refused = connect(
+            &store,
+            "smb://me:secret@nas/media",
+            &Cancel::default(),
+            |_| unreachable!("refused before mounting"),
+        );
         assert!(refused.is_err());
         assert!(!store.places.exists());
-        let connected = connect(&store, "nas.local/media", |_| Ok("/Volumes/media".into()));
+        // Cancelled while it mounted: the mount may have won, the save doesn't.
+        let cancel = Arc::new(Cancel::default());
+        let cancelled = connect(&store, "nas.local/media", &cancel, |_| {
+            cancel.cancel();
+            Ok("/Volumes/media".into())
+        });
+        assert_eq!(cancelled, Err("Cancelled.".into()));
+        assert_eq!(store.servers(), Ok(Vec::new()));
+        let connected = connect(&store, "nas.local/media", &Cancel::default(), |_| {
+            Ok("/Volumes/media".into())
+        });
         assert_eq!(
             connected,
             Ok(("smb://nas.local/media".into(), "/Volumes/media".into()))
         );
-        connect(&store, "smb://nas.local/media/", |_| {
+        connect(&store, "smb://nas.local/media/", &Cancel::default(), |_| {
             Ok("/Volumes/media".into())
         })
         .unwrap();

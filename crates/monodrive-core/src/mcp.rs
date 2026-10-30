@@ -846,16 +846,18 @@ impl Server {
                 };
                 volumes::eject(&expand_home(&path), &origin, &mut self.ops).map(|done| done + "\n")
             }
-            ToolCall::Connect { address } if !self.ops.agents_change_files() => Err(format!(
-                "Agents can't connect to {address}: Let agents change files is off in Monodrive's Agents settings."
-            )),
-            ToolCall::Connect { address } => {
+            ToolCall::Connect { address } => servers::address(&address).and_then(|address| {
+                if !self.ops.agents_change_files() {
+                    return Err(format!(
+                        "Agents can't connect to {address}: Let agents change files is off in Monodrive's Agents settings."
+                    ));
+                }
                 let cancel = Arc::default();
-                servers::connect(&self.places, &address, |address| {
+                servers::connect(&self.places, &address, &cancel, |address| {
                     servers::mount(address, Prompt::Never, &cancel)
                 })
                 .map(|(address, at)| format!("{address} is at {}\n", at.display()))
-            }
+            }),
             ToolCall::Disconnect { address } => {
                 let origin = Origin::Agent {
                     client: self.client.clone(),
@@ -4360,6 +4362,19 @@ mod tests {
             json!({"name": "connect", "arguments": {"address": "smb://nas/media"}}),
         );
         assert!(text(&reply).starts_with("Agents can't connect"), "{reply}");
+        // With changes off or on, no reply repeats a password.
+        for tool in ["connect", "disconnect", "forget_server"] {
+            let reply = call(
+                &mut server,
+                json!({"name": tool, "arguments": {"address": "smb://me:secret@nas/media"}}),
+            );
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            assert!(
+                text(&reply).starts_with("Leave the password out"),
+                "{reply}"
+            );
+            assert!(!reply.to_string().contains("secret"), "{reply}");
+        }
         let reply = call(
             &mut server,
             json!({"name": "download", "arguments": {"paths": [&made, &renamed]}}),

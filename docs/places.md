@@ -18,7 +18,7 @@ Eject refuses the startup disk, and any volume that a queued, running or waiting
 
 ## Connect to Server
 
-`servers` mounts `smb://` shares through macOS's NetFS with no user or password, so macOS finds credentials in the Keychain or asks on screen. An address with a password in it is refused before anything happens, and an address is saved only once it has connected. The window allows the prompt. An MCP server asks NetFS for no UI, since nobody can answer one there, and says so when credentials are needed. Closing the window's card cancels a mount in flight. Connecting only mounts: the share shows in the sidebar, nothing lists it until someone opens it, and nothing crawls it. Disconnecting is Eject, with its refusals. Forgetting an address leaves a mounted share mounted.
+`servers` mounts `smb://` shares through macOS's NetFS with no user or password, so macOS finds credentials in the Keychain or asks on screen. An address with a password in it is refused before anything happens, and an address is saved only once it has connected. The window allows the prompt. An MCP server asks NetFS for no UI, since nobody can answer one there, and says so when credentials are needed. A mount in flight is cancelled whenever its card goes away, however it goes, and a cancelled attempt saves nothing. No refusal repeats the typed address, and a remount address loses any password when it's read. Connecting only mounts: the share shows in the sidebar, nothing lists it until someone opens it, and nothing crawls it. Disconnecting is Eject, with its refusals. Forgetting an address leaves a mounted share mounted.
 
 ## In the window
 

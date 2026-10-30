@@ -3122,6 +3122,14 @@ impl Render for Browser {
                     cx.listener(|this, _: &MoveHere, window, cx| this.paste(true, window, cx)),
                 )
             })
+            // Only here, so the menu bar's item is off and can't reach the
+            // selection while the keys are somewhere else, such as the sidebar.
+            .when(self.renaming.is_none() && !self.selection.is_empty(), |d| {
+                d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
+                    let paths = this.chosen();
+                    this.submit(Request::Trash { paths }, window, cx)
+                }))
+            })
             .when(self.showing_recents(), |d| {
                 d.on_action(cx.listener(|this, _: &ClearRecents, _, cx| this.clear_recents(cx)))
             })
@@ -3325,10 +3333,6 @@ impl Render for Browser {
                     d.on_action(cx.listener(|this, _: &Duplicate, window, cx| {
                         let paths = this.chosen();
                         this.submit(Request::Duplicate { paths }, window, cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
-                        let paths = this.chosen();
-                        this.submit(Request::Trash { paths }, window, cx)
                     }))
                     .on_action(cx.listener(
                         |this, _: &NewFolderWithSelection, window, cx| {

@@ -510,6 +510,16 @@ pub fn conflict(stroke: &Keystroke, id: &str, context: Option<&str>, cx: &App) -
     )
 }
 
+/// Whether `stroke` is a shortcut bound to command `id` now.
+pub fn is_shortcut_of(stroke: &Keystroke, id: &str, cx: &App) -> bool {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    keymap.bindings().any(|binding| {
+        binding.action().name() == id
+            && matches!(binding.keystrokes(), [only] if stroke.should_match(only))
+    })
+}
+
 /// The label of the first shortcut command `id` runs on now, if any.
 pub fn shortcut_label(id: &str, cx: &App) -> Option<String> {
     let overrides = &cx.global::<Preferences>().shortcuts;

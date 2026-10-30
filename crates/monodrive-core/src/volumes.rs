@@ -196,7 +196,7 @@ fn volume(
         let share = get(NSURLVolumeURLForRemountingKey)
             .and_then(|url| url.downcast::<NSURL>().ok())
             .and_then(|url| url.absoluteString())
-            .map(|url| VolumeId::Url(url.to_string()));
+            .map(|url| VolumeId::Url(crate::servers::without_password(&url.to_string())));
         let uuid = text(NSURLVolumeUUIDStringKey).map(VolumeId::Uuid);
         Volume {
             name: text(NSURLVolumeLocalizedNameKey).unwrap_or_else(|| mount.display().to_string()),

@@ -627,3 +627,82 @@ fn connect_validates_shows_failures_and_saves_only_what_connected(cx: &mut TestA
     click(cx, "connect-cancel");
     assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
 }
+
+#[gpui::test]
+fn a_connect_card_that_goes_away_cancels_its_mount_and_saves_nothing(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    // Settings and the palette each replace the card without dismissing it.
+    for replace in ["cmd-,", "cmd-shift-p"] {
+        press(cx, "cmd-k");
+        cx.simulate_input("nas.local/media");
+        cx.run_until_parked();
+        *world.fake.mounted.lock().unwrap() = Some(Ok("/Volumes/media".into()));
+        let view = browser.read_with(cx, |b, _| match &b.sheet {
+            Some(Sheet::Connect(view)) => view.clone(),
+            _ => panic!("the card is open"),
+        });
+        // In flight: its work hasn't run yet.
+        let cancel = view.update(cx, |view, cx| {
+            view.connect(cx);
+            view.connecting.clone().unwrap()
+        });
+        drop(view);
+        assert!(!cancel.is_cancelled());
+        press(cx, replace);
+        assert!(browser.read_with(cx, |b, _| !matches!(b.sheet, Some(Sheet::Connect(_)))));
+        assert!(cancel.is_cancelled(), "{replace}");
+        assert_eq!(world.store.servers(), Ok(Vec::new()));
+        press(cx, "escape");
+        assert!(browser.read_with(cx, |b, _| b.sheet.is_none()), "{replace}");
+    }
+}
+
+#[gpui::test]
+fn command_backspace_in_the_sidebar_never_reaches_the_lists_selection(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(
+        vec![
+            startup(),
+            volume("Backup", "/Volumes/Backup".as_ref(), "B", 1000, 250),
+        ],
+        cx,
+    );
+    let owned = own(cx);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "down down down");
+    let file = project.join("a.txt");
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    let favorites = browser.read_with(cx, |b, _| b.sidebar.places.len());
+    // Recents, then each volume.
+    for row in [0, favorites + 1, favorites + 2] {
+        browser.update_in(cx, |b, window, cx| {
+            b.sidebar_cursor = row;
+            window.focus(&b.sidebar_focus, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // Handled here, so macOS doesn't offer it to the menu bar.
+        let stroke = Keystroke::parse("cmd-backspace").unwrap();
+        let handled = cx.update(|window, cx| window.dispatch_keystroke(stroke, cx));
+        cx.run_until_parked();
+        assert!(handled, "row {row}");
+        // The menu bar's Move to Trash is off, and sending it does nothing.
+        let on = cx.update(|window, cx| window.is_action_available(&MoveToTrash, cx));
+        assert!(!on, "row {row}");
+        cx.dispatch_action(MoveToTrash);
+        cx.run_until_parked();
+        assert!(file.exists(), "row {row}");
+    }
+    assert_eq!(
+        browser.read_with(cx, |b, _| b.sidebar.places.len()),
+        favorites
+    );
+    // With the list's keys back, it's the list's command again.
+    browser.update_in(cx, |b, window, cx| b.focus_list(window, cx));
+    cx.run_until_parked();
+    let on = cx.update(|window, cx| window.is_action_available(&MoveToTrash, cx));
+    assert!(on);
+    release(owned, cx);
+}

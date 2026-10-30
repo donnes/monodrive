@@ -11,8 +11,9 @@ use crate::commands::{self, Scope};
 use crate::preferences::Preferences;
 use crate::theme::{self, accent, content, icon, icon_button, section_label};
 use gpui::{
-    Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, Role, Stateful, Task, Window, div, prelude::*, px,
+    Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, Role, Stateful, Task, Window, div,
+    prelude::*, px,
 };
 use monodrive_core::ops::{self, Origin};
 use monodrive_core::places::{Availability, Place, Store};
@@ -778,6 +779,17 @@ impl Browser {
                     .key_context("Sidebar")
                     .track_focus(&self.sidebar_focus)
                     .on_key_down(cx.listener(Self::type_to_search))
+                    // On a row that isn't a favorite, Remove from Sidebar's
+                    // key stops here: macOS would offer it to the menu bar.
+                    .on_key_down(|event: &KeyDownEvent, _, cx| {
+                        if commands::is_shortcut_of(
+                            &event.keystroke,
+                            super::RemoveFromSidebar.name(),
+                            cx,
+                        ) {
+                            cx.stop_propagation();
+                        }
+                    })
                     .on_action(cx.listener(|this, _: &PlacePrevious, _, cx| {
                         this.move_sidebar_cursor(this.sidebar_cursor.saturating_sub(1), cx)
                     }))
