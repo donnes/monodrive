@@ -38,7 +38,9 @@ use gpui::{
 };
 use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Request};
+use monodrive_core::places::Favorite;
 use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
@@ -270,6 +272,8 @@ pub struct Browser {
     frame: Option<preferences::Frame>,
     /// This window's state in the saved session, if it's saved.
     session_key: Option<u64>,
+    /// Working out what to save. A newer save replaces it.
+    session_save: Task<()>,
 }
 
 impl Browser {
@@ -323,26 +327,69 @@ impl Browser {
         browser
     }
 
-    /// What should come back on the next launch.
-    pub(crate) fn state(&self, cx: &mut Context<Self>) -> WindowState {
-        let volumes = &self.sidebar.volumes;
+    /// What should come back on the next launch, if every stop has a place.
+    fn state(&self, cx: &App) -> Option<WindowState> {
         let tabs = self
             .tabs
             .iter()
-            .map(|tab| TabState {
-                panes: tab
-                    .panes()
-                    .map(|pane| pane.update(cx, |pane, _| pane.state(volumes)))
-                    .collect(),
-                second_focused: tab.second_focused,
-                ratio: tab.ratio,
+            .map(|tab| {
+                Some(TabState {
+                    panes: tab
+                        .panes()
+                        .map(|pane| pane.read(cx).state())
+                        .collect::<Option<_>>()?,
+                    second_focused: tab.second_focused,
+                    ratio: tab.ratio,
+                })
             })
-            .collect();
-        WindowState {
+            .collect::<Option<_>>()?;
+        Some(WindowState {
             tabs,
             active: self.active,
             frame: self.frame,
-        }
+        })
+    }
+
+    /// Works out which volume each new stop's folder is really on, off the UI
+    /// thread as `Store::pin` does, then hands `done` what should come back. A
+    /// link's own path says nothing about the drive it leads to.
+    fn capture_state(
+        &self,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(WindowState, &mut App) + 'static,
+    ) -> Task<()> {
+        let panes: Vec<_> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes())
+            .cloned()
+            .collect();
+        let folders: Vec<PathBuf> = panes
+            .iter()
+            .flat_map(|pane| pane.read(cx).unplaced())
+            .collect();
+        let volumes = self.sidebar.volumes.clone();
+        let placed = cx.background_executor().spawn(async move {
+            folders
+                .into_iter()
+                .map(|folder| {
+                    let place = Favorite::of(&pane::real(&folder), &volumes);
+                    (folder, place)
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let placed = placed.await;
+            let _ = this.update(cx, |this, cx| {
+                for pane in panes {
+                    pane.update(cx, |pane, _| pane.place_stops(&placed));
+                }
+                // A stop added meanwhile has its own save coming.
+                if let Some(state) = this.state(cx) {
+                    done(state, cx);
+                }
+            });
+        })
     }
 
     /// Keeps this window's state under `key` from now on.
@@ -353,13 +400,14 @@ impl Browser {
 
     /// Says what's open, once the volumes are known: a place saved before then
     /// wouldn't remember which drive it was on.
-    pub(super) fn save_session(&self, cx: &mut Context<Self>) {
+    pub(super) fn save_session(&mut self, cx: &mut Context<Self>) {
         let Some(key) = self.session_key else { return };
         if self.sidebar.volumes.is_empty() {
             return;
         }
-        let state = self.state(cx);
-        session::update(key, state, cx);
+        self.session_save = self.capture_state(cx, move |state, cx| {
+            session::update(key, state, cx);
+        });
     }
 
     fn empty(cx: &mut Context<Self>) -> Self {
@@ -425,6 +473,7 @@ impl Browser {
             sidebar: sidebar::Sidebar::default(),
             frame: None,
             session_key: None,
+            session_save: Task::ready(()),
         }
     }
 

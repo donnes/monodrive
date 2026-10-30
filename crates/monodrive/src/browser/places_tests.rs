@@ -16,7 +16,9 @@ use monodrive_core::ops::Origin;
 use monodrive_core::places::{Favorite, Pinned, Store};
 use monodrive_core::servers::Cancel;
 use monodrive_core::volumes::{Volume, VolumeId};
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 #[derive(Default)]
 struct Fake {
@@ -1443,12 +1445,13 @@ fn open_state<'a>(
 #[gpui::test]
 fn tabs_and_panes_come_back_as_they_were(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
+    let project = project.canonicalize().unwrap();
     let world = world(vec![startup()], cx);
     let (browser, cx) = open(&world, &project, cx);
     // The first tab went into docs; the second is on the project, in the grid,
     // split, with its right pane up a level and the keys there.
     press(cx, "down cmd-down cmd-t cmd-up cmd-2 cmd-alt-s cmd-up");
-    let state = browser.update(cx, |b, cx| b.state(cx));
+    let state = saved_state(&browser, cx);
     let bytes = serde_json::to_vec(&Session::of(vec![state])).unwrap();
     let state = session::decode(&bytes).unwrap().windows.remove(0);
     assert_eq!((state.tabs.len(), state.active), (2, 1));
@@ -1579,4 +1582,45 @@ fn windows_share_one_index(cx: &mut TestAppContext) {
     for browser in [&first, &second] {
         assert!(browser.read_with(cx, |b, _| Arc::ptr_eq(&b.index, &shared)));
     }
+}
+
+/// What the window would save now.
+fn saved_state(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> WindowState {
+    let kept: Rc<RefCell<Option<WindowState>>> = Rc::default();
+    let into = kept.clone();
+    browser.update(cx, |b, cx| {
+        b.capture_state(cx, move |state, _| *into.borrow_mut() = Some(state))
+            .detach()
+    });
+    cx.run_until_parked();
+    kept.take().unwrap()
+}
+
+#[gpui::test]
+fn a_link_into_a_drive_is_saved_with_that_drive(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let drive = tempfile::tempdir().unwrap();
+    let mount = drive.path().canonicalize().unwrap();
+    std::fs::create_dir(mount.join("work")).unwrap();
+    let link = project.join("to-drive");
+    std::os::unix::fs::symlink(mount.join("work"), &link).unwrap();
+    let world = world(
+        vec![startup(), volume("Backup", &mount, "B", 1000, 500)],
+        cx,
+    );
+    let (browser, cx) = open(&world, &project, cx);
+    on_pane(&browser, cx, |pane, cx| pane.navigate(link.clone(), cx));
+    cx.run_until_parked();
+    let state = saved_state(&browser, cx);
+    let place = state.tabs[0].panes[0].history[1].place.clone();
+    assert_eq!(place.path, mount.join("work"));
+    let drive_name = place.volume.as_ref().map(|volume| volume.name.as_str());
+    assert_eq!(drive_name, Some("Backup"));
+    // Another drive at that mount isn't what comes back.
+    *world.fake.volumes.lock().unwrap() =
+        vec![startup(), volume("Impostor", &mount, "I", 1000, 500)];
+    let cx: &mut TestAppContext = cx;
+    let (browser, cx) = open_state(&world, state, cx);
+    assert!(in_pane(&browser, cx, |pane, _| pane.unavailable.is_some()));
+    assert!(shown(&browser, cx).0.is_empty());
 }

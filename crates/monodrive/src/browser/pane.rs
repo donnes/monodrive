@@ -38,7 +38,6 @@ use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::Index;
 use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
 use monodrive_core::places::{Availability, Favorite};
-use monodrive_core::volumes::Volume;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -349,26 +348,44 @@ impl Pane {
         matches!(self.unavailable, Some(Unavailable::Gone(_)))
     }
 
-    /// What should come back on the next launch. Each place is kept with the
-    /// volume it was first saved on, and `volumes` must be as they are now.
-    pub(super) fn state(&mut self, volumes: &[Volume]) -> PaneState {
+    /// The folders of the history's stops not yet known by volume, to resolve
+    /// off the UI thread.
+    pub(super) fn unplaced(&self) -> Vec<PathBuf> {
+        self.history
+            .iter()
+            .filter(|stop| stop.place.is_none())
+            .map(|stop| stop.folder.clone())
+            .collect()
+    }
+
+    /// Keeps each stop with the volume its folder was first saved on.
+    pub(super) fn place_stops(&mut self, placed: &HashMap<PathBuf, Favorite>) {
+        for stop in &mut self.history {
+            if stop.place.is_none() {
+                stop.place = placed.get(&stop.folder).cloned();
+            }
+        }
+    }
+
+    /// What should come back on the next launch, once `place_stops` knows every
+    /// stop: a path alone doesn't say which drive it was on.
+    pub(super) fn state(&self) -> Option<PaneState> {
         let history = self
             .history
-            .iter_mut()
-            .map(|stop| StopState {
-                place: stop
-                    .place
-                    .get_or_insert_with(|| Favorite::of(&stop.folder, volumes))
-                    .clone(),
-                recents: stop.recents,
+            .iter()
+            .map(|stop| {
+                Some(StopState {
+                    place: stop.place.clone()?,
+                    recents: stop.recents,
+                })
             })
-            .collect();
-        PaneState {
+            .collect::<Option<_>>()?;
+        Some(PaneState {
             history,
             at: self.at,
             view: self.view,
             sort: self.sort,
-        }
+        })
     }
 
     /// Preferences changed: lists again if the hidden files did. With `adopt`,
