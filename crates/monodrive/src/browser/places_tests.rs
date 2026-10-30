@@ -1624,3 +1624,43 @@ fn a_link_into_a_drive_is_saved_with_that_drive(cx: &mut TestAppContext) {
     assert!(in_pane(&browser, cx, |pane, _| pane.unavailable.is_some()));
     assert!(shown(&browser, cx).0.is_empty());
 }
+
+#[gpui::test]
+fn going_to_a_dotfile_does_not_open_the_trash_or_applications_to_hidden_files(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let root = world.dir.path().canonicalize().unwrap();
+    let (trash, applications) = (root.join("Trash"), root.join("Applications"));
+    with_a_dotfile(&trash);
+    with_a_dotfile(&applications);
+    std::fs::write(root.join(".named"), "").unwrap();
+    let (browser, cx) = open(&world, &project, cx);
+    let go_to = |folder: &Path, file: &str, cx: &mut VisualTestContext| {
+        let pane = pane_of(&browser, cx);
+        let (folder, file) = (folder.to_path_buf(), folder.join(file));
+        pane.update_in(cx, |pane, window, cx| {
+            pane.go_to(folder, Some(file), window, cx)
+        });
+        cx.run_until_parked();
+    };
+    // Applications and the Trash open on what they always show.
+    go_to(&applications, ".DS_Store", cx);
+    assert_eq!(shown(&browser, cx).0, ["app.app"]);
+    go_to(&trash, ".DS_Store", cx);
+    assert_eq!(shown(&browser, cx).0, ["app.app"]);
+    // Elsewhere the file asked for by name shows, as before.
+    go_to(&project, ".env", cx);
+    assert_eq!(shown(&browser, cx).1, [".env"]);
+    // A folder opened in place under one with a named dotfile keeps the rule.
+    go_to(&root, ".named", cx);
+    assert_eq!(shown(&browser, cx).1, [".named"]);
+    on_pane(&browser, cx, |pane, cx| {
+        pane.toggle_folder(applications.clone(), cx)
+    });
+    cx.run_until_parked();
+    let rows = shown(&browser, cx).0;
+    assert!(rows.contains(&"  app.app".to_string()), "{rows:?}");
+    assert!(!rows.contains(&"  .DS_Store".to_string()), "{rows:?}");
+}

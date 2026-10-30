@@ -628,7 +628,7 @@ impl Pane {
                 }
                 verified = Some(folder.clone());
             }
-            let hidden = |dir: &Path| peek || sidebar::lists_hidden(dir, show_hidden, &tidy);
+            let hidden = |dir: &Path| sidebar::lists_hidden(dir, show_hidden || peek, &tidy);
             let root = entries::list_dir(&folder, hidden(&folder), sort)
                 .map_err(|e| format!("{}: {e}", folder.display()))?;
             let real_folder = real(&folder);
@@ -824,7 +824,7 @@ impl Pane {
         let tidy = self.tidy_folders(cx);
         let dir = path.clone();
         let list = cx.background_executor().spawn(async move {
-            let hidden = peek || sidebar::lists_hidden(&dir, show_hidden, &tidy);
+            let hidden = sidebar::lists_hidden(&dir, show_hidden || peek, &tidy);
             let list = entries::list_dir(&dir, hidden, sort).unwrap_or_default();
             (list, real(&dir))
         });
