@@ -38,6 +38,10 @@ We assess the problem, scope, approval and evidence, not whether an agent wrote 
 
 Every change to `main` from a contributor goes through a PR. A PR can merge once the `macOS` and `Dependencies and licenses` checks pass, and we squash or rebase it. A maintainer approves CI for a first-time contributor's first PR.
 
+## Size labels
+
+Every PR also gets a `size:*` label from `size:XS` to `size:XXL`, counted from its changed lines. The count leaves out `vendor/`, `Cargo.lock` and test files, unless the PR only changes tests. The label is context for reviewers, not a limit.
+
 ## Vouching
 
 The vouch workflow labels every PR by its author's status in [.github/VOUCHED.td](.github/VOUCHED.td):
