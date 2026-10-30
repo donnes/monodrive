@@ -17,17 +17,17 @@ Update a plan's row when its work lands on `main`.
 | 07 Places, drives and NAS | Done; a real SMB share still needs a check | ae1cead, 532d2b7, 4a396e1, f3bfa68 |
 | 08 Tabs and panes | Done; drag between panes is in plan 09 | 8c16e59 and earlier |
 | 09 Drag and drop | Done, with spring-loaded folders; drags to and from other apps need a person to check | 8173471 and earlier |
-| 10 Open With and Get Info | Done; launching apps, the open panel and terminals need a person to check | 5c5f7b1 |
-| 11 Search | Core and MCP filters on main; UI picked, filter UI skipped for now | |
-| 12 Batch rename | Core on main; UI waiting for picks | |
-| 13 Archives | Core on main; UI waiting for picks | |
-| 14 Remote locations | Core on main; UI waiting for picks | |
-| 15 File and folder comparison | Core on main; UI waiting for picks | |
-| 16 Offline catalogs | Core on main; UI waiting for picks | |
-| 17 Storage inspection | Core on main; UI waiting for picks | |
-| 18 Cloud storage | Local slice core on main; UI waiting for picks; direct providers deferred | |
-| 19 More views | Waiting for UI picks | |
-| 21 Extensions | User commands core on main; UI waiting for picks; runtime deferred | |
+| 10 Open With and Get Info | Done; launching apps, the open panel and terminals need a person to check | 5c5f7b1, 5a19615, 74b635c |
+| 11 Search | Done; filter UI skipped for now | 1c1c4f5, ef44c3d |
+| 12 Batch rename | Core on main; UI picked, not built | |
+| 13 Archives | Core on main; UI picked, not built | |
+| 14 Remote locations | Core on main; UI picked, not built | |
+| 15 File and folder comparison | Core on main; UI picked, not built | |
+| 16 Offline catalogs | Core on main; UI picked, not built | |
+| 17 Storage inspection | Core on main; UI picked, not built | |
+| 18 Cloud storage | Local slice core on main; UI picked, not built; direct providers deferred | |
+| 19 More views | UI picked, not built | |
+| 21 Extensions | User commands core on main; UI picked, not built; runtime deferred | |
 | 22 Worktree management | Inventory on main; goal changed to one place to scan and manage all worktrees; deletion needs a design review | |
 | 23 Agent features | Later | |
 
