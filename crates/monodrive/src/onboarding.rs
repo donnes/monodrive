@@ -21,6 +21,7 @@ use monodrive_core::index::{self, Index};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 /// Raise it to show onboarding once more to everyone who finished this one.
@@ -239,6 +240,10 @@ impl IndexGate {
 
 type Then = Box<dyn FnOnce(&mut App)>;
 
+/// Opens a main window when onboarding leaves the app with none.
+struct Reopen(Rc<dyn Fn(&mut App)>);
+impl Global for Reopen {}
+
 /// The onboarding window while it's up, and what opens when it goes.
 struct Flow {
     window: WindowHandle<Onboarding>,
@@ -253,24 +258,43 @@ pub fn launch(
     explicit_folder: bool,
     setup: Arc<dyn Setup>,
     then: impl FnOnce(&mut App) + 'static,
+    reopen: impl Fn(&mut App) + 'static,
     cx: &mut App,
 ) {
+    cx.set_global(Reopen(Rc::new(reopen)));
     let due = !explicit_folder && cx.global::<Preferences>().onboarding_version < VERSION;
     if !due {
         cx.set_global(IndexGate::new(setup, false));
         return then(cx);
     }
-    let granted = setup.full_disk_access();
-    let held = !granted && !setup.saved_index();
-    cx.set_global(IndexGate::new(setup, held));
-    // With the access there's nothing to explain, so it starts where there's
-    // something to decide: an existing install, or a reopen after the grant.
-    let step = if granted { Step::Agents } else { Step::Welcome };
-    open(step, Some(Box::new(then)), cx);
-    if granted {
-        start_index(cx);
-    }
-    cx.activate(true);
+    // Held until the disk has been asked, off the UI thread.
+    let gate = IndexGate::new(setup.clone(), true);
+    cx.set_global(gate.clone());
+    let then: Then = Box::new(then);
+    cx.spawn(async move |cx| {
+        let (granted, held) = cx
+            .background_executor()
+            .spawn(async move {
+                let granted = setup.full_disk_access();
+                (granted, !granted && !setup.saved_index())
+            })
+            .await;
+        if !held {
+            gate.open();
+        }
+        // With the access there's nothing to explain, so it starts where
+        // there's something to decide: an existing install, or a reopen after
+        // the grant.
+        let step = if granted { Step::Agents } else { Step::Welcome };
+        cx.update(|cx| {
+            open(step, Some(then), cx);
+            if granted {
+                start_index(cx);
+            }
+            cx.activate(true);
+        });
+    })
+    .detach();
 }
 
 /// Opens onboarding at `step`, or takes the open one there.
@@ -305,7 +329,8 @@ pub fn open_windows_now(cx: &mut App) -> bool {
 }
 
 /// A window closed. If it's onboarding's, however it went, what it held back
-/// goes ahead, before the app sees it has no windows left and quits.
+/// goes ahead, and if that was already opened and closed, a main window does,
+/// before the app sees it has no windows left and quits.
 pub fn closed(window: WindowId, cx: &mut App) {
     if cx
         .try_global::<Flow>()
@@ -317,6 +342,10 @@ pub fn closed(window: WindowId, cx: &mut App) {
     open_gate(cx);
     if let Some(then) = then {
         then(cx);
+    } else if !browser::any_window(cx)
+        && let Some(reopen) = cx.try_global::<Reopen>().map(|reopen| reopen.0.clone())
+    {
+        reopen(cx);
     }
 }
 
@@ -499,7 +528,7 @@ impl Onboarding {
     }
 
     /// What ↩ and the primary button do.
-    fn primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.step {
             Step::Welcome => self.go(Step::FullDiskAccess, cx),
             Step::FullDiskAccess if self.access.granted => {
@@ -528,7 +557,7 @@ impl Onboarding {
         cx.notify();
     }
 
-    fn not_now(&mut self, cx: &mut Context<Self>) {
+    pub fn not_now(&mut self, cx: &mut Context<Self>) {
         if !self.skipped.contains(&Step::FullDiskAccess) {
             self.skipped.push(Step::FullDiskAccess);
         }
@@ -661,6 +690,8 @@ impl Onboarding {
                         .map(|d| {
                             if done {
                                 d.child(icon("check-hi", 14.).text_color(theme::success()))
+                            } else if skipped {
+                                d.child(div().w(px(8.)).h(px(2.)).rounded_full().bg(content(0.55)))
                             } else {
                                 d.child(
                                     div()
@@ -674,15 +705,7 @@ impl Onboarding {
                             }
                         }),
                 )
-                .child(div().flex_1().min_w_0().truncate().child(step.name()))
-                .when(skipped, |d| {
-                    d.child(
-                        div()
-                            .text_size(px(theme::TEXT_CAPTION))
-                            .text_color(content(0.65))
-                            .child("Skipped"),
-                    )
-                })
+                .child(step.name())
         });
         div()
             .w(px(RAIL_WIDTH))

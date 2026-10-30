@@ -147,7 +147,13 @@ pub fn run(folder: Option<PathBuf>) {
             cx.on_action(|_: &ShowWelcome, cx| onboarding::show(onboarding::Step::Welcome, cx));
             window_commands(cx);
             let explicit = folder.is_some();
-            onboarding::launch(explicit, setup, move |cx| open_windows(folder, cx), cx);
+            onboarding::launch(
+                explicit,
+                setup,
+                move |cx| open_windows(folder, cx),
+                open_main_window,
+                cx,
+            );
         });
 }
 
@@ -175,6 +181,15 @@ fn open_windows(folder: Option<PathBuf>, cx: &mut App) {
     cx.activate(true);
 }
 
+/// Opens a main window where the last one was, for when the app has none left
+/// and isn't quitting.
+fn open_main_window(cx: &mut App) {
+    let opening = session::last_closed(cx)
+        .map_or_else(|| Opening::Folder(browser::home()), Opening::Restored);
+    open_window(opening, false, cx);
+    cx.activate(true);
+}
+
 /// Runs `act` on the window in front, once the command that asked has returned:
 /// commands dispatch inside that window's own update, and updating a window from
 /// inside itself fails.
@@ -191,7 +206,7 @@ fn window_commands(cx: &mut App) {
     cx.on_action(|_: &CloseWindow, cx| on_front_window(cx, Window::remove_window));
     cx.on_action(|_: &Minimize, cx| on_front_window(cx, |window| window.minimize_window()));
     cx.on_window_closed(|cx, window| {
-        session::forget(window.as_u64(), cx);
+        session::forget(window.as_u64(), browser::any_window(cx), cx);
         onboarding::closed(window, cx);
         if cx.windows().is_empty() {
             cx.quit();

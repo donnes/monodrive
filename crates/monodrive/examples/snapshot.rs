@@ -32,8 +32,10 @@
 //!
 //! `onboarding-welcome.png`, `onboarding-access.png`,
 //! `onboarding-access-asked.png`, `onboarding-access-granted.png`,
-//! `onboarding-access-reopen.png`, `onboarding-agents.png` and
-//! `onboarding-ready.png` show each step, with a made-up Mac behind them.
+//! `onboarding-access-reopen.png`, `onboarding-agents.png`,
+//! `onboarding-agents-skipped.png`, `onboarding-ready.png` and
+//! `onboarding-ready-skipped.png` show each step and what the list shows for
+//! it, with a made-up Mac behind them.
 //!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
@@ -622,7 +624,11 @@ impl Setup for MadeUpSetup {
     fn agents(&self) -> (Vec<Harness>, Vec<Harness>) {
         (
             vec![Harness::ClaudeCode, Harness::Codex, Harness::Cursor],
-            vec![Harness::Codex],
+            if self.granted {
+                vec![Harness::Codex]
+            } else {
+                Vec::new()
+            },
         )
     }
 
@@ -642,6 +648,8 @@ fn onboarding(cx: &mut Cx, out: &Path, base: &Preferences) -> gpui::Result<()> {
         ("access-reopen", Step::FullDiskAccess, true, true, false),
         ("agents", Step::Agents, true, false, false),
         ("ready", Step::Ready, true, false, false),
+        ("agents-skipped", Step::FullDiskAccess, false, false, false),
+        ("ready-skipped", Step::FullDiskAccess, false, false, false),
     ] {
         let setup = Arc::new(MadeUpSetup {
             granted,
@@ -656,6 +664,19 @@ fn onboarding(cx: &mut Cx, out: &Path, base: &Preferences) -> gpui::Result<()> {
                 view
             })
         })?;
+        // Skipping goes through what Not Now and Skip do.
+        if name.ends_with("-skipped") {
+            cx.update_window(window.into(), |root, window, cx| {
+                if let Ok(view) = root.downcast::<Onboarding>() {
+                    view.update(cx, |view, cx| {
+                        view.not_now(cx);
+                        if name == "ready-skipped" {
+                            view.primary(window, cx);
+                        }
+                    });
+                }
+            })?;
+        }
         // The logo decodes, then a second pass draws it.
         for _ in 0..2 {
             cx.run_until_parked();

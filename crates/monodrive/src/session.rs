@@ -110,18 +110,24 @@ pub fn save(path: &Path, session: &Session) {
 struct Store {
     path: PathBuf,
     windows: Vec<(u64, WindowState)>,
+    /// The last window to close while no other was open. It's the session
+    /// until another opens, so quitting comes back to it.
+    last_closed: Option<WindowState>,
     pending: Task<()>,
 }
 impl Global for Store {}
 
 impl Store {
     fn session(&self) -> Session {
-        Session::of(
-            self.windows
-                .iter()
-                .map(|(_, state)| state.clone())
-                .collect(),
-        )
+        let mut windows: Vec<_> = self
+            .windows
+            .iter()
+            .map(|(_, state)| state.clone())
+            .collect();
+        if windows.is_empty() {
+            windows.extend(self.last_closed.clone());
+        }
+        Session::of(windows)
     }
 }
 
@@ -134,6 +140,7 @@ pub fn init(path: PathBuf, cx: &mut App) {
     cx.set_global(Store {
         path,
         windows: Vec::new(),
+        last_closed: None,
         pending: Task::ready(()),
     });
     // A save still waiting when the app quits would be lost.
@@ -164,16 +171,32 @@ pub fn update(key: u64, state: WindowState, cx: &mut App) {
     schedule(cx);
 }
 
-/// Window `key` closed. The last window's state stays, so quitting by closing
-/// it comes back to it; any other is gone for good.
-pub fn forget(key: u64, cx: &mut App) {
-    if !enabled(cx) || cx.windows().is_empty() {
+/// Window `key` closed. If no browser is left, even with onboarding still
+/// open, its state stays, so quitting comes back to it; any other is gone for
+/// good.
+pub fn forget(key: u64, browsers_left: bool, cx: &mut App) {
+    if !enabled(cx) {
         return;
     }
-    cx.global_mut::<Store>()
-        .windows
-        .retain(|(window, _)| *window != key);
+    let store = cx.global_mut::<Store>();
+    let closed = store.windows.iter().position(|(window, _)| *window == key);
+    let Some(closed) = closed.map(|at| store.windows.remove(at).1) else {
+        return;
+    };
+    if !browsers_left {
+        store.last_closed = Some(closed);
+    }
     schedule(cx);
+}
+
+/// The state of the last window to close, if it's the session now.
+pub fn last_closed(cx: &App) -> Option<WindowState> {
+    let store = cx.try_global::<Store>()?;
+    store
+        .windows
+        .is_empty()
+        .then(|| store.last_closed.clone())
+        .flatten()
 }
 
 /// Replacing the pending save drops it, so only the last change is written.

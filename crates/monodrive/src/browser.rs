@@ -149,6 +149,13 @@ impl Global for Operations {}
 pub struct SharedIndex(pub Arc<OnceLock<Result<Index, String>>>);
 impl Global for SharedIndex {}
 
+/// Whether a browser window is open.
+pub(crate) fn any_window(cx: &App) -> bool {
+    cx.windows()
+        .iter()
+        .any(|window| window.downcast::<Browser>().is_some())
+}
+
 pub fn bind(cx: &mut App) {
     let context = Some("Browser");
     // Commands and their shortcuts live in `commands`; these are the keys

@@ -1,16 +1,24 @@
 use super::*;
 use crate::browser::{Browser, SharedIndex};
+use crate::preferences::View;
+use crate::session::{self, PaneState, StopState, TabState, WindowState};
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
+use monodrive_core::entries::Sort;
+use monodrive_core::places::Favorite;
 use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
+
+/// Longer than the session waits before it saves.
+const SESSION_SETTLES: Duration = Duration::from_secs(1);
 
 /// A Mac where nothing real is read or changed, and that says what was asked.
 #[derive(Default)]
 pub(crate) struct Fake {
     pub granted: AtomicBool,
     pub saved: bool,
+    pub checks: AtomicUsize,
     pub starts: AtomicUsize,
     pub opened_settings: AtomicUsize,
     pub relaunches: AtomicUsize,
@@ -20,6 +28,7 @@ pub(crate) struct Fake {
 
 impl Setup for Fake {
     fn full_disk_access(&self) -> bool {
+        self.checks.fetch_add(1, Ordering::SeqCst);
         self.granted.load(Ordering::SeqCst)
     }
 
@@ -63,8 +72,15 @@ impl Setup for Fake {
 /// Launches as `run` does with `fake` and in-memory preferences, saying how
 /// many times the main windows opened.
 fn launched(fake: &Arc<Fake>, folder: bool, cx: &mut TestAppContext) -> Rc<Cell<usize>> {
+    let main = launch_only(fake, folder, cx);
+    cx.run_until_parked();
+    main
+}
+
+/// `launched`, stopping before anything off the UI thread has run.
+fn launch_only(fake: &Arc<Fake>, folder: bool, cx: &mut TestAppContext) -> Rc<Cell<usize>> {
     let main = Rc::new(Cell::new(0));
-    let opened = main.clone();
+    let (opened, reopened) = (main.clone(), main.clone());
     let fake = fake.clone();
     cx.update(|cx| {
         if !cx.has_global::<Preferences>() {
@@ -73,9 +89,14 @@ fn launched(fake: &Arc<Fake>, folder: bool, cx: &mut TestAppContext) -> Rc<Cell<
             commands::apply(cx);
             crate::window_commands(cx);
         }
-        launch(folder, fake, move |_| opened.set(opened.get() + 1), cx);
+        launch(
+            folder,
+            fake,
+            move |_| opened.set(opened.get() + 1),
+            move |_| reopened.set(reopened.get() + 1),
+            cx,
+        );
     });
-    cx.run_until_parked();
     main
 }
 
@@ -205,11 +226,17 @@ fn finishing_is_saved_opens_the_windows_and_isnt_shown_again(cx: &mut TestAppCon
     );
     assert!(cx.update(|cx| !cx.has_global::<Flow>()));
 
+    let checks = fake.checks.load(Ordering::SeqCst);
     let next = launched(&fake, false, cx);
     assert_eq!(
         next.get(),
         1,
         "the next launch goes straight to the windows"
+    );
+    assert_eq!(
+        fake.checks.load(Ordering::SeqCst),
+        checks,
+        "a normal launch doesn't ask"
     );
     assert!(cx.update(|cx| !cx.has_global::<Flow>()));
 
@@ -247,6 +274,7 @@ fn a_folder_on_the_command_line_skips_onboarding(cx: &mut TestAppContext) {
     let fake = no_grant();
     let main = launched(&fake, true, cx);
     assert_eq!(main.get(), 1);
+    assert_eq!(fake.checks.load(Ordering::SeqCst), 0);
     assert!(cx.update(|cx| !cx.has_global::<Flow>()));
     assert!(!cx.update(|cx| cx.global::<IndexGate>().held()));
     assert_eq!(
@@ -256,14 +284,139 @@ fn a_folder_on_the_command_line_skips_onboarding(cx: &mut TestAppContext) {
 }
 
 /// A window on a temp folder, starting the index as `open_window` does.
-fn browser_starting_the_index(folder: &Path, cx: &mut TestAppContext) {
+fn browser_starting_the_index(folder: &Path, cx: &mut TestAppContext) -> WindowHandle<Browser> {
     let folder = folder.to_path_buf();
-    cx.add_window(|_, cx| {
+    let window = cx.add_window(|_, cx| {
         let mut browser = Browser::new(folder, cx);
         browser.start_index(cx);
         browser
     });
     cx.run_until_parked();
+    window
+}
+
+fn close<V: 'static>(window: WindowHandle<V>, cx: &mut TestAppContext) {
+    window
+        .update(cx, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+}
+
+fn state(stop: &str) -> WindowState {
+    WindowState {
+        tabs: vec![TabState {
+            panes: vec![PaneState {
+                history: vec![StopState {
+                    place: Favorite {
+                        path: stop.into(),
+                        volume: None,
+                    },
+                    recents: false,
+                }],
+                at: 0,
+                view: View::List,
+                sort: Sort::default(),
+            }],
+            second_focused: false,
+            ratio: 0.5,
+        }],
+        active: 0,
+        frame: None,
+    }
+}
+
+#[gpui::test]
+fn closing_the_last_browser_under_onboarding_keeps_its_session(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("windows.json");
+    let fake = no_grant();
+    launched(&fake, false, cx);
+    let browser = browser_starting_the_index(dir.path(), cx);
+    let key = browser.window_id().as_u64();
+    let session_path = path.clone();
+    cx.update(|cx| {
+        session::init(session_path, cx);
+        session::update(key, state("/kept"), cx);
+    });
+
+    close(browser, cx);
+    cx.executor().advance_clock(SESSION_SETTLES);
+    cx.run_until_parked();
+    let saved = session::load(&path).map(|session| session.windows);
+    assert_eq!(saved, Some(vec![state("/kept")]));
+    assert_eq!(
+        cx.update(|cx| session::last_closed(cx)),
+        Some(state("/kept"))
+    );
+
+    // A window opened after that is the session, without the one before it.
+    let next = browser_starting_the_index(dir.path(), cx);
+    let key = next.window_id().as_u64();
+    cx.update(|cx| session::update(key, state("/next"), cx));
+    cx.executor().advance_clock(SESSION_SETTLES);
+    cx.run_until_parked();
+    let saved = session::load(&path).map(|session| session.windows);
+    assert_eq!(saved, Some(vec![state("/next")]));
+}
+
+#[gpui::test]
+fn finishing_after_the_windows_were_closed_opens_one(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake {
+        granted: AtomicBool::new(true),
+        ..Fake::default()
+    });
+    let main = launched(&fake, false, cx);
+    // ⌘N opens what onboarding held back, and the person closes it again.
+    assert!(cx.update(open_windows_now));
+    assert_eq!(main.get(), 1);
+    let browser = browser_starting_the_index(dir.path(), cx);
+    close(browser, cx);
+
+    let (_, visual) = flow(cx);
+    press("enter", visual);
+    press("enter", visual);
+    assert!(cx.update(|cx| !cx.has_global::<Flow>()));
+    assert_eq!(main.get(), 2, "the app has a window to go on with");
+}
+
+#[gpui::test]
+fn closing_after_the_windows_were_closed_opens_one(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = no_grant();
+    let main = launched(&fake, false, cx);
+    assert!(cx.update(open_windows_now));
+    let browser = browser_starting_the_index(dir.path(), cx);
+    close(browser, cx);
+
+    let (_, visual) = flow(cx);
+    press("cmd-w", visual);
+    assert_eq!(main.get(), 2);
+}
+
+#[gpui::test]
+fn onboarding_opens_no_window_while_a_browser_is_open(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = no_grant();
+    let main = launched(&fake, false, cx);
+    assert!(cx.update(open_windows_now));
+    browser_starting_the_index(dir.path(), cx);
+
+    let (_, visual) = flow(cx);
+    press("cmd-w", visual);
+    assert_eq!(main.get(), 1);
+}
+
+#[gpui::test]
+fn the_first_look_at_the_mac_is_off_the_ui_thread_with_the_crawl_held(cx: &mut TestAppContext) {
+    let fake = no_grant();
+    launch_only(&fake, false, cx);
+    assert_eq!(fake.checks.load(Ordering::SeqCst), 0);
+    assert!(cx.update(|cx| cx.global::<IndexGate>().held()));
+    assert!(cx.update(|cx| !cx.has_global::<Flow>()));
+
+    cx.run_until_parked();
+    assert!(cx.update(|cx| cx.has_global::<Flow>()));
 }
 
 #[gpui::test]
