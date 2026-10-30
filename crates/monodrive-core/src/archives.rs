@@ -5,11 +5,12 @@
 //!
 //! Entry names come from whoever made the archive. They're shown as stored
 //! and checked before anything is written: no absolute paths, no `..`, no
-//! two entries at one path, no link leading out of what it's extracted
-//! with, and no writing through a link, whether the archive made it or it
-//! was already there.
+//! two entries at one path, no link that could climb out of its folder, and
+//! no writing through a link, whether the archive made it or it was already
+//! there.
 
 use crate::entries::Kind;
+use caseless::Caseless;
 use flate2::bufread::DeflateDecoder;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -330,12 +331,6 @@ impl Archive {
                 printable(item)
             ));
         }
-        let links: HashSet<Vec<String>> = taken
-            .iter()
-            .zip(&keys)
-            .filter(|((entry, _), _)| entry.kind == Kind::Link)
-            .map(|(_, key)| key.clone())
-            .collect();
         let own = taken
             .iter()
             .find(|(_, rest)| rest.is_empty())
@@ -349,8 +344,6 @@ impl Archive {
         let base = CString::new(base.as_bytes()).map_err(|e| e.to_string())?;
         let mut writer = Writer {
             archive: self,
-            links,
-            ignores_case,
             file: File::open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?,
             buffer: vec![0; CHUNK],
             cancel,
@@ -607,12 +600,15 @@ fn to_dos(seconds: i64) -> DateTime {
 }
 
 /// A path's parts as a volume compares names: whatever their Unicode
-/// normalization, and whatever their case where it `ignores_case`.
+/// normalization, and where it `ignores_case`, with Unicode's full case
+/// folding, which matches σ with ς where lowercasing doesn't. It may match
+/// more than the volume does, which only refuses more; what it misses still
+/// fails when `O_EXCL` finds the name taken.
 fn key(parts: &[&str], ignores_case: bool) -> Vec<String> {
     parts
         .iter()
         .map(|part| match ignores_case {
-            true => part.to_lowercase().nfd().collect(),
+            true => part.nfd().default_case_fold().nfd().collect(),
             false => part.nfd().collect(),
         })
         .collect()
@@ -621,9 +617,6 @@ fn key(parts: &[&str], ignores_case: bool) -> Vec<String> {
 /// Writes an archive's files and links where `extract` puts them.
 struct Writer<'a> {
     archive: &'a Archive,
-    /// The item's links, keyed as its volume compares names.
-    links: HashSet<Vec<String>>,
-    ignores_case: bool,
     file: File,
     buffer: Vec<u8>,
     cancel: &'a AtomicBool,
@@ -652,10 +645,10 @@ impl Writer<'_> {
             }
             let mut target = Vec::new();
             self.pour(entry, &mut target)?;
-            if !self.stays(&target, at) {
+            if !stays(&target, at) {
                 return Err(format!(
-                    "{shown} is a link that leads out of what's extracted with it, or through \
-                     another link, so it wasn't extracted."
+                    "{shown} is a link that leads out of its folder or climbs with .., \
+                     so it wasn't extracted."
                 ));
             }
             let target = CString::new(target).map_err(|e| e.to_string())?;
@@ -752,36 +745,19 @@ impl Writer<'_> {
         }
         Ok(())
     }
+}
 
-    /// Whether a link at `at` inside the item, to `target`, leads somewhere
-    /// inside the item. A relative target may climb with `..` as long as it
-    /// stays inside, but it can't pass through one of the item's links,
-    /// whose own target would move it: what `..` means after one isn't what
-    /// it reads as. A link at the top of the item would lead among the
-    /// destination's own items, which the archive doesn't decide.
-    fn stays(&self, target: &[u8], at: &[&str]) -> bool {
-        let (Ok(target), Some((_, folder))) = (std::str::from_utf8(target), at.split_last()) else {
-            return false;
-        };
-        if target.starts_with('/') || target.contains('\0') {
-            return false;
-        }
-        let parts: Vec<&str> = split(target);
-        let mut here = key(folder, self.ignores_case);
-        for (i, part) in parts.iter().enumerate() {
-            if *part == ".." {
-                if here.pop().is_none() {
-                    return false;
-                }
-                continue;
-            }
-            here.extend(key(&[part], self.ignores_case));
-            if i + 1 < parts.len() && self.links.contains(&here) {
-                return false;
-            }
-        }
-        true
-    }
+/// Whether a link at `at` inside the item, to `target`, can only lead down
+/// into its own folder: relative, with no `..` at all. Then no chain of
+/// links can climb, whatever their names, so none leads out without Monodrive
+/// having to compare names as the volume does. A link at the top of the item
+/// would lead among the destination's own items, which the archive doesn't
+/// decide.
+fn stays(target: &[u8], at: &[&str]) -> bool {
+    !at.is_empty()
+        && !target.starts_with(b"/")
+        && !target.contains(&0)
+        && !target.split(|b| *b == b'/').any(|part| part == b"..")
 }
 
 /// What stopped an entry being written: a link or file in the way.
@@ -1129,6 +1105,29 @@ pub(crate) mod tests {
         assert_eq!(archive.total, MAX_ENTRIES as u64 + 1);
         let refused = archive.plan(&[], None).unwrap_err();
         assert!(refused.contains("has 200001 entries"), "{refused}");
+    }
+
+    #[test]
+    fn a_name_the_duplicate_check_misses_still_fails_when_o_excl_finds_it_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.zip");
+        zip(
+            &path,
+            &[
+                ("d/B.txt", Item::File(b"one")),
+                ("d/b.txt", Item::File(b"two")),
+            ],
+        );
+        let archive = Archive::open(&path).unwrap();
+        let to = dir.path().join("out");
+        // Told the volume minds case, when this one doesn't.
+        let (cancel, done) = (AtomicBool::new(false), AtomicU64::new(0));
+        let failed = archive
+            .extract("d", &to, false, &cancel, &done)
+            .unwrap_err();
+        assert_eq!(failed, "d/b.txt appears twice in the archive.");
+        // Left for the job to send to the Trash as its own.
+        assert_eq!(std::fs::read_to_string(to.join("B.txt")).unwrap(), "one");
     }
 
     #[test]

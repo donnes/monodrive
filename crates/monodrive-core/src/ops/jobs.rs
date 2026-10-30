@@ -607,12 +607,16 @@ fn opened(shared: &Shared, op: u64, spec: &Spec) -> Result<Arc<Archive>, String>
 }
 
 /// The item at `path` and every folder holding it, by identity, so neither
-/// a link to one nor its name in another case hides it. `None` when they
+/// a link to one nor its name in another case hides it. A link counts with
+/// what it leads to, the folders holding that included. `None` when they
 /// can't be found.
 fn holders(path: &Path) -> Option<Vec<FileId>> {
     let folder = path.parent()?.canonicalize().ok()?;
     let mut held = vec![disk::id(path)?];
     held.extend(folder.ancestors().filter_map(disk::id));
+    if let Ok(resolved) = path.canonicalize() {
+        held.extend(resolved.ancestors().filter_map(disk::id));
+    }
     Some(held)
 }
 

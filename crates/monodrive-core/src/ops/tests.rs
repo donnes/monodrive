@@ -1931,10 +1931,20 @@ fn replace_never_trashes_a_folder_holding_the_source_through_an_alias_or_a_chang
         assert_eq!(read(&source), "a");
         assert!(crate::archives::Archive::open(&archive).is_ok());
     }
+    // The archive named through a link of its own: its real folder is still
+    // spared.
+    let link = files.join("alias.zip");
+    std::os::unix::fs::symlink(&archive, &link).unwrap();
+    let refused = job(&shared, extract(&link, &["sub"], &real, Conflict::Replace));
+    assert!(
+        matches!(&refused.tasks[0].done, Some(Done::Failed(why)) if why.contains("can't be replaced")),
+        "{refused:?}"
+    );
+    assert!(crate::archives::Archive::open(&archive).is_ok());
 }
 
 #[test]
-fn an_extracted_link_never_leads_out_through_another_link() {
+fn an_extracted_link_never_climbs_so_no_chain_of_links_leads_out() {
     use crate::archives::tests::{Item, zip};
     let (_dir, files, engine) = engine();
     let shared = jobs::Shared::new(engine, None);
@@ -1945,13 +1955,28 @@ fn an_extracted_link_never_leads_out_through_another_link() {
         (&[("root/a", ".."), ("root/b", "a/..")][..], "root/a"),
         (
             &[("root/sub/a", ".."), ("root/sub/b", "a/../..")][..],
-            "root/sub/b",
+            "root/sub/a",
         ),
         (
             &[("root/sub/A", ".."), ("root/sub/b", "a/../..")][..],
-            "root/sub/b",
+            "root/sub/A",
         ),
-        (&[("root/c", "sub/a/x"), ("root/sub/a", "..")][..], "root/c"),
+        // σ and ς are one name where case is ignored, which lowercasing
+        // can't tell: root/l climbs through root/sub/σ.
+        (
+            &[("root/sub/σ", ".."), ("root/l", "sub/ς/../..")][..],
+            "root/sub/σ",
+        ),
+        (
+            &[("root/l", "sub/ς/../.."), ("root/sub/σ", "..")][..],
+            "root/l",
+        ),
+        (
+            &[("root/c", "sub/a/x"), ("root/sub/a", "..")][..],
+            "root/sub/a",
+        ),
+        // Stays inside as written, but climbs all the same.
+        (&[("root/x", "sub/../y")][..], "root/x"),
         // Beside dest's other items, where the archive doesn't decide what's there.
         (&[("top", "x")][..], "top"),
     ] {
@@ -1974,20 +1999,20 @@ fn an_extracted_link_never_leads_out_through_another_link() {
         }
         assert_eq!(names(&dest), Vec::<String>::new());
     }
-    // Climbing within what's extracted is fine.
+    // Pointing down into the link's own folder is fine, through another
+    // link too.
     let archive = files.join("fine.zip");
     zip(
         &archive,
         &[
-            ("root/f.txt", Item::File(b"f")),
-            ("root/sub/l", Item::Link("../f.txt")),
-            ("root/sub/up", Item::Link("..")),
+            ("root/sub/f.txt", Item::File(b"f")),
+            ("root/l", Item::Link("sub/f.txt")),
+            ("root/m", Item::Link("./l")),
         ],
     );
     let done = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
     assert_eq!(done.state, State::Completed, "{done:?}");
-    assert_eq!(read(&dest.join("root/sub/l")), "f");
-    assert_eq!(read(&dest.join("root/sub/up/f.txt")), "f");
+    assert_eq!(read(&dest.join("root/m")), "f");
 }
 
 #[test]
@@ -2002,6 +2027,23 @@ fn entries_that_are_one_path_once_extracted_refuse_the_item_before_anything_is_w
         (
             &[("d/B.txt", "one"), ("d//b.txt", "two")][..],
             "d/B.txt and d//b.txt",
+        ),
+        // One name to a volume that ignores case: lowercasing misses σ and ς.
+        (
+            &[("d/σ.txt", "one"), ("d/ς.txt", "two")][..],
+            "d/σ.txt and d/ς.txt",
+        ),
+        (
+            &[("d/\u{c4}.txt", "one"), ("d/a\u{308}.txt", "two")][..],
+            "d/\u{c4}.txt and d/a\u{308}.txt",
+        ),
+        (
+            &[("d/\u{212a}.txt", "one"), ("d/k.txt", "two")][..],
+            "d/\u{212a}.txt and d/k.txt",
+        ),
+        (
+            &[("d/\u{1e9e}.txt", "one"), ("d/\u{df}.txt", "two")][..],
+            "d/\u{1e9e}.txt and d/\u{df}.txt",
         ),
     ] {
         let archive = files.join("twice.zip");
