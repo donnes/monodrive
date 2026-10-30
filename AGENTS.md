@@ -85,7 +85,7 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 
 ## Pull requests
 
-- Never open a PR unless the maintainer asks.
+- Never open a PR unless the person you're working for asks. Outside contributions also follow `CONTRIBUTING.md`.
 - Conventional commit titles in plain language: `feat(mcp): add a stat tool`.
 - The body states the problem in a sentence or two, then how you fixed it, then how you verified it.
 - UI changes need before and after images; motion needs a short video. Upload PR evidence to GitHub; never commit it.

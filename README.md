@@ -38,6 +38,6 @@ On a Mac without an fsearch index, opening the window or running the first MCP s
 
 ## Develop
 
-`scripts/check` runs the same checks as CI. See [AGENTS.md](AGENTS.md) for how we work.
+`scripts/check` runs the same checks as CI. See [AGENTS.md](AGENTS.md) for how we work and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
 
 Monodrive is MIT licensed; see [LICENSE](LICENSE). Credits for the code and assets it builds on are in [NOTICE](NOTICE).
