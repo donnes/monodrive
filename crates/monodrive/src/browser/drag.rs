@@ -806,17 +806,7 @@ impl Browser {
         let Some(target) = wanted else {
             return;
         };
-        let drag = self.drag.clone();
-        let timer = cx.spawn_in(window, async move |this, cx| {
-            let rest = SPRING_DELAY - SPRING_PULSE;
-            cx.background_executor().timer(rest).await;
-            drag.set_pulsing(true);
-            let _ = this.update(cx, |_, cx| cx.notify());
-            cx.background_executor().timer(SPRING_PULSE).await;
-            drag.set_pulsing(false);
-            let _ = this.update_in(cx, |this, window, cx| this.spring(&target, window, cx));
-        });
-        self.drag.keep_spring_timer(timer);
+        self.start_spring(target, true, window, cx);
     }
 
     /// Space: what the drag rests on opens now, and the timer has nothing left.
@@ -828,7 +818,48 @@ impl Browser {
             return;
         };
         self.drag.spring_moved_to(&Some(target.clone()));
-        self.spring(&target, window, cx);
+        self.start_spring(target, false, window, cx);
+    }
+
+    /// Opens `target` after the rest, if `waits`, and the pulse. Going in could
+    /// raise a privacy prompt no one asked for, so a gated place stays shut,
+    /// by where it really leads, and that's asked off the UI thread. A drop on
+    /// it is still the person's own ask. The person may have moved on by the
+    /// answer, so it opens only if the drag is still on `target`.
+    fn start_spring(&self, target: Target, waits: bool, window: &Window, cx: &mut Context<Self>) {
+        let drag = self.drag.clone();
+        let drives = cx
+            .try_global::<Places>()
+            .map(|places| places.drives.clone());
+        let timer = cx.spawn_in(window, async move |this, cx| {
+            if waits {
+                let rest = SPRING_DELAY - SPRING_PULSE;
+                cx.background_executor().timer(rest).await;
+            }
+            let Target::Folder { path, .. } = &target else {
+                return;
+            };
+            let path = path.clone();
+            let gated = cx
+                .background_executor()
+                .spawn(async move { drives.is_some_and(|drives| drives.needs_consent(&path)) })
+                .await;
+            if gated {
+                return;
+            }
+            if waits {
+                drag.set_pulsing(true);
+                let _ = this.update(cx, |_, cx| cx.notify());
+                cx.background_executor().timer(SPRING_PULSE).await;
+                drag.set_pulsing(false);
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.drag.springable().as_ref() == Some(&target) {
+                    this.spring(&target, window, cx);
+                }
+            });
+        });
+        self.drag.keep_spring_timer(timer);
     }
 
     /// Opens `target` under the drag, which goes on over the new listing. What

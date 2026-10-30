@@ -219,6 +219,8 @@ pub struct Pane {
     consented: bool,
     /// The name being edited in place.
     pub(super) renaming: Option<Renaming>,
+    /// What's selected stays when the next listing lands, as it was put back.
+    pub(super) keep_selection: bool,
     /// What a change made, to select once the listing that has it lands.
     select_after: Vec<PathBuf>,
     /// The trimmed search text; empty while showing the folder.
@@ -324,6 +326,7 @@ impl Pane {
             unavailable: None,
             consented: false,
             renaming: None,
+            keep_selection: false,
             select_after: Vec::new(),
             query: String::new(),
             selection: Selection::default(),
@@ -555,6 +558,7 @@ impl Pane {
         self.at = to.at;
         self.expanded = to.expanded;
         self.selection = to.selection;
+        self.keep_selection = true;
         self.query = to.query;
         let (query, end) = (self.query.clone(), self.query.len());
         self.search
@@ -735,23 +739,8 @@ impl Pane {
                 }
                 this.relayout(!quiet);
                 this.recheck_held(cx);
-                // Search selects its best hit so Enter opens it. A folder
-                // selects the one just left, else keeps its selection.
                 let left = this.reselect.take();
-                let first = if this.query.is_empty() {
-                    left.and_then(|path| this.entries.iter().position(|e| e.path == path))
-                } else {
-                    (!this.entries.is_empty()).then_some(0)
-                };
-                let made = std::mem::take(&mut this.select_after);
-                if this.entries.iter().any(|e| made.contains(&e.path)) {
-                    this.selection.clear();
-                    for entry in this.entries.iter().filter(|e| made.contains(&e.path)) {
-                        this.selection.toggle(entry);
-                    }
-                } else if let Some(ix) = first {
-                    this.selection.select(&this.entries[ix]);
-                }
+                this.pick_selection(left);
                 if let Some(renaming) = &this.renaming
                     && !this.entries.iter().any(|e| e.path == renaming.path)
                 {
@@ -767,6 +756,28 @@ impl Pane {
                 cx.notify();
             });
         });
+    }
+
+    /// What a listing that's just landed selects. Search selects its best hit
+    /// so Enter opens it. A folder selects the one just left, else keeps its
+    /// selection. Put back after a cancelled drag, the selection stays.
+    pub(super) fn pick_selection(&mut self, left: Option<PathBuf>) {
+        let first = if std::mem::take(&mut self.keep_selection) {
+            None
+        } else if self.query.is_empty() {
+            left.and_then(|path| self.entries.iter().position(|e| e.path == path))
+        } else {
+            (!self.entries.is_empty()).then_some(0)
+        };
+        let made = std::mem::take(&mut self.select_after);
+        if self.entries.iter().any(|e| made.contains(&e.path)) {
+            self.selection.clear();
+            for entry in self.entries.iter().filter(|e| made.contains(&e.path)) {
+                self.selection.toggle(entry);
+            }
+        } else if let Some(ix) = first {
+            self.selection.select(&self.entries[ix]);
+        }
     }
 
     /// Refreshes the listing shortly after the disk changes under a folder on

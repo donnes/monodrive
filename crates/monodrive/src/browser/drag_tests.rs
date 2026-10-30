@@ -680,3 +680,28 @@ fn a_drag_from_another_app_springs_and_leaving_cancels_what_was_pending(cx: &mut
     assert_eq!(here(&browser, cx), project.join("docs"));
     cx.simulate_event(FileDropEvent::Exited);
 }
+
+/// A search here has no index to answer it, so this is what the reload does
+/// when its hits land: the rows on screen stand for them.
+#[gpui::test]
+fn esc_keeps_the_selection_over_search_results(cx: &mut TestAppContext) {
+    use crate::onboarding::{IndexGate, tests::Fake};
+    let (_dir, project) = folder();
+    // Held, so the search the reload runs starts no index.
+    cx.update(|cx| cx.set_global(IndexGate::new(Arc::new(Fake::default()), true)));
+    let (browser, cx) = browse(&project, cx);
+    let file = row(&browser, 2, cx);
+    cx.simulate_click(file, with(""));
+    on_pane(&browser, cx, |pane, cx| {
+        pane.query = "a".into();
+        let back = pane.before_spring();
+        pane.spring_back(back, cx);
+        pane.pick_selection(None);
+        let chosen = pane.chosen();
+        assert_eq!(chosen, [project.join("a.txt")]);
+        // Only that landing: the next search selects its best hit as ever.
+        pane.pick_selection(None);
+        assert_eq!(pane.chosen(), [project.join("docs")]);
+    });
+    cx.run_until_parked();
+}

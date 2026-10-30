@@ -2045,3 +2045,81 @@ fn resting_on_a_favorite_or_a_drive_opens_it_in_the_pane_commands_act_on(cx: &mu
     assert_eq!(here(&browser, cx), project);
     cx.simulate_mouse_up(volume_row, MouseButton::Left, with(""));
 }
+
+#[gpui::test]
+fn a_folder_behind_a_privacy_prompt_never_opens_under_a_drag_but_takes_a_drop(
+    cx: &mut TestAppContext,
+) {
+    // A temp home with Documents gated, a folder gated behind a link, and a
+    // plain one to show the rest still opens.
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let (documents, real, plain) = (
+        home.join("Documents"),
+        home.join("real"),
+        home.join("plain"),
+    );
+    std::fs::create_dir_all(real.join("secret")).unwrap();
+    std::fs::create_dir(&documents).unwrap();
+    std::fs::create_dir(&plain).unwrap();
+    std::fs::write(home.join("a.txt"), "").unwrap();
+    let via = home.join("via");
+    std::os::unix::fs::symlink(&real, &via).unwrap();
+    std::fs::write(real.join("b.txt"), "").unwrap();
+    let world = world(vec![startup()], cx);
+    {
+        let mut gated = world.fake.gated.lock().unwrap();
+        gated.push(documents.clone());
+        gated.push(real.join("secret"));
+    }
+    let mut owned = own(cx);
+    let (browser, cx) = open(&world, &home, cx);
+    let row_of = |name: &str, cx: &mut VisualTestContext| {
+        let ix = in_pane(&browser, cx, |pane, _| {
+            pane.entries.iter().position(|e| e.name == name).unwrap()
+        });
+        row(&browser, ix, cx)
+    };
+    let rest = |cx: &mut VisualTestContext| {
+        cx.executor().advance_clock(super::drag::SPRING_DELAY);
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    };
+    let (file, over) = (row_of("a.txt", cx), row_of("Documents", cx));
+    carry(file, over, "", cx);
+    // Its volume can't be read either, so the pill says a copy.
+    assert_eq!(says(&browser, cx).unwrap(), "Copy a.txt to Documents");
+    rest(cx);
+    assert_eq!(here(&browser, cx), home);
+    press(cx, "space");
+    assert_eq!(here(&browser, cx), home);
+    // The rest of the home still opens, so the wait above wasn't the reason.
+    let other = row_of("plain", cx);
+    hover(other, "", cx);
+    press(cx, "space");
+    assert_eq!(here(&browser, cx), plain);
+    press(cx, "escape");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(other, MouseButton::Left, with(""));
+    // The drop still goes in: that's what the person asked for.
+    carry(file, over, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Copy a.txt to Documents");
+    cx.simulate_mouse_up(over, MouseButton::Left, with(""));
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(documents.join("a.txt").exists());
+    // Through a link, by where it really leads.
+    let pane = pane_of(&browser, cx);
+    pane.update_in(cx, |pane, window, cx| pane.go(via.clone(), window, cx));
+    cx.run_until_parked();
+    let (file, secret) = (row_of("b.txt", cx), row_of("secret", cx));
+    carry(file, secret, "", cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), via);
+    press(cx, "escape");
+    cx.simulate_mouse_up(secret, MouseButton::Left, with(""));
+    release(owned, cx);
+}
