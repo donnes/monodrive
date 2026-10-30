@@ -17,6 +17,16 @@ pub struct FileId {
     ino: u64,
 }
 
+impl FileId {
+    /// The item `meta` describes.
+    pub(crate) fn of(meta: &std::fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }
+    }
+}
+
 /// What an item was like, to tell whether it changed since. A folder's
 /// covers everything inside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,21 +45,14 @@ pub fn id(path: &Path) -> Option<FileId> {
 
 /// Like `id`, keeping the OS's reason when there's no item.
 pub fn lookup(path: &Path) -> io::Result<FileId> {
-    let meta = std::fs::symlink_metadata(path)?;
-    Ok(FileId {
-        dev: meta.dev(),
-        ino: meta.ino(),
-    })
+    std::fs::symlink_metadata(path).map(|meta| FileId::of(&meta))
 }
 
 /// The item at `path` and its stamp. A folder is walked whole, without
 /// following links; a subfolder that can't be read counts as empty.
 pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
     let meta = std::fs::symlink_metadata(path)?;
-    let id = FileId {
-        dev: meta.dev(),
-        ino: meta.ino(),
-    };
+    let id = FileId::of(&meta);
     let mut stamp = Stamp {
         entries: 0,
         size: meta.size(),

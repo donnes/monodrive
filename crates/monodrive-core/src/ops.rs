@@ -5,17 +5,16 @@
 //! they share one journal, one list of jobs and one undo history.
 //! docs/operations.md records why.
 
-mod disk;
+pub(crate) mod disk;
 mod jobs;
 mod owner;
 pub mod rename;
 
-pub use disk::FileId;
+pub use disk::{FileId, Stamp};
 pub use jobs::{Conflict, Done, Job, State, Task};
 pub(crate) use owner::lock;
 pub use owner::{Client, Owner, Watch, run_owner};
 
-use disk::Stamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -93,6 +92,14 @@ pub enum Request {
         #[serde(default)]
         conflict: Conflict,
     },
+    /// Copies each item to its own path, as one copy job, as a comparison's
+    /// plan says. An item whose source, or what's at its path, isn't as
+    /// `found` and `replaces` say is refused rather than copied.
+    CopyPlanned {
+        /// The folder the paths are in, which the job shows.
+        into: PathBuf,
+        items: Vec<Planned>,
+    },
     /// Compresses the items, all in one folder, into a new ZIP archive
     /// beside them, as a job: "name.zip" for one item, "Archive.zip" for
     /// more, numbered as Finder does when the name is taken.
@@ -146,6 +153,18 @@ pub enum Request {
     },
 }
 
+/// One copy of a planned job, and how its source and destination were when
+/// the plan was made.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Planned {
+    pub source: PathBuf,
+    pub to: PathBuf,
+    pub found: (FileId, Stamp),
+    /// What's at `to`, which goes to the Trash first. With `None`, nothing
+    /// may be there.
+    pub replaces: Option<(FileId, Stamp)>,
+}
+
 /// An item in the Trash as Empty Trash counted it. Only that same item is
 /// erased, never another put there under its name since.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +183,7 @@ impl Request {
             Request::NewFile { .. } => "New File",
             Request::NewFolderWith { .. } => "New Folder with Selection",
             Request::Duplicate { .. } => "Duplicate",
-            Request::Copy { .. } => "Copy",
+            Request::Copy { .. } | Request::CopyPlanned { .. } => "Copy",
             Request::Move { .. } => "Move",
             Request::Compress { .. } => "Compress",
             Request::Extract { .. } => "Extract",
@@ -774,6 +793,7 @@ impl Engine {
             Request::UndoOf { op } => self.reverse(submission, false, Some(op)),
             Request::Redo => self.reverse(submission, true, None),
             Request::Copy { .. }
+            | Request::CopyPlanned { .. }
             | Request::Move { .. }
             | Request::Compress { .. }
             | Request::Extract { .. }

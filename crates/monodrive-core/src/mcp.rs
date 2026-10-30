@@ -1,9 +1,10 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
-//! service method; the behavior lives in `archives`, `entries`, `index`,
-//! `info`, `ops`, `places`, `search`, `sizes` and `volumes`.
+//! service method; the behavior lives in `archives`, `compare`, `entries`,
+//! `index`, `info`, `ops`, `places`, `search`, `sizes` and `volumes`.
 
 use crate::archives::{self, Archive};
+use crate::compare::{self, Action, Block, Comparison, CopyPlan, LineKind, Newer, TextDiff};
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, Caps, GrepMode, Index, Status};
@@ -17,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -32,6 +33,8 @@ trash, put_back, rename, rename_many, create_folder, create_folder_with, create_
 undo and redo change files through the same undo history as the Monodrive window; rename_preview \
 shows what rename_many would do. copy, move, archive_create and archive_extract run as jobs that \
 job_status follows; archive_list shows what a ZIP holds without extracting it. \
+compare compares two files or folders, diff shows two text files' differences, and compare_copy \
+copies differences one way as a job. \
 list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches.";
 
@@ -174,6 +177,36 @@ enum ToolCall {
         #[serde(default)]
         conflict: Conflict,
     },
+    Compare {
+        left: String,
+        right: String,
+        #[serde(default)]
+        verify: bool,
+        #[serde(default = "compare_limit")]
+        limit: usize,
+        #[serde(default = "default_timeout")]
+        timeout_seconds: u64,
+    },
+    Diff {
+        left: String,
+        right: String,
+        #[serde(default = "diff_context")]
+        context: usize,
+        #[serde(default = "diff_limit")]
+        limit: usize,
+    },
+    CompareCopy {
+        left: String,
+        right: String,
+        #[serde(default)]
+        paths: Vec<String>,
+        #[serde(default)]
+        confirm: bool,
+        #[serde(default = "compare_limit")]
+        limit: usize,
+        #[serde(default = "default_timeout")]
+        timeout_seconds: u64,
+    },
     JobStatus {
         job: Option<u64>,
     },
@@ -225,6 +258,18 @@ fn default_timeout() -> u64 {
 
 fn archive_limit() -> usize {
     200
+}
+
+fn compare_limit() -> usize {
+    200
+}
+
+fn diff_context() -> usize {
+    3
+}
+
+fn diff_limit() -> usize {
+    500
 }
 
 impl Server {
@@ -443,6 +488,45 @@ impl Server {
                 into: expand_home(&into),
                 conflict,
             }),
+            ToolCall::Compare {
+                left,
+                right,
+                verify,
+                limit,
+                timeout_seconds,
+            } => {
+                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
+                let progress = compare::Progress::default();
+                compare::compare(
+                    &expand_home(&left),
+                    &expand_home(&right),
+                    &progress,
+                    deadline,
+                )
+                .map(|mut comparison| {
+                    let read =
+                        verify.then(|| comparison.verify(&[PathBuf::new()], &progress, deadline));
+                    compared(&comparison, limit, read, timeout_seconds)
+                })
+            }
+            ToolCall::Diff {
+                left,
+                right,
+                context,
+                limit,
+            } => {
+                let (left, right) = (expand_home(&left), expand_home(&right));
+                compare::diff(&left, &right, context)
+                    .map(|diff| unified(&diff, &left, &right, limit))
+            }
+            ToolCall::CompareCopy {
+                left,
+                right,
+                paths,
+                confirm,
+                limit,
+                timeout_seconds,
+            } => self.compare_copy(&left, &right, &paths, confirm, limit, timeout_seconds),
             ToolCall::ContinueJob { job, conflict } => self
                 .submit(Request::Retry { job, conflict })
                 .map(|outcome| format!("job {} queued again\n", outcome.op)),
@@ -559,6 +643,45 @@ impl Server {
         } else {
             Ok(out)
         }
+    }
+
+    /// Compares the two folders now and previews, or with `confirm` queues,
+    /// a one-way copy of the differences at `paths`.
+    fn compare_copy(
+        &mut self,
+        left: &str,
+        right: &str,
+        paths: &[String],
+        confirm: bool,
+        limit: usize,
+        timeout: u64,
+    ) -> Result<String, String> {
+        let deadline = Instant::now().checked_add(Duration::from_secs(timeout));
+        let comparison = compare::compare(
+            &expand_home(left),
+            &expand_home(right),
+            &compare::Progress::default(),
+            deadline,
+        )?;
+        if !comparison.complete {
+            return Err(format!(
+                "{}So there's no plan; nothing was copied.\n",
+                stopped(&comparison, timeout)
+            ));
+        }
+        let under: Vec<PathBuf> = match paths {
+            [] => vec![PathBuf::new()],
+            paths => paths.iter().map(PathBuf::from).collect(),
+        };
+        let plan = comparison.plan(&under);
+        let preview = copy_plan(&plan, limit);
+        if !confirm {
+            return Ok(preview + "Pass confirm: true to copy.\n");
+        }
+        let request = plan
+            .request()
+            .ok_or_else(|| format!("{preview}Nothing to copy.\n"))?;
+        self.queue(request).map(|queued| preview + &queued)
     }
 
     /// Where the index is, without starting it.
@@ -833,6 +956,223 @@ fn archive_list(archive: &Archive, folder: &str, limit: usize) -> String {
     out
 }
 
+/// Both roots, the counts, then each difference a line, by its path
+/// relative to both. Equal and same-looking entries are only counted.
+fn compared(comparison: &Comparison, limit: usize, read: Option<bool>, timeout: u64) -> String {
+    use compare::Status;
+    let label = |status: &Status| match status {
+        Status::OnlyLeft => "only left",
+        Status::OnlyRight => "only right",
+        Status::TypeConflict => "type conflict",
+        Status::SameMetadata => "same size and date",
+        Status::MetadataDiffers => "dates differ",
+        Status::Equal => "equal",
+        Status::Differs => "differs",
+        Status::Unknown(_) => "unknown",
+    };
+    let mut out = format!(
+        "left: {}\nright: {}\n",
+        comparison.left.display(),
+        comparison.right.display()
+    );
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for entry in &comparison.entries {
+        match counts
+            .iter_mut()
+            .find(|(name, _)| *name == label(&entry.status))
+        {
+            Some((_, n)) => *n += 1,
+            None => counts.push((label(&entry.status), 1)),
+        }
+    }
+    counts.sort_by_key(|(name, _)| {
+        [
+            "only left",
+            "only right",
+            "type conflict",
+            "dates differ",
+            "differs",
+            "unknown",
+            "same size and date",
+            "equal",
+        ]
+        .iter()
+        .position(|n| n == name)
+    });
+    let counts: Vec<String> = counts
+        .iter()
+        .map(|(name, n)| format!("{n} {name}"))
+        .collect();
+    let _ = writeln!(
+        out,
+        "{}",
+        if counts.is_empty() {
+            "Both are empty.".into()
+        } else {
+            counts.join(", ")
+        }
+    );
+    let one = comparison.entries.len() == 1 && comparison.entries[0].path.as_os_str().is_empty();
+    let shown: Vec<&compare::Entry> = comparison
+        .entries
+        .iter()
+        .filter(|entry| one || !matches!(entry.status, Status::Equal | Status::SameMetadata))
+        .collect();
+    for entry in shown.iter().take(limit) {
+        out.push_str(label(&entry.status));
+        if !one {
+            let kind = entry
+                .left
+                .as_ref()
+                .or(entry.right.as_ref())
+                .map(|side| side.kind);
+            let _ = write!(out, ": {}{}", entry.path.display(), kind.map_or("", suffix));
+        }
+        let detail = match (&entry.status, &entry.left, &entry.right) {
+            (Status::TypeConflict, Some(l), Some(r)) => format!(
+                " ({} on the left, {} on the right)",
+                compare::kind_name(l.kind),
+                compare::kind_name(r.kind)
+            ),
+            (Status::Unknown(why), ..) => format!(" ({why})"),
+            _ => match entry.newer() {
+                Some(Newer::Left) => " (left newer)".into(),
+                Some(Newer::Right) => " (right newer)".into(),
+                None => String::new(),
+            },
+        };
+        let _ = writeln!(out, "{detail}");
+    }
+    if shown.len() > limit {
+        let _ = writeln!(out, "({} more; pass a larger limit)", shown.len() - limit);
+    }
+    if comparison
+        .entries
+        .iter()
+        .any(|entry| entry.status == Status::SameMetadata)
+    {
+        out.push_str(
+            "(Same size and date doesn't prove equal contents; verify: true reads them.)\n",
+        );
+    }
+    if read == Some(false) {
+        let _ = writeln!(
+            out,
+            "(Reading stopped after {timeout}s; what it didn't read is still unverified.)"
+        );
+    }
+    if !comparison.complete {
+        out.push_str(&stopped(comparison, timeout));
+    }
+    out
+}
+
+fn stopped(comparison: &Comparison, timeout: u64) -> String {
+    if comparison.entries.len() >= compare::MAX_ENTRIES {
+        format!(
+            "(Stopped at {} entries; compare smaller folders.)\n",
+            compare::MAX_ENTRIES
+        )
+    } else {
+        format!("(Stopped after {timeout}s before comparing everything; raise timeout_seconds.)\n")
+    }
+}
+
+/// A unified diff: `@@ -start,count +start,count @@` before each hunk.
+fn unified(diff: &TextDiff, left: &Path, right: &Path, limit: usize) -> String {
+    if diff.additions + diff.deletions == 0 {
+        return "No differences in the text.\n".into();
+    }
+    let mut out = format!("--- {}\n+++ {}\n", left.display(), right.display());
+    let mut lines = Vec::new();
+    for block in &diff.blocks {
+        let Block::Hunk(range) = block else { continue };
+        let side = |kind: LineKind, before: &[compare::Line], hunk: &[compare::Line]| {
+            let count = hunk.iter().filter(|l| l.kind != kind).count();
+            let start = before.iter().filter(|l| l.kind != kind).count();
+            (start + usize::from(count > 0), count)
+        };
+        let (before, hunk) = (&diff.lines[..range.start], &diff.lines[range.clone()]);
+        let (old, new) = (
+            side(LineKind::Add, before, hunk),
+            side(LineKind::Del, before, hunk),
+        );
+        lines.push(format!("@@ -{},{} +{},{} @@", old.0, old.1, new.0, new.1));
+        for line in hunk {
+            let mark = match line.kind {
+                LineKind::Add => '+',
+                LineKind::Del => '-',
+                LineKind::Context => ' ',
+            };
+            lines.push(format!("{mark}{}", line.text));
+        }
+    }
+    for line in lines.iter().take(limit) {
+        let _ = writeln!(out, "{line}");
+    }
+    if lines.len() > limit {
+        let _ = writeln!(
+            out,
+            "({} more lines; pass a larger limit)",
+            lines.len() - limit
+        );
+    }
+    out
+}
+
+/// What a one-way copy does, a line an item, then the totals.
+fn copy_plan(plan: &CopyPlan, limit: usize) -> String {
+    let mut out = format!(
+        "from: {}\ninto: {}\n",
+        plan.from.display(),
+        plan.into.display()
+    );
+    if plan.rows.is_empty() {
+        out.push_str("No differences to copy there.\n");
+        return out;
+    }
+    let (mut copies, mut replaces, mut skips) = (0, 0, 0);
+    for (i, row) in plan.rows.iter().enumerate() {
+        let line = match &row.action {
+            Action::Copy => {
+                copies += 1;
+                format!(
+                    "copy: {} → {}",
+                    row.source.display(),
+                    row.destination.display()
+                )
+            }
+            Action::Replace => {
+                replaces += 1;
+                format!(
+                    "replace: {} → {}",
+                    row.source.display(),
+                    row.destination.display()
+                )
+            }
+            Action::Skip(why) => {
+                skips += 1;
+                format!("skip: {} ({why})", row.path.display())
+            }
+        };
+        if i < limit {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+    if plan.rows.len() > limit {
+        let _ = writeln!(
+            out,
+            "({} more; pass a larger limit)",
+            plan.rows.len() - limit
+        );
+    }
+    let _ = writeln!(
+        out,
+        "{copies} to copy, {replaces} to replace, {skips} skipped. What's replaced goes to the Trash; nothing is deleted."
+    );
+    out
+}
+
 /// `old path → new name` a line, with the status unless it's ok.
 fn rename_table(plan: &rename::Plan) -> String {
     plan.rows.iter().fold(String::new(), |mut out, row| {
@@ -875,7 +1215,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 33] = [
+pub const TOOLS: [Tool; 36] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -1094,6 +1434,64 @@ pub const TOOLS: [Tool; 33] = [
                     "conflict": conflict_schema()
                 },
                 "required": ["path", "into"]
+            })
+        },
+    },
+    Tool {
+        name: "compare",
+        description: "Compare two files, or two folders whole, by size and modification time, never \
+    following links. Prints counts, then each difference by its path in both: only left, only right, \
+    type conflict, dates differ, differs, or unknown with why. Same size and date isn't proof; verify: \
+    true reads files to settle them as equal or differs. Stops at timeout_seconds.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "left": {"type": "string", "description": "A file or folder. Absolute; ~ is your home."},
+                    "right": {"type": "string", "description": "The same kind of item to compare it with."},
+                    "verify": {"type": "boolean", "default": false},
+                    "limit": {"type": "integer", "minimum": 1, "default": 200},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}
+                },
+                "required": ["left", "right"]
+            })
+        },
+    },
+    Tool {
+        name: "diff",
+        description: "A unified line diff of two text files, with context lines around each change. \
+    Refuses binary files and files over 1 MB.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "left": {"type": "string", "description": "The old file. Absolute; ~ is your home."},
+                    "right": {"type": "string", "description": "The new file."},
+                    "context": {"type": "integer", "minimum": 0, "default": 3},
+                    "limit": {"type": "integer", "minimum": 1, "default": 500, "description": "Most lines to print."}
+                },
+                "required": ["left", "right"]
+            })
+        },
+    },
+    Tool {
+        name: "compare_copy",
+        description: "Copy differences one way, from the left folder into the right: what's only on \
+    the left, and files that differ where the left one is newer, whose older copy goes to the Trash. \
+    Never deletes what's only on the right. Previews unless confirm: true, which returns a job id; \
+    undo reverses it. Refuses items that changed since it compared.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "left": {"type": "string", "description": "The folder to copy from. Absolute; ~ is your home."},
+                    "right": {"type": "string", "description": "The folder to copy into."},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Entries as compare prints them, or folders holding them; all differences by default."},
+                    "confirm": {"type": "boolean", "default": false},
+                    "limit": {"type": "integer", "minimum": 1, "default": 200},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}
+                },
+                "required": ["left", "right"]
             })
         },
     },
@@ -1881,6 +2279,142 @@ mod tests {
             assert_eq!(reply["result"]["isError"], true);
             assert!(text(&reply).ends_with(refusal), "{reply}");
         }
+    }
+
+    #[test]
+    fn compare_diff_and_compare_copy_preview_then_copy_only_on_confirm() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let paths = ops::Paths {
+            state: root.join("state"),
+            settings: root.join("settings.json"),
+            trash: root.join("Trash"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let mut server = Server::new(ops::Client::new(paths, None), places(&root));
+        let (left, right) = (root.join("left"), root.join("right"));
+        let then = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (path, text, at) in [
+            (left.join("a.txt"), "one\nnew\n", 3600),
+            (left.join("same.txt"), "same", 0),
+            (left.join("docs/only.md"), "only", 0),
+            (right.join("a.txt"), "one\nold\n", 0),
+            (right.join("same.txt"), "same", 0),
+            (right.join("docs/extra.md"), "extra", 0),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(then + Duration::from_secs(at))
+                .unwrap();
+        }
+        let both = json!({"left": left, "right": right});
+        let reply = call(&mut server, json!({"name": "compare", "arguments": both}));
+        let roots = format!("left: {}\nright: {}\n", left.display(), right.display());
+        assert_eq!(
+            text(&reply),
+            roots.clone()
+                + "1 only left, 1 only right, 1 dates differ, 1 same size and date\n\
+                   dates differ: a.txt (left newer)\n\
+                   only right: docs/extra.md\n\
+                   only left: docs/only.md\n\
+                   (Same size and date doesn't prove equal contents; verify: true reads them.)\n"
+        );
+        let mut verified = both.clone();
+        verified["verify"] = json!(true);
+        verified["limit"] = json!(1);
+        let reply = call(
+            &mut server,
+            json!({"name": "compare", "arguments": verified}),
+        );
+        assert_eq!(
+            text(&reply),
+            roots
+                + "1 only left, 1 only right, 1 differs, 1 equal\n\
+                   differs: a.txt (left newer)\n\
+                   (2 more; pass a larger limit)\n"
+        );
+
+        let reply = call(
+            &mut server,
+            json!({"name": "diff", "arguments": {"left": right.join("a.txt"), "right": left.join("a.txt")}}),
+        );
+        assert_eq!(
+            text(&reply),
+            format!(
+                "--- {}\n+++ {}\n@@ -1,2 +1,2 @@\n one\n-old\n+new\n",
+                right.join("a.txt").display(),
+                left.join("a.txt").display()
+            )
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "diff", "arguments": {"left": left.join("same.txt"), "right": right.join("same.txt")}}),
+        );
+        assert_eq!(text(&reply), "No differences in the text.\n");
+
+        let preview = format!(
+            "from: {}\ninto: {}\n\
+             replace: {} → {}\n\
+             skip: docs/extra.md (Only on the right; Monodrive never deletes it.)\n\
+             copy: {} → {}\n\
+             1 to copy, 1 to replace, 1 skipped. What's replaced goes to the Trash; nothing is deleted.\n",
+            left.display(),
+            right.display(),
+            left.join("a.txt").display(),
+            right.join("a.txt").display(),
+            left.join("docs/only.md").display(),
+            right.join("docs/only.md").display(),
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "compare_copy", "arguments": both}),
+        );
+        assert_eq!(
+            text(&reply),
+            preview.clone() + "Pass confirm: true to copy.\n"
+        );
+        assert!(!right.join("docs/only.md").exists());
+
+        let mut confirmed = both.clone();
+        confirmed["confirm"] = json!(true);
+        confirmed["paths"] = json!(["docs/"]);
+        let settings = root.join("settings.json");
+        std::fs::write(&settings, r#"{"agents_change_files": false}"#).unwrap();
+        let reply = call(
+            &mut server,
+            json!({"name": "compare_copy", "arguments": confirmed}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(text(&reply).ends_with("Agents can't change files: Let agents change files is off in Monodrive's Agents settings."), "{reply}");
+        std::fs::write(&settings, r#"{"agents_change_files": true}"#).unwrap();
+        let reply = call(
+            &mut server,
+            json!({"name": "compare_copy", "arguments": confirmed}),
+        );
+        assert!(text(&reply).ends_with("1 to copy, 0 to replace, 1 skipped. What's replaced goes to the Trash; nothing is deleted.\njob 1 queued\n"), "{reply}");
+        for bad in [
+            json!({"name": "compare", "arguments": {"left": left}}),
+            json!({"name": "compare_copy", "arguments": {"left": left, "right": right, "confirm": "yes"}}),
+            json!({"name": "diff", "arguments": {"left": left, "right": right, "context": -1}}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
+        drop(server);
+        serving.join().unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(right.join("docs/only.md")).unwrap(),
+            "only"
+        );
+        assert_eq!(
+            std::fs::read_to_string(right.join("a.txt")).unwrap(),
+            "one\nold\n"
+        );
+        assert!(right.join("docs/extra.md").exists());
     }
 
     #[test]

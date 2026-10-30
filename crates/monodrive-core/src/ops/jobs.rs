@@ -6,7 +6,8 @@
 //! repeated.
 
 use super::{
-    Engine, FileId, Origin, Outcome, Record, Request, Spot, Stamp, Step, Submission, disk, existing,
+    Engine, FileId, Origin, Outcome, Planned, Record, Request, Spot, Stamp, Step, Submission, disk,
+    existing,
 };
 use crate::archives::{self, Archive};
 use serde::{Deserialize, Serialize};
@@ -149,6 +150,10 @@ pub(super) struct Spec {
     ids: Vec<FileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     archive: Option<PathBuf>,
+    /// For a planned copy, each source's own destination and what it was
+    /// planned against.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    planned: Vec<Planned>,
 }
 
 impl Spec {
@@ -194,6 +199,27 @@ impl Spec {
                     sources: paths.clone(),
                     ids: ids(paths)?,
                     archive: None,
+                    planned: Vec::new(),
+                })
+            }
+            Request::CopyPlanned { into, items } => {
+                absolute(
+                    items
+                        .iter()
+                        .flat_map(|item| [&item.source, &item.to])
+                        .chain([into]),
+                )?;
+                if items.is_empty() {
+                    return Err("Name at least one item.".into());
+                }
+                Ok(Self {
+                    kind: Kind::Copy,
+                    into: into.clone(),
+                    conflict: Conflict::Replace,
+                    sources: items.iter().map(|item| item.source.clone()).collect(),
+                    ids: items.iter().map(|item| item.found.0).collect(),
+                    archive: None,
+                    planned: items.clone(),
                 })
             }
             Request::Compress { paths } => {
@@ -212,6 +238,7 @@ impl Spec {
                     sources: paths.clone(),
                     ids,
                     archive: None,
+                    planned: Vec::new(),
                 })
             }
             Request::Extract {
@@ -230,9 +257,19 @@ impl Spec {
                     ids: vec![id; items.len()],
                     sources: items.iter().map(|item| archive.join(item)).collect(),
                     archive: Some(archive.clone()),
+                    planned: Vec::new(),
                 })
             }
             _ => unreachable!("only jobs have a spec"),
+        }
+    }
+
+    /// The folder item `index` goes into: a planned copy's own, or the
+    /// job's.
+    fn into(&self, index: usize) -> &Path {
+        match self.planned.get(index) {
+            Some(planned) => planned.to.parent().unwrap_or(&planned.to),
+            None => &self.into,
         }
     }
 
@@ -629,6 +666,14 @@ fn replaced(path: &Path) -> String {
     )
 }
 
+/// "{path} changed since...", for a planned copy whose inputs changed.
+fn changed(path: &Path) -> String {
+    format!(
+        "{} changed since the comparison was planned, so nothing was copied. Compare again.",
+        path.display()
+    )
+}
+
 impl Item<'_> {
     fn transfer(&mut self, cancel: &AtomicBool, copied: &AtomicU64) -> Next {
         match self.spec.kind {
@@ -648,11 +693,16 @@ impl Item<'_> {
         if self.work.id.is_some_and(|accepted| accepted != id) {
             return fail(replaced(&source));
         }
-        let into = &self.spec.into;
+        let planned = self.spec.planned.get(self.index);
+        if planned.is_some_and(|planned| planned.found != (id, stamp)) {
+            return fail(changed(&source));
+        }
+        let into = self.spec.into(self.index);
         if !into.is_dir() {
             return fail(format!("{}: not a folder.", into.display()));
         }
-        let Some(name) = source.file_name() else {
+        let Some(name) = planned.map_or(source.file_name(), |planned| planned.to.file_name())
+        else {
             return fail(format!("{}: has no name to copy.", source.display()));
         };
         if source.is_dir()
@@ -665,6 +715,11 @@ impl Item<'_> {
             ));
         }
         let to = into.join(name);
+        if let Some(planned) = planned
+            && disk::stamp(&to).ok() != planned.replaces
+        {
+            return fail(changed(&to));
+        }
         if self.spec.kind == Kind::Move && to == source {
             return fail(format!(
                 "{}: already in {}.",
@@ -920,7 +975,7 @@ impl Item<'_> {
     ) -> Result<(), String> {
         let temp = self
             .spec
-            .into
+            .into(self.index)
             .join(format!(".monodrive-{}-{}", self.op, self.index));
         if disk::id(&temp).is_some() {
             return Err(format!("{}: already exists.", temp.display()));

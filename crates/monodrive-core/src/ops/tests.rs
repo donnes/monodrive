@@ -2064,3 +2064,80 @@ fn entries_that_are_one_path_once_extracted_refuse_the_item_before_anything_is_w
         assert_eq!(names(&dest), Vec::<String>::new());
     }
 }
+
+#[test]
+fn a_planned_copy_runs_only_what_was_selected_and_refuses_what_changed_since() {
+    use crate::compare::{self, Action, Progress};
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let files = files.canonicalize().unwrap();
+    let (left, right) = (files.join("left"), files.join("right"));
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for (path, text, newer) in [
+        (left.join("a.txt"), "new a", true),
+        (left.join("b.txt"), "new b", true),
+        (left.join("c.txt"), "c", false),
+        (left.join("d.txt"), "d", false),
+        (left.join("new/inner.txt"), "inner", false),
+        (right.join("a.txt"), "old a", false),
+        (right.join("b.txt"), "old b", false),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let at = then + std::time::Duration::from_secs(if newer { 3600 } else { 0 });
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+    let comparison = compare::compare(&left, &right, &Progress::default(), None).unwrap();
+    let selected = ["a.txt", "b.txt", "d.txt", "new"].map(PathBuf::from);
+    let plan = comparison.plan(&selected);
+    let actions: Vec<&Action> = plan.rows.iter().map(|row| &row.action).collect();
+    assert_eq!(
+        actions,
+        [
+            &Action::Replace,
+            &Action::Replace,
+            &Action::Copy,
+            &Action::Copy
+        ]
+    );
+    let request = plan.request().unwrap();
+
+    // Edited after the preview: a destination it would replace, and a file
+    // deep in a folder it would copy.
+    std::fs::write(right.join("b.txt"), "edited b").unwrap();
+    std::fs::write(left.join("new/inner.txt"), "edited inner").unwrap();
+    let done = job(&shared, request);
+    assert_eq!(done.title, "Copy");
+    assert_eq!(done.into, right);
+    assert_eq!(done.state, State::Failed);
+    let refused = |i: usize, path: &Path| {
+        let why = format!(
+            "{} changed since the comparison was planned, so nothing was copied. Compare again.",
+            path.display()
+        );
+        assert_eq!(done.tasks[i].done, Some(Done::Failed(why)));
+    };
+    assert_eq!(done.tasks[0].done, Some(Done::To(right.join("a.txt"))));
+    refused(1, &right.join("b.txt"));
+    assert_eq!(done.tasks[2].done, Some(Done::To(right.join("d.txt"))));
+    refused(3, &left.join("new"));
+    assert_eq!(read(&right.join("a.txt")), "new a");
+    assert_eq!(read(&right.join("b.txt")), "edited b");
+    assert!(!right.join("c.txt").exists() && !right.join("new").exists());
+
+    // Undo puts back what was replaced and trashes the copies.
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    assert_eq!(read(&right.join("a.txt")), "old a");
+    assert!(!right.join("d.txt").exists());
+    for item in undone.items {
+        let at = item.result.unwrap();
+        if !at.starts_with(&right) {
+            untrash(&at, &files);
+        }
+    }
+}
