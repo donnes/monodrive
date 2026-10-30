@@ -5,7 +5,7 @@
 //! `storage` and `volumes`.
 
 use crate::archives::{self, Archive};
-use crate::catalogs::{self, Catalog, Found, Resolved};
+use crate::catalogs::{self, Catalog, Found, Resolved, Unreadable};
 use crate::cloud::{self, Asked};
 use crate::compare::{
     self, Action, Block, Comparison, CopyPlan, Ending, LineKind, Newer, TextDiff,
@@ -789,15 +789,18 @@ impl Server {
                     )
                     .map(|catalog| catalog_line(&catalog, &volumes, index::now()))
             }
-            ToolCall::CatalogList {} => self.catalogs.list().map(|catalogs| {
-                if catalogs.is_empty() {
+            ToolCall::CatalogList {} => self.catalogs.list().map(|listing| {
+                if listing.catalogs.is_empty() && listing.unreadable.is_empty() {
                     return "No catalogs.\n".into();
                 }
                 let volumes = volumes::all();
-                catalogs
+                let mut out: String = listing
+                    .catalogs
                     .iter()
                     .map(|catalog| catalog_line(catalog, &volumes, index::now()))
-                    .collect()
+                    .collect();
+                unreadable_catalogs(&mut out, &listing.unreadable);
+                out
             }),
             ToolCall::CatalogRefresh {
                 catalog,
@@ -1340,7 +1343,19 @@ fn catalog_hits(found: &Found, volumes: &[Volume], now: i64) -> String {
             };
         }
     }
+    unreadable_catalogs(&mut out, &found.unreadable);
     out
+}
+
+/// A line for each catalog file that doesn't read, saying how to remove it.
+fn unreadable_catalogs(out: &mut String, unreadable: &[Unreadable]) {
+    for broken in unreadable {
+        let _ = writeln!(
+            out,
+            "catalog {} can't be read: {}. catalog_forget removes it.",
+            broken.id, broken.why
+        );
+    }
 }
 
 /// How long before `now` a moment in seconds from the epoch was.
@@ -3863,6 +3878,24 @@ mod tests {
         ] {
             assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
         }
+
+        // A damaged file is listed, so it can be forgotten.
+        let broken = store.dir.join("aaaaaaaaaaaa.catalog");
+        std::fs::write(&broken, "MDCATLG1").unwrap();
+        let reply = call(&mut server, json!({"name": "catalog_list"}));
+        assert!(
+            text(&reply).ends_with(&format!(
+                "catalog aaaaaaaaaaaa can't be read: {}: damaged catalog: it's too short. catalog_forget removes it.\n",
+                broken.display()
+            )),
+            "{}",
+            text(&reply)
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "catalog_forget", "arguments": {"catalog": "aaaaaaaaaaaa"}}),
+        );
+        assert_eq!(reply["result"]["isError"], false);
 
         let forget = json!({"name": "catalog_forget", "arguments": {"catalog": id}});
         let reply = call(&mut server, forget.clone());

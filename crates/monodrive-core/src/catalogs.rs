@@ -37,6 +37,10 @@ const MAGIC: &[u8; 8] = b"MDCATLG1";
 const PREFIX: u64 = 16;
 /// How often, in entries, a refresh's `Progress` calls its notify.
 const NOTIFY_ENTRIES: u64 = 4096;
+/// The most a header may take, and an entry's path inside its source, so
+/// a damaged file can't make a read allocate without bound.
+const MAX_HEADER: u64 = 64 * 1024;
+const MAX_PATH: usize = libc::PATH_MAX as usize;
 
 /// Where the catalogs are kept: `<id>.catalog` each, beside a `<id>.lock`
 /// a refresh holds.
@@ -83,12 +87,30 @@ pub struct Failed {
     pub why: String,
 }
 
+/// Every catalog the store holds.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// By volume name, then path.
+    pub catalogs: Vec<Catalog>,
+    /// Files that are damaged or from another version, which only forget
+    /// removes.
+    pub unreadable: Vec<Unreadable>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreadable {
+    pub id: String,
+    pub why: String,
+}
+
 /// What a search over catalogs found, best first.
 #[derive(Debug)]
 pub struct Found {
     /// Each catalog a hit came from.
     pub catalogs: Vec<Searched>,
     pub hits: Vec<Hit>,
+    /// Catalogs it couldn't read, which it left out.
+    pub unreadable: Vec<Unreadable>,
 }
 
 #[derive(Debug)]
@@ -129,28 +151,37 @@ impl Store {
         })
     }
 
-    /// Every catalog, by volume name and then path. Reads only headers.
-    pub fn list(&self) -> Result<Vec<Catalog>, String> {
+    /// Every catalog, and each file that doesn't read as one. Reads only
+    /// headers.
+    pub fn list(&self) -> Result<Listing, String> {
         let listing = match std::fs::read_dir(&self.dir) {
             Ok(listing) => listing,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Listing::default()),
             Err(e) => return Err(format!("{}: {e}", self.dir.display())),
         };
-        let mut catalogs = Vec::new();
+        let (mut catalogs, mut unreadable) = (Vec::new(), Vec::new());
         for item in listing {
             let item = item.map_err(|e| format!("{}: {e}", self.dir.display()))?;
             let name = item.file_name();
             let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".catalog")) else {
                 continue;
             };
-            if is_id(id) {
-                catalogs.push(self.read(id)?);
+            if !is_id(id) {
+                continue;
+            }
+            match self.read(id) {
+                Ok(catalog) => catalogs.push(catalog),
+                Err(why) => unreadable.push(Unreadable { id: id.into(), why }),
             }
         }
         catalogs.sort_by(|a, b| {
             (&a.source.volume.name, &a.source.path).cmp(&(&b.source.volume.name, &b.source.path))
         });
-        Ok(catalogs)
+        unreadable.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(Listing {
+            catalogs,
+            unreadable,
+        })
     }
 
     /// Catalogs the folder at `path`, or refreshes the catalog of it that
@@ -221,16 +252,15 @@ impl Store {
     }
 
     /// Removes the catalog's file, and only that: the source is untouched.
+    /// Its empty lock file stays, since removing it would let a refresh
+    /// holding the old one run beside one locking a new one.
     pub fn forget(&self, id: &str) -> Result<(), String> {
         let file = self.file(id)?;
-        let held = self.hold(id)?;
-        let removed = discard(&file).map_err(|e| match e.kind() {
+        let _held = self.hold(id)?;
+        discard(&file).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => format!("No catalog {id}."),
             _ => format!("{}: {e}", file.display()),
-        });
-        let _ = discard(&self.lock(id));
-        drop(held);
-        removed
+        })
     }
 
     /// Runs `query`, in find_files' language, over every catalog, or only
@@ -239,20 +269,25 @@ impl Store {
     pub fn search(&self, query: &Query, volumes: &[Volume], limit: usize) -> Result<Found, String> {
         let home = std::env::var("HOME").unwrap_or_default();
         let q = index::fsearch_query(query, &Scope::Everywhere, &home, index::now())?;
-        let catalogs: Vec<Searched> = self
-            .list()?
+        let listing = self.list()?;
+        let mut unreadable = listing.unreadable;
+        let catalogs: Vec<Searched> = listing
+            .catalogs
             .into_iter()
             .map(|catalog| Searched {
                 source: catalog.source.locate(volumes),
                 catalog,
             })
             .collect();
-        let mut hits = self.scan(&catalogs, &q, limit)?;
+        let mut broken = Vec::new();
+        let mut hits = self.scan(&catalogs, &q, limit, &mut broken);
         // As fsearch does: typos past the first letter only when nothing
         // closer matched.
         if hits.is_empty() && q.tokens.iter().any(|t| !t.negate && t.edits > 0) {
-            hits = self.scan(&catalogs, &q.deepen(), limit)?;
+            broken.clear();
+            hits = self.scan(&catalogs, &q.deepen(), limit, &mut broken);
         }
+        unreadable.extend(broken);
         // Only the catalogs hits came from, in order of their best.
         let mut kept: Vec<usize> = Vec::new();
         for hit in &mut hits {
@@ -269,15 +304,19 @@ impl Store {
         Ok(Found {
             catalogs: kept.iter().filter_map(|&c| catalogs[c].take()).collect(),
             hits,
+            unreadable,
         })
     }
 
+    /// The best `limit` hits in `catalogs`, leaving out each catalog whose
+    /// body doesn't read, which goes in `broken`.
     fn scan(
         &self,
         catalogs: &[Searched],
         q: &fsearch::Query,
         limit: usize,
-    ) -> Result<Vec<Hit>, String> {
+        broken: &mut Vec<Unreadable>,
+    ) -> Vec<Hit> {
         let forms: Vec<fsearch::Query> = std::iter::once(q.clone())
             .chain(q.alt.as_ref().map(|alt| fsearch::Query {
                 tokens: alt.clone(),
@@ -306,7 +345,8 @@ impl Store {
             let mut path = root.as_os_str().as_bytes().to_vec();
             path.push(b'/');
             let base = path.len();
-            self.each(&searched.catalog.id, |inside, kind, size, mtime| {
+            let catalog = &searched.catalog;
+            let read = self.each(&catalog.id, catalog.entries, |inside, kind, size, mtime| {
                 path.truncate(base);
                 path.extend_from_slice(inside);
                 let second = u32::try_from(mtime.clamp(0, u32::MAX.into())).unwrap_or(0);
@@ -337,37 +377,65 @@ impl Store {
                 if hits.len() >= limit.max(64) * 4 {
                     keep(&mut hits);
                 }
-            })?;
+            });
+            if let Err(why) = read {
+                hits.retain(|hit| hit.catalog != at);
+                broken.push(Unreadable {
+                    id: catalog.id.clone(),
+                    why,
+                });
+            }
         }
         keep(&mut hits);
-        Ok(hits)
+        hits
     }
 
     /// Calls `each` with every entry in the catalog's body: its path inside
-    /// the source, fsearch's kind, its size and modification second.
-    fn each(&self, id: &str, mut each: impl FnMut(&[u8], u8, u64, i64)) -> Result<(), String> {
+    /// the source, fsearch's kind, its size and modification second. Fails
+    /// on a damaged body, or one that doesn't hold the `entries` its header
+    /// says.
+    fn each(
+        &self,
+        id: &str,
+        entries: u64,
+        mut each: impl FnMut(&[u8], u8, u64, i64),
+    ) -> Result<(), String> {
         let path = self.file(id)?;
         let fail = |e: io::Error| format!("{}: {e}", path.display());
-        let (file, len) = open(&path).map_err(fail)?;
+        let (file, len, _) = open(&path).map_err(fail)?;
         let mut body = BufReader::new(DeflateDecoder::new(BufReader::new(file.take(len))));
-        let mut inside = Vec::new();
+        let (mut inside, mut met) = (Vec::new(), 0u64);
         loop {
             if body.fill_buf().map_err(fail)?.is_empty() {
+                if met != entries {
+                    return Err(fail(damaged(&format!(
+                        "it holds {met} entries, but its header says {entries}"
+                    ))));
+                }
                 return Ok(());
             }
-            let shared = varint(&mut body).map_err(fail)? as usize;
-            let more = varint(&mut body).map_err(fail)? as usize;
-            if shared > inside.len() {
-                return Err(fail(io::ErrorKind::InvalidData.into()));
-            }
-            inside.truncate(shared);
-            let start = inside.len();
-            inside.resize(start + more, 0);
+            let shared = varint(&mut body).map_err(fail)?;
+            let more = varint(&mut body).map_err(fail)?;
+            let start = usize::try_from(shared)
+                .ok()
+                .filter(|&shared| shared <= inside.len());
+            let end = start.and_then(|start| {
+                usize::try_from(more)
+                    .ok()
+                    .and_then(|more| start.checked_add(more))
+                    .filter(|&end| end <= MAX_PATH)
+            });
+            let (Some(start), Some(end)) = (start, end) else {
+                return Err(fail(damaged("an entry's path is damaged")));
+            };
+            inside.truncate(start);
+            inside.resize(end, 0);
             body.read_exact(&mut inside[start..]).map_err(fail)?;
             let mut kind = [0];
             body.read_exact(&mut kind).map_err(fail)?;
             let size = varint(&mut body).map_err(fail)?;
             let mtime = unzigzag(varint(&mut body).map_err(fail)?);
+            met += 1;
             each(&inside, kind[0], size, mtime);
         }
     }
@@ -388,10 +456,7 @@ impl Store {
             Ok(catalog) => Ok(catalog),
             Err(why) => match old {
                 Some(old) => Err(self.fail(old, why)),
-                None => {
-                    let _ = discard(&self.lock(id));
-                    Err(why)
-                }
+                None => Err(why),
             },
         }
     }
@@ -406,6 +471,14 @@ impl Store {
     ) -> Result<Catalog, String> {
         let into = self.file(id)?;
         let fail = |e: io::Error| format!("{}: {e}", into.display());
+        // Which folder it is: a volume that's unplugged, or replaced by
+        // another mounted at the same path, leaves another folder there.
+        let at = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .ok()
+                .map(|meta| (meta.dev(), meta.ino()))
+        };
+        let before = at(&source.path);
         let draft = Draft::new(into.clone()).map_err(fail)?;
         let mut body = DeflateEncoder::new(BufWriter::new(&draft.file), Compression::default());
         let entries = Cell::new(0u64);
@@ -460,6 +533,14 @@ impl Store {
             Some(Stop::Deadline) => return Err("Ran out of time before it finished.".into()),
             Some(Stop::Budget) | None => {}
         }
+        // A walk that lost its source partway skipped what vanished and
+        // couldn't list what was left; neither is what the source holds.
+        if before.is_none() || at(&source.path) != before {
+            return Err(format!(
+                "{} was disconnected during the refresh.",
+                source.volume.name
+            ));
+        }
         body.finish()
             .and_then(|mut written| written.flush())
             .map_err(fail)?;
@@ -490,7 +571,7 @@ impl Store {
             return kept;
         };
         let saved = (|| {
-            let (mut file, len) = open(&into)?;
+            let (mut file, len, _) = open(&into)?;
             let mut draft = Draft::new(into.clone())?;
             io::copy(&mut (&mut file).take(len), &mut draft.file)?;
             draft.commit(&old)
@@ -510,14 +591,14 @@ impl Store {
             io::ErrorKind::NotFound => format!("No catalog {id}."),
             _ => format!("{}: {e}", path.display()),
         };
-        let (mut file, len) = open(&path).map_err(fail)?;
+        let (mut file, len, size) = open(&path).map_err(fail)?;
         file.seek(SeekFrom::Start(PREFIX + len)).map_err(fail)?;
         let mut header = Vec::new();
-        file.read_to_end(&mut header).map_err(fail)?;
+        file.take(size).read_to_end(&mut header).map_err(fail)?;
         let mut catalog: Catalog =
             serde_json::from_slice(&header).map_err(|e| format!("{}: {e}", path.display()))?;
         catalog.id = id.into();
-        catalog.bytes = PREFIX + len + header.len() as u64;
+        catalog.bytes = PREFIX + len + size;
         Ok(catalog)
     }
 
@@ -552,12 +633,36 @@ impl Source {
     /// Where the source is now: on whichever mounted volume has its
     /// identity, maybe mounted somewhere else, never on another volume of
     /// the same name.
+    /// A folder replaced by a link, or another volume mounted inside, isn't
+    /// the source, even with the same path.
     pub fn locate(&self, volumes: &[Volume]) -> Availability {
-        Favorite {
+        let found = Favorite {
             path: self.path.clone(),
             volume: Some(self.volume.clone()),
         }
-        .resolve(volumes)
+        .resolve(volumes);
+        let Availability::Available(path) = found else {
+            return found;
+        };
+        if std::fs::canonicalize(&path).ok().as_ref() != Some(&path) {
+            return Availability::Unavailable(format!(
+                "{} is now a link, not the cataloged folder.",
+                path.display()
+            ));
+        }
+        let mount = volumes
+            .iter()
+            .find(|volume| volume.id.as_ref() == Some(&self.volume.id))
+            .map(|volume| &volume.mount);
+        let dev = |path: &Path| std::fs::metadata(path).ok().map(|meta| meta.dev());
+        if mount.and_then(|mount| dev(mount)) != dev(&path) {
+            return Availability::Unavailable(format!(
+                "{} is now on another volume, not {}.",
+                path.display(),
+                self.volume.name
+            ));
+        }
+        Availability::Available(path)
     }
 
     /// The same for every catalog of this volume and folder, wherever the
@@ -592,13 +697,30 @@ impl Catalog {
         };
         let path = root.join(&hit.inside);
         let was = &hit.entry;
+        let gone = |path: PathBuf, e: io::Error| match e.kind() {
+            io::ErrorKind::NotFound => Resolved::Changed(path, "gone since cataloged".into()),
+            _ => Resolved::Changed(path, e.to_string()),
+        };
+        // Only the last part may be a link; a folder above it that became
+        // one leads somewhere else, maybe another drive.
+        if let Some(parent) = path.parent() {
+            match std::fs::canonicalize(parent) {
+                Ok(real) if real == parent => {}
+                Ok(_) => {
+                    let why = "changed since cataloged: a folder above it is now a link";
+                    return Resolved::Changed(path, why.into());
+                }
+                Err(e) => return gone(path, e),
+            }
+        }
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(meta) => meta,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Resolved::Changed(path, "gone since cataloged".into());
-            }
-            Err(e) => return Resolved::Changed(path, e.to_string()),
+            Err(e) => return gone(path, e),
         };
+        if std::fs::metadata(&root).is_ok_and(|root| root.dev() != meta.dev()) {
+            let why = "changed since cataloged: it's on another volume now";
+            return Resolved::Changed(path, why.into());
+        }
         let kind = Kind::of(meta.file_type());
         if kind != was.kind {
             let why = format!(
@@ -735,19 +857,33 @@ fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-/// A catalog file open at its body, and the body's length.
-fn open(path: &Path) -> io::Result<(File, u64)> {
+/// A catalog file open at its body, the body's length and the header's,
+/// both checked against the file's size.
+fn open(path: &Path) -> io::Result<(File, u64, u64)> {
     let mut file = File::open(path)?;
     let mut prefix = [0; PREFIX as usize];
-    file.read_exact(&mut prefix)?;
+    file.read_exact(&mut prefix)
+        .map_err(|_| damaged("it's too short"))?;
     if &prefix[..8] != MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "not a catalog this Monodrive can read",
-        ));
+        return Err(damaged("it isn't a catalog this Monodrive can read"));
     }
     let len = u64::from_le_bytes(prefix[8..].try_into().unwrap_or_default());
-    Ok((file, len))
+    let size = file.metadata()?.len();
+    let header = PREFIX
+        .checked_add(len)
+        .and_then(|end| size.checked_sub(end))
+        .ok_or_else(|| damaged("its body runs past its end"))?;
+    if header > MAX_HEADER {
+        return Err(damaged("its header is too large"));
+    }
+    Ok((file, len, header))
+}
+
+fn damaged(why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("damaged catalog: {why}"),
+    )
 }
 
 /// A catalog file being written under a name of its own: the magic, room
@@ -781,8 +917,14 @@ impl Draft {
         serde_json::to_writer(&mut self.file, catalog)?;
         self.file.write_all_at(&body.to_le_bytes(), 8)?;
         let size = self.file.metadata()?.len();
+        // On disk before it replaces the old one, and the rename on disk
+        // before a caller is told it's done, so a crash leaves one whole.
+        self.file.sync_all()?;
         if let Some(tmp) = self.tmp.take() {
             std::fs::rename(tmp, &self.into)?;
+        }
+        if let Some(dir) = self.into.parent() {
+            File::open(dir)?.sync_all()?;
         }
         Ok(size)
     }

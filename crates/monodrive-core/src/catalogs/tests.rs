@@ -1,5 +1,6 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 fn volume(name: &str, mount: &Path, uuid: Option<&str>) -> Volume {
@@ -63,6 +64,13 @@ fn search(store: &Store, query: &str, volumes: &[Volume]) -> Found {
         .unwrap()
 }
 
+/// The catalogs, none unreadable.
+fn listed(store: &Store) -> Vec<Catalog> {
+    let listing = store.list().unwrap();
+    assert_eq!(listing.unreadable, []);
+    listing.catalogs
+}
+
 fn paths(found: &Found) -> Vec<PathBuf> {
     found
         .hits
@@ -99,12 +107,12 @@ fn a_disconnected_source_searches_offline_and_resolves_by_identity_wherever_it_r
     assert_eq!(catalog.failed, None);
     assert_eq!(catalog.source.path, mount);
     assert!(catalog.bytes > PREFIX, "{catalog:?}");
-    assert_eq!(store.list(), Ok(vec![catalog.clone()]));
+    assert_eq!(listed(&store), std::slice::from_ref(&catalog));
     // The same source by another path is the same catalog.
     let link = dir.join("to-backup");
     std::os::unix::fs::symlink(&mount, &link).unwrap();
     assert_eq!(create(&store, &link, &mounted).id, catalog.id);
-    assert_eq!(store.list().unwrap().len(), 1);
+    assert_eq!(listed(&store).len(), 1);
 
     // Unplugged, and plugged in again where macOS mounts a second drive
     // of the same name.
@@ -303,14 +311,14 @@ fn a_failed_cancelled_or_late_refresh_keeps_the_last_good_catalog() {
         Err(format!("Backup isn't connected.{kept}"))
     );
 
-    let listed = store.list().unwrap().remove(0);
-    let failed = listed.failed.clone().unwrap();
+    let after = listed(&store).remove(0);
+    let failed = after.failed.clone().unwrap();
     assert_eq!(failed.why, "Backup isn't connected.");
     assert_eq!(
         Catalog {
             failed: None,
             bytes: good.bytes,
-            ..listed
+            ..after
         },
         good
     );
@@ -342,8 +350,8 @@ fn a_failed_cancelled_or_late_refresh_keeps_the_last_good_catalog() {
         store.create(&work, &volumes, &cancelled, None),
         Err("Cancelled before it finished.".into())
     );
-    assert_eq!(store.list().unwrap().len(), 1);
-    assert_eq!(files(&store).len(), 2);
+    assert_eq!(listed(&store).len(), 1);
+    assert_eq!(files(&store).len(), 3);
 }
 
 #[test]
@@ -376,8 +384,10 @@ fn forget_removes_only_monodrives_catalog_file() {
     let mounted = [root(), volume("Backup", &mount, Some("U1"))];
     let catalog = create(&store, &mount, &mounted);
     assert_eq!(store.forget(&catalog.id), Ok(()));
-    assert_eq!(store.list(), Ok(Vec::new()));
-    assert_eq!(files(&store), Vec::<String>::new());
+    assert_eq!(listed(&store), Vec::<Catalog>::new());
+    // The lock stays, so a refresh that opened it keeps excluding others.
+    let lock = [format!("{}.lock", catalog.id)];
+    assert_eq!(files(&store), lock);
     assert!(mount.join("Photos/2024/report.pdf").is_file());
     let missing = format!("No catalog {}.", catalog.id);
     assert_eq!(store.forget(&catalog.id), Err(missing.clone()));
@@ -390,7 +400,7 @@ fn forget_removes_only_monodrives_catalog_file() {
         store.forget("../places"),
         Err("No catalog ../places.".into())
     );
-    assert_eq!(files(&store), Vec::<String>::new());
+    assert_eq!(files(&store), lock);
 }
 
 #[test]
@@ -419,5 +429,185 @@ fn only_a_folder_on_a_volume_with_an_identity_other_than_the_startup_disk_is_cat
         format!("{} isn't a folder.", file.display())
     );
     assert!(refused("Loose".as_ref(), &usb).contains("give an absolute path"));
-    assert_eq!(store.list(), Ok(Vec::new()));
+    assert_eq!(listed(&store), Vec::<Catalog>::new());
+}
+
+#[test]
+fn a_source_disconnected_during_a_refresh_keeps_the_last_good_catalog() {
+    let (_tmp, dir) = real_tempdir();
+    let (store, mount) = (store(&dir), dir.join("Backup"));
+    for folder in ["a", "b", "c", "d"] {
+        std::fs::create_dir_all(mount.join(folder)).unwrap();
+        for n in 0..2000 {
+            std::fs::write(mount.join(folder).join(format!("{n}.txt")), "").unwrap();
+        }
+    }
+    let mounted = [root(), volume("Backup", &mount, Some("U1"))];
+    let good = create(&store, &mount, &mounted);
+    // Unplugged partway: once the walk has met a few thousand entries, the
+    // folders it hasn't listed yet are gone.
+    let (from, to) = (mount.clone(), dir.join("unplugged"));
+    let unplugged = AtomicBool::new(false);
+    let progress = Progress::notifying(move || {
+        if !unplugged.swap(true, Ordering::Relaxed) {
+            std::fs::rename(&from, &to).unwrap();
+        }
+    });
+    assert_eq!(
+        store.refresh(&good.id, &mounted, &progress, None),
+        Err("Backup was disconnected during the refresh. The last good catalog is kept.".into())
+    );
+    let kept = listed(&store).remove(0);
+    assert_eq!(kept.entries, good.entries);
+    assert_eq!(
+        kept.failed.map(|failed| failed.why),
+        Some("Backup was disconnected during the refresh.".into())
+    );
+}
+
+#[test]
+fn a_folder_replaced_by_a_link_is_neither_resolved_through_nor_walked() {
+    let (_tmp, dir) = real_tempdir();
+    let (store, mount) = (store(&dir), backup(&dir));
+    let mounted = [root(), volume("Backup", &mount, Some("U1"))];
+    create(&store, &mount, &mounted);
+    let photos = mount.join("Photos");
+    let folder = create(&store, &photos, &mounted);
+    // Photos now leads to another drive's folder with the same names and
+    // sizes.
+    let other = dir.join("Other/Photos");
+    write(&other.join("2024/report.pdf"), 2000);
+    write(&other.join("beach.jpg"), 10);
+    std::fs::rename(&photos, dir.join("Photos before")).unwrap();
+    std::os::unix::fs::symlink(&other, &photos).unwrap();
+
+    let found = search(&store, "report", &mounted);
+    let whole = found
+        .catalogs
+        .iter()
+        .position(|searched| searched.catalog.source.path == mount)
+        .unwrap();
+    let hit = found.hits.iter().find(|hit| hit.catalog == whole).unwrap();
+    assert_eq!(
+        found.catalogs[whole].catalog.resolve(hit, &mounted),
+        Resolved::Changed(
+            photos.join("2024/report.pdf"),
+            "changed since cataloged: a folder above it is now a link".into()
+        )
+    );
+    let now_a_link = format!(
+        "{} is now a link, not the cataloged folder.",
+        photos.display()
+    );
+    assert_eq!(
+        store.refresh(&folder.id, &mounted, &Progress::default(), None),
+        Err(format!("{now_a_link} The last good catalog is kept."))
+    );
+    assert_eq!(
+        folder.source.locate(&mounted),
+        Availability::Unavailable(now_a_link)
+    );
+}
+
+#[test]
+fn a_damaged_catalog_file_reads_as_unreadable_without_panicking() {
+    let (_tmp, dir) = real_tempdir();
+    let (store, mount) = (store(&dir), backup(&dir));
+    let mounted = [root(), volume("Backup", &mount, Some("U1"))];
+    let good = create(&store, &mount, &mounted);
+    let file = store.file(&good.id).unwrap();
+    let original = std::fs::read(&file).unwrap();
+    let header = serde_json::to_vec(&good).unwrap();
+    // A file with these records, this header and a body length, or the
+    // body's own.
+    let forge = |records: &[u8], header: &[u8], len: Option<u64>| {
+        let mut body = DeflateEncoder::new(Vec::new(), Compression::default());
+        body.write_all(records).unwrap();
+        let body = body.finish().unwrap();
+        let mut out = MAGIC.to_vec();
+        out.extend(len.unwrap_or(body.len() as u64).to_le_bytes());
+        out.extend(body);
+        out.extend(header);
+        out
+    };
+    let entry = |shared: u64, more: u64, name: &[u8]| {
+        let mut record = Vec::new();
+        put_varint(&mut record, shared);
+        put_varint(&mut record, more);
+        record.extend(name);
+        record.extend([KIND_FILE, 0, 0]);
+        record
+    };
+    let seven: Vec<u8> = (0..7).flat_map(|_| entry(0, 1, b"a")).collect();
+    let mut padded = header.clone();
+    padded.extend(vec![b' '; 100_000]);
+    let mut overflow = entry(0, 1, b"a");
+    put_varint(&mut overflow, 1);
+    put_varint(&mut overflow, u64::MAX);
+    let header_damage = [
+        (original[..original.len() / 2].to_vec(), "EOF while parsing"),
+        (
+            original[..PREFIX as usize + 1].to_vec(),
+            "damaged catalog: its body runs past its end",
+        ),
+        (original[..10].to_vec(), "damaged catalog: it's too short"),
+        (
+            forge(&seven, &header, Some(u64::MAX)),
+            "damaged catalog: its body runs past its end",
+        ),
+        (
+            forge(&seven, &padded, None),
+            "damaged catalog: its header is too large",
+        ),
+    ];
+    for (bytes, why) in header_damage {
+        std::fs::write(&file, bytes).unwrap();
+        let listing = store.list().unwrap();
+        assert_eq!(listing.catalogs, []);
+        let [unreadable] = &listing.unreadable[..] else {
+            panic!("{listing:?}");
+        };
+        assert_eq!(unreadable.id, good.id);
+        let prefix = format!("{}: ", file.display());
+        assert!(
+            unreadable.why.starts_with(&prefix) && unreadable.why.contains(why),
+            "{why}: {unreadable:?}"
+        );
+        let found = search(&store, "", &[root()]);
+        assert_eq!(
+            (found.hits.len(), found.unreadable),
+            (0, listing.unreadable)
+        );
+    }
+    let body_damage = [
+        (
+            forge(&entry(0, 5000, &[b'a'; 5000]), &header, None),
+            "an entry's path is damaged",
+        ),
+        (
+            forge(&overflow, &header, None),
+            "an entry's path is damaged",
+        ),
+        (
+            forge(&entry(0, 1, b"a"), &header, None),
+            "it holds 1 entries, but its header says 7",
+        ),
+    ];
+    for (bytes, why) in body_damage {
+        std::fs::write(&file, bytes).unwrap();
+        // The header reads, so it's listed; the body is checked as it's
+        // searched.
+        assert_eq!(listed(&store).len(), 1);
+        let found = search(&store, "", &[root()]);
+        let why = format!("{}: damaged catalog: {why}", file.display());
+        assert_eq!(found.hits.len(), 0, "{why}");
+        assert_eq!(
+            found.unreadable,
+            [Unreadable {
+                id: good.id.clone(),
+                why
+            }]
+        );
+    }
+    assert_eq!(store.forget(&good.id), Ok(()));
 }
