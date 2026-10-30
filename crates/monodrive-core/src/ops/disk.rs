@@ -49,7 +49,8 @@ pub fn lookup(path: &Path) -> io::Result<FileId> {
 }
 
 /// The item at `path` and its stamp. A folder is walked whole, without
-/// following links; a subfolder that can't be read counts as empty.
+/// following links. A subfolder that can't be read counts as empty, and so
+/// does a cloud placeholder folder, which listing would download.
 pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
     let meta = std::fs::symlink_metadata(path)?;
     let id = FileId::of(&meta);
@@ -59,7 +60,7 @@ pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
         digest: mix(&meta),
     };
     let mut folders = Vec::new();
-    if meta.is_dir() {
+    if listable(&meta) {
         folders.push(path.to_path_buf());
     }
     while let Some(folder) = folders.pop() {
@@ -72,7 +73,7 @@ pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
             stamp.entries += 1;
             stamp.size += meta.size();
             stamp.digest = stamp.digest.wrapping_add(mix(&meta));
-            if meta.is_dir() {
+            if listable(&meta) {
                 folders.push(item.path());
             }
         }
@@ -237,12 +238,13 @@ pub fn copy(from: &Path, to: &Path, meter: Option<&Meter>) -> io::Result<()> {
 }
 
 /// How many items are inside `path`, and the bytes in its files: what a
-/// complete copy has the same of.
+/// complete copy has the same of. A cloud placeholder folder counts as
+/// empty, as in `stamp`.
 pub fn tally(path: &Path) -> io::Result<(u64, u64)> {
     let meta = std::fs::symlink_metadata(path)?;
     let mut tally = (0, if meta.is_file() { meta.len() } else { 0 });
     let mut folders = Vec::new();
-    if meta.is_dir() {
+    if listable(&meta) {
         folders.push(path.to_path_buf());
     }
     while let Some(folder) = folders.pop() {
@@ -252,7 +254,7 @@ pub fn tally(path: &Path) -> io::Result<(u64, u64)> {
             tally.0 += 1;
             if meta.is_file() {
                 tally.1 += meta.len();
-            } else if meta.is_dir() {
+            } else if listable(&meta) {
                 folders.push(item.path());
             }
         }
@@ -305,6 +307,11 @@ pub fn find_in_trash(id: FileId, original: &Path) -> Option<PathBuf> {
                 .map(|item| item.path())
                 .find(|path| self::id(path) == Some(id))
         })
+}
+
+/// A folder whose items are on this Mac, so listing it downloads nothing.
+fn listable(meta: &std::fs::Metadata) -> bool {
+    meta.is_dir() && crate::cloud::Availability::of(meta).is_local()
 }
 
 fn c_path(path: &Path) -> io::Result<CString> {

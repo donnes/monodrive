@@ -95,6 +95,10 @@ pub struct Usage {
     pub unshared: u64,
     /// Files, links and special files.
     pub files: u64,
+    /// Files and folders that are cloud placeholders, counted without
+    /// downloading: a file at its size on no blocks, a folder without its
+    /// items.
+    pub placeholders: u64,
 }
 
 impl Usage {
@@ -103,6 +107,7 @@ impl Usage {
         self.on_disk += other.on_disk;
         self.unshared += other.unshared;
         self.files += other.files;
+        self.placeholders += other.placeholders;
     }
 }
 
@@ -133,6 +138,8 @@ struct Record {
     usage: Usage,
     id: FileId,
     modified: (i64, i64),
+    /// Reading it would download it, so looking for duplicates doesn't.
+    placeholder: bool,
 }
 
 impl Record {
@@ -190,19 +197,32 @@ pub fn scan(
         met.set(met.get() + 1);
         progress.add(&progress.items, 1, NOTIFY_ITEMS);
         match event {
-            Met::Folder { parent, path } => report.folders.push(Folder {
+            Met::Folder {
+                parent,
+                path,
+                placeholder,
+            } => report.folders.push(Folder {
                 path: path.to_path_buf(),
                 parent: Some(parent),
-                usage: Usage::default(),
+                usage: Usage {
+                    placeholders: u64::from(placeholder),
+                    ..Usage::default()
+                },
                 children: Vec::new(),
                 unreadable: false,
             }),
-            Met::Item { at, name, meta } => {
+            Met::Item {
+                at,
+                name,
+                meta,
+                placeholder,
+            } => {
                 let mut usage = Usage {
                     bytes: meta.len(),
                     on_disk: meta.blocks() * 512,
                     unshared: meta.blocks() * 512,
                     files: 1,
+                    placeholders: u64::from(placeholder),
                 };
                 if meta.is_file() {
                     let path = report.folders[at].path.join(&name);
@@ -215,6 +235,7 @@ pub fn scan(
                         usage,
                         id: FileId::of(meta),
                         modified: (meta.mtime(), meta.mtime_nsec()),
+                        placeholder,
                     });
                 }
                 report.folders[at].usage.add(&usage);
@@ -327,8 +348,10 @@ impl Report {
     /// one's start, middle and end splits them; reading them whole, and
     /// finding them unchanged after, verifies them. A file no larger than
     /// its three samples is read whole the first time. Hard links to one
-    /// file are that file, never its duplicates. Stops when cancelled or at
-    /// `deadline`; a group it hadn't finished reading stays as it was.
+    /// file are that file, never its duplicates. A cloud placeholder is
+    /// never read: one the size of another file is listed as not
+    /// downloaded instead. Stops when cancelled or at `deadline`; a group
+    /// it hadn't finished reading stays as it was.
     pub fn duplicates(
         &self,
         wanted: &dyn Fn(u64) -> bool,
@@ -341,15 +364,22 @@ impl Report {
                 by_size.entry(file.usage.bytes).or_default().push(i);
             }
         }
+        let mut not_downloaded = Vec::new();
         let mut groups: Vec<(Match, Vec<usize>)> = by_size
             .into_values()
-            .map(|mut files| {
+            .filter_map(|mut files| {
                 files.sort_by_key(|&i| self.files[i].id);
                 files.dedup_by_key(|&mut i| self.files[i].id);
-                (Match::Size, files)
+                if files.len() < 2 {
+                    return None;
+                }
+                let (cloud, local): (Vec<usize>, Vec<usize>) =
+                    files.into_iter().partition(|&i| self.files[i].placeholder);
+                not_downloaded.extend(cloud.iter().map(|&i| self.path(&self.files[i])));
+                (local.len() > 1).then_some((Match::Size, local))
             })
-            .filter(|(_, files)| files.len() > 1)
             .collect();
+        not_downloaded.sort();
         let mut unreadable = Vec::new();
         let mut found: HashMap<usize, (FileId, Stamp)> = HashMap::new();
         let mut stopped = None;
@@ -435,6 +465,7 @@ impl Report {
         Duplicates {
             groups,
             unreadable,
+            not_downloaded,
             stopped: stopped.or(self.stopped),
         }
     }
@@ -455,6 +486,9 @@ impl Report {
             let readers: Vec<_> = (0..READERS)
                 .map(|_| {
                     scope.spawn(move || {
+                        // A file evicted since the scan fails to read
+                        // rather than downloading.
+                        fsearch::no_materialize();
                         let mut done = Vec::new();
                         let mut buffer = vec![0; CHUNK];
                         while let Some(&i) = picked.get(next.fetch_add(1, Ordering::Relaxed)) {
@@ -618,6 +652,9 @@ pub struct Duplicates {
     /// Files left out because they couldn't be read or changed since the
     /// scan, with why.
     pub unreadable: Vec<String>,
+    /// Cloud placeholders the size of another file, never read, so neither
+    /// verified nor ruled out. By path.
+    pub not_downloaded: Vec<PathBuf>,
     /// Why the scan or the reading stopped early, if it did.
     pub stopped: Option<Stop>,
 }

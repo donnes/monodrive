@@ -1,3 +1,4 @@
+use crate::cloud::Availability;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,8 @@ pub struct Entry {
     pub size: u64,
     /// Seconds since the Unix epoch; 0 when unknown.
     pub modified: u64,
+    /// From the listing's own `lstat`, so never `Downloading`.
+    pub availability: Availability,
 }
 
 impl Entry {
@@ -175,6 +178,7 @@ pub fn list_dir(dir: &Path, show_hidden: bool, order: Sort) -> std::io::Result<V
                 kind,
                 size: meta.len(),
                 modified,
+                availability: Availability::of(&meta),
             })
         })
         .collect();
@@ -193,6 +197,7 @@ mod tests {
             kind,
             size,
             modified,
+            availability: Availability::Local,
         }
     }
 

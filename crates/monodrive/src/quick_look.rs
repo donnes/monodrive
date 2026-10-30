@@ -281,6 +281,7 @@ mod tests {
                 },
                 size: 0,
                 modified: 0,
+                availability: Default::default(),
             })
             .collect()
     }

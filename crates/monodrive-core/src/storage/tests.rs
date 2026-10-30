@@ -225,3 +225,30 @@ fn a_group_whose_files_all_fail_to_read_drops_out() {
     assert!(found.groups.is_empty());
     assert_eq!(found.unreadable.len(), 2, "{:?}", found.unreadable);
 }
+
+#[test]
+fn placeholders_are_counted_but_never_read_for_duplicates() {
+    let (_dir, root) = folder();
+    let cloud = root.join("cloud.txt");
+    for name in ["a.txt", "b.txt", "cloud.txt"] {
+        write(&root.join(name), b"same");
+    }
+    let mut report = scanned(&root);
+    for file in report
+        .files
+        .iter_mut()
+        .filter(|file| file.name == "cloud.txt")
+    {
+        file.placeholder = true;
+    }
+    // Reading it now would fail, so a read would show among the unreadable.
+    std::fs::set_permissions(&cloud, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let found = duplicates(&report);
+    std::fs::set_permissions(&cloud, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        named(&found),
+        [(Match::Content, vec!["a.txt".into(), "b.txt".into()])]
+    );
+    assert_eq!(found.not_downloaded, [cloud]);
+    assert!(found.unreadable.is_empty(), "{:?}", found.unreadable);
+}

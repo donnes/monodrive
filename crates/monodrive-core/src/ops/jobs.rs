@@ -10,6 +10,7 @@ use super::{
     existing,
 };
 use crate::archives::{self, Archive};
+use crate::cloud;
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
@@ -249,6 +250,13 @@ impl Spec {
             } => {
                 absolute([archive, into].into_iter())?;
                 let id = ids(std::slice::from_ref(archive))?[0];
+                // Opening a placeholder here would hold the owner while it
+                // downloads.
+                if std::fs::symlink_metadata(archive)
+                    .is_ok_and(|meta| !cloud::Availability::of(&meta).is_local())
+                {
+                    return Err(cloud::not_downloaded(archive));
+                }
                 let items = Archive::open(archive)?.plan(entries, disk::free(into).ok())?;
                 Ok(Self {
                     kind: Kind::Extract,
@@ -822,6 +830,13 @@ impl Item<'_> {
         if !spec.into.is_dir() {
             return fail(format!("{}: not a folder.", spec.into.display()));
         }
+        if let Err(why) = spec
+            .sources
+            .iter()
+            .try_for_each(|source| cloud::refuse_placeholders(source))
+        {
+            return fail(why);
+        }
         let name = match spec.sources.as_slice() {
             [one] => format!(
                 "{}.zip",
@@ -862,6 +877,9 @@ impl Item<'_> {
         };
         if self.work.id.is_some_and(|accepted| accepted != id) {
             return fail(replaced(path));
+        }
+        if let Err(why) = cloud::refuse_placeholders(path) {
+            return fail(why);
         }
         if !spec.into.is_dir() {
             return fail(format!("{}: not a folder.", spec.into.display()));
@@ -941,6 +959,7 @@ impl Item<'_> {
         copied: &AtomicU64,
     ) -> Result<(), String> {
         let source = self.work.source.clone();
+        cloud::refuse_placeholders(&source)?;
         let meter = disk::Meter { copied, cancel };
         self.make_here(to, replacing, cancel, |temp| {
             disk::copy(&source, temp, Some(&meter))

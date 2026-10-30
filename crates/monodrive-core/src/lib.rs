@@ -3,6 +3,7 @@
 
 pub mod apps;
 pub mod archives;
+pub mod cloud;
 pub mod compare;
 pub mod entries;
 pub mod index;

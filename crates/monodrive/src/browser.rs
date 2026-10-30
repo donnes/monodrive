@@ -4447,6 +4447,7 @@ mod tests {
             kind,
             size: 0,
             modified: 0,
+            availability: Default::default(),
         }
     }
 

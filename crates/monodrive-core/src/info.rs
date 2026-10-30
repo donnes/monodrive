@@ -2,12 +2,14 @@
 //! itself, never a link's target, and never asks Spotlight, so each call is
 //! a few system calls and one LaunchServices lookup for the kind.
 
+use crate::cloud::Availability;
 use crate::entries::Kind;
 use objc2::runtime::AnyObject;
 use objc2_foundation::{
-    NSArray, NSDictionary, NSNumber, NSString, NSURL, NSURLIsPackageKey,
-    NSURLLocalizedTypeDescriptionKey, NSURLResourceKey, NSURLVolumeLocalizedNameKey,
-    NSURLVolumeURLKey,
+    NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL, NSURLIsPackageKey,
+    NSURLIsUbiquitousItemKey, NSURLLocalizedTypeDescriptionKey, NSURLResourceKey,
+    NSURLUbiquitousItemDownloadingErrorKey, NSURLUbiquitousItemIsDownloadingKey,
+    NSURLVolumeLocalizedNameKey, NSURLVolumeURLKey,
 };
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -37,6 +39,13 @@ pub struct Info {
     pub package: bool,
     /// Where a symbolic link points, as written in the link.
     pub link: Option<PathBuf>,
+    /// Never `Unknown`.
+    pub availability: Availability,
+    /// iCloud Drive or a File Provider app keeps it in the cloud, so it can
+    /// be downloaded or have its download removed.
+    pub in_cloud: bool,
+    /// Why its latest download failed, as its provider says.
+    pub download_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +82,10 @@ pub fn info(path: &Path) -> Result<Info, String> {
         _ => None,
     };
     let known = Resources::of(path);
+    let availability = match Availability::of(&meta) {
+        Availability::Placeholder if known.downloading => Availability::Downloading,
+        listed => listed,
+    };
     Ok(Info {
         name: path.file_name().map_or_else(
             || path.display().to_string(),
@@ -106,6 +119,9 @@ pub fn info(path: &Path) -> Result<Info, String> {
         },
         package: known.package,
         link,
+        availability,
+        in_cloud: known.in_cloud,
+        download_error: known.download_error,
         path: path.to_path_buf(),
     })
 }
@@ -122,6 +138,9 @@ struct Resources {
     kind_name: Option<String>,
     package: bool,
     volume: Option<OnVolume>,
+    in_cloud: bool,
+    downloading: bool,
+    download_error: Option<String>,
 }
 
 impl Resources {
@@ -135,6 +154,9 @@ impl Resources {
                     NSURLIsPackageKey,
                     NSURLVolumeLocalizedNameKey,
                     NSURLVolumeURLKey,
+                    NSURLIsUbiquitousItemKey,
+                    NSURLUbiquitousItemIsDownloadingKey,
+                    NSURLUbiquitousItemDownloadingErrorKey,
                 ]
             };
             let Ok(values) = url.resourceValuesForKeys_error(&NSArray::from_slice(&keys)) else {
@@ -156,6 +178,11 @@ impl Resources {
                             .unwrap_or_else(|| mount.display().to_string()),
                         mount,
                     }),
+                    in_cloud: flag(&values, NSURLIsUbiquitousItemKey),
+                    downloading: flag(&values, NSURLUbiquitousItemIsDownloadingKey),
+                    download_error: get(NSURLUbiquitousItemDownloadingErrorKey)
+                        .and_then(|e| e.downcast::<NSError>().ok())
+                        .map(|e| e.localizedDescription().to_string()),
                 }
             }
         })

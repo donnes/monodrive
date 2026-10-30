@@ -221,6 +221,7 @@ mod tests {
                 kind: Kind::File,
                 size: 10,
                 modified: 0,
+                availability: Default::default(),
             })
             .collect()
     }

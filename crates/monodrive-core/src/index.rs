@@ -3,6 +3,7 @@
 //! `monodrive mcp` and the fsearch CLI all share one index in
 //! `~/Library/Application Support/FSearch`.
 
+use crate::cloud::Availability;
 use crate::entries::{Entry, Kind};
 use crate::search::{self, Query, Scope, Term};
 use serde::{Deserialize, Serialize};
@@ -261,6 +262,7 @@ impl Index {
                 },
                 size: found.size,
                 modified: found.mtime.into(),
+                availability: Availability::Unknown,
             })
             .collect())
     }

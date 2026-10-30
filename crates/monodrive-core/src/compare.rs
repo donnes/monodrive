@@ -1,10 +1,12 @@
 //! Comparing two files or folders. A walk reads both trees' metadata, so
 //! size and modification time pick candidates; only reading the bytes says
-//! two files are equal. A plan turns selected differences into a one-way
-//! copy the operation owner checks again before it copies anything.
+//! two files are equal, and a cloud placeholder is never read. A plan turns
+//! selected differences into a one-way copy the operation owner checks
+//! again before it copies anything.
 //! Everything here reads the disk and blocks, so callers run it off the UI
 //! thread.
 
+use crate::cloud::{self, Availability};
 use crate::entries::Kind;
 use crate::ops::{FileId, Planned, Request, Stamp, disk};
 use std::collections::BTreeMap;
@@ -53,6 +55,7 @@ pub struct Side {
     /// A file's length; a folder's own size, not what it holds.
     pub size: u64,
     pub modified: Option<SystemTime>,
+    pub availability: Availability,
     id: FileId,
 }
 
@@ -62,6 +65,7 @@ impl Side {
             kind: Kind::of(meta.file_type()),
             size: meta.len(),
             modified: meta.modified().ok(),
+            availability: Availability::of(meta),
             id: FileId::of(meta),
         }
     }
@@ -124,6 +128,16 @@ impl Entry {
         ) && !matches!(self.status, Status::Equal | Status::Differs)
     }
 
+    /// Unverified because a side is a cloud placeholder, which verifying
+    /// doesn't read: reading it would download it.
+    pub fn not_downloaded(&self) -> bool {
+        self.unverified()
+            && [&self.left, &self.right]
+                .into_iter()
+                .flatten()
+                .any(|side| !side.availability.is_local())
+    }
+
     fn under(&self, paths: &[PathBuf]) -> bool {
         paths.iter().any(|path| self.path.starts_with(path))
     }
@@ -176,9 +190,12 @@ fn walk(
         Side::read(&path).map(|side| (path, side))
     };
     let ((left, l), (right, r)) = (root(left)?, root(right)?);
-    for root in [&left, &right] {
+    for (root, side) in [(&left, &l), (&right, &r)] {
         if let Some(why) = crate::sizes::guarded(root, gated) {
             return Err(format!("{}: {why}", root.display()));
+        }
+        if side.kind == Kind::Dir && !side.availability.is_local() {
+            return Err(cloud::not_downloaded(root));
         }
     }
     let mut comparison = Comparison {
@@ -245,6 +262,20 @@ fn walk(
             let path = folder.join(&name);
             progress.entries.fetch_add(1, Ordering::Relaxed);
             let (l, r, status) = match sides {
+                // Listing a placeholder folder would download its items.
+                (Some(Ok(l)), Some(Ok(r)))
+                    if l.kind == Kind::Dir
+                        && r.kind == Kind::Dir
+                        && !(l.availability.is_local() && r.availability.is_local()) =>
+                {
+                    let side = if l.availability.is_local() {
+                        &right
+                    } else {
+                        &left
+                    };
+                    let status = Status::Unknown(cloud::not_downloaded(&side.join(&name)));
+                    (Some(l), Some(r), status)
+                }
                 (Some(Ok(l)), Some(Ok(r))) if l.kind == Kind::Dir && r.kind == Kind::Dir => {
                     pending.push((path, l, r));
                     continue;
@@ -360,8 +391,9 @@ fn at(root: &Path, path: &Path) -> PathBuf {
 impl Comparison {
     /// Reads every unverified entry at or under one of `paths` (an empty
     /// path is everything), `READERS` files at a time, and settles it as
-    /// equal, differing or unknown. False if it stopped before the end;
-    /// what it hadn't read stays as it was.
+    /// equal, differing or unknown. Entries with a placeholder side stay
+    /// unverified, unread. False if it stopped before the end; what it
+    /// hadn't read stays as it was.
     pub fn verify(
         &mut self,
         paths: &[PathBuf],
@@ -369,7 +401,10 @@ impl Comparison {
         deadline: Option<Instant>,
     ) -> bool {
         let picked: Vec<usize> = (0..self.entries.len())
-            .filter(|&i| self.entries[i].unverified() && self.entries[i].under(paths))
+            .filter(|&i| {
+                let entry = &self.entries[i];
+                entry.unverified() && !entry.not_downloaded() && entry.under(paths)
+            })
             .collect();
         let next = AtomicUsize::new(0);
         let (picked, next, this) = (&picked, &next, &*self);
@@ -377,6 +412,9 @@ impl Comparison {
             let readers: Vec<_> = (0..READERS)
                 .map(|_| {
                     scope.spawn(move || {
+                        // A file evicted since the walk fails to read
+                        // rather than downloading.
+                        fsearch::no_materialize();
                         let mut read = Vec::new();
                         let mut buffers = (vec![0; CHUNK], vec![0; CHUNK]);
                         while let Some(&i) = picked.get(next.fetch_add(1, Ordering::Relaxed)) {
@@ -553,6 +591,9 @@ fn planned(entry: &Entry, source: &Path, destination: &Path) -> Result<Planned, 
         _ => return Err("Nothing to copy.".into()),
     };
     let side = entry.left.as_ref().ok_or("Nothing to copy.")?;
+    if !side.availability.is_local() {
+        return Err(cloud::not_downloaded(source));
+    }
     Ok(Planned {
         source: source.to_path_buf(),
         to: destination.to_path_buf(),

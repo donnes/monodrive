@@ -2,8 +2,10 @@
 //! a folder added up, links counted as themselves and never followed.
 //! Measuring walks the whole tree, so `Sizes` runs it on its own thread,
 //! stops when asked, and keeps each finished total until `invalidate` says
-//! the folder changed.
+//! the folder changed. A cloud placeholder counts at its size without
+//! being downloaded, and a placeholder folder isn't listed.
 
+use crate::cloud::Availability;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::Metadata;
@@ -27,6 +29,9 @@ pub struct FolderSize {
     /// couldn't be read, such as one the user may not read or search. What
     /// couldn't be read isn't counted.
     pub unreadable: u64,
+    /// Files and folders among them that are cloud placeholders, counted
+    /// without downloading: a file at its size, a folder without its items.
+    pub placeholders: u64,
     /// False when it stopped early: the totals are then what it had counted.
     pub complete: bool,
 }
@@ -50,9 +55,15 @@ pub fn measure(
     let mut size = FolderSize::default();
     let mut counted = None;
     size.complete = walk(folder, &gated(), &mut stopped, &mut |met| match met {
-        Met::Folder { .. } => size.folders += 1,
-        Met::Item { meta, .. } => {
+        Met::Folder { placeholder, .. } => {
+            size.folders += 1;
+            size.placeholders += u64::from(placeholder);
+        }
+        Met::Item {
+            meta, placeholder, ..
+        } => {
             size.files += 1;
+            size.placeholders += u64::from(placeholder);
             size.bytes += meta.len();
             size.on_disk += meta.blocks() * 512;
         }
@@ -67,14 +78,20 @@ pub fn measure(
 /// What `walk` meets, a folder's items all together.
 pub(crate) enum Met<'a> {
     /// A folder inside folder `parent`. Folders are numbered from 1 as
-    /// they're met; the one walked is 0.
-    Folder { parent: usize, path: &'a Path },
+    /// they're met; the one walked is 0. A placeholder folder isn't walked.
+    Folder {
+        parent: usize,
+        path: &'a Path,
+        placeholder: bool,
+    },
     /// An item in folder `at` that isn't a folder. A hard-linked file comes
     /// only the first time.
     Item {
         at: usize,
         name: OsString,
         meta: &'a Metadata,
+        /// A cloud placeholder: reading it would download it.
+        placeholder: bool,
     },
     /// Folder `at`, or an item in it at `path`, couldn't be read. What
     /// couldn't be read isn't met.
@@ -122,9 +139,10 @@ pub(crate) fn guarded(path: &Path, gated: &[PathBuf]) -> Option<std::io::Error> 
 }
 
 /// Walks every item under `folder` without following links or opening
-/// `gated` folders, until `stopped` says to stop. A link given as `folder`
+/// `gated` or placeholder folders, until `stopped` says to stop. A link given as `folder`
 /// is resolved first, so it can't lead into one. True if it met
-/// everything. Fails only when `folder` itself can't be listed.
+/// everything. Fails only when `folder` itself can't be listed, or is a
+/// placeholder.
 pub(crate) fn walk(
     folder: &Path,
     gated: &[PathBuf],
@@ -134,6 +152,9 @@ pub(crate) fn walk(
     let root = folder
         .canonicalize()
         .map_err(|e| format!("{}: {e}", folder.display()))?;
+    if std::fs::symlink_metadata(&root).is_ok_and(|meta| !Availability::of(&meta).is_local()) {
+        return Err(crate::cloud::not_downloaded(folder));
+    }
     let mut linked = HashSet::new();
     let mut found = 0;
     let mut pending = vec![(root, 0)];
@@ -196,14 +217,18 @@ pub(crate) fn walk(
                     continue;
                 }
             };
+            let placeholder = !Availability::of(&meta).is_local();
             if meta.is_dir() {
                 found += 1;
                 let path = item.path();
                 met(Met::Folder {
                     parent: at,
                     path: &path,
+                    placeholder,
                 });
-                pending.push((path, found));
+                if !placeholder {
+                    pending.push((path, found));
+                }
                 continue;
             }
             if meta.nlink() > 1 {
@@ -219,6 +244,7 @@ pub(crate) fn walk(
                 at,
                 name: item.file_name(),
                 meta: &meta,
+                placeholder,
             });
         }
     }

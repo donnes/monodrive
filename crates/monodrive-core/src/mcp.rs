@@ -1,10 +1,11 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
-//! service method; the behavior lives in `archives`, `compare`, `entries`,
+//! service method; the behavior lives in `archives`, `cloud`, `compare`, `entries`,
 //! `index`, `info`, `ops`, `places`, `search`, `sizes`, `storage` and
 //! `volumes`.
 
 use crate::archives::{self, Archive};
+use crate::cloud::{self, Asked};
 use crate::compare::{
     self, Action, Block, Comparison, CopyPlan, Ending, LineKind, Newer, TextDiff,
 };
@@ -42,7 +43,9 @@ compare compares two files or folders, diff shows two text files' differences, a
 copies differences one way as a job. storage_scan shows what takes up space in a folder, duplicates \
 finds identical files there, and cleanup_duplicates trashes the copies you choose. \
 list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them. \
-list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches.";
+list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches. \
+Items iCloud Drive or a cloud app hasn't downloaded show (not downloaded); nothing but download \
+fetches them, and remove_download frees a downloaded copy.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
@@ -283,6 +286,12 @@ enum ToolCall {
     Eject {
         path: String,
     },
+    Download {
+        paths: Vec<String>,
+    },
+    RemoveDownload {
+        paths: Vec<String>,
+    },
     ListSearches {},
     SaveSearch {
         name: String,
@@ -452,7 +461,13 @@ impl Server {
                     .map_err(|e| format!("{path}: {e}"))
                     .map(|list| {
                         list.iter().fold(String::new(), |mut out, e| {
-                            let _ = writeln!(out, "{}{}", e.name, suffix(e.kind));
+                            let _ = writeln!(
+                                out,
+                                "{}{}{}",
+                                e.name,
+                                suffix(e.kind),
+                                marker(e.availability)
+                            );
                             out
                         })
                     })
@@ -686,6 +701,18 @@ impl Server {
                 };
                 volumes::eject(&expand_home(&path), &origin, &mut self.ops).map(|done| done + "\n")
             }
+            ToolCall::Download { paths } => self.ask_cloud(
+                &paths,
+                cloud::download,
+                "downloading; stat shows when it's done",
+                "already downloaded",
+            ),
+            ToolCall::RemoveDownload { paths } => self.ask_cloud(
+                &paths,
+                cloud::remove_download,
+                "removing the download; download brings it back",
+                "already not downloaded",
+            ),
             ToolCall::ListSearches {} => self.places.searches().map(|searches| {
                 if searches.is_empty() {
                     return "No saved searches.\n".into();
@@ -922,6 +949,36 @@ impl Server {
         }
     }
 
+    /// Asks macOS to download or remove the download of each path, a line
+    /// each saying what it came to.
+    fn ask_cloud(
+        &self,
+        paths: &[String],
+        ask: fn(&Path, &Origin, &ops::Client) -> Result<Asked, String>,
+        requested: &str,
+        unneeded: &str,
+    ) -> Result<String, String> {
+        let origin = Origin::Agent {
+            client: self.client.clone(),
+        };
+        let mut failed = false;
+        let mut lines: Vec<String> = expand(paths)
+            .iter()
+            .map(|path| match ask(path, &origin, &self.ops) {
+                Ok(Asked::Requested) => format!("{}: {requested}", path.display()),
+                Ok(Asked::Unneeded) => format!("{}: {unneeded}", path.display()),
+                Err(e) => {
+                    failed = true;
+                    e
+                }
+            })
+            .collect();
+        // The Agents setting refuses every path alike.
+        lines.dedup();
+        let text = lines.join("\n") + "\n";
+        if failed { Err(text) } else { Ok(text) }
+    }
+
     /// Where the index is, without starting it.
     fn status(&self) -> Result<Status, String> {
         match &self.index {
@@ -955,6 +1012,18 @@ fn stat(about: &Info) -> String {
             "size",
             format!("{} bytes ({} on disk)", size.bytes, size.on_disk),
         );
+    }
+    let availability = match about.availability {
+        cloud::Availability::Local if about.in_cloud => Some("downloaded"),
+        cloud::Availability::Local | cloud::Availability::Unknown => None,
+        cloud::Availability::Placeholder => Some("not downloaded"),
+        cloud::Availability::Downloading => Some("downloading"),
+    };
+    if let Some(availability) = availability {
+        field("availability", availability.into());
+    }
+    if let Some(why) = &about.download_error {
+        field("download failed", why.clone());
     }
     if let Some(parent) = &about.parent {
         field("where", parent.display().to_string());
@@ -1012,6 +1081,7 @@ fn folder_size(folder: &std::path::Path, size: &FolderSize, timeout: u64) -> Str
             size.unreadable
         );
     }
+    placeholders(&mut out, size.placeholders);
     if !size.complete {
         let _ = writeln!(
             out,
@@ -1019,6 +1089,25 @@ fn folder_size(folder: &std::path::Path, size: &FolderSize, timeout: u64) -> Str
         );
     }
     out
+}
+
+/// How many placeholders a total counted without downloading them.
+fn placeholders(out: &mut String, n: u64) {
+    if n > 0 {
+        let _ = writeln!(
+            out,
+            "not downloaded: {n} placeholders, counted at their size; a placeholder folder's items aren't"
+        );
+    }
+}
+
+/// What list_dir and others print after an item that isn't downloaded.
+fn marker(availability: cloud::Availability) -> &'static str {
+    match availability {
+        cloud::Availability::Placeholder => " (not downloaded)",
+        cloud::Availability::Downloading => " (downloading)",
+        cloud::Availability::Local | cloud::Availability::Unknown => "",
+    }
 }
 
 /// ISO 8601 in UTC, to the second. A date too far out for a calendar year
@@ -1273,6 +1362,7 @@ fn compared(comparison: &Comparison, limit: usize, read: Option<bool>, timeout: 
                 compare::kind_name(r.kind)
             ),
             (Status::Unknown(why), ..) => format!(" ({why})"),
+            _ if entry.not_downloaded() => " (not downloaded)".into(),
             _ => match entry.newer() {
                 Some(Newer::Left) => " (left newer)".into(),
                 Some(Newer::Right) => " (right newer)".into(),
@@ -1283,6 +1373,17 @@ fn compared(comparison: &Comparison, limit: usize, read: Option<bool>, timeout: 
     }
     if shown.len() > limit {
         let _ = writeln!(out, "({} more; pass a larger limit)", shown.len() - limit);
+    }
+    let cloud = comparison
+        .entries
+        .iter()
+        .filter(|entry| entry.not_downloaded())
+        .count();
+    if cloud > 0 {
+        let _ = writeln!(
+            out,
+            "({cloud} not downloaded on a side, so verify doesn't read them; download them first.)"
+        );
     }
     if comparison
         .entries
@@ -1393,8 +1494,10 @@ fn storage_report(
         total.files,
         report.folders.len() - 1
     );
-    unreadable(
+    placeholders(&mut out, total.placeholders);
+    listed(
         &mut out,
+        "unreadable",
         &report.unreadable,
         "what couldn't be read isn't counted",
     );
@@ -1403,7 +1506,17 @@ fn storage_report(
         out.push_str("largest files:\n");
     }
     for file in &large {
-        let _ = writeln!(out, "{}  {}", file.path.display(), usage(&file.usage));
+        let cloud = if file.usage.placeholders > 0 {
+            " (not downloaded)"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "{}  {}{cloud}",
+            file.path.display(),
+            usage(&file.usage)
+        );
     }
     if !root.children.is_empty() && depth > 0 {
         out.push_str("folders, most on disk first:\n");
@@ -1459,13 +1572,13 @@ fn usage(usage: &Usage) -> String {
     line
 }
 
-/// How many couldn't be read, and the first few with why.
-fn unreadable(out: &mut String, why: &[String], meaning: &str) {
+/// How many were left out as `label`, and the first few.
+fn listed(out: &mut String, label: &str, why: &[String], meaning: &str) {
     const SHOWN: usize = 10;
     if why.is_empty() {
         return;
     }
-    let _ = writeln!(out, "unreadable: {} ({meaning})", why.len());
+    let _ = writeln!(out, "{label}: {} ({meaning})", why.len());
     for line in why.iter().take(SHOWN) {
         let _ = writeln!(out, "{line}");
     }
@@ -1543,7 +1656,23 @@ fn duplicate_groups(report: &Report, found: &Duplicates, limit: usize, timeout: 
     {
         out.push_str("(Candidates aren't verified; only verified copies can be cleaned up.)\n");
     }
-    unreadable(&mut out, &found.unreadable, "left out of the groups");
+    let cloud: Vec<String> = found
+        .not_downloaded
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    listed(
+        &mut out,
+        "not downloaded",
+        &cloud,
+        "the size of another file but never read, so unverified; download them to check",
+    );
+    listed(
+        &mut out,
+        "unreadable",
+        &found.unreadable,
+        "left out of the groups",
+    );
     if let Some(stop) = found.stopped {
         out.push_str(&stopped_scan(stop, timeout));
     }
@@ -1667,7 +1796,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 39] = [
+pub const TOOLS: [Tool; 41] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -1707,8 +1836,9 @@ pub const TOOLS: [Tool; 39] = [
     },
     Tool {
         name: "list_dir",
-        description: "List one folder. Folders end in /, links in @. Names sort as people read \
-    them (file2 before file10). For the newest or largest first, sort by modified or size with descending: true.",
+        description: "List one folder. Folders end in /, links in @, and cloud placeholders that \
+    aren't downloaded in (not downloaded). Names sort as people read them (file2 before file10). For \
+    the newest or largest first, sort by modified or size with descending: true.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -1733,13 +1863,15 @@ pub const TOOLS: [Tool; 39] = [
         name: "stat",
         description: "Get Info for files, folders or links, one block per path: kind, size, where, \
     volume, created, modified, opened (when macOS recorded it), permissions, whether it's a package, \
-    and a link's target. Dates are UTC. A folder's size comes from folder_size.",
+    a link's target, and for cloud items whether they're downloaded. Dates are UTC. A folder's size \
+    comes from folder_size.",
         input_schema: paths_schema,
     },
     Tool {
         name: "folder_size",
         description: "Add up every file under a folder without following links. Counts hard links \
-    once and reports folders it couldn't read. Stops at timeout_seconds and says when totals are partial.",
+    once and cloud placeholders at their size without downloading them, and reports folders it couldn't \
+    read. Stops at timeout_seconds and says when totals are partial.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -1894,7 +2026,7 @@ pub const TOOLS: [Tool; 39] = [
         description: "Compare two files, or two folders whole, by size and modification time, never \
     following links. Prints counts, then each difference by its path in both: only left, only right, \
     type conflict, dates differ, differs, or unknown with why. Same size and date isn't proof; verify: \
-    true reads files to settle them as equal or differs. Stops at timeout_seconds.",
+    true reads files to settle them as equal or differs, except cloud placeholders. Stops at timeout_seconds.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -1972,8 +2104,8 @@ pub const TOOLS: [Tool; 39] = [
         name: "duplicates",
         description: "Find files with identical contents in a folder. Same-size files are candidates; \
     reading their start, middle and end narrows them, and reading them whole verifies them. Hard links \
-    are one file, never duplicates. Prints verified groups, then unverified candidates, each copy's path \
-    a line. Only verified copies can go to cleanup_duplicates.",
+    are one file, never duplicates, and cloud placeholders are never read. Prints verified groups, then \
+    unverified candidates, each copy's path a line. Only verified copies can go to cleanup_duplicates.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -2075,6 +2207,19 @@ pub const TOOLS: [Tool; 39] = [
                 "required": ["path"]
             })
         },
+    },
+    Tool {
+        name: "download",
+        description: "Ask iCloud Drive or the cloud app holding each path to download it, in the \
+    background. Jobs that read contents, such as copy, refuse items that aren't downloaded. stat shows when \
+    each is done, or why its download failed.",
+        input_schema: paths_schema,
+    },
+    Tool {
+        name: "remove_download",
+        description: "Remove the downloaded copy of each path and keep it in the cloud, as Finder's \
+    Remove Download does. Refuses an item that isn't uploaded yet or has conflicts. download brings it back.",
+        input_schema: paths_schema,
     },
     Tool {
         name: "list_searches",
@@ -2426,6 +2571,67 @@ mod tests {
     }
 
     #[test]
+    fn placeholders_say_so_and_downloads_never_happen_unasked() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let mut about = info::info(&file).unwrap();
+        assert_eq!(about.availability, cloud::Availability::Local);
+        assert!(!stat(&about).contains("availability"));
+        let field = |about: &Info, name: &str| {
+            stat(about)
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}: ")).map(str::to_owned))
+        };
+        about.in_cloud = true;
+        assert_eq!(field(&about, "availability").as_deref(), Some("downloaded"));
+        about.availability = cloud::Availability::Placeholder;
+        about.download_error = Some("The server is unavailable.".into());
+        assert_eq!(
+            field(&about, "availability").as_deref(),
+            Some("not downloaded")
+        );
+        assert_eq!(
+            field(&about, "download failed").as_deref(),
+            Some("The server is unavailable.")
+        );
+        let size = FolderSize {
+            placeholders: 2,
+            complete: true,
+            ..FolderSize::default()
+        };
+        assert!(
+            folder_size(dir.path(), &size, 10).contains("\nnot downloaded: 2 placeholders, "),
+            "{}",
+            folder_size(dir.path(), &size, 10)
+        );
+
+        let mut server = server();
+        let reply = call(
+            &mut server,
+            json!({"name": "download", "arguments": {"paths": [file]}}),
+        );
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        assert_eq!(
+            text(&reply),
+            format!("{}: already downloaded\n", file.display())
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "remove_download", "arguments": {"paths": [file]}}),
+        );
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        assert_eq!(
+            text(&reply),
+            format!(
+                "{} isn't in iCloud Drive or a File Provider folder.\n",
+                file.display()
+            )
+        );
+        assert!(file.is_file());
+    }
+
+    #[test]
     fn unknown_tools_are_protocol_errors() {
         let reply = call(&mut server(), json!({"name": "rm_rf", "arguments": {}}));
         assert_eq!(reply["error"]["code"], -32602);
@@ -2489,6 +2695,13 @@ mod tests {
             json!({"name": "eject", "arguments": {"path": "/"}}),
         );
         assert!(text(&reply).starts_with("Agents can't eject"), "{reply}");
+        let reply = call(
+            &mut server,
+            json!({"name": "download", "arguments": {"paths": [&made, &renamed]}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(text(&reply).lines().count(), 1, "{reply}");
+        assert!(text(&reply).starts_with("Agents can't download"), "{reply}");
         drop(server);
         serving.join().unwrap().unwrap();
     }

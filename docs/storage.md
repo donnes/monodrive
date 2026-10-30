@@ -24,7 +24,7 @@ Opening a consent-gated folder without Full Disk Access shows a privacy prompt a
 
 Only files whose sizes match are candidates. Two readers then hash each candidate's first, middle and last 64 KiB with BLAKE3, which splits most false candidates without reading them whole. The rest are read whole, two at a time with a 256 KiB buffer each, and a group is verified only when every member's full BLAKE3 hash matches and each file's identity, length and modification time were the same before and after it was read. A file no larger than its three samples is read whole the first time. Hard links to one file are one file, never its own duplicates; clones are duplicates whose trashing frees nothing, and their unshared size shows it.
 
-Stopping keeps each group at the last stage it finished for every member: same size, or same samples. Only verified groups can be cleaned up.
+Stopping keeps each group at the last stage it finished for every member: same size, or same samples. Only verified groups can be cleaned up. A cloud placeholder is never read, since reading it would download it; one the size of another file is listed as not downloaded instead (see [cloud folders](cloud.md)).
 
 ## Cleanup
 

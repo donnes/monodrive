@@ -1500,6 +1500,7 @@ impl Make {
                 .open(path)
                 .map(|_| path.to_path_buf()),
             Make::Copy => {
+                crate::cloud::refuse_placeholders(path)?;
                 let copy = copy_name(path)
                     .ok_or_else(|| format!("{}: can't name a copy of this.", path.display()))?;
                 disk::copy(path, &copy, None).map(|()| copy)

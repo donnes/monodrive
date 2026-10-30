@@ -424,3 +424,43 @@ fn binary_and_oversized_files_have_no_text_diff() {
         )
     );
 }
+
+#[test]
+fn placeholders_stay_unverified_unread_and_out_of_copy_plans() {
+    let (_dir, left, right) = fixture();
+    let progress = Progress::default();
+    let mut comparison = compare(&left, &right, &progress, None).unwrap();
+    let at = |comparison: &Comparison, path: &str| {
+        comparison
+            .entries
+            .iter()
+            .position(|entry| entry.path == Path::new(path))
+            .unwrap()
+    };
+    let (twin, only) = (at(&comparison, "twin.txt"), at(&comparison, "only"));
+    comparison.entries[twin]
+        .right
+        .as_mut()
+        .unwrap()
+        .availability = Availability::Placeholder;
+    comparison.entries[only].left.as_mut().unwrap().availability = Availability::Placeholder;
+    // Reading it now would fail, so a read would settle it as unknown.
+    let cloud = right.join("twin.txt");
+    std::fs::set_permissions(&cloud, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let finished = comparison.verify(&[PathBuf::new()], &progress, None);
+    std::fs::set_permissions(&cloud, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(finished);
+    assert_eq!(comparison.entries[twin].status, Status::SameMetadata);
+    assert!(comparison.entries[twin].not_downloaded());
+    assert_eq!(
+        comparison.entries[at(&comparison, "same.txt")].status,
+        Status::Equal
+    );
+
+    let plan = comparison.plan(&["only".into()]);
+    assert_eq!(
+        plan.rows[0].action,
+        Action::Skip(cloud::not_downloaded(&left.join("only")))
+    );
+    assert_eq!(plan.request(), None);
+}
