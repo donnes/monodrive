@@ -2,7 +2,7 @@
 //! JSON-RPC message per line. Tools only decode arguments and call one
 //! service method; the behavior lives in `archives`, `catalogs`, `cloud`,
 //! `compare`, `entries`, `index`, `info`, `ops`, `places`, `search`, `sizes`,
-//! `storage` and `volumes`.
+//! `storage`, `volumes` and `worktrees`.
 
 use crate::archives::{self, Archive};
 use crate::catalogs::{self, Catalog, Found, Resolved, Unreadable};
@@ -20,6 +20,7 @@ use crate::search::{Query, Scope};
 use crate::sizes::{self, FolderSize};
 use crate::storage::{self, Cleanup, Duplicates, Match, Report, Stop, Usage};
 use crate::volumes::{self, Volume, VolumeId};
+use crate::worktrees::{self, Git, Worktree};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -48,7 +49,9 @@ list_searches, save_search, rename_search and remove_search manage the sidebar's
 Items iCloud Drive or a cloud app hasn't downloaded show (not downloaded); nothing but download \
 fetches them, and remove_download frees a downloaded copy. catalog_create keeps a searchable list \
 of a drive's or folder's names, so catalog_search finds them while it's disconnected; catalog_list, \
-catalog_refresh and catalog_forget manage those catalogs.";
+catalog_refresh and catalog_forget manage those catalogs. worktrees lists a Git repository's worktrees \
+and worktree_status shows one's changes, without fetching or changing anything; repo_register, repos \
+and repo_forget manage the repositories Monodrive remembers.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
@@ -88,6 +91,8 @@ pub struct Server {
     client: Option<String>,
     places: places::Store,
     catalogs: catalogs::Store,
+    /// Found on the first Git tool, and again until one is found.
+    git: Option<Git>,
     /// What compare_copy and cleanup_duplicates previewed, oldest first,
     /// so a confirm runs only that.
     plans: Vec<Previewed>,
@@ -332,6 +337,21 @@ enum ToolCall {
         #[serde(default = "default_limit")]
         limit: usize,
     },
+    Worktrees {
+        path: String,
+    },
+    WorktreeStatus {
+        path: String,
+        #[serde(default = "default_timeout")]
+        timeout_seconds: u64,
+    },
+    Repos {},
+    RepoRegister {
+        path: String,
+    },
+    RepoForget {
+        path: String,
+    },
 }
 
 fn folders_first() -> bool {
@@ -395,6 +415,7 @@ impl Server {
             places,
             catalogs,
             plans: Vec::new(),
+            git: None,
         }
     }
 
@@ -821,6 +842,47 @@ impl Server {
                     .and_then(|query| self.catalogs.search(&query, &volumes, limit))
                     .map(|found| catalog_hits(&found, &volumes, index::now()))
             }
+            ToolCall::Worktrees { path } => self
+                .git()
+                .and_then(|git| worktrees::list(&git, &expand_home(&path)))
+                .map(|inventory| inventory.worktrees.iter().map(worktree_line).collect()),
+            ToolCall::WorktreeStatus {
+                path,
+                timeout_seconds,
+            } => self
+                .git()
+                .and_then(|git| {
+                    let git = Git {
+                        timeout: Duration::from_secs(timeout_seconds),
+                        ..git
+                    };
+                    worktrees::status(&git, &expand_home(&path))
+                })
+                .map(|status| worktree_status(&status)),
+            ToolCall::Repos {} => self.places.repositories().map(|repos| {
+                if repos.is_empty() {
+                    return "No registered repositories.\n".into();
+                }
+                repos.iter().fold(String::new(), |mut out, repo| {
+                    let _ = match repo.resolve() {
+                        Availability::Available(path) => writeln!(out, "{}", path.display()),
+                        Availability::Unavailable(why) => {
+                            writeln!(out, "{} (unavailable: {why})", repo.path.display())
+                        }
+                    };
+                    out
+                })
+            }),
+            ToolCall::RepoRegister { path } => self
+                .git()
+                .and_then(|git| worktrees::register(&git, &self.places, &expand_home(&path)))
+                .map(|repo| format!("{}\n", repo.path.display())),
+            ToolCall::RepoForget { path } => self
+                .places
+                .forget_repository(&expand_home(&path))
+                .map(|repo| {
+                    format!("Forgot {}; the repository is untouched.\n", repo.path.display())
+                }),
         };
         match text {
             Ok(text) if text.is_empty() => tool_text("No results.", false),
@@ -1057,6 +1119,15 @@ impl Server {
         if failed { Err(text) } else { Ok(text) }
     }
 
+    fn git(&mut self) -> Result<Git, String> {
+        let git = match self.git.take() {
+            Some(git) => git,
+            None => Git::find()?,
+        };
+        self.git = Some(git.clone());
+        Ok(git)
+    }
+
     /// Where the index is, without starting it.
     fn status(&self) -> Result<Status, String> {
         match &self.index {
@@ -1269,6 +1340,82 @@ fn list_places(places: &[Place], volumes: &[Volume]) -> String {
             None => {}
         }
         let _ = writeln!(out, "{} ({})", volume.mount.display(), about.join(", "));
+    }
+    out
+}
+
+/// A worktree's path, then its branch, short HEAD and what's worth knowing.
+fn worktree_line(worktree: &Worktree) -> String {
+    let mut about = vec![match (&worktree.branch, worktree.bare) {
+        (Some(branch), _) => branch.clone(),
+        (None, true) => "bare".into(),
+        (None, false) => "detached".into(),
+    }];
+    match &worktree.head {
+        Some(head) => about.push(short(head)),
+        None if !worktree.bare => about.push("no commits".into()),
+        None => {}
+    }
+    if worktree.main {
+        about.push("main worktree".into());
+    }
+    let one_line = |text: &str| text.replace('\n', " ");
+    match worktree.locked.as_deref() {
+        Some("") => about.push("locked".into()),
+        Some(why) => about.push(format!("locked: {}", one_line(why))),
+        None => {}
+    }
+    match &worktree.state {
+        worktrees::State::Ok => {}
+        worktrees::State::Missing => about.push("missing".into()),
+        worktrees::State::Stale => about.push("stale".into()),
+        worktrees::State::Unreadable(why) => about.push(format!("unreadable: {why}")),
+    }
+    if let Some(why) = &worktree.prunable {
+        about.push(format!("prunable: {}", one_line(why)));
+    }
+    format!("{} ({})\n", worktree.path.display(), about.join(", "))
+}
+
+fn short(head: &str) -> String {
+    head.chars().take(7).collect()
+}
+
+/// The worktree's branch and HEAD, then its changes, or clean.
+fn worktree_status(status: &worktrees::Status) -> String {
+    let head = status
+        .head
+        .as_deref()
+        .map_or_else(|| "no commits".into(), |head| format!("at {}", short(head)));
+    let mut out = match &status.branch {
+        Some(branch) => format!("{branch} {head}"),
+        None => format!("detached {head}"),
+    };
+    let _ = match (&status.upstream, status.ahead_behind) {
+        (Some(upstream), Some((ahead, behind))) => {
+            writeln!(out, ", tracking {upstream}: {ahead} ahead, {behind} behind")
+        }
+        (Some(upstream), None) => writeln!(
+            out,
+            ", tracking {upstream}, which isn't fetched, so ahead and behind are unknown"
+        ),
+        (None, _) if status.branch.is_some() => writeln!(out, ", no upstream"),
+        (None, _) => writeln!(out),
+    };
+    let counts: Vec<String> = [
+        (status.staged, "staged"),
+        (status.unstaged, "unstaged"),
+        (status.conflicted, "conflicted"),
+        (status.untracked, "untracked"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, label)| format!("{n} {label}"))
+    .collect();
+    if counts.is_empty() {
+        out.push_str("clean\n");
+    } else {
+        let _ = writeln!(out, "{}", counts.join(", "));
     }
     out
 }
@@ -1989,7 +2136,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 46] = [
+pub const TOOLS: [Tool; 51] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2525,6 +2672,47 @@ pub const TOOLS: [Tool; 46] = [
                 "required": ["query"]
             })
         },
+    },
+    Tool {
+        name: "worktrees",
+        description: "The Git worktrees of the repository path is in, reached through any folder or \
+    worktree of it, the main one first. One a line: path, then branch or detached, short HEAD, and \
+    main worktree, locked, missing, stale, unreadable or prunable. Prunable is Git's view, never a \
+    sign a folder is safe to delete. Fetches nothing and changes nothing.",
+        input_schema: path_schema,
+    },
+    Tool {
+        name: "worktree_status",
+        description: "One worktree's branch, HEAD and upstream, with ahead and behind when the upstream \
+    is fetched, then how many paths are staged, unstaged, conflicted and untracked, or clean. Fetches \
+    nothing and takes no Git locks.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The worktree. Absolute; ~ is your home."},
+                    "timeout_seconds": {"type": "integer", "minimum": 0, "default": 10}
+                },
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "repos",
+        description: "The Git repositories registered in Monodrive, a path a line, marked when unavailable.",
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "repo_register",
+        description: "Register the Git repository path is in, once however it's reached, and print its \
+    path. Changes nothing in the repository.",
+        input_schema: path_schema,
+    },
+    Tool {
+        name: "repo_forget",
+        description: "Forget a registered repository, by the path repos prints. Only Monodrive's \
+    bookmark goes; Git and the files are untouched.",
+        input_schema: path_schema,
     },
 ];
 
@@ -3908,5 +4096,80 @@ mod tests {
         assert_eq!(text(&reply), "No catalogs.\n");
         let reply = call(&mut server, forget);
         assert_eq!(text(&reply), format!("No catalog {id}."));
+    }
+
+    #[test]
+    fn worktree_tools_list_and_inspect_worktrees_and_register_and_forget_repositories() {
+        use crate::worktrees::tests::{fixture, real_tempdir, repo};
+        let (_dir, root) = real_tempdir();
+        let main = root.join("repo");
+        repo(&main);
+        let (feature, detached) = (root.join("feature"), root.join("detached"));
+        fixture(
+            &main,
+            &["worktree", "add", "-q", "-b", "feature", "../feature"],
+        );
+        fixture(&main, &["worktree", "add", "-q", "--detach", "../detached"]);
+        fixture(
+            &main,
+            &["worktree", "lock", "--reason", "on a drive", "../detached"],
+        );
+        let head = fixture(&main, &["rev-parse", "--short=7", "HEAD"]);
+        let head = head.trim();
+        let mut server = server();
+        server.places = places(&root.join("state"));
+        let mut tool = |name: &str, path: &std::path::Path| {
+            let reply = call(
+                &mut server,
+                json!({"name": name, "arguments": {"path": path}}),
+            );
+            (reply["result"]["isError"] == true, text(&reply).to_owned())
+        };
+
+        let listed = format!(
+            "{} (main, {head}, main worktree)\n{} (detached, {head}, locked: on a drive)\n{} (feature, {head})\n",
+            main.display(),
+            detached.display(),
+            feature.display()
+        );
+        for path in [&main, &feature] {
+            assert_eq!(tool("worktrees", path), (false, listed.clone()));
+        }
+        let not_a_repo = format!("{} isn't in a Git repository.", root.display());
+        assert_eq!(tool("worktrees", &root), (true, not_a_repo.clone()));
+
+        std::fs::write(feature.join("a"), "changed\n").unwrap();
+        std::fs::write(feature.join("new"), "").unwrap();
+        assert_eq!(
+            tool("worktree_status", &feature),
+            (
+                false,
+                format!("feature at {head}, no upstream\n1 unstaged, 1 untracked\n")
+            )
+        );
+        assert_eq!(
+            tool("worktree_status", &detached),
+            (false, format!("detached at {head}\nclean\n"))
+        );
+
+        let none = (false, "No registered repositories.\n".to_owned());
+        assert_eq!(tool("repos", &root), none);
+        let registered = (false, format!("{}\n", main.display()));
+        assert_eq!(tool("repo_register", &feature), registered);
+        assert_eq!(tool("repo_register", &root), (true, not_a_repo));
+        assert_eq!(tool("repos", &root), registered);
+        assert_eq!(
+            tool("repo_forget", &main),
+            (
+                false,
+                format!("Forgot {}; the repository is untouched.\n", main.display())
+            )
+        );
+        assert_eq!(tool("repos", &root), none);
+        assert!(main.join(".git/HEAD").is_file());
+        assert_eq!(
+            call(&mut server, json!({"name": "worktrees", "arguments": {}}))["error"]["code"],
+            -32602
+        );
     }
 }

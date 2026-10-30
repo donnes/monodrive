@@ -17,6 +17,7 @@ pub mod search;
 pub mod sizes;
 pub mod storage;
 pub mod volumes;
+pub mod worktrees;
 
 /// `~/Library/Application Support/Monodrive`.
 pub fn support_dir() -> Option<std::path::PathBuf> {

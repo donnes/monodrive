@@ -1,11 +1,13 @@
-//! Places: the sidebar's favorite folders and saved searches, and the files
-//! recently opened through Monodrive. They're Monodrive's own lists, kept beside
-//! settings.json rather than in it, because the window and every MCP server
-//! change them and only the window writes settings.json.
+//! Places: the sidebar's favorite folders and saved searches, the registered
+//! Git repositories, and the files recently opened through Monodrive. They're
+//! Monodrive's own lists, kept beside settings.json rather than in it, because
+//! the window and every MCP server change them and only the window writes
+//! settings.json.
 
 use crate::ops;
 use crate::search::{Query, Scope};
 use crate::volumes::{self, Volume, VolumeId};
+use crate::worktrees::Registration;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,8 +18,8 @@ pub const RECENTS: usize = 50;
 /// Where the lists are saved.
 #[derive(Clone, Debug)]
 pub struct Store {
-    /// `places.json`: the favorites and saved searches, and later saved
-    /// servers.
+    /// `places.json`: the favorites, saved searches and registered
+    /// repositories, and later saved servers.
     pub places: PathBuf,
     /// `recents.json`, newest first.
     pub recents: PathBuf,
@@ -76,6 +78,8 @@ struct Saved {
     favorites: Option<Vec<Favorite>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     searches: Vec<SavedSearch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repositories: Vec<Registration>,
 }
 
 impl Favorite {
@@ -280,6 +284,47 @@ impl Store {
             let mut saved = self.saved()?;
             change(&mut saved.searches)?;
             write(&self.places, &saved)
+        })
+    }
+
+    /// The registered repositories in the order they were registered.
+    pub fn repositories(&self) -> Result<Vec<Registration>, String> {
+        Ok(self.saved()?.repositories)
+    }
+
+    /// Adds `repo`, or updates the one with its common Git folder where it
+    /// is. `worktrees::register` finds what to pass.
+    pub fn register_repository(&self, repo: Registration) -> Result<(), String> {
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            let repos = &mut saved.repositories;
+            match repos.iter_mut().find(|r| r.common_dir == repo.common_dir) {
+                Some(known) => *known = repo,
+                None => repos.push(repo),
+            }
+            write(&self.places, &saved)
+        })
+    }
+
+    /// Forgets the repository shown at `path`, or whose common Git folder
+    /// it is, and returns it. Only the bookmark goes; Git and the files are
+    /// untouched.
+    pub fn forget_repository(&self, path: &Path) -> Result<Registration, String> {
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            let repos = &mut saved.repositories;
+            let ix = repos
+                .iter()
+                .position(|r| {
+                    [&real, path]
+                        .iter()
+                        .any(|p| r.path == **p || r.common_dir == **p)
+                })
+                .ok_or_else(|| format!("{} isn't a registered repository.", path.display()))?;
+            let repo = repos.remove(ix);
+            write(&self.places, &saved)?;
+            Ok(repo)
         })
     }
 
