@@ -213,6 +213,17 @@ fn the_walk_stops_partway_through_a_folder_once_it_has_read_its_budget() {
 }
 
 #[test]
+fn a_cancelled_walk_stops_even_at_empty_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+    std::fs::create_dir(&left).unwrap();
+    std::fs::create_dir(&right).unwrap();
+    let progress = Progress::default();
+    progress.cancel.store(true, Ordering::Relaxed);
+    assert!(!walk(&left, &right, &progress, None, 10).unwrap().complete);
+}
+
+#[test]
 fn a_plan_copies_whats_only_left_replaces_whats_older_and_skips_the_rest() {
     let (_dir, left, right) = fixture();
     let comparison = compare(&left, &right, &Progress::default(), None).unwrap();

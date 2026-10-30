@@ -191,6 +191,11 @@ fn walk(
     };
     let mut pending = vec![(PathBuf::new(), l, r)];
     while let Some((folder, l, r)) = pending.pop() {
+        // Empty folders take nothing from the budget, so check here too.
+        if progress.stopped(deadline) {
+            comparison.complete = false;
+            break;
+        }
         let (left, right) = (
             at(&comparison.left, &folder),
             at(&comparison.right, &folder),
