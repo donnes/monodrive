@@ -192,6 +192,27 @@ fn cancelling_stops_the_walk_and_verification_without_settling_anything() {
 }
 
 #[test]
+fn the_walk_stops_partway_through_a_folder_once_it_has_read_its_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+    std::fs::create_dir(&right).unwrap();
+    for i in 0..11 {
+        write(&left.join(format!("{i}.txt")), "", when(0));
+    }
+    let progress = Progress::default();
+    let short = walk(&left, &right, &progress, None, 10).unwrap();
+    assert!(!short.complete);
+    assert!(short.entries.is_empty(), "{:?}", short.entries);
+    // A folder on both sides counts once a side.
+    std::fs::create_dir(right.join("0.txt.d")).unwrap();
+    std::fs::create_dir(left.join("0.txt.d")).unwrap();
+    assert!(!walk(&left, &right, &progress, None, 12).unwrap().complete);
+    let whole = walk(&left, &right, &progress, None, 13).unwrap();
+    assert!(whole.complete);
+    assert_eq!(whole.entries.len(), 11);
+}
+
+#[test]
 fn a_plan_copies_whats_only_left_replaces_whats_older_and_skips_the_rest() {
     let (_dir, left, right) = fixture();
     let comparison = compare(&left, &right, &Progress::default(), None).unwrap();
@@ -281,6 +302,22 @@ fn a_text_diff_keeps_context_around_changes_and_folds_the_rest() {
             (LineKind::Del, "7", Some(7), None),
             (LineKind::Add, "seven", None, Some(7)),
             (LineKind::Context, "8", Some(8), Some(8)),
+        ]
+    );
+    // Only the real ending comes off: a stray \r is text.
+    std::fs::write(&old, "foo\r\r\n").unwrap();
+    std::fs::write(&new, "foo").unwrap();
+    let ends: Vec<_> = super::diff(&old, &new, 3)
+        .unwrap()
+        .lines
+        .into_iter()
+        .map(|l| (l.kind, l.text, l.ending))
+        .collect();
+    assert_eq!(
+        ends,
+        [
+            (LineKind::Del, "foo\r".to_string(), Ending::CrLf),
+            (LineKind::Add, "foo".to_string(), Ending::None),
         ]
     );
 }

@@ -4,7 +4,9 @@
 //! `index`, `info`, `ops`, `places`, `search`, `sizes` and `volumes`.
 
 use crate::archives::{self, Archive};
-use crate::compare::{self, Action, Block, Comparison, CopyPlan, LineKind, Newer, TextDiff};
+use crate::compare::{
+    self, Action, Block, Comparison, CopyPlan, Ending, LineKind, Newer, TextDiff,
+};
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, Caps, GrepMode, Index, Status};
@@ -17,6 +19,7 @@ use crate::volumes::{self, Volume, VolumeId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
+use std::hash::{BuildHasher, RandomState};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -72,7 +75,20 @@ pub struct Server {
     /// The name the agent's MCP client gave, to attribute its changes.
     client: Option<String>,
     places: places::Store,
+    /// What compare_copy previewed, oldest first, so a confirm runs only
+    /// that.
+    plans: Vec<Previewed>,
 }
+
+struct Previewed {
+    token: String,
+    made: Instant,
+    plan: CopyPlan,
+}
+
+/// How many previews a session keeps, and for how long.
+const PLANS_KEPT: usize = 16;
+const PLAN_LIFE: Duration = Duration::from_secs(600);
 
 #[derive(Deserialize)]
 #[serde(tag = "name", content = "arguments", rename_all = "snake_case")]
@@ -196,12 +212,13 @@ enum ToolCall {
         limit: usize,
     },
     CompareCopy {
-        left: String,
-        right: String,
+        left: Option<String>,
+        right: Option<String>,
         #[serde(default)]
         paths: Vec<String>,
         #[serde(default)]
         confirm: bool,
+        plan: Option<String>,
         #[serde(default = "compare_limit")]
         limit: usize,
         #[serde(default = "default_timeout")]
@@ -279,6 +296,7 @@ impl Server {
             ops,
             client: None,
             places,
+            plans: Vec::new(),
         }
     }
 
@@ -524,9 +542,16 @@ impl Server {
                 right,
                 paths,
                 confirm,
+                plan,
                 limit,
                 timeout_seconds,
-            } => self.compare_copy(&left, &right, &paths, confirm, limit, timeout_seconds),
+            } => match (confirm, left, right) {
+                (true, ..) => self.run_plan(plan.as_deref(), limit),
+                (false, Some(left), Some(right)) => {
+                    self.preview_copy(&left, &right, &paths, limit, timeout_seconds)
+                }
+                (false, ..) => Err("Pass left and right to preview a copy.".into()),
+            },
             ToolCall::ContinueJob { job, conflict } => self
                 .submit(Request::Retry { job, conflict })
                 .map(|outcome| format!("job {} queued again\n", outcome.op)),
@@ -645,14 +670,13 @@ impl Server {
         }
     }
 
-    /// Compares the two folders now and previews, or with `confirm` queues,
-    /// a one-way copy of the differences at `paths`.
-    fn compare_copy(
+    /// Compares the two folders now and previews a one-way copy of the
+    /// differences at `paths`, kept under a token for `run_plan`.
+    fn preview_copy(
         &mut self,
         left: &str,
         right: &str,
         paths: &[String],
-        confirm: bool,
         limit: usize,
         timeout: u64,
     ) -> Result<String, String> {
@@ -666,7 +690,7 @@ impl Server {
         if !comparison.complete {
             return Err(format!(
                 "{}So there's no plan; nothing was copied.\n",
-                stopped(&comparison, timeout)
+                stopped(timeout)
             ));
         }
         let under: Vec<PathBuf> = match paths {
@@ -675,13 +699,37 @@ impl Server {
         };
         let plan = comparison.plan(&under);
         let preview = copy_plan(&plan, limit);
-        if !confirm {
-            return Ok(preview + "Pass confirm: true to copy.\n");
+        if plan.request().is_none() {
+            return Ok(preview + "Nothing to copy.\n");
         }
-        let request = plan
-            .request()
-            .ok_or_else(|| format!("{preview}Nothing to copy.\n"))?;
-        self.queue(request).map(|queued| preview + &queued)
+        let token = format!("{:016x}", RandomState::new().hash_one(self.plans.len()));
+        self.plans.retain(|kept| kept.made.elapsed() < PLAN_LIFE);
+        if self.plans.len() >= PLANS_KEPT {
+            self.plans.remove(0);
+        }
+        self.plans.push(Previewed {
+            token: token.clone(),
+            made: Instant::now(),
+            plan,
+        });
+        Ok(format!(
+            "{preview}plan: {token}\nPass confirm: true and this plan within 10 minutes to copy it.\n"
+        ))
+    }
+
+    /// Queues exactly the plan a preview kept, once. The owner refuses each
+    /// item whose source or destination changed since.
+    fn run_plan(&mut self, token: Option<&str>, limit: usize) -> Result<String, String> {
+        self.plans.retain(|kept| kept.made.elapsed() < PLAN_LIFE);
+        let at = token
+            .and_then(|token| self.plans.iter().position(|kept| kept.token == token))
+            .ok_or("No previewed plan with that token in this session. A plan runs once, within 10 minutes; preview again with left and right.")?;
+        let plan = &self.plans[at].plan;
+        let preview = copy_plan(plan, limit);
+        let request = plan.request().ok_or("Nothing to copy.")?;
+        let queued = self.queue(request)?;
+        self.plans.remove(at);
+        Ok(preview + &queued)
     }
 
     /// Where the index is, without starting it.
@@ -1062,28 +1110,35 @@ fn compared(comparison: &Comparison, limit: usize, read: Option<bool>, timeout: 
         );
     }
     if !comparison.complete {
-        out.push_str(&stopped(comparison, timeout));
+        out.push_str(&stopped(timeout));
     }
     out
 }
 
-fn stopped(comparison: &Comparison, timeout: u64) -> String {
-    if comparison.entries.len() >= compare::MAX_ENTRIES {
-        format!(
-            "(Stopped at {} entries; compare smaller folders.)\n",
-            compare::MAX_ENTRIES
-        )
-    } else {
-        format!("(Stopped after {timeout}s before comparing everything; raise timeout_seconds.)\n")
-    }
+/// Why a comparison isn't whole. Either limit can stop it.
+fn stopped(timeout: u64) -> String {
+    format!(
+        "(Stopped before comparing everything, after {timeout}s or {} items; raise timeout_seconds or compare smaller folders.)\n",
+        compare::MAX_ITEMS
+    )
 }
 
-/// A unified diff: `@@ -start,count +start,count @@` before each hunk.
+/// A unified diff: `@@ -start,count +start,count @@` before each hunk, and
+/// `\\ No newline at end of file` after a last line without one. When the
+/// changed lines end differently, ␍ marks those ending in CRLF.
 fn unified(diff: &TextDiff, left: &Path, right: &Path, limit: usize) -> String {
     if diff.additions + diff.deletions == 0 {
         return "No differences in the text.\n".into();
     }
     let mut out = format!("--- {}\n+++ {}\n", left.display(), right.display());
+    let mut endings = diff
+        .lines
+        .iter()
+        .filter(|l| l.kind != LineKind::Context)
+        .map(|l| l.ending);
+    let first = endings.next();
+    let mixed = endings.any(|ending| Some(ending) != first);
+    let mut marked = false;
     let mut lines = Vec::new();
     for block in &diff.blocks {
         let Block::Hunk(range) = block else { continue };
@@ -1104,7 +1159,12 @@ fn unified(diff: &TextDiff, left: &Path, right: &Path, limit: usize) -> String {
                 LineKind::Del => '-',
                 LineKind::Context => ' ',
             };
-            lines.push(format!("{mark}{}", line.text));
+            let cr = mixed && line.kind != LineKind::Context && line.ending == Ending::CrLf;
+            marked |= cr;
+            lines.push(format!("{mark}{}{}", line.text, if cr { "␍" } else { "" }));
+            if line.ending == Ending::None {
+                lines.push("\\ No newline at end of file".into());
+            }
         }
     }
     for line in lines.iter().take(limit) {
@@ -1116,6 +1176,9 @@ fn unified(diff: &TextDiff, left: &Path, right: &Path, limit: usize) -> String {
             "({} more lines; pass a larger limit)",
             lines.len() - limit
         );
+    }
+    if marked {
+        out.push_str("(␍ marks a line that ends in CRLF.)\n");
     }
     out
 }
@@ -1478,8 +1541,9 @@ pub const TOOLS: [Tool; 36] = [
         name: "compare_copy",
         description: "Copy differences one way, from the left folder into the right: what's only on \
     the left, and files that differ where the left one is newer, whose older copy goes to the Trash. \
-    Never deletes what's only on the right. Previews unless confirm: true, which returns a job id; \
-    undo reverses it. Refuses items that changed since it compared.",
+    Never deletes what's only on the right. A preview with left and right prints a plan token; \
+    confirm: true with that plan runs exactly that preview, once, within 10 minutes, and returns a \
+    job id; undo reverses it. Items that changed since the preview are refused.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -1488,10 +1552,10 @@ pub const TOOLS: [Tool; 36] = [
                     "right": {"type": "string", "description": "The folder to copy into."},
                     "paths": {"type": "array", "items": {"type": "string"}, "description": "Entries as compare prints them, or folders holding them; all differences by default."},
                     "confirm": {"type": "boolean", "default": false},
+                    "plan": {"type": "string", "description": "The token a preview printed; needed with confirm."},
                     "limit": {"type": "integer", "minimum": 1, "default": 200},
                     "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}
-                },
-                "required": ["left", "right"]
+                }
             })
         },
     },
@@ -2299,6 +2363,7 @@ mod tests {
             (left.join("a.txt"), "one\nnew\n", 3600),
             (left.join("same.txt"), "same", 0),
             (left.join("docs/only.md"), "only", 0),
+            (left.join("docs/new.md"), "new", 0),
             (right.join("a.txt"), "one\nold\n", 0),
             (right.join("same.txt"), "same", 0),
             (right.join("docs/extra.md"), "extra", 0),
@@ -2318,9 +2383,10 @@ mod tests {
         assert_eq!(
             text(&reply),
             roots.clone()
-                + "1 only left, 1 only right, 1 dates differ, 1 same size and date\n\
+                + "2 only left, 1 only right, 1 dates differ, 1 same size and date\n\
                    dates differ: a.txt (left newer)\n\
                    only right: docs/extra.md\n\
+                   only left: docs/new.md\n\
                    only left: docs/only.md\n\
                    (Same size and date doesn't prove equal contents; verify: true reads them.)\n"
         );
@@ -2334,9 +2400,9 @@ mod tests {
         assert_eq!(
             text(&reply),
             roots
-                + "1 only left, 1 only right, 1 differs, 1 equal\n\
+                + "2 only left, 1 only right, 1 differs, 1 equal\n\
                    differs: a.txt (left newer)\n\
-                   (2 more; pass a larger limit)\n"
+                   (3 more; pass a larger limit)\n"
         );
 
         let reply = call(
@@ -2357,32 +2423,65 @@ mod tests {
         );
         assert_eq!(text(&reply), "No differences in the text.\n");
 
-        let preview = format!(
-            "from: {}\ninto: {}\n\
-             replace: {} → {}\n\
-             skip: docs/extra.md (Only on the right; Monodrive never deletes it.)\n\
-             copy: {} → {}\n\
-             1 to copy, 1 to replace, 1 skipped. What's replaced goes to the Trash; nothing is deleted.\n",
-            left.display(),
-            right.display(),
-            left.join("a.txt").display(),
-            right.join("a.txt").display(),
-            left.join("docs/only.md").display(),
-            right.join("docs/only.md").display(),
-        );
+        let token = |reply: &Value| {
+            text(reply)
+                .lines()
+                .find_map(|line| line.strip_prefix("plan: "))
+                .unwrap_or_default()
+                .to_string()
+        };
         let reply = call(
             &mut server,
             json!({"name": "compare_copy", "arguments": both}),
         );
+        let shown = |path: &str| {
+            (
+                left.join(path).display().to_string(),
+                right.join(path).display().to_string(),
+            )
+        };
+        let ((la, ra), (ln, rn), (lo, ro)) =
+            (shown("a.txt"), shown("docs/new.md"), shown("docs/only.md"));
         assert_eq!(
             text(&reply),
-            preview.clone() + "Pass confirm: true to copy.\n"
+            format!(
+                "from: {}\ninto: {}\n\
+                 replace: {la} → {ra}\n\
+                 skip: docs/extra.md (Only on the right; Monodrive never deletes it.)\n\
+                 copy: {ln} → {rn}\n\
+                 copy: {lo} → {ro}\n\
+                 2 to copy, 1 to replace, 1 skipped. What's replaced goes to the Trash; nothing is deleted.\n\
+                 plan: {}\n\
+                 Pass confirm: true and this plan within 10 minutes to copy it.\n",
+                left.display(),
+                right.display(),
+                token(&reply),
+            )
         );
         assert!(!right.join("docs/only.md").exists());
 
-        let mut confirmed = both.clone();
+        let mut docs = both.clone();
+        docs["paths"] = json!(["docs/"]);
+        let reply = call(
+            &mut server,
+            json!({"name": "compare_copy", "arguments": docs}),
+        );
+        assert!(
+            text(&reply).contains(&format!("copy: {lo} → {ro}\n")),
+            "{reply}"
+        );
+        // Appearing after the preview, older and another size: a plan made
+        // again now would replace it.
+        std::fs::write(right.join("docs/only.md"), "stale").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(right.join("docs/only.md"))
+            .unwrap()
+            .set_modified(then - Duration::from_secs(3600))
+            .unwrap();
+        let mut confirmed = docs.clone();
         confirmed["confirm"] = json!(true);
-        confirmed["paths"] = json!(["docs/"]);
+        confirmed["plan"] = json!(token(&reply));
         let settings = root.join("settings.json");
         std::fs::write(&settings, r#"{"agents_change_files": false}"#).unwrap();
         let reply = call(
@@ -2396,7 +2495,17 @@ mod tests {
             &mut server,
             json!({"name": "compare_copy", "arguments": confirmed}),
         );
-        assert!(text(&reply).ends_with("1 to copy, 0 to replace, 1 skipped. What's replaced goes to the Trash; nothing is deleted.\njob 1 queued\n"), "{reply}");
+        assert!(text(&reply).ends_with("2 to copy, 0 to replace, 1 skipped. What's replaced goes to the Trash; nothing is deleted.\njob 1 queued\n"), "{reply}");
+        let mut unknown = confirmed.clone();
+        unknown["plan"] = json!("0");
+        for refused in [confirmed, unknown] {
+            let reply = call(
+                &mut server,
+                json!({"name": "compare_copy", "arguments": refused}),
+            );
+            assert_eq!(reply["result"]["isError"], true);
+            assert!(text(&reply).starts_with("No previewed plan"), "{reply}");
+        }
         for bad in [
             json!({"name": "compare", "arguments": {"left": left}}),
             json!({"name": "compare_copy", "arguments": {"left": left, "right": right, "confirm": "yes"}}),
@@ -2406,15 +2515,40 @@ mod tests {
         }
         drop(server);
         serving.join().unwrap().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(right.join("docs/only.md")).unwrap(),
-            "only"
-        );
-        assert_eq!(
-            std::fs::read_to_string(right.join("a.txt")).unwrap(),
-            "one\nold\n"
-        );
+        let read = |path: &str| std::fs::read_to_string(right.join(path)).unwrap();
+        assert_eq!(read("docs/new.md"), "new");
+        assert_eq!(read("docs/only.md"), "stale");
+        assert_eq!(read("a.txt"), "one\nold\n");
         assert!(right.join("docs/extra.md").exists());
+    }
+
+    #[test]
+    fn diff_shows_a_missing_last_newline_and_line_endings_that_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = server();
+        let mut diff = |old: &str, new: &str| {
+            let (left, right) = (dir.path().join("old"), dir.path().join("new"));
+            std::fs::write(&left, old).unwrap();
+            std::fs::write(&right, new).unwrap();
+            let reply = call(
+                &mut server,
+                json!({"name": "diff", "arguments": {"left": left, "right": right}}),
+            );
+            let head = format!("--- {}\n+++ {}\n", left.display(), right.display());
+            text(&reply).strip_prefix(&head).unwrap().to_string()
+        };
+        assert_eq!(
+            diff("foo\n", "foo"),
+            "@@ -1,1 +1,1 @@\n-foo\n+foo\n\\ No newline at end of file\n"
+        );
+        assert_eq!(
+            diff("a\r\nb\n", "a\nb\n"),
+            "@@ -1,2 +1,2 @@\n-a␍\n+a\n b\n(␍ marks a line that ends in CRLF.)\n"
+        );
+        assert_eq!(
+            diff("foo\r\r\n", "foo\r\n"),
+            "@@ -1,1 +1,1 @@\n-foo\r\n+foo\n"
+        );
     }
 
     #[test]

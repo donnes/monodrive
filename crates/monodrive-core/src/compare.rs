@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-/// A walk stops once it has this many entries, to bound its memory.
-pub const MAX_ENTRIES: usize = 200_000;
+/// A walk stops after reading this many items, both sides' and folders'
+/// counted, which bounds what it holds.
+pub const MAX_ITEMS: usize = 200_000;
 /// Files read at once while verifying.
 const READERS: usize = 2;
 const CHUNK: usize = 64 * 1024;
@@ -136,8 +137,8 @@ pub struct Comparison {
     /// By path. Folders on both sides aren't entries; what they hold is.
     /// A folder on one side is one entry, not walked.
     pub entries: Vec<Entry>,
-    /// False when it was cancelled, ran out of time or reached
-    /// `MAX_ENTRIES`; `entries` holds what it got to.
+    /// False when it was cancelled, ran out of time or read `MAX_ITEMS`;
+    /// `entries` holds the folders it finished.
     pub complete: bool,
 }
 
@@ -148,6 +149,16 @@ pub fn compare(
     right: &Path,
     progress: &Progress,
     deadline: Option<Instant>,
+) -> Result<Comparison, String> {
+    walk(left, right, progress, deadline, MAX_ITEMS)
+}
+
+fn walk(
+    left: &Path,
+    right: &Path,
+    progress: &Progress,
+    deadline: Option<Instant>,
+    items: usize,
 ) -> Result<Comparison, String> {
     let root = |path: &Path| {
         let path = path
@@ -173,19 +184,25 @@ pub fn compare(
         progress.entries.fetch_add(1, Ordering::Relaxed);
         return Ok(comparison);
     }
+    let mut budget = Budget {
+        items,
+        progress,
+        deadline,
+    };
     let mut pending = vec![(PathBuf::new(), l, r)];
     while let Some((folder, l, r)) = pending.pop() {
-        if progress.stopped(deadline) || comparison.entries.len() >= MAX_ENTRIES {
-            comparison.complete = false;
-            break;
-        }
         let (left, right) = (
             at(&comparison.left, &folder),
             at(&comparison.right, &folder),
         );
         let mut names: BTreeMap<OsString, (Option<Listed>, Option<Listed>)> = BTreeMap::new();
-        match (list(&left), list(&right)) {
-            (Ok(on_left), Ok(on_right)) => {
+        match (list(&left, &mut budget), list(&right, &mut budget)) {
+            // Half a folder would show the rest as only on one side.
+            (Ok(None), _) | (_, Ok(None)) => {
+                comparison.complete = false;
+                break;
+            }
+            (Ok(Some(on_left)), Ok(Some(on_right))) => {
                 for (name, side) in on_left {
                     names.entry(name).or_default().0 = Some(side);
                 }
@@ -236,11 +253,33 @@ pub fn compare(
 
 type Listed = Result<Side, String>;
 
-/// A folder's items by name, without following links.
-fn list(folder: &Path) -> Result<Vec<(OsString, Listed)>, String> {
+/// What a walk may still read.
+struct Budget<'a> {
+    items: usize,
+    progress: &'a Progress,
+    deadline: Option<Instant>,
+}
+
+impl Budget<'_> {
+    /// False once the walk has to stop.
+    fn take(&mut self) -> bool {
+        if self.items == 0 || self.progress.stopped(self.deadline) {
+            return false;
+        }
+        self.items -= 1;
+        true
+    }
+}
+
+/// A folder's items by name, without following links. `None` once the
+/// budget runs out partway.
+fn list(folder: &Path, budget: &mut Budget) -> Result<Option<Vec<(OsString, Listed)>>, String> {
     let fail = |e: std::io::Error| format!("{}: {e}", folder.display());
     let mut listed = Vec::new();
     for item in std::fs::read_dir(folder).map_err(fail)? {
+        if !budget.take() {
+            return Ok(None);
+        }
         let item = item.map_err(fail)?;
         // DirEntry::metadata doesn't follow links.
         let side = match item.metadata() {
@@ -250,7 +289,7 @@ fn list(folder: &Path) -> Result<Vec<(OsString, Listed)>, String> {
         };
         listed.push((item.file_name(), side));
     }
-    Ok(listed)
+    Ok(Some(listed))
 }
 
 fn newer(left: SystemTime, right: SystemTime) -> Option<Newer> {
@@ -558,11 +597,21 @@ pub enum LineKind {
     Context,
 }
 
-/// One line of a text diff, without its line ending. Numbers count from 1.
+/// How a line ends. Only the last line of a file can have none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    None,
+    Lf,
+    CrLf,
+}
+
+/// One line of a text diff. Numbers count from 1.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
     pub kind: LineKind,
+    /// Without its ending; any other `\r` stays.
     pub text: String,
+    pub ending: Ending,
     pub old_number: Option<usize>,
     pub new_number: Option<usize>,
 }
@@ -589,20 +638,34 @@ pub struct TextDiff {
 /// `DIFF_BYTES`, without reading it whole.
 pub fn diff(left: &Path, right: &Path, context: usize) -> Result<TextDiff, String> {
     let (old, new) = (text(left)?, text(right)?);
+    // similar's own line split also ends a line at a lone \r.
+    let (old, new): (Vec<&str>, Vec<&str>) = (
+        old.split_inclusive('\n').collect(),
+        new.split_inclusive('\n').collect(),
+    );
     let diff = similar::TextDiff::configure()
         .timeout(DIFF_TIME)
-        .diff_lines(&old, &new);
+        .diff_slices(&old, &new);
     let lines: Vec<Line> = diff
         .iter_all_changes()
-        .map(|change| Line {
-            kind: match change.tag() {
-                similar::ChangeTag::Insert => LineKind::Add,
-                similar::ChangeTag::Delete => LineKind::Del,
-                similar::ChangeTag::Equal => LineKind::Context,
-            },
-            text: change.value().trim_end_matches(['\n', '\r']).to_string(),
-            old_number: change.old_index().map(|i| i + 1),
-            new_number: change.new_index().map(|i| i + 1),
+        .map(|change| {
+            let line = change.value();
+            let (text, ending) = match (line.strip_suffix("\r\n"), line.strip_suffix('\n')) {
+                (Some(text), _) => (text, Ending::CrLf),
+                (None, Some(text)) => (text, Ending::Lf),
+                (None, None) => (line, Ending::None),
+            };
+            Line {
+                kind: match change.tag() {
+                    similar::ChangeTag::Insert => LineKind::Add,
+                    similar::ChangeTag::Delete => LineKind::Del,
+                    similar::ChangeTag::Equal => LineKind::Context,
+                },
+                text: text.to_string(),
+                ending,
+                old_number: change.old_index().map(|i| i + 1),
+                new_number: change.new_index().map(|i| i + 1),
+            }
         })
         .collect();
     Ok(TextDiff {

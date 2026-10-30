@@ -731,6 +731,13 @@ impl Item<'_> {
             Ok(claimed) => claimed,
             Err(next) => return next,
         };
+        // A planned copy replaces only the item it was planned against, as
+        // it was then, which the Trash step checks once more.
+        let replacing = match (planned.map(|planned| planned.replaces), replacing) {
+            (Some(Some((id, stamp))), Some(step)) => Some(Step { id, stamp, ..step }),
+            (Some(None), Some(_)) => return fail(changed(&to)),
+            (_, replacing) => replacing,
+        };
         self.work.to = Some(to.clone());
         self.work.bytes = disk::tally(&source).map_or(self.work.bytes, |(_, bytes)| bytes);
         // The destination folder may be a link to another volume.
