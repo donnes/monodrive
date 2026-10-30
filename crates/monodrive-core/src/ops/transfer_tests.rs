@@ -1,7 +1,9 @@
 use super::tests::{untrash, untrash_unfinished};
 use super::*;
-use crate::remote::{Connector, RemoteError, Source, fixture};
+use crate::remote::fixture::{self, frame, status, version};
+use crate::remote::{Connector, RemoteError, Source, Transport};
 use std::collections::VecDeque;
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
@@ -25,6 +27,7 @@ enum Next {
     Lost(usize),
     Cancel(usize),
     Refused(RemoteError),
+    Given(Transport),
 }
 
 fn bench() -> Bench {
@@ -65,6 +68,7 @@ fn bench() -> Bench {
                 .transport
             }
             Some(Next::Refused(error)) => return Err(error),
+            Some(Next::Given(transport)) => transport,
         })
     });
     let engine = Engine::open(paths(&root)).unwrap();
@@ -564,6 +568,7 @@ fn a_crash_leaves_an_uploads_temp_named_and_continuing_removes_only_that() {
     let work = jobs::Work {
         source: b.local.join("a.txt"),
         left: Some(remote(&temp)),
+        made: true,
         ..jobs::Work::default()
     };
     b.shared.record(op, 0, &work).unwrap();
@@ -712,4 +717,148 @@ fn stopping_mid_job_holds_no_flag_for_the_next_run() {
         std::fs::metadata(b.server.join("big.bin")).unwrap().len(),
         BIG as u64
     );
+}
+
+/// How a hand-written server answers a request to create the temp.
+#[derive(Clone, Copy)]
+enum Create {
+    Collide,
+    HangUp,
+}
+
+/// A server where a temp's name is always taken by a file of someone else's,
+/// so exclusive creation can't succeed. Records each kind it's asked.
+fn taken_names(create: Create) -> (Transport, Arc<Mutex<Vec<u8>>>) {
+    let asked: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let recorded = asked.clone();
+    let (ours, mut theirs) = UnixStream::pair().unwrap();
+    std::thread::spawn(move || {
+        let _ = fixture::request(&mut theirs);
+        let _ = theirs.write_all(&version());
+        while let Some((kind, id, body)) = fixture::packet(&mut theirs) {
+            recorded.lock().unwrap().push(kind);
+            let path = String::from_utf8_lossy(body.get(4..).unwrap_or_default()).into_owned();
+            let attrs = |mode: u32, size: u64| {
+                let mut out = (1u32 | 4).to_be_bytes().to_vec();
+                out.extend_from_slice(&size.to_be_bytes());
+                out.extend_from_slice(&mode.to_be_bytes());
+                frame(105, Some(id), &out)
+            };
+            let reply = match kind {
+                3 | 14 => match create {
+                    Create::Collide => frame(101, Some(id), &status(4)),
+                    Create::HangUp => return,
+                },
+                7 | 17 if path.contains(".monodrive-") => attrs(0o100_644, 5),
+                7 | 17 if path.ends_with("server") => attrs(0o040_755, 0),
+                7 | 17 => frame(101, Some(id), &status(2)),
+                _ => frame(101, Some(id), &status(0)),
+            };
+            let _ = theirs.write_all(&reply);
+        }
+    });
+    (Transport::new(ours.try_clone().unwrap(), ours), asked)
+}
+
+#[test]
+fn a_create_that_collides_removes_nothing_from_the_server() {
+    let b = bench();
+    std::fs::write(b.local.join("a.txt"), "a").unwrap();
+    std::fs::create_dir(b.local.join("folder")).unwrap();
+    for name in ["a.txt", "folder"] {
+        let (transport, asked) = taken_names(Create::Collide);
+        b.next.lock().unwrap().push_back(Next::Given(transport));
+        let job = b.run(b.upload(&[name], Conflict::Stop));
+        assert_eq!(job.state, State::Failed, "{job:?}");
+        let asked = asked.lock().unwrap().clone();
+        assert!(asked.contains(&3) || asked.contains(&14), "{asked:?}");
+        assert!(
+            !asked.contains(&13) && !asked.contains(&15),
+            "removed something it didn't make: {asked:?}"
+        );
+    }
+}
+
+#[test]
+fn a_connection_lost_while_creating_leaves_the_temp_as_unproven() {
+    let b = bench();
+    std::fs::write(b.local.join("a.txt"), "a").unwrap();
+    let (transport, asked) = taken_names(Create::HangUp);
+    b.next.lock().unwrap().push_back(Next::Given(transport));
+    let job = b.run(b.upload(&["a.txt"], Conflict::Stop));
+    assert_eq!(job.state, State::Interrupted, "{job:?}");
+    let why = first_failure(&job);
+    assert!(why.contains("can't tell whether this job made it"), "{why}");
+    let asked = asked.lock().unwrap().clone();
+    assert!(!asked.contains(&13) && !asked.contains(&15), "{asked:?}");
+
+    // Continuing says so once, removes nothing, and then copies.
+    let reported = b.resume(job.id, None);
+    assert_eq!(reported.state, State::Failed, "{reported:?}");
+    assert!(
+        first_failure(&reported).contains("left it there"),
+        "{reported:?}"
+    );
+    let done = b.resume(job.id, None);
+    assert_eq!(done.state, State::Completed, "{done:?}");
+    assert_eq!(b.on_server(), ["a.txt"]);
+}
+
+#[test]
+fn recovery_leaves_on_the_server_what_it_cant_prove_this_job_made() {
+    let b = bench();
+    std::fs::write(b.local.join("a.txt"), "a").unwrap();
+    let theirs = b.server.join(".monodrive-1-0-abc");
+    std::fs::write(&theirs, "someone else's").unwrap();
+    let op = b.queue(b.upload(&["a.txt"], Conflict::Stop));
+    // Written down as about to be made, and then the owner crashed.
+    let work = jobs::Work {
+        source: b.local.join("a.txt"),
+        left: Some(remote(&theirs)),
+        ..jobs::Work::default()
+    };
+    b.shared.record(op, 0, &work).unwrap();
+
+    let engine = Engine::open(paths(&b.root)).unwrap();
+    let job = engine.jobs().into_iter().find(|job| job.id == op).unwrap();
+    assert_eq!(job.state, State::Interrupted);
+    let why = first_failure(&job);
+    assert!(why.contains("can't tell whether this job made it"), "{why}");
+
+    let shared = jobs::Shared::with_connector(
+        engine,
+        None,
+        Arc::new(|_: &Source| Ok(fixture::transport())),
+    );
+    let resume = |id: &str| {
+        let submission = Submission {
+            id: id.into(),
+            origin: Origin::Window,
+            request: Request::Retry {
+                job: op,
+                conflict: None,
+            },
+        };
+        shared.lock().submit(submission).unwrap();
+        jobs::run(&shared, op);
+        shared
+            .lock()
+            .jobs()
+            .into_iter()
+            .find(|job| job.id == op)
+            .unwrap()
+    };
+    let reported = resume("first");
+    assert_eq!(reported.state, State::Failed, "{reported:?}");
+    assert!(
+        first_failure(&reported).contains("left it there"),
+        "{reported:?}"
+    );
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's");
+    assert_eq!(b.on_server(), [".monodrive-1-0-abc"]);
+
+    let done = resume("second");
+    assert_eq!(done.state, State::Completed, "{done:?}");
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's");
+    assert_eq!(b.on_server(), [".monodrive-1-0-abc", "a.txt"]);
 }

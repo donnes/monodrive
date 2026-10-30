@@ -1,5 +1,5 @@
 use super::*;
-use crate::remote::fixture;
+use crate::remote::fixture::{self, frame, request, status, string, version};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
@@ -34,47 +34,6 @@ fn names(page: &Page) -> Vec<String> {
     let mut names: Vec<String> = page.entries.iter().map(|e| e.name.clone()).collect();
     names.sort();
     names
-}
-
-/// One frame from a hand-written server.
-fn frame(kind: u8, id: Option<u32>, body: &[u8]) -> Vec<u8> {
-    let length = 1 + if id.is_some() { 4 } else { 0 } + body.len();
-    let mut out = (length as u32).to_be_bytes().to_vec();
-    out.push(kind);
-    if let Some(id) = id {
-        out.extend_from_slice(&id.to_be_bytes());
-    }
-    out.extend_from_slice(body);
-    out
-}
-
-fn string(text: &[u8]) -> Vec<u8> {
-    let mut out = (text.len() as u32).to_be_bytes().to_vec();
-    out.extend_from_slice(text);
-    out
-}
-
-fn status(code: u32) -> Vec<u8> {
-    let mut out = code.to_be_bytes().to_vec();
-    out.extend_from_slice(&string(b""));
-    out.extend_from_slice(&string(b""));
-    out
-}
-
-fn version() -> Vec<u8> {
-    frame(2, None, &3u32.to_be_bytes())
-}
-
-/// Reads one request: its kind and id.
-fn request(stream: &mut UnixStream) -> Option<(u8, u32)> {
-    let mut length = [0; 4];
-    stream.read_exact(&mut length).ok()?;
-    let mut body = vec![0; u32::from_be_bytes(length) as usize];
-    stream.read_exact(&mut body).ok()?;
-    let id = body
-        .get(1..5)
-        .map_or(0, |id| u32::from_be_bytes([id[0], id[1], id[2], id[3]]));
-    Some((body[0], id))
 }
 
 /// A connection to a hand-written server, which has answered INIT.
@@ -468,6 +427,7 @@ fn the_ssh_command_line_cant_be_changed_by_a_host() {
         args,
         [
             "-oBatchMode=yes",
+            "-oStrictHostKeyChecking=yes",
             "-oConnectTimeout=15",
             "-oForwardAgent=no",
             "-oForwardX11=no",
@@ -479,7 +439,6 @@ fn the_ssh_command_line_cant_be_changed_by_a_host() {
             "sftp"
         ]
     );
-    assert!(!args.iter().any(|arg| arg.contains("StrictHostKeyChecking")));
     for fine in [
         "nas",
         "me@nas.local",
@@ -593,6 +552,11 @@ fn what_ssh_says_is_told_apart() {
     assert!(error.is_connection());
     let error = RemoteError::HostKeyChanged("nas".into());
     assert!(error.to_string().contains("didn't connect"));
+    let error = RemoteError::HostKeyUnknown("nas".into()).to_string();
+    assert!(
+        error.contains("connect once with ssh in a terminal so it's in known_hosts"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -876,4 +840,84 @@ fn a_cache_a_dead_process_left_is_swept_and_a_live_ones_kept() {
     let other = Previews::open(&cache, 10).unwrap();
     assert!(live.inner.dir.exists());
     assert!(other.inner.dir.exists());
+}
+
+/// Attrs of a regular file of `size` bytes.
+fn file_attrs(size: u64) -> Vec<u8> {
+    let mut body = (1u32 | 4).to_be_bytes().to_vec();
+    body.extend_from_slice(&size.to_be_bytes());
+    body.extend_from_slice(&0o100_644u32.to_be_bytes());
+    body
+}
+
+/// A server whose stat says `stat` bytes and whose lstat says `lstat`, and
+/// that answers each read with `sent(asked)` bytes. Records the kinds it's
+/// asked.
+fn sizes_differ(stat: u64, lstat: u64, sent: fn(u32) -> u32) -> (Connection, mpsc::Receiver<u8>) {
+    let (tx, rx) = mpsc::channel();
+    let connection = fake(move |server| {
+        while let Some((kind, id, body)) = fixture::packet(server) {
+            let _ = tx.send(kind);
+            let reply = match kind {
+                17 => frame(105, Some(id), &file_attrs(stat)),
+                7 => frame(105, Some(id), &file_attrs(lstat)),
+                16 => {
+                    let mut name = 1u32.to_be_bytes().to_vec();
+                    name.extend_from_slice(&string(b"/srv/real"));
+                    name.extend_from_slice(&string(b""));
+                    name.extend_from_slice(&0u32.to_be_bytes());
+                    frame(104, Some(id), &name)
+                }
+                3 => frame(102, Some(id), &string(b"h")),
+                5 => {
+                    // After the handle "h": a u64 offset, then the length.
+                    let asked = u32::from_be_bytes(body[13..17].try_into().unwrap());
+                    frame(103, Some(id), &string(&vec![7; sent(asked) as usize]))
+                }
+                _ => frame(101, Some(id), &status(0)),
+            };
+            let _ = server.write_all(&reply);
+        }
+    })
+    .unwrap();
+    (connection, rx)
+}
+
+#[test]
+fn a_preview_never_downloads_more_than_it_reserved_whatever_the_server_says_next() {
+    let (_dir, dir) = folder();
+    let previews = Previews::open(&dir.join("cache"), 100).unwrap();
+    let (copied, cancel) = (AtomicU64::new(0), AtomicBool::new(false));
+    let meter = meter(&copied, &cancel);
+    let file = RemotePath::new("box", "/srv/file").unwrap();
+
+    // Grown, or another file behind a changed link, since the stat that
+    // reserved its room: refused before anything is asked for or written.
+    let (grown, asked) = sizes_differ(10, 1000, |asked| asked);
+    let refused = previews.fetch(&grown, &file, &meter).err().unwrap();
+    assert!(matches!(refused, RemoteError::TooBig(_)), "{refused:?}");
+    let asked: Vec<u8> = asked.try_iter().collect();
+    assert!(!asked.contains(&3), "opened it anyway: {asked:?}");
+    assert_eq!(copied.load(Ordering::Relaxed), 0);
+
+    // A reply larger than the read asked for ends it at the reservation.
+    let (lying, _) = sizes_differ(10, 10, |asked| asked + 1);
+    let refused = previews.fetch(&lying, &file, &meter).err().unwrap();
+    assert!(matches!(refused, RemoteError::Protocol(_)), "{refused:?}");
+    assert_eq!(copied.load(Ordering::Relaxed), 0);
+
+    // Smaller than reserved: it says what's really there, and gives back the
+    // room it reserved when it goes.
+    let (shrunk, _) = sizes_differ(100, 20, |asked| asked);
+    let preview = previews.fetch(&shrunk, &file, &meter).unwrap();
+    assert_eq!(preview.size, 20);
+    assert_eq!(std::fs::metadata(&preview.path).unwrap().len(), 20);
+    let refused = previews.fetch(&shrunk, &file, &meter).err().unwrap();
+    assert!(matches!(refused, RemoteError::TooBig(_)), "{refused:?}");
+    drop(preview);
+    let again = previews.fetch(&shrunk, &file, &meter).unwrap();
+    assert_eq!(again.size, 20);
+    drop(again);
+    assert_eq!(previews.inner.used.load(Ordering::Relaxed), 0);
+    assert_eq!(std::fs::read_dir(&previews.inner.dir).unwrap().count(), 0);
 }

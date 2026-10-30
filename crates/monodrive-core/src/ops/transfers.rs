@@ -130,6 +130,16 @@ impl Item<'_> {
                 source.display()
             ));
         };
+        if self.work.left.is_some() && !self.work.made {
+            // Said once. The next attempt takes a name of its own.
+            let why = format!(
+                "{}: nothing was copied. {}",
+                source.display(),
+                self.work.left_note().unwrap_or_default()
+            );
+            self.work.left = None;
+            return fail(why);
+        }
         let connection = match self.shared.remote.connect(into.source()) {
             Ok(connection) => connection,
             Err(e) => return ended(e, &source),
@@ -147,6 +157,7 @@ impl Item<'_> {
                 };
             }
             self.work.left = None;
+            self.work.made = false;
             if let Err(e) = self.shared.record(self.op, self.index, &self.work) {
                 return fail(e);
             }
@@ -202,15 +213,22 @@ impl Item<'_> {
             Ok(temp) => temp,
             Err(e) => return fail(e.to_string()),
         };
-        // On record before it exists, so what's found under this name later
-        // can only be this job's.
+        // On record before it exists, but it's not the job's until the server
+        // says it made it: exclusive creation can fail on someone else's item.
         self.work.left = Some(temp.clone());
+        self.work.made = false;
         if let Err(e) = self.shared.record(self.op, self.index, &self.work) {
             return fail(e);
         }
         let meter = Meter { copied, cancel };
+        let mut created = false;
+        let (shared, op, index, work) = (self.shared, self.op, self.index, &mut self.work);
         let made = connection
-            .put(&source, &tree, &temp, &meter)
+            .put(&source, &tree, &temp, &meter, || {
+                created = true;
+                work.made = true;
+                shared.record(op, index, work).map_err(RemoteError::Failed)
+            })
             .and_then(|()| {
                 if cancel.load(Ordering::Relaxed) {
                     Err(RemoteError::Cancelled)
@@ -221,16 +239,25 @@ impl Item<'_> {
         match made {
             Ok(()) => {
                 self.work.left = None;
+                self.work.made = false;
                 match left_out(&to, &tree) {
                     Some(why) => fail(why),
                     None => Next::Done(Done::To(to.to_string().into())),
                 }
             }
             Err(e) if e.is_connection() => Next::Interrupt(format!(
-                "{}: {e} An unfinished copy may be on the server at {temp}; continuing the job \
-                removes it.",
-                source.display()
+                "{}: {e} {}",
+                source.display(),
+                self.work.left_note().unwrap_or_default()
             )),
+            // It never made the temp, so what's there isn't the job's to touch.
+            Err(e) if !created => {
+                self.work.left = None;
+                fail(format!(
+                    "{}: {e} Nothing on the server changed.",
+                    source.display()
+                ))
+            }
             Err(e) => {
                 let mut why = match e {
                     RemoteError::Cancelled => format!("{}: cancelled partway.", source.display()),
@@ -239,6 +266,7 @@ impl Item<'_> {
                 match connection.discard(&temp) {
                     Ok(()) => {
                         self.work.left = None;
+                        self.work.made = false;
                         why.push_str(" The unfinished copy was removed from the server.");
                     }
                     Err(e) => why.push_str(&format!(

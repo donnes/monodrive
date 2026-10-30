@@ -341,12 +341,12 @@ fn main() {
     .unwrap();
     std::fs::write(dir.join("known_hosts_empty"), "").unwrap();
     let user = std::env::var("USER").unwrap();
-    let host = |alias: &str, port: u16, identity: &str, known: &str| {
+    let host = |alias: &str, port: u16, identity: &str, known: &str, strict: &str| {
         format!(
             "Host {alias}\n  HostName 127.0.0.1\n  Port {port}\n  User {user}\n  \
             IdentityFile {dir}/{identity}\n  IdentitiesOnly yes\n  IdentityAgent none\n  \
             UserKnownHostsFile {dir}/{known}\n  GlobalKnownHostsFile /dev/null\n  \
-            StrictHostKeyChecking yes\n  PasswordAuthentication no\n  \
+            StrictHostKeyChecking {strict}\n  PasswordAuthentication no\n  \
             KbdInteractiveAuthentication no\n  LogLevel ERROR\n",
             dir = dir.display(),
         )
@@ -355,16 +355,32 @@ fn main() {
     std::fs::write(
         &config,
         [
-            host("fixture", port, "user_key", "known_hosts"),
-            host("changed", port, "user_key", "known_hosts_changed"),
-            host("unknown", port, "user_key", "known_hosts_empty"),
-            host("nokey", port, "not_authorized", "known_hosts"),
-            host("closed", closed_port, "user_key", "known_hosts"),
+            host("fixture", port, "user_key", "known_hosts", "yes"),
+            host("changed", port, "user_key", "known_hosts_changed", "yes"),
+            host("permissive", port, "user_key", "known_hosts_changed", "no"),
+            host("unknown", port, "user_key", "known_hosts_empty", "yes"),
+            host(
+                "accept-new",
+                port,
+                "user_key",
+                "known_hosts_empty",
+                "accept-new",
+            ),
+            host("nokey", port, "not_authorized", "known_hosts", "yes"),
+            host("closed", closed_port, "user_key", "known_hosts", "yes"),
         ]
         .concat(),
     )
     .unwrap();
-    for alias in ["fixture", "changed", "unknown", "nokey", "closed"] {
+    for alias in [
+        "fixture",
+        "changed",
+        "permissive",
+        "unknown",
+        "accept-new",
+        "nokey",
+        "closed",
+    ] {
         store.add_remote(alias, Some(alias), None).unwrap();
     }
 
@@ -387,7 +403,14 @@ fn main() {
         }
     };
     expect("changed", |e| matches!(e, RemoteError::HostKeyChanged(_)));
+    // The user's config can't let a changed or an unknown key through.
+    expect("permissive", |e| {
+        matches!(e, RemoteError::HostKeyChanged(_))
+    });
     expect("unknown", |e| matches!(e, RemoteError::HostKeyUnknown(_)));
+    expect("accept-new", |e| {
+        matches!(e, RemoteError::HostKeyUnknown(_))
+    });
     expect("nokey", |e| matches!(e, RemoteError::AuthFailed(..)));
     expect("closed", |e| matches!(e, RemoteError::Unreachable(..)));
 

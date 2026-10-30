@@ -4,6 +4,7 @@
 
 use super::Transport;
 use std::io::{self, Read};
+use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -94,4 +95,51 @@ pub(crate) fn killed_after(after: usize) -> Server {
     }));
     *slot.lock().unwrap() = Some(server.child.clone());
     server
+}
+
+/// One frame from a hand-written server.
+pub(crate) fn frame(kind: u8, id: Option<u32>, body: &[u8]) -> Vec<u8> {
+    let length = 1 + if id.is_some() { 4 } else { 0 } + body.len();
+    let mut out = (length as u32).to_be_bytes().to_vec();
+    out.push(kind);
+    if let Some(id) = id {
+        out.extend_from_slice(&id.to_be_bytes());
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+pub(crate) fn string(text: &[u8]) -> Vec<u8> {
+    let mut out = (text.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(text);
+    out
+}
+
+pub(crate) fn status(code: u32) -> Vec<u8> {
+    let mut out = code.to_be_bytes().to_vec();
+    out.extend_from_slice(&string(b""));
+    out.extend_from_slice(&string(b""));
+    out
+}
+
+pub(crate) fn version() -> Vec<u8> {
+    frame(2, None, &3u32.to_be_bytes())
+}
+
+/// Reads one request: its kind, id, and the rest of its body.
+pub(crate) fn packet(stream: &mut UnixStream) -> Option<(u8, u32, Vec<u8>)> {
+    let mut length = [0; 4];
+    stream.read_exact(&mut length).ok()?;
+    let mut body = vec![0; u32::from_be_bytes(length) as usize];
+    stream.read_exact(&mut body).ok()?;
+    let id = body
+        .get(1..5)
+        .map_or(0, |id| u32::from_be_bytes([id[0], id[1], id[2], id[3]]));
+    let rest = body.get(5..).unwrap_or_default().to_vec();
+    Some((body[0], id, rest))
+}
+
+/// Reads one request: its kind and id.
+pub(crate) fn request(stream: &mut UnixStream) -> Option<(u8, u32)> {
+    packet(stream).map(|(kind, id, _)| (kind, id))
 }

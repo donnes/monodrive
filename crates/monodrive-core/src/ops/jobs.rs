@@ -373,13 +373,32 @@ pub(super) struct Work {
     /// time, so continuing it refuses one that changed since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) seen: Option<(u64, u64)>,
-    /// The unfinished item an upload made on the server, written down before
-    /// it's made. It's the only thing on a server a job ever removes.
+    /// The name an upload's unfinished item takes on the server, written down
+    /// before it's made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) left: Option<RemotePath>,
+    /// The server confirmed this job made `left`, the only thing on a server a
+    /// job ever removes. Until then what's there may not be the job's.
+    #[serde(default)]
+    pub(super) made: bool,
 }
 
 impl Work {
+    /// What a stopped upload left on the server, and what becomes of it.
+    pub(super) fn left_note(&self) -> Option<String> {
+        let left = self.left.as_ref()?;
+        Some(if self.made {
+            format!(
+                "An unfinished copy may be on the server at {left}; continuing the job removes it."
+            )
+        } else {
+            format!(
+                "Something may be on the server at {left}, and Monodrive can't tell whether this \
+                job made it, so it left it there. Check it, and remove it if it's not wanted."
+            )
+        })
+    }
+
     /// Not done, and nothing on disk changed for it.
     fn untouched(&self) -> bool {
         !matches!(self.done, Some(Done::To(_))) && self.steps.iter().all(|step| !step.applied)
@@ -460,6 +479,7 @@ impl Entry {
                     id: work.id,
                     seen: work.seen,
                     left: work.left.take(),
+                    made: work.made,
                     ..Work::default()
                 };
             }
@@ -1356,11 +1376,8 @@ impl Engine {
                 if let Some(temp) = work.temp.as_deref() {
                     why = unfinished(why, temp, job.spec.kind);
                 }
-                if let Some(left) = &work.left {
-                    why = format!(
-                        "{why} An unfinished copy may be on the server at {left}; continuing \
-                        the job removes it."
-                    );
+                if let Some(note) = work.left_note() {
+                    why = format!("{why} {note}");
                 }
                 work.done = Some(if whole {
                     Done::To(to)

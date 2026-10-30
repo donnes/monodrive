@@ -23,11 +23,13 @@ const LAST_WORDS: Duration = Duration::from_secs(2);
 
 /// The arguments that open SFTP to `host`, which `Source` has checked can't
 /// read as an option. They're what sftp(1) passes, so a host's config can't
-/// forward the agent or run a local command, plus `BatchMode`. Host key
-/// checking stays as the user's config has it.
+/// forward the agent or run a local command, plus `BatchMode`. Strict host key
+/// checking goes on whatever the user's config says: with it off, ssh connects
+/// through a changed key, and stderr would only say so afterwards.
 pub fn arguments(host: &str) -> Vec<OsString> {
     [
         "-oBatchMode=yes".to_string(),
+        "-oStrictHostKeyChecking=yes".into(),
         format!("-oConnectTimeout={CONNECT_SECONDS}"),
         "-oForwardAgent=no".into(),
         "-oForwardX11=no".into(),

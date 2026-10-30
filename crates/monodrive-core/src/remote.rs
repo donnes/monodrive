@@ -137,8 +137,8 @@ impl fmt::Display for RemoteError {
             ),
             Self::HostKeyUnknown(host) => write!(
                 f,
-                "{host}: ssh couldn't verify its host key, so Monodrive didn't connect. Connect \
-                once with ssh in a terminal to check and record it."
+                "{host}: ssh couldn't verify its host key, so Monodrive didn't connect. To trust \
+                this server, connect once with ssh in a terminal so it's in known_hosts."
             ),
             Self::Unreachable(host, said) => write!(f, "{host}: unreachable: {said}"),
             Self::NoSftp(host) => write!(f, "{host}: SFTP isn't enabled on this server."),
@@ -809,7 +809,7 @@ impl Connection {
         meter: &Meter,
     ) -> Result<(), RemoteError> {
         match from.kind {
-            Kind::File => self.fetch_file(&from.path, to, meter)?,
+            Kind::File => self.fetch_file(&from.path, to, u64::MAX, meter)?,
             Kind::Link => self.fetch_link(&from.path, to)?,
             Kind::Dir => {
                 make_dir(to, from.permissions)?;
@@ -820,7 +820,7 @@ impl Connection {
                     let (remote, local) = (from.path.joined(name)?, to.join(name));
                     match node {
                         Node::Dir(_) => make_dir(&local, None)?,
-                        Node::File => self.fetch_file(&remote, &local, meter)?,
+                        Node::File => self.fetch_file(&remote, &local, u64::MAX, meter)?,
                         Node::Link => self.fetch_link(&remote, &local)?,
                     }
                 }
@@ -841,11 +841,24 @@ impl Connection {
     }
 
     /// Reads ahead by `WINDOW` chunks, so distance costs latency once, not per
-    /// chunk. A new file, so nothing there is followed or overwritten.
-    fn fetch_file(&self, from: &RemotePath, to: &Path, meter: &Meter) -> Result<(), RemoteError> {
+    /// chunk. A new file, so nothing there is followed or overwritten. A file
+    /// over `most` bytes is refused before anything is written, and reads stop
+    /// at the size checked here, so at most that many bytes ever arrive.
+    fn fetch_file(
+        &self,
+        from: &RemotePath,
+        to: &Path,
+        most: u64,
+        meter: &Meter,
+    ) -> Result<(), RemoteError> {
         let path = self.on(from)?;
         let was = self.sftp.lstat(path).map_err(|e| e.at(from))?;
         let size = was.size.unwrap_or(0);
+        if size > most {
+            return Err(RemoteError::TooBig(format!(
+                "{from}: is {size} bytes now, more than the {most} there's room for."
+            )));
+        }
         let mode = was.permissions.unwrap_or(0o644) & 0o777 | 0o600;
         let mut file = File::options()
             .write(true)
@@ -931,22 +944,27 @@ impl Connection {
     }
 
     /// Copies the local item `from` to the new remote path `to`, verifying
-    /// each file's size. `tree` is what `walk_local` found there.
+    /// each file's size. `tree` is what `walk_local` found there. `created` is
+    /// called as soon as the server has confirmed it made `to`, which can only
+    /// be for this call. Without that call, what's at `to` isn't this copy's.
     pub(crate) fn put(
         &self,
         from: &Path,
         tree: &Tree,
         to: &RemotePath,
         meter: &Meter,
+        created: impl FnOnce() -> Result<(), RemoteError>,
     ) -> Result<(), RemoteError> {
         let meta = std::fs::symlink_metadata(from).map_err(|e| local_error(from, &e))?;
         if meta.is_file() {
-            return self.put_file(from, to, meter);
+            return self.put_file(from, to, meter, created);
         }
         if meta.is_symlink() {
-            return self.put_link(from, to);
+            self.put_link(from, to)?;
+            return created();
         }
         self.make_new_folder(to, meta.mode() & 0o777 | 0o700)?;
+        created()?;
         for (name, node) in &tree.items {
             if meter.cancel.load(Ordering::Relaxed) {
                 return Err(RemoteError::Cancelled);
@@ -954,7 +972,7 @@ impl Connection {
             let (local, remote) = (from.join(name), to.joined(name)?);
             match node {
                 Node::Dir(mode) => self.make_new_folder(&remote, *mode)?,
-                Node::File => self.put_file(&local, &remote, meter)?,
+                Node::File => self.put_file(&local, &remote, meter, || Ok(()))?,
                 Node::Link => self.put_link(&local, &remote)?,
             }
         }
@@ -976,7 +994,13 @@ impl Connection {
 
     /// Creates `to`, failing if anything is there, so this copy only ever
     /// writes a file it made.
-    fn put_file(&self, from: &Path, to: &RemotePath, meter: &Meter) -> Result<(), RemoteError> {
+    fn put_file(
+        &self,
+        from: &Path,
+        to: &RemotePath,
+        meter: &Meter,
+        created: impl FnOnce() -> Result<(), RemoteError>,
+    ) -> Result<(), RemoteError> {
         let path = self.on(to)?;
         let mut file = File::open(from).map_err(|e| local_error(from, &e))?;
         let was = file.metadata().map_err(|e| local_error(from, &e))?;
@@ -984,7 +1008,7 @@ impl Connection {
             .sftp
             .open(path, OPEN_NEW, was.mode() & 0o777)
             .map_err(|e| e.at(to))?;
-        let sent = self.write_whole(&handle, &mut file, from, meter);
+        let sent = created().and_then(|()| self.write_whole(&handle, &mut file, from, meter));
         let closed = self.sftp.close_handle(handle);
         let sent = sent.map_err(|e| e.at(to))?;
         closed.map_err(|e| e.at(to))?;
@@ -1068,10 +1092,10 @@ impl Connection {
         self.sftp.replace(old, new).map_err(|e| e.at(to))
     }
 
-    /// Removes a temp this copy made, and everything in it, which is only
-    /// ever what the copy put there. The one way Monodrive removes anything
-    /// from a server, and it refuses a name that isn't a temp's. Fine if it's
-    /// gone.
+    /// Removes a temp the server confirmed this copy made, and everything in
+    /// it, which is only ever what the copy put there. The one way Monodrive
+    /// removes anything from a server, and it refuses a name that isn't a
+    /// temp's. Fine if it's gone.
     pub(crate) fn discard(&self, temp: &RemotePath) -> Result<(), RemoteError> {
         if !temp
             .name()
@@ -1284,6 +1308,7 @@ impl Previews {
         let mut preview = Preview {
             path: PathBuf::new(),
             size: entry.size,
+            reserved: entry.size,
             folder: self.inner.dir.join(n.to_string()),
             inner: self.inner.clone(),
         };
@@ -1296,11 +1321,13 @@ impl Previews {
         make_dir(&preview.folder, None)?;
         let part = preview.folder.join(".part");
         let real = connection.realpath(at.path())?;
-        connection.fetch_file(&real, &part, meter)?;
+        connection.fetch_file(&real, &part, preview.reserved, meter)?;
         let path = preview.folder.join(name);
         std::fs::set_permissions(&part, Permissions::from_mode(0o400))
             .and_then(|()| std::fs::rename(&part, &path))
             .map_err(|e| local_error(&path, &e))?;
+        let meta = std::fs::metadata(&path).map_err(|e| local_error(&path, &e))?;
+        preview.size = meta.len();
         preview.path = path;
         Ok(preview)
     }
@@ -1311,6 +1338,8 @@ pub struct Preview {
     /// The real local path, for Quick Look or Open With.
     pub path: PathBuf,
     pub size: u64,
+    /// What it holds of the cache's room, whatever it turned out to be.
+    reserved: u64,
     folder: PathBuf,
     inner: Arc<Inner>,
 }
@@ -1322,7 +1351,7 @@ impl Drop for Preview {
             reason = "the preview cache is Monodrive's own, not the user's files"
         )]
         let _ = std::fs::remove_dir_all(&self.folder);
-        self.inner.used.fetch_sub(self.size, Ordering::Relaxed);
+        self.inner.used.fetch_sub(self.reserved, Ordering::Relaxed);
     }
 }
 
