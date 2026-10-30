@@ -3,7 +3,7 @@
 //! What's window-wide (toasts, sheets, the jobs ring, the sidebar) belongs to
 //! `Browser`, which a pane reaches through `PaneEvent`.
 
-use super::drag::{Drag, Spot, Target};
+use super::drag::{Drag, Spot, Target, offers};
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, Eject,
     EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
@@ -2113,7 +2113,7 @@ impl Pane {
                                     })
                                     .when_some(target, |d, target| {
                                         let drag = self.drag.clone();
-                                        d.on_mouse_move(move |_, _, _| drag.offer(target.clone()))
+                                        offers(d, move |_| drag.offer(target.clone()))
                                     })
                                     .child(name)
                                     .when(outlined, |d| {
@@ -2289,11 +2289,7 @@ impl Pane {
                                 this.click_entry(ix, event, window, cx)
                             }))
                             .map(|d| Self::context_target(d, ix, cx))
-                            .when(drops, |d| {
-                                d.on_mouse_move(
-                                    cx.listener(move |this, _, _, _| this.offer_row(ix, id)),
-                                )
-                            })
+                            .when(drops, |d| Self::takes_drops(d, ix, cx))
                             .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
                                 d.relative()
                                     .child(theme::drop_outline().rounded(px(theme::RADIUS_ROW)))
@@ -2421,11 +2417,7 @@ impl Pane {
                             this.click_entry(ix, event, window, cx)
                         }))
                         .map(|d| Self::context_target(d, ix, cx))
-                        .when(drops, |d| {
-                            d.on_mouse_move(
-                                cx.listener(move |this, _, _, _| this.offer_row(ix, id)),
-                            )
-                        })
+                        .when(drops, |d| Self::takes_drops(d, ix, cx))
                         .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
                             d.relative()
                                 .child(theme::drop_outline().rounded(px(theme::RADIUS_ROW)))
@@ -3404,13 +3396,13 @@ impl Render for Pane {
             .child(list)
             .children(self.path_bar(window, cx))
             .when(dropping_here, |d| {
-                d.on_mouse_move(cx.listener(move |this, _, _, _| {
-                    this.drag.offer(Target::Folder {
-                        spot: Spot::Pane(id),
-                        path: this.folder().to_path_buf(),
-                        name: level_name(this.folder()),
-                    });
-                }))
+                let drag = self.drag.clone();
+                let target = Target::Folder {
+                    spot: Spot::Pane(id),
+                    path: self.folder().to_path_buf(),
+                    name: level_name(self.folder()),
+                };
+                offers(d, move |_| drag.offer(target.clone()))
             })
             .when(outlined, |d| {
                 d.child(theme::drop_outline().when(!boxy, |d| {

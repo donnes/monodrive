@@ -13,9 +13,9 @@ use super::pane::{Pane, text_width};
 use crate::file_icons;
 use crate::theme::{self, Elevation, content};
 use gpui::{
-    Context, Div, DragMoveEvent, Entity, EntityId, ExternalDragPayload, ExternalPaths,
-    FileDragPaths, FontWeight, Modifiers, MouseButton, Pixels, Point, Render, Stateful, Window,
-    div, prelude::*, px,
+    App, Context, Div, DragMoveEvent, Entity, EntityId, ExternalDragPayload, ExternalPaths,
+    FileDragPaths, FontWeight, Modifiers, MouseButton, MouseMoveEvent, Pixels, PlatformInput,
+    Point, Render, Stateful, Window, div, prelude::*, px,
 };
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::volumes::{self, Volume};
@@ -201,6 +201,9 @@ struct Session {
     /// What the frame shows, worked out once per target and keys, since
     /// a selection can run to thousands.
     decided: Option<(Target, (bool, bool), Decision)>,
+    /// The next frame comes from something that doesn't move what's under the
+    /// pointer: a move has just looked, or only the keys changed.
+    settled: bool,
 }
 
 #[derive(Default)]
@@ -229,6 +232,7 @@ impl Drag {
             folders,
             target: None,
             decided: None,
+            settled: false,
         });
     }
 
@@ -256,6 +260,7 @@ impl Drag {
         let mut state = self.0.borrow_mut();
         if let Some(session) = state.session.as_mut() {
             session.target = None;
+            session.settled = true;
         }
         state.session.is_some()
     }
@@ -274,18 +279,28 @@ impl Drag {
         self.0.borrow().session.as_ref().is_some_and(|s| s.folders)
     }
 
+    /// What changed needs a frame, and nothing moved under the pointer.
+    fn keep_settled(&self) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut() {
+            session.settled = true;
+        }
+    }
+
     /// Before a frame: ends with GPUI's drag, and works out what it would do.
-    fn settle(&self, dragging: bool, keys: Modifiers, volumes: &[Volume]) {
+    /// Says whether what's under the pointer may have changed without a move,
+    /// as a scroll or a closed tab changes it.
+    fn settle(&self, dragging: bool, keys: Modifiers, volumes: &[Volume]) -> bool {
         let mut state = self.0.borrow_mut();
         if !dragging {
             state.session = None;
         }
         let Some(session) = state.session.as_mut() else {
-            return;
+            return false;
         };
+        let moved_under = !std::mem::take(&mut session.settled);
         let Some(target) = session.target.clone() else {
             session.decided = None;
-            return;
+            return moved_under;
         };
         let pressed = (keys.alt, keys.platform);
         if !session
@@ -298,6 +313,7 @@ impl Drag {
             });
             session.decided = Some((target, pressed, decision));
         }
+        moved_under
     }
 
     /// Reads what the frame shows a drop would do.
@@ -325,15 +341,25 @@ impl Drag {
         .flatten()
     }
 
-    /// The button's up: what to do, worked out once more for the keys held
-    /// and the volumes mounted now. The drag ends either way.
-    fn finish(&self, keys: Modifiers, volumes: &[Volume]) -> Option<Decision> {
+    /// The button came up, and what's under it has just offered itself: what
+    /// the pill showed, as long as that's still what's there. The drag ends
+    /// either way.
+    fn finish(&self) -> Option<Decision> {
         let session = self.0.borrow_mut().session.take()?;
-        let target = session.target?;
-        Some(decide(&session.sources, &target, keys, |a, b| {
-            same_volume(volumes, a, b)
-        }))
+        let (shown, _, decision) = session.decided?;
+        (session.target? == shown).then_some(decision)
     }
+}
+
+/// Makes `element` offer what `offer` does while the pointer's over it: on
+/// each move, for the pill, and at release, to check the pill against what's
+/// on screen.
+pub(super) fn offers<E: InteractiveElement>(element: E, offer: impl Fn(&mut App) + 'static) -> E {
+    let offer = Rc::new(offer);
+    let at_release = offer.clone();
+    element
+        .on_mouse_move(move |_, _, cx| offer(cx))
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| at_release(cx))
 }
 
 /// The icon under the pointer, with a count when there's more than one.
@@ -450,10 +476,23 @@ impl Pane {
         Some(ExternalDragPayload::Files(FileDragPaths::new(files)))
     }
 
+    /// Makes row or cell `ix` offer itself to a drag.
+    pub(super) fn takes_drops(
+        element: Stateful<Div>,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let pane = cx.entity();
+        offers(element, move |cx| {
+            let id = pane.entity_id();
+            pane.read(cx).offer_row(ix, id);
+        })
+    }
+
     /// The pointer's over row `ix`, on the way to a drop: a folder takes it,
     /// and a file in an open folder gives way to that folder. Anything else
     /// offers nothing, so it goes to what's behind the row.
-    pub(super) fn offer_row(&self, ix: usize, id: EntityId) {
+    fn offer_row(&self, ix: usize, id: EntityId) {
         let Some(row) = self.folder_row(ix) else {
             return;
         };
@@ -499,10 +538,15 @@ impl Browser {
                 }
             },
         ))
+        // What's under the pointer offers itself again at release.
+        .capture_any_mouse_up(cx.listener(|this, _, _, _| {
+            this.drag.next_move();
+        }))
         .on_drop::<FileDrag>(cx.listener(|this, _, window, cx| this.drop_files(window, cx)))
         .on_drop::<ExternalPaths>(cx.listener(|this, _, window, cx| this.drop_files(window, cx)))
         .on_modifiers_changed(cx.listener(|this, _, _, cx| {
             if this.drag.active() {
+                this.drag.keep_settled();
                 cx.notify();
             }
         }))
@@ -527,20 +571,33 @@ impl Browser {
         .detach();
     }
 
-    /// Before a frame: the drag's state for what's held and mounted now.
-    pub(super) fn settle_drag(&self, window: &Window, cx: &gpui::App) {
-        self.drag.settle(
-            cx.has_active_drag(),
-            held_keys(window),
-            &self.sidebar.volumes,
-        );
+    /// Before a frame: the drag's state for what's held and mounted now. A
+    /// frame that may have moved things under a resting pointer looks again
+    /// once it's drawn, with a move at the same place, so that frame's listeners
+    /// answer. That move's own frame doesn't look again, so nothing repeats.
+    pub(super) fn settle_drag(&self, window: &Window, cx: &App) {
+        let keys = held_keys(window);
+        let moved_under = self
+            .drag
+            .settle(cx.has_active_drag(), keys, &self.sidebar.volumes);
+        if moved_under {
+            window.on_next_frame(|window, cx| {
+                if cx.has_active_drag() {
+                    let event = MouseMoveEvent {
+                        position: window.mouse_position(),
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: window.modifiers(),
+                    };
+                    window.dispatch_event(PlatformInput::MouseMove(event), cx);
+                }
+            });
+        }
     }
 
     /// The button came up over the window. Nothing has touched the disk until
     /// now; the job checks each item again as it starts.
     fn drop_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let decision = self.drag.finish(held_keys(window), &self.sidebar.volumes);
-        match decision {
+        match self.drag.finish() {
             Some(Decision::Send {
                 paths,
                 into,

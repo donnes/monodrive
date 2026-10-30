@@ -1,7 +1,7 @@
 //! The tabs of a window and the top bar that shows them. A tab holds its
 //! panes; only the active tab's are drawn, listed or told about the disk.
 
-use super::drag::{Spot, Target};
+use super::drag::{Spot, Target, offers};
 use super::pane::{Opening, Pane, Stop};
 use super::{Browser, drag_area, pane_room};
 use crate::preferences::Preferences;
@@ -489,7 +489,7 @@ impl Browser {
             .when(hovered && !alone, |d| d.pr(px(24.)))
             .when_some(target, |d, target| {
                 let drag = self.drag.clone();
-                d.on_mouse_move(move |_, _, _| drag.offer(target.clone()))
+                offers(d, move |_| drag.offer(target.clone()))
             })
             .when(self.drag.outlines(&Spot::Tab(ix)), |d| {
                 d.child(theme::drop_outline().rounded_full())

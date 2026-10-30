@@ -8,8 +8,8 @@ use super::tests::*;
 use super::*;
 use crate::preferences::View;
 use gpui::{
-    ExternalDragPayload, ExternalPaths, FileDropEvent, Modifiers, TestAppContext,
-    VisualTestContext, point,
+    ExternalDragPayload, ExternalPaths, FileDropEvent, Modifiers, ScrollDelta, ScrollWheelEvent,
+    TestAppContext, TouchPhase, VisualTestContext, point,
 };
 
 /// Draws a frame, as the test platform doesn't on its own: what offers a
@@ -361,4 +361,75 @@ fn what_leaves_the_window_is_the_selection_as_paths_with_their_kinds(cx: &mut Te
         [(project.join("docs"), true), (project.join("a.txt"), false)]
     );
     press(cx, "escape");
+}
+
+#[gpui::test]
+fn scrolling_under_a_resting_drag_retargets_it_and_a_stale_target_takes_nothing(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let tall = dir.path().join("tall");
+    for ix in 0..200 {
+        std::fs::create_dir_all(tall.join(format!("f{ix:03}"))).unwrap();
+    }
+    let mut owned = own(cx);
+    let (browser, cx) = browse(&tall, cx);
+    let (source, over) = (row(&browser, 1, cx), row(&browser, 5, cx));
+    let scroll = |down: f32, cx: &mut VisualTestContext| {
+        cx.simulate_event(ScrollWheelEvent {
+            position: over,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-down))),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        draw(cx);
+    };
+    let rows = cx.update(|_, cx| cx.global::<Preferences>().row_size.metrics().0);
+    carry(source, over, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Move f001 to f005");
+    // Released before the pill caught up, with another row under the pointer.
+    scroll(rows * 10., cx);
+    cx.simulate_mouse_up(over, MouseButton::Left, with(""));
+    // At rest, the pill catches up once the frame after the scroll has drawn.
+    scroll(rows * -10., cx);
+    carry(source, over, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Move f001 to f005");
+    scroll(rows * 10., cx);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    draw(cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Move f001 to f015");
+    cx.simulate_mouse_up(over, MouseButton::Left, with(""));
+    finish_job(&mut owned, cx);
+    assert!(tall.join("f015/f001").exists());
+    assert!(!tall.join("f005/f001").exists());
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn closing_a_tab_under_a_drag_takes_nothing_into_what_it_showed(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::create_dir(project.join("docs/sub")).unwrap();
+    let mut owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-t down cmd-down");
+    draw(cx);
+    let tab = cx.debug_bounds("tab-0").unwrap().center();
+    // sub, then inner.md.
+    let (sub, inner) = (row(&browser, 0, cx), row(&browser, 1, cx));
+    carry(inner, tab, "", cx);
+    let name = project.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        says(&browser, cx).unwrap(),
+        format!("Move inner.md to {name}")
+    );
+    browser.update_in(cx, |browser, window, cx| browser.close_tab(0, window, cx));
+    draw(cx);
+    cx.simulate_mouse_up(tab, MouseButton::Left, with(""));
+    // Something for the owner to finish, so what the drop did has landed.
+    carry(inner, sub, "", cx);
+    cx.simulate_mouse_up(sub, MouseButton::Left, with(""));
+    finish_job(&mut owned, cx);
+    assert!(!project.join("inner.md").exists());
+    assert!(project.join("docs/sub/inner.md").exists());
+    release(owned, cx);
 }

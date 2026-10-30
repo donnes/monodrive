@@ -3,7 +3,7 @@
 //! Everything shown is read off the UI thread and read again when a watch
 //! hears a change, so nothing here polls.
 
-use super::drag::{Spot, Target};
+use super::drag::{Spot, Target, offers};
 use super::pane::Stop;
 use super::{
     Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, OpenInNewTab, OpenPlace,
@@ -663,7 +663,7 @@ impl Browser {
         slot.when_some(folder.filter(|_| self.drag.active()), |d, (path, name)| {
             let drag = self.drag.clone();
             let target = Target::Folder { spot, path, name };
-            d.on_mouse_move(move |_, _, _| drag.offer(target.clone()))
+            offers(d, move |_| drag.offer(target.clone()))
         })
         .when(outlined, |d| {
             d.relative().child(
@@ -678,14 +678,13 @@ impl Browser {
     /// pinning at its position; the line shows in the gap under the row above.
     fn pin_edge(&self, at: usize, top: bool) -> gpui::Div {
         let drag = self.drag.clone();
-        div()
+        let edge = div()
             .absolute()
             .left_0()
             .right_0()
             .h(px(PIN_EDGE))
-            .map(|d| if top { d.top_0() } else { d.bottom_0() })
-            .debug_selector(move || format!("pin-edge-{at}-{top}"))
-            .on_mouse_move(move |_, _, _| drag.offer(Target::Pin(at)))
+            .map(|d| if top { d.top_0() } else { d.bottom_0() });
+        offers(edge, move |_| drag.offer(Target::Pin(at)))
     }
 
     /// `slot`, the row at position `at` in Favorites, with its edges while
