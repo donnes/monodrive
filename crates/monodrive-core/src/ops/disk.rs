@@ -30,8 +30,13 @@ pub struct Stamp {
 
 /// The item at `path` itself, not what a link there points to.
 pub fn id(path: &Path) -> Option<FileId> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    Some(FileId {
+    lookup(path).ok()
+}
+
+/// Like `id`, keeping the OS's reason when there's no item.
+pub fn lookup(path: &Path) -> io::Result<FileId> {
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok(FileId {
         dev: meta.dev(),
         ino: meta.ino(),
     })

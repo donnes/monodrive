@@ -666,7 +666,9 @@ impl Engine {
                 }
                 let ids = paths
                     .iter()
-                    .map(|path| existing(path).map(|(id, _)| id))
+                    // Only the item, not a stamp: walking a big folder here
+                    // would hold the engine while the owner waits.
+                    .map(|path| disk::lookup(path).map_err(|e| format!("{}: {e}", path.display())))
                     .collect::<Result<_, _>>()?;
                 Spec {
                     kind,
