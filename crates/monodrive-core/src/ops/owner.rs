@@ -4,6 +4,8 @@
 
 use super::jobs::{self, Shared};
 use super::{Engine, JOURNAL, Job, Origin, Outcome, Paths, Request, Submission};
+use crate::places;
+use crate::user_commands::{self, Run, Runs};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, Permissions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -34,10 +36,27 @@ enum Message {
     Submit(Submission),
     /// Answered with a `Result<Vec<Job>, String>`.
     Jobs,
+    /// Runs the saved command `name` on `paths`. Answered with a
+    /// `Result<u64, String>`: the run's id. Sending the same `id` again
+    /// returns that run instead of starting another.
+    RunCommand {
+        id: String,
+        origin: Origin,
+        name: String,
+        paths: Vec<PathBuf>,
+    },
+    /// Answered with a `Result<Vec<Run>, String>`.
+    Runs,
+    /// Answered with a `Result<(), String>`.
+    CancelRun { run: u64 },
 }
 
 pub struct Owner {
     shared: Arc<Shared>,
+    /// User commands' runs, which aren't file operations: nothing journals
+    /// or undoes them.
+    runs: Arc<Runs>,
+    paths: Paths,
     /// Readable when a job ends.
     woken: UnixStream,
     listener: UnixListener,
@@ -58,7 +77,7 @@ impl Owner {
                 format!("{}: {e}", dir.join(LOCK).display())
             }
         })?;
-        let engine = Engine::open(paths)?;
+        let engine = Engine::open(paths.clone())?;
         let socket = dir.join(SOCKET);
         let fail = |e: io::Error| format!("{}: {e}", socket.display());
         if socket.exists() {
@@ -75,7 +94,9 @@ impl Owner {
         let (woken, wake) = UnixStream::pair().map_err(|e| e.to_string())?;
         woken.set_nonblocking(true).map_err(|e| e.to_string())?;
         Ok(Self {
+            runs: Runs::new(wake.try_clone().ok()),
             shared: Shared::new(engine, Some(wake)),
+            paths,
             woken,
             listener,
             socket,
@@ -90,7 +111,7 @@ impl Owner {
         let mut clients: Vec<BufReader<UnixStream>> = Vec::new();
         let mut served = false;
         loop {
-            let busy = self.shared.lock().busy();
+            let busy = self.shared.lock().busy() || self.runs.busy();
             let timeout = match (clients.is_empty(), served, busy) {
                 (true, true, false) => return Ok(()),
                 (true, false, false) => FIRST_CLIENT_MS,
@@ -158,6 +179,14 @@ impl Owner {
                 serde_json::to_string(&outcome)
             }
             Ok(Message::Jobs) => serde_json::to_string(&Ok::<_, String>(self.shared.lock().jobs())),
+            Ok(Message::RunCommand {
+                id,
+                origin,
+                name,
+                paths,
+            }) => serde_json::to_string(&self.run_command(id, origin, &name, &paths)),
+            Ok(Message::Runs) => serde_json::to_string(&Ok::<_, String>(self.runs.list())),
+            Ok(Message::CancelRun { run }) => serde_json::to_string(&self.runs.cancel(run)),
             Err(e) => serde_json::to_string(&Err::<Outcome, _>(format!(
                 "Monodrive couldn't read the request: {e}"
             ))),
@@ -167,6 +196,33 @@ impl Owner {
         };
         reply.push('\n');
         client.get_mut().write_all(reply.as_bytes()).is_ok()
+    }
+}
+
+impl Owner {
+    /// Starts a run of the command saved as `name`, planned again here from
+    /// what's saved, so nobody runs a definition that isn't.
+    fn run_command(
+        &self,
+        id: String,
+        origin: Origin,
+        name: &str,
+        paths: &[PathBuf],
+    ) -> Result<u64, String> {
+        if matches!(origin, Origin::Agent { .. }) && !super::agents_change_files(&self.paths) {
+            return Err(
+                "Agents can't run commands: Let agents change files is off in Monodrive's Agents settings."
+                    .into(),
+            );
+        }
+        // places.json sits beside settings.json, as `places::Store::user`
+        // puts it.
+        let store = places::Store {
+            places: self.paths.settings.with_file_name("places.json"),
+            recents: self.paths.settings.with_file_name("recents.json"),
+        };
+        let plan = user_commands::preview(&store.command(name)?, paths)?;
+        self.runs.start(id, origin, plan)
     }
 }
 
@@ -301,6 +357,33 @@ impl Client {
     /// Every job still going and the latest finished, newest first.
     pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
         self.ask(&Message::Jobs)
+    }
+
+    /// Runs the saved command `name` on `paths` and returns the run's id at
+    /// once. Nothing it changes can be undone.
+    pub fn run_command(
+        &mut self,
+        origin: Origin,
+        name: &str,
+        paths: Vec<PathBuf>,
+    ) -> Result<u64, String> {
+        self.sent += 1;
+        let id = format!("{}-{}", self.prefix, self.sent);
+        self.ask(&Message::RunCommand {
+            id,
+            origin,
+            name: name.into(),
+            paths,
+        })
+    }
+
+    /// Every command run going and the latest ended, newest first.
+    pub fn runs(&mut self) -> Result<Vec<Run>, String> {
+        self.ask(&Message::Runs)
+    }
+
+    pub fn cancel_run(&mut self, run: u64) -> Result<(), String> {
+        self.ask(&Message::CancelRun { run })
     }
 
     /// The Agents setting, for changes outside the owner, such as Eject.

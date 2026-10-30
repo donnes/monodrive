@@ -254,7 +254,7 @@ fn stop(child: &mut Child, why: String) -> String {
 
 /// Waits for the child `pid` to exit without reaping it, so its pid can't
 /// be reused before `stop` or `wait` reaps it.
-fn exited(pid: libc::id_t) {
+pub(crate) fn exited(pid: libc::id_t) {
     loop {
         // SAFETY: `info` is a valid siginfo_t for waitid to fill.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -266,7 +266,7 @@ fn exited(pid: libc::id_t) {
     }
 }
 
-fn executable(path: &Path) -> bool {
+pub(crate) fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)

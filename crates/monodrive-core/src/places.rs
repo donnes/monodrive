@@ -1,11 +1,13 @@
 //! Places: the sidebar's favorite folders and saved searches, the registered
-//! Git repositories, and the files recently opened through Monodrive. They're
+//! Git repositories, the user's saved commands, and the files recently opened
+//! through Monodrive. They're
 //! Monodrive's own lists, kept beside settings.json rather than in it, because
 //! the window and every MCP server change them and only the window writes
 //! settings.json.
 
 use crate::ops;
 use crate::search::{Query, Scope};
+use crate::user_commands::Definition;
 use crate::volumes::{self, Volume, VolumeId};
 use crate::worktrees::Registration;
 use serde::{Deserialize, Serialize};
@@ -80,6 +82,8 @@ struct Saved {
     searches: Vec<SavedSearch>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     repositories: Vec<Registration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    commands: Vec<Definition>,
 }
 
 impl Favorite {
@@ -325,6 +329,47 @@ impl Store {
             let repo = repos.remove(ix);
             write(&self.places, &saved)?;
             Ok(repo)
+        })
+    }
+
+    /// The saved commands in the order they were saved.
+    pub fn commands(&self) -> Result<Vec<Definition>, String> {
+        Ok(self.saved()?.commands)
+    }
+
+    pub fn command(&self, name: &str) -> Result<Definition, String> {
+        self.commands()?
+            .into_iter()
+            .find(|command| command.name == name)
+            .ok_or_else(|| format!("{name} isn't a saved command."))
+    }
+
+    /// Validates `command` and saves it, replacing the one saved under its
+    /// name where it is, and returns it as saved. Running it is separate.
+    pub fn save_command(&self, command: Definition) -> Result<Definition, String> {
+        let command = command.validated()?;
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            let commands = &mut saved.commands;
+            match commands.iter_mut().find(|known| known.name == command.name) {
+                Some(known) => *known = command.clone(),
+                None => commands.push(command.clone()),
+            }
+            write(&self.places, &saved)
+        })?;
+        Ok(command)
+    }
+
+    pub fn remove_command(&self, name: &str) -> Result<(), String> {
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            let ix = saved
+                .commands
+                .iter()
+                .position(|command| command.name == name)
+                .ok_or_else(|| format!("{name} isn't a saved command."))?;
+            saved.commands.remove(ix);
+            write(&self.places, &saved)
         })
     }
 

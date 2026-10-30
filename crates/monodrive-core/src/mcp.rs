@@ -2,7 +2,7 @@
 //! JSON-RPC message per line. Tools only decode arguments and call one
 //! service method; the behavior lives in `archives`, `catalogs`, `cloud`,
 //! `compare`, `entries`, `index`, `info`, `ops`, `places`, `search`, `sizes`,
-//! `storage`, `volumes` and `worktrees`.
+//! `storage`, `user_commands`, `volumes` and `worktrees`.
 
 use crate::archives::{self, Archive};
 use crate::catalogs::{self, Catalog, Found, Resolved, Unreadable};
@@ -19,6 +19,7 @@ use crate::places::{self, Availability, Place, SavedSearch};
 use crate::search::{Query, Scope};
 use crate::sizes::{self, FolderSize};
 use crate::storage::{self, Cleanup, Duplicates, Match, Report, Stop, Usage};
+use crate::user_commands::{self, Cwd, Definition, Ended, Run, Sources};
 use crate::volumes::{self, Volume, VolumeId};
 use crate::worktrees::{self, Git, Worktree};
 use serde::Deserialize;
@@ -51,7 +52,9 @@ fetches them, and remove_download frees a downloaded copy. catalog_create keeps 
 of a drive's or folder's names, so catalog_search finds them while it's disconnected; catalog_list, \
 catalog_refresh and catalog_forget manage those catalogs. worktrees lists a Git repository's worktrees \
 and worktree_status shows one's changes, without fetching or changing anything; repo_register, repos \
-and repo_forget manage the repositories Monodrive remembers.";
+and repo_forget manage the repositories Monodrive remembers. commands_list shows the commands the user \
+saved, command_preview prints exactly what one would run on paths, and command_run runs it, which \
+command_status follows and command_cancel stops. Only the user saves commands.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
@@ -351,6 +354,23 @@ enum ToolCall {
     },
     RepoForget {
         path: String,
+    },
+    CommandsList {},
+    CommandPreview {
+        name: String,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
+    CommandRun {
+        name: String,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
+    CommandStatus {
+        run: Option<u64>,
+    },
+    CommandCancel {
+        run: u64,
     },
 }
 
@@ -883,6 +903,42 @@ impl Server {
                 .map(|repo| {
                     format!("Forgot {}; the repository is untouched.\n", repo.path.display())
                 }),
+            ToolCall::CommandsList {} => self
+                .places
+                .commands()
+                .map(|commands| commands.iter().map(command_line).collect()),
+            ToolCall::CommandPreview { name, paths } => self
+                .places
+                .command(&name)
+                .and_then(|command| user_commands::preview(&command, &expand(&paths)))
+                .map(|plan| previewed(&plan)),
+            ToolCall::CommandRun { name, paths } => {
+                let origin = Origin::Agent {
+                    client: self.client.clone(),
+                };
+                self.ops
+                    .run_command(origin, &name, expand(&paths))
+                    .map(|run| {
+                        format!(
+                            "run {run} started; command_status follows it. Commands aren't undoable: \
+                            Monodrive can't reverse what one changes.\n"
+                        )
+                    })
+            }
+            ToolCall::CommandStatus { run } => self.ops.runs().and_then(|runs| match run {
+                Some(id) => runs
+                    .iter()
+                    .find(|run| run.id == id)
+                    .map(run_detail)
+                    .ok_or_else(|| format!("No run {id}.")),
+                None => Ok(runs.iter().fold(String::new(), |mut out, run| {
+                    let _ = writeln!(out, "{}", run_summary(run));
+                    out
+                })),
+            }),
+            ToolCall::CommandCancel { run } => self.ops.cancel_run(run).map(|()| {
+                format!("Cancelling run {run}. Commands aren't undoable: what it changed stays.\n")
+            }),
         };
         match text {
             Ok(text) if text.is_empty() => tool_text("No results.", false),
@@ -1537,14 +1593,18 @@ fn bytes(n: u64) -> String {
     }
 }
 
-/// One line: what a job is doing, how far it's got, and who asked.
-fn summary(job: &Job) -> String {
-    let done = job.tasks.iter().filter(|task| task.done.is_some()).count();
-    let by = match &job.origin {
+fn by(origin: &Origin) -> String {
+    match origin {
         Origin::Window => "the window".to_string(),
         Origin::Agent { client: Some(name) } => format!("agent {name}"),
         Origin::Agent { client: None } => "an agent".to_string(),
-    };
+    }
+}
+
+/// One line: what a job is doing, how far it's got, and who asked.
+fn summary(job: &Job) -> String {
+    let done = job.tasks.iter().filter(|task| task.done.is_some()).count();
+    let by = by(&job.origin);
     format!(
         "job {} {} into {}: {}, {done} of {} items, {} of {} bytes, by {by}",
         job.id,
@@ -1565,6 +1625,113 @@ fn describe(job: &Job) -> String {
             Done::To(path) => writeln!(out, "{}", path.display()),
             Done::Skipped(why) | Done::Failed(why) => writeln!(out, "{why}"),
         };
+    }
+    out
+}
+
+/// Arguments as a JSON array, so spaces, quotes and newlines in them read
+/// unambiguously.
+fn argv<'a>(args: impl IntoIterator<Item = &'a std::ffi::OsStr>) -> String {
+    let args: Vec<_> = args.into_iter().map(|arg| arg.to_string_lossy()).collect();
+    serde_json::to_string(&args).unwrap_or_default()
+}
+
+/// A saved command on a line: its name, the program and arguments as
+/// saved, what it takes and where it runs.
+fn command_line(command: &Definition) -> String {
+    let template = argv(
+        std::iter::once(command.program.as_os_str())
+            .chain(command.args.iter().map(std::ffi::OsStr::new)),
+    );
+    let sources = match command.sources {
+        Sources::Files => "files",
+        Sources::Folders => "folders",
+        Sources::Both => "files and folders",
+    };
+    let cwd = match &command.cwd {
+        Cwd::Selection => "the selection's folder".to_string(),
+        Cwd::Home => "home".to_string(),
+        Cwd::Folder(dir) => dir.display().to_string(),
+    };
+    format!(
+        "{}: {template} on {sources}, in {cwd}, timeout {}s\n",
+        command.name, command.timeout_seconds
+    )
+}
+
+/// Each invocation's folder and arguments, exactly as a run would start
+/// them.
+fn previewed(plan: &user_commands::Plan) -> String {
+    let times = match plan.invocations.len() {
+        1 => "once".to_string(),
+        n => format!("{n} times, each"),
+    };
+    let mut out = format!(
+        "{} would run {times} for up to {}s. It isn't undoable.\n",
+        plan.name, plan.timeout_seconds
+    );
+    for invocation in &plan.invocations {
+        let _ = writeln!(out, "cwd {}", invocation.cwd.display());
+        let _ = writeln!(
+            out,
+            "argv {}",
+            argv(invocation.argv.iter().map(|a| a.as_os_str()))
+        );
+    }
+    if !plan.env.is_empty() {
+        let env = serde_json::to_string(&plan.env).unwrap_or_default();
+        let _ = writeln!(out, "env adds {env}");
+    }
+    out
+}
+
+/// One line: a run's command, state, progress, and who started it.
+fn run_summary(run: &Run) -> String {
+    let done = run.progress.iter().filter(|p| p.ended.is_some()).count();
+    format!(
+        "run {} {}: {}, {done} of {} invocations, by {}",
+        run.id,
+        run.plan.name,
+        run.state.label(),
+        run.plan.invocations.len(),
+        by(&run.origin),
+    )
+}
+
+/// The summary, each invocation's end and arguments, then the output.
+fn run_detail(run: &Run) -> String {
+    let mut out = format!("{}\n", run_summary(run));
+    for (i, invocation) in run.plan.invocations.iter().enumerate() {
+        let ended = match run.progress.get(i) {
+            None => "not run".to_string(),
+            Some(progress) => {
+                let how = match &progress.ended {
+                    None => "running".to_string(),
+                    Some(Ended::Exited(code)) => format!("exit {code}"),
+                    Some(Ended::Signaled(signal)) => format!("killed by signal {signal}"),
+                    Some(Ended::TimedOut) => "timed out".to_string(),
+                    Some(Ended::Cancelled) => "cancelled".to_string(),
+                    Some(Ended::Failed(why)) => why.clone(),
+                };
+                format!("{how} after {} ms", progress.millis)
+            }
+        };
+        let args = argv(invocation.argv.iter().map(|a| a.as_os_str()));
+        let _ = writeln!(out, "{ended}: {args}");
+    }
+    let output = &run.output;
+    if output.total == 0 {
+        out.push_str("No output.\n");
+    } else {
+        let _ = writeln!(out, "output, {} bytes:", output.total);
+        out.push_str(&output.head);
+        if output.left_out() > 0 {
+            let _ = write!(out, "\n[{} bytes left out]\n", output.left_out());
+        }
+        out.push_str(&output.tail);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
     }
     out
 }
@@ -2137,7 +2304,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 51] = [
+pub const TOOLS: [Tool; 56] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2715,6 +2882,48 @@ pub const TOOLS: [Tool; 51] = [
     bookmark goes; Git and the files are untouched.",
         input_schema: path_schema,
     },
+    Tool {
+        name: "commands_list",
+        description: "The commands the user saved in Monodrive, a line each: name, program and \
+    arguments as a JSON array, what they run on and where. Only the user saves commands.",
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "command_preview",
+        description: "What command_run would start: each invocation's folder and exact arguments \
+    as a JSON array. {paths} becomes every path, each its own argument; {path} runs once per path. \
+    Runs nothing.",
+        input_schema: command_schema,
+    },
+    Tool {
+        name: "command_run",
+        description: "Run a saved command on paths, never through a shell string. Returns a run \
+    id at once; command_status follows it. Not undoable.",
+        input_schema: command_schema,
+    },
+    Tool {
+        name: "command_status",
+        description: "A command run's state, each invocation's exit and duration, and its output: \
+    the start and end when it printed more than its limit. Without run, one line per recent run.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"run": {"type": "integer"}}
+            })
+        },
+    },
+    Tool {
+        name: "command_cancel",
+        description: "Stop a command run: SIGTERM to the processes it started, then SIGKILL. \
+    What it already changed stays.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"run": {"type": "integer"}},
+                "required": ["run"]
+            })
+        },
+    },
 ];
 
 fn tools() -> Value {
@@ -2795,6 +3004,21 @@ fn rename_schema(skip: bool) -> Value {
         schema["properties"]["skip_problems"] = json!({"type": "boolean", "default": false});
     }
     schema
+}
+
+fn command_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "As commands_list prints it."},
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Absolute; ~ is your home."
+            }
+        },
+        "required": ["name"]
+    })
 }
 
 fn job_schema() -> Value {
@@ -2880,6 +3104,170 @@ mod tests {
 
     fn text(reply: &Value) -> &str {
         reply["result"]["content"][0]["text"].as_str().unwrap()
+    }
+
+    #[test]
+    fn command_tools_list_preview_run_and_cancel_only_what_the_user_saved() {
+        use crate::user_commands::tests::{fifo, script};
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().map(|real| (dir, real)).unwrap();
+        let (_kept, dir) = dir;
+        let paths = ops::Paths {
+            state: dir.join("state"),
+            settings: dir.join("settings.json"),
+            trash: dir.join("Trash"),
+        };
+        let (ready, hold) = (fifo(&dir.join("ready")), fifo(&dir.join("hold")));
+        let wait = script(
+            &dir,
+            "wait",
+            &format!(
+                "echo up > '{}'\nread x < '{}'",
+                ready.display(),
+                hold.display()
+            ),
+        );
+        let (spaced, dashed) = (dir.join("a \"b\".txt"), dir.join("-n"));
+        for file in [&spaced, &dashed] {
+            std::fs::write(file, "").unwrap();
+        }
+        let store = places(&dir);
+        store
+            .save_command(Definition {
+                name: "Wait".into(),
+                program: wait.clone(),
+                args: vec!["--".into(), user_commands::PATHS.into()],
+                cwd: Cwd::Selection,
+                sources: Sources::Files,
+                env: [("MODE".to_string(), "fast".to_string())].into(),
+                timeout_seconds: 30,
+                output_limit: 1 << 10,
+            })
+            .unwrap();
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let mut server = Server::new(ops::Client::new(paths, None), store, catalog_store(&dir));
+
+        let reply = call(&mut server, json!({"name": "commands_list"}));
+        let template = serde_json::to_string(&[wait.to_str().unwrap(), "--", "{paths}"]).unwrap();
+        assert_eq!(
+            text(&reply),
+            format!("Wait: {template} on files, in the selection's folder, timeout 30s\n")
+        );
+
+        let batch = json!({"name": "Wait", "paths": [spaced, dashed]});
+        let reply = call(
+            &mut server,
+            json!({"name": "command_preview", "arguments": batch}),
+        );
+        let args = serde_json::to_string(&[
+            wait.to_str().unwrap(),
+            "--",
+            spaced.to_str().unwrap(),
+            dashed.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            text(&reply),
+            format!(
+                "Wait would run once for up to 30s. It isn't undoable.\ncwd {}\nargv {args}\nenv adds {{\"MODE\":\"fast\"}}\n",
+                dir.display()
+            )
+        );
+
+        for bad in [
+            json!({"name": "command_run", "arguments": {}}),
+            json!({"name": "command_preview", "arguments": {"paths": [spaced]}}),
+            json!({"name": "command_cancel", "arguments": {}}),
+            json!({"name": "command_status", "arguments": {"run": "one"}}),
+            // Agents run what the user saved; no tool saves one.
+            json!({"name": "command_save", "arguments": {"name": "X", "program": "/bin/sh"}}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
+        for (bad, error) in [
+            (
+                json!({"name": "command_preview", "arguments": {"name": "Nope", "paths": [spaced]}}),
+                "Nope isn't a saved command.",
+            ),
+            (
+                json!({"name": "command_run", "arguments": {"name": "Wait", "paths": [dir]}}),
+                "is a folder",
+            ),
+            (
+                json!({"name": "command_status", "arguments": {"run": 9}}),
+                "No run 9.",
+            ),
+        ] {
+            let reply = call(&mut server, bad);
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            assert!(text(&reply).contains(error), "{reply}");
+        }
+
+        let reply = call(
+            &mut server,
+            json!({"name": "command_run", "arguments": batch}),
+        );
+        assert!(text(&reply).starts_with("run 1 started;"), "{reply}");
+        assert!(text(&reply).contains("aren't undoable"), "{reply}");
+        assert_eq!(std::fs::read_to_string(&ready).unwrap(), "up\n");
+        let reply = call(&mut server, json!({"name": "command_status"}));
+        assert_eq!(
+            text(&reply),
+            "run 1 Wait: running, 0 of 1 invocations, by an agent\n"
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "command_cancel", "arguments": {"run": 1}}),
+        );
+        assert!(text(&reply).starts_with("Cancelling run 1."), "{reply}");
+        drop(server);
+        serving.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn command_status_shows_each_invocations_end_and_the_outputs_two_ends() {
+        let invocation = |path: &str| user_commands::Invocation {
+            argv: vec!["/bin/tool".into(), path.into()],
+            cwd: "/tmp".into(),
+        };
+        let run = Run {
+            id: 4,
+            origin: Origin::Window,
+            state: user_commands::RunState::Cancelled,
+            started: 0,
+            plan: user_commands::Plan {
+                name: "Tool".into(),
+                invocations: vec![invocation("/a"), invocation("/b"), invocation("/c")],
+                env: Default::default(),
+                timeout_seconds: 60,
+                output_limit: 1 << 10,
+            },
+            progress: vec![
+                user_commands::Progress {
+                    ended: Some(Ended::Exited(3)),
+                    millis: 12,
+                },
+                user_commands::Progress {
+                    ended: Some(Ended::Cancelled),
+                    millis: 40,
+                },
+            ],
+            output: user_commands::Output {
+                head: "start".into(),
+                tail: "end".into(),
+                total: 100,
+                kept: 8,
+            },
+        };
+        assert_eq!(
+            run_detail(&run),
+            "run 4 Tool: cancelled, 2 of 3 invocations, by the window\n\
+             exit 3 after 12 ms: [\"/bin/tool\",\"/a\"]\n\
+             cancelled after 40 ms: [\"/bin/tool\",\"/b\"]\n\
+             not run: [\"/bin/tool\",\"/c\"]\n\
+             output, 100 bytes:\nstart\n[92 bytes left out]\nend\n"
+        );
     }
 
     #[test]
