@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod ops;
 pub mod paths;
 pub mod places;
+pub mod search;
 pub mod sizes;
 pub mod volumes;
 

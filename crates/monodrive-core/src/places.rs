@@ -1,9 +1,10 @@
-//! Places: the sidebar's favorite folders and the files recently opened
-//! through Monodrive. They're Monodrive's own lists, kept beside
+//! Places: the sidebar's favorite folders and saved searches, and the files
+//! recently opened through Monodrive. They're Monodrive's own lists, kept beside
 //! settings.json rather than in it, because the window and every MCP server
 //! change them and only the window writes settings.json.
 
 use crate::ops;
+use crate::search::{Query, Scope};
 use crate::volumes::{self, Volume, VolumeId};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -15,7 +16,8 @@ pub const RECENTS: usize = 50;
 /// Where the lists are saved.
 #[derive(Clone, Debug)]
 pub struct Store {
-    /// `places.json`: the favorites, and later saved servers.
+    /// `places.json`: the favorites and saved searches, and later saved
+    /// servers.
     pub places: PathBuf,
     /// `recents.json`, newest first.
     pub recents: PathBuf,
@@ -57,11 +59,23 @@ pub struct Place {
     pub availability: Availability,
 }
 
+/// A search kept in the sidebar. Saving one never runs it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedSearch {
+    pub name: String,
+    /// As `Query` prints it.
+    pub query: String,
+    #[serde(default)]
+    pub scope: Scope,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
     /// `None` until the first change, which keeps the defaults until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     favorites: Option<Vec<Favorite>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    searches: Vec<SavedSearch>,
 }
 
 impl Favorite {
@@ -188,6 +202,87 @@ impl Store {
         })
     }
 
+    /// The saved searches in the sidebar's order.
+    pub fn searches(&self) -> Result<Vec<SavedSearch>, String> {
+        Ok(self.saved()?.searches)
+    }
+
+    /// Saves `search` at position `at`, or last, and returns it as saved,
+    /// its query reprinted. One already saved under its name is replaced
+    /// where it is, or moved to `at`.
+    pub fn save_search(
+        &self,
+        search: SavedSearch,
+        at: Option<usize>,
+    ) -> Result<SavedSearch, String> {
+        let name = named(&search.name)?;
+        let query = Query::parse(&search.query)?.to_string();
+        if query.is_empty() {
+            return Err(format!("{name}: type something to search for."));
+        }
+        if let Scope::Folder(folder) = &search.scope
+            && !folder.is_absolute()
+        {
+            return Err(format!("{}: give an absolute path.", folder.display()));
+        }
+        let search = SavedSearch {
+            name,
+            query,
+            scope: search.scope,
+        };
+        self.change_searches(|searches| {
+            match searches.iter().position(|s| s.name == search.name) {
+                Some(ix) if at.is_none() => searches[ix] = search.clone(),
+                found => {
+                    if let Some(ix) = found {
+                        searches.remove(ix);
+                    }
+                    let at = at.unwrap_or(searches.len()).min(searches.len());
+                    searches.insert(at, search.clone());
+                }
+            }
+            Ok(())
+        })?;
+        Ok(search)
+    }
+
+    pub fn rename_search(&self, name: &str, to: &str) -> Result<(), String> {
+        let to = named(to)?;
+        self.change_searches(|searches| {
+            if to != name && searches.iter().any(|s| s.name == to) {
+                return Err(format!("{to} is already a saved search."));
+            }
+            let search = searches
+                .iter_mut()
+                .find(|s| s.name == name)
+                .ok_or_else(|| format!("{name} isn't a saved search."))?;
+            search.name = to;
+            Ok(())
+        })
+    }
+
+    pub fn remove_search(&self, name: &str) -> Result<(), String> {
+        self.change_searches(|searches| {
+            let ix = searches
+                .iter()
+                .position(|s| s.name == name)
+                .ok_or_else(|| format!("{name} isn't a saved search."))?;
+            searches.remove(ix);
+            Ok(())
+        })
+    }
+
+    fn change_searches(
+        &self,
+        change: impl FnOnce(&mut Vec<SavedSearch>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            change(&mut saved.searches)?;
+            write(&self.places, &saved)
+        })
+    }
+
     /// Files opened through Monodrive, newest first. A file that doesn't
     /// read is an error, so `opened` never replaces it.
     pub fn recents(&self) -> Result<Vec<PathBuf>, String> {
@@ -239,6 +334,15 @@ impl Store {
         saved.favorites = Some(favorites);
         write(&self.places, &saved)
     }
+}
+
+/// A saved search's name, trimmed.
+fn named(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name the search.".into());
+    }
+    Ok(name.into())
 }
 
 /// Today's sidebar: Home, Desktop, Documents, Downloads and Applications.
@@ -462,6 +566,139 @@ mod tests {
         let pinned = paths(&store, &root);
         assert!(folders.iter().all(|f| pinned.contains(f)), "{pinned:?}");
         assert_eq!(store.recents().unwrap().len(), folders.len());
+    }
+
+    #[test]
+    fn saved_searches_save_edit_move_rename_and_remove_beside_the_favorites() {
+        let (_dir, dir) = real_tempdir();
+        let (store, root) = (
+            store(&dir),
+            [volume("Macintosh HD", "/".as_ref(), Some("R"))],
+        );
+        assert_eq!(store.searches(), Ok(Vec::new()));
+        let search = |name: &str, query: &str, scope: Scope| SavedSearch {
+            name: name.into(),
+            query: query.into(),
+            scope,
+        };
+        let pictures = Scope::Folder("/Users/me/Pictures".into());
+        let saved = store
+            .save_search(
+                search(" Big photos ", "kind:image  size:>1MB", pictures.clone()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            saved,
+            search("Big photos", "kind:image size:>1mb", pictures.clone())
+        );
+        store
+            .save_search(search("Recent", "modified:7d", Scope::Everywhere), None)
+            .unwrap();
+        store
+            .save_search(search("Code", "kind:code", Scope::Everywhere), Some(0))
+            .unwrap();
+        let names = |store: &Store| -> Vec<String> {
+            store
+                .searches()
+                .unwrap()
+                .into_iter()
+                .map(|s| s.name)
+                .collect()
+        };
+        assert_eq!(names(&store), ["Code", "Big photos", "Recent"]);
+
+        // Saving under a name edits that search where it is; `at` moves it.
+        store
+            .save_search(search("Big photos", "kind:image size:>5mb", pictures), None)
+            .unwrap();
+        assert_eq!(names(&store), ["Code", "Big photos", "Recent"]);
+        assert_eq!(store.searches().unwrap()[1].query, "kind:image size:>5mb");
+        let recent = store.searches().unwrap().remove(2);
+        store.save_search(recent, Some(0)).unwrap();
+        assert_eq!(names(&store), ["Recent", "Code", "Big photos"]);
+
+        store.rename_search("Code", "Source").unwrap();
+        assert_eq!(names(&store), ["Recent", "Source", "Big photos"]);
+        for (result, error) in [
+            (
+                store.rename_search("Source", "Recent"),
+                "Recent is already a saved search.",
+            ),
+            (
+                store.rename_search("Code", "Other"),
+                "Code isn't a saved search.",
+            ),
+            (store.rename_search("Source", "  "), "Name the search."),
+            (store.remove_search("Code"), "Code isn't a saved search."),
+        ] {
+            assert_eq!(result, Err(error.into()));
+        }
+        for (bad, error) in [
+            (
+                search("X", "size:big", Scope::Everywhere),
+                "size:big: give a size",
+            ),
+            (search("X", "   ", Scope::Everywhere), "X: type something"),
+            (search("", "a", Scope::Everywhere), "Name the search."),
+            (
+                search("X", "a", Scope::Folder("rel".into())),
+                "rel: give an absolute",
+            ),
+        ] {
+            let got = store.save_search(bad, None).unwrap_err();
+            assert!(got.starts_with(error), "{got}");
+        }
+
+        // Favorites and searches share places.json and keep each other.
+        let work = dir.join("Work");
+        std::fs::create_dir(&work).unwrap();
+        store.pin(&work, None, &root).unwrap();
+        store.remove_search("Recent").unwrap();
+        assert_eq!(paths(&store, &root).last(), Some(&work));
+        assert_eq!(names(&store), ["Source", "Big photos"]);
+        let json = std::fs::read_to_string(&store.places).unwrap();
+        assert!(
+            json.contains("\"folder\": \"/Users/me/Pictures\""),
+            "{json}"
+        );
+        assert!(json.contains("\"scope\": \"everywhere\""), "{json}");
+
+        // A list that doesn't read is never replaced by a change.
+        std::fs::write(&store.places, "{").unwrap();
+        assert!(store.searches().is_err());
+        assert!(store.remove_search("Source").is_err());
+        assert_eq!(std::fs::read_to_string(&store.places).unwrap(), "{");
+    }
+
+    #[test]
+    fn concurrent_saved_searches_and_pins_all_survive() {
+        let (_dir, dir) = real_tempdir();
+        let root = [volume("Macintosh HD", "/".as_ref(), Some("R"))];
+        let folders: Vec<PathBuf> = (0..20).map(|n| dir.join(format!("f{n}"))).collect();
+        for folder in &folders {
+            std::fs::create_dir(folder).unwrap();
+        }
+        std::thread::scope(|scope| {
+            for (t, chunk) in folders.chunks(4).enumerate() {
+                let (store, root) = (store(&dir), &root);
+                scope.spawn(move || {
+                    for (n, folder) in chunk.iter().enumerate() {
+                        let search = SavedSearch {
+                            name: format!("s{t}-{n}"),
+                            query: format!("ext:rs in:{}", folder.display()),
+                            scope: Scope::Everywhere,
+                        };
+                        store.save_search(search, None).unwrap();
+                        store.pin(folder, None, root).unwrap();
+                    }
+                });
+            }
+        });
+        let store = store(&dir);
+        assert_eq!(store.searches().unwrap().len(), folders.len());
+        let pinned = paths(&store, &root);
+        assert!(folders.iter().all(|f| pinned.contains(f)), "{pinned:?}");
     }
 
     #[test]

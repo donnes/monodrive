@@ -4,10 +4,13 @@
 //! `~/Library/Application Support/FSearch`.
 
 use crate::entries::{Entry, Kind};
+use crate::search::{self, Query, Scope, Term};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -22,7 +25,10 @@ pub enum GrepMode {
 #[derive(Clone, Debug, Serialize)]
 pub struct LineMatch {
     pub line: usize,
+    /// The line's first 400 bytes, trailing space trimmed.
     pub text: String,
+    /// Where the matches are in `text`, in bytes.
+    pub matches: Vec<Range<usize>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -34,8 +40,28 @@ pub struct GrepFile {
 #[derive(Clone, Debug, Serialize)]
 pub struct GrepResults {
     pub files: Vec<GrepFile>,
-    /// False when the time budget ran out before every candidate was read.
+    /// False when the time budget ran out before every candidate was read,
+    /// or `Caps::lines` left matches out.
     pub complete: bool,
+}
+
+/// How much a content search returns.
+#[derive(Clone, Copy, Debug)]
+pub struct Caps {
+    pub files: usize,
+    pub per_file: usize,
+    /// Matched lines in all.
+    pub lines: usize,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            files: 50,
+            per_file: 5,
+            lines: 250,
+        }
+    }
 }
 
 pub struct Index {
@@ -208,10 +234,14 @@ impl Index {
         }
     }
 
-    /// Name search in fsearch's query language: fuzzy words plus filters such
-    /// as `ext:rs`, `in:~/Work`, `type:image`, `size:>5mb` and `mtime:<7d`.
+    /// Name search for what was typed, everywhere. See `search`.
     pub fn find(&self, query: &str, limit: usize) -> Result<Vec<Entry>, String> {
-        let mut q = fsearch::Query::parse(query, self.engine.home())?;
+        self.search(&Query::parse(query)?, &Scope::Everywhere, limit)
+    }
+
+    /// Name search, best matches first.
+    pub fn search(&self, query: &Query, scope: &Scope, limit: usize) -> Result<Vec<Entry>, String> {
+        let mut q = fsearch_query(query, scope, self.engine.home(), now())?;
         q.limit = limit;
         Ok(self
             .engine
@@ -236,50 +266,281 @@ impl Index {
     }
 
     /// Content search, smart-case, ranked by how likely each file is wanted.
+    /// `filters` picks the files read, with the same meaning as in `search`.
     pub fn grep(
         &self,
         pattern: &str,
         mode: GrepMode,
-        within: Option<&Path>,
-        limit: usize,
+        filters: &Query,
+        scope: &Scope,
+        caps: Caps,
     ) -> Result<GrepResults, String> {
-        let home = self.engine.home();
-        let mut q = fsearch::Query::parse("", home)?;
-        q.limit = limit;
-        if let Some(dir) = within {
-            q.filter("in", &dir.to_string_lossy(), home)?;
-        }
+        let mut q = fsearch_query(filters, scope, self.engine.home(), now())?;
+        q.limit = caps.files;
         let mode = match mode {
             GrepMode::Literal => fsearch::GrepMode::Literal,
             GrepMode::Regex => fsearch::GrepMode::Regex,
             GrepMode::Symbol => fsearch::GrepMode::Symbol,
         };
-        let grep = fsearch::Grep::new(pattern, mode)?;
+        let mut grep = fsearch::Grep::new(pattern, mode)?;
+        grep.max_per_file = caps.per_file;
         let (result, _indexed) = self.engine.grep(&q, &grep)?;
-        Ok(GrepResults {
-            files: result
-                .files
-                .into_iter()
-                .map(|file| GrepFile {
-                    path: <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(
-                        file.path,
-                    )
-                    .into(),
-                    lines: file
-                        .lines
-                        .into_iter()
-                        .map(|(line, text)| LineMatch { line, text })
-                        .collect(),
-                })
-                .collect(),
-            complete: result.complete,
+        Ok(bounded(result, caps.lines))
+    }
+}
+
+/// `query` as fsearch's own at `now`, in seconds from the epoch: the words
+/// through fsearch's parser, and each filter onto the field fsearch tests.
+fn fsearch_query(
+    query: &Query,
+    scope: &Scope,
+    home: &str,
+    now: i64,
+) -> Result<fsearch::Query, String> {
+    query.check()?;
+    let words: Vec<String> = query
+        .terms
+        .iter()
+        .filter(|term| matches!(term, Term::Word(_)))
+        .map(Term::to_string)
+        .collect();
+    let mut q = fsearch::Query::parse(&words.join(" "), home)?;
+    let mut exts: Option<Vec<Vec<u8>>> = None;
+    for term in &query.terms {
+        match term {
+            Term::Word(_) | Term::In(_) => {}
+            Term::Kind(kinds) => {
+                for kind in kinds {
+                    let (key, value) = match kind {
+                        search::Kind::Folder => ("kind", "dir"),
+                        search::Kind::File => ("kind", "file"),
+                        search::Kind::Link => ("kind", "link"),
+                        search::Kind::Document => ("type", "doc"),
+                        group => ("type", group.name()),
+                    };
+                    q.filter(key, value, home)?;
+                }
+            }
+            Term::Ext(list) => exts
+                .get_or_insert_default()
+                .extend(list.iter().map(|ext| ext.as_bytes().to_vec())),
+            Term::Size(size) => {
+                let (first, last) = size.bytes();
+                let bytes = |n: i64| u64::try_from(n).unwrap_or(0);
+                q.size = (bytes(first), bytes(last));
+            }
+            Term::Modified(modified) => {
+                let (first, last) = modified.seconds(now);
+                let second = |n: i64| u32::try_from(n.clamp(0, u32::MAX.into())).unwrap_or(0);
+                q.mtime = (second(first), second(last));
+            }
+        }
+    }
+    // An extension narrows what its kinds take.
+    if let Some(exts) = exts {
+        if q.exts.is_empty() {
+            q.exts = exts;
+        } else {
+            q.exts.retain(|ext| exts.contains(ext));
+            if q.exts.is_empty() {
+                // fsearch's own way to match nothing: no name has a '/'.
+                q.exts.push(b"/".to_vec());
+            }
+        }
+    }
+    if let Some(folder) = query.folder(scope)? {
+        q.filter("in", &folder.to_string_lossy(), home)?;
+    }
+    Ok(q)
+}
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+/// fsearch's matches cut to `lines` in all.
+fn bounded(result: fsearch::GrepResult, lines: usize) -> GrepResults {
+    let found: usize = result.files.iter().map(|file| file.lines.len()).sum();
+    let mut left = lines;
+    let files = result
+        .files
+        .into_iter()
+        .map_while(|file| {
+            let take = file.lines.len().min(left);
+            left -= take;
+            let mut hits = file.hits.into_iter();
+            (take > 0).then(|| GrepFile {
+                path: <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(file.path)
+                    .into(),
+                lines: file
+                    .lines
+                    .into_iter()
+                    .take(take)
+                    .map(|(line, text)| LineMatch {
+                        line,
+                        text,
+                        matches: hits
+                            .next()
+                            .map(|hit| hit.ranges.into_iter().map(|(a, b)| a..b).collect())
+                            .unwrap_or_default(),
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+    GrepResults {
+        files,
+        complete: result.complete && found <= lines,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use fsearch::walk::{KIND_DIR, KIND_FILE, KIND_LINK};
+
+    const NOW: i64 = 1_800_000_000;
+
+    /// Whether fsearch's own matcher takes an entry for `text` in `scope`.
+    fn takes(text: &str, scope: &Scope, (path, kind, size, mtime): (&str, u8, u64, i64)) -> bool {
+        let home = std::env::var("HOME").unwrap();
+        let q = fsearch_query(&Query::parse(text).unwrap(), scope, &home, NOW).unwrap();
+        let mtime = u32::try_from(mtime).unwrap();
+        q.match_path(path.as_bytes(), kind, size, mtime).is_some()
+    }
+
+    fn file(path: &str) -> (&str, u8, u64, i64) {
+        (path, KIND_FILE, 1000, NOW)
+    }
+
+    #[test]
+    fn kinds_map_onto_fsearchs_types_and_an_extension_narrows_them() {
+        let all = &Scope::Everywhere;
+        let (png, jpg, mov, rs) = (
+            file("/f/a.png"),
+            file("/f/a.JPG"),
+            file("/f/a.mov"),
+            file("/f/a.rs"),
+        );
+        assert!(takes("kind:image", all, png) && takes("kind:image", all, jpg));
+        assert!(!takes("kind:image", all, rs) && !takes("kind:image", all, mov));
+        assert!(takes("kind:image,video", all, mov));
+        assert!(takes("kind:document", all, file("/f/report.pdf")));
+        assert!(takes("kind:image ext:png", all, png));
+        assert!(!takes("kind:image ext:png", all, jpg));
+        assert!(takes("ext:rs ext:toml", all, rs));
+        for nothing in [png, rs] {
+            assert!(!takes("kind:image ext:rs", all, nothing));
+        }
+
+        let folder = ("/f/a.png", KIND_DIR, 0, NOW);
+        assert!(takes("kind:folder", all, folder) && !takes("kind:folder", all, png));
+        assert!(takes("kind:file", all, png) && !takes("kind:file", all, folder));
+        assert!(takes("kind:link", all, ("/f/l", KIND_LINK, 0, NOW)));
+        for app in [KIND_DIR, KIND_LINK] {
+            assert!(takes(
+                "kind:app",
+                all,
+                ("/Applications/Safari.app", app, 0, NOW)
+            ));
+        }
+        assert!(!takes("kind:app", all, file("/f/Safari.app")));
+        // Words still go to fsearch.
+        assert!(takes("report kind:document", all, file("/f/report.pdf")));
+        assert!(!takes("report kind:document", all, file("/f/notes.pdf")));
+        assert!(!takes("!report kind:document", all, file("/f/report.pdf")));
+    }
+
+    #[test]
+    fn size_and_modified_bounds_reach_fsearch_exactly() {
+        let all = &Scope::Everywhere;
+        let sized = |size| ("/f/a.bin", KIND_FILE, size, NOW);
+        assert!(takes("size:>1mb", all, sized(1_000_001)));
+        assert!(!takes("size:>1mb", all, sized(1_000_000)));
+        assert!(takes("size:>=1mb", all, sized(1_000_000)));
+        assert!(takes("size:1kb..2kb", all, sized(2000)));
+        assert!(!takes("size:1kb..2kb", all, sized(2001)));
+        assert!(!takes("size:<1kb", all, sized(1000)));
+
+        let aged = |seconds| ("/f/a.txt", KIND_FILE, 1, NOW - seconds);
+        assert!(takes("modified:7d", all, aged(7 * 86_400)));
+        assert!(!takes("modified:7d", all, aged(7 * 86_400 + 1)));
+        assert!(takes("modified:>7d", all, aged(8 * 86_400)));
+        assert!(!takes("modified:>7d", all, aged(86_400)));
+        let first = |text: &str| match &Query::parse(text).unwrap().terms[0] {
+            Term::Modified(modified) => modified.seconds(NOW),
+            other => panic!("{other:?}"),
+        };
+        let (midnight, _) = first("modified:today");
+        assert!(takes("modified:today", all, aged(NOW - midnight)));
+        assert!(!takes("modified:today", all, aged(NOW - midnight + 1)));
+        assert!(takes("modified:yesterday", all, aged(NOW - midnight + 1)));
+        let (_, last) = first("modified:<2026-01-01");
+        assert!(takes("modified:<2026-01-01", all, aged(NOW - last)));
+        assert!(!takes("modified:<2026-01-01", all, aged(NOW - last - 1)));
+    }
+
+    #[test]
+    fn a_folder_scope_takes_what_is_under_it_and_in_overrides_it() {
+        let work = Scope::Folder("/nonexistent/Work".into());
+        assert!(takes("", &work, file("/nonexistent/Work/a.txt")));
+        assert!(takes("", &work, file("/nonexistent/Work/deep/down/a.txt")));
+        assert!(!takes("", &work, file("/nonexistent/Workshop/a.txt")));
+        assert!(!takes("", &work, ("/nonexistent/Work", KIND_DIR, 0, NOW)));
+        assert!(!takes("", &work, file("/elsewhere/a.txt")));
+        assert!(takes("", &Scope::Everywhere, file("/elsewhere/a.txt")));
+        assert!(takes("in:src", &work, file("/nonexistent/Work/src/a.rs")));
+        assert!(!takes("in:src", &work, file("/nonexistent/Work/a.rs")));
+        assert!(takes("in:/elsewhere", &work, file("/elsewhere/a.txt")));
+        let home = std::env::var("HOME").unwrap();
+        assert!(
+            fsearch_query(
+                &Query::parse("in:src").unwrap(),
+                &Scope::Everywhere,
+                &home,
+                NOW
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn content_matches_stop_at_the_cap_on_lines_in_all() {
+        let file = |path: &str, lines: usize| fsearch::FileMatches {
+            path: path.as_bytes().to_vec(),
+            lines: (1..=lines).map(|n| (n, format!("line {n}"))).collect(),
+            hits: (0..lines)
+                .map(|_| fsearch::Hit {
+                    ranges: vec![(0, 4)],
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        let result = || fsearch::GrepResult {
+            files: vec![file("/a", 3), file("/b", 3), file("/c", 1)],
+            complete: true,
+            ..Default::default()
+        };
+        let cut = bounded(result(), 4);
+        let shape: Vec<(String, usize)> = cut
+            .files
+            .iter()
+            .map(|f| (f.path.display().to_string(), f.lines.len()))
+            .collect();
+        assert_eq!(shape, [("/a".into(), 3), ("/b".into(), 1)]);
+        assert_eq!(cut.files[1].lines[0].text, "line 1");
+        assert_eq!(
+            cut.files[1].lines[0].matches,
+            vec![Range { start: 0, end: 4 }]
+        );
+        assert!(!cut.complete);
+        assert!(bounded(result(), 7).complete);
+    }
 
     #[test]
     fn listing_fills_up_to_but_not_past_almost_full() {

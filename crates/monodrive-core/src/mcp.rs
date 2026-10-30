@@ -1,14 +1,15 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
 //! service method; the behavior lives in `entries`, `index`, `info`, `ops`,
-//! `places`, `sizes` and `volumes`.
+//! `places`, `search`, `sizes` and `volumes`.
 
 use crate::entries::{self, Kind};
 use crate::expand_home;
-use crate::index::{self, GrepMode, Index, Status};
+use crate::index::{self, Caps, GrepMode, Index, Status};
 use crate::info::{self, Info};
 use crate::ops::{self, Conflict, Done, Job, Origin, Request};
-use crate::places::{self, Availability, Place};
+use crate::places::{self, Availability, Place, SavedSearch};
+use crate::search::{Query, Scope};
 use crate::sizes::{self, FolderSize};
 use crate::volumes::{self, Volume, VolumeId};
 use serde::Deserialize;
@@ -28,7 +29,8 @@ by name, grep to search inside files, and list_dir to see one folder. index_stat
 whether the index is ready. stat describes items, and folder_size adds up a folder. \
 trash, put_back, rename, create_folder, create_folder_with, create_file, duplicate, undo \
 and redo change files through the same undo history as the Monodrive window. \
-list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them.";
+list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them. \
+list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
@@ -79,6 +81,8 @@ enum ToolCall {
         #[serde(default)]
         mode: GrepMode,
         path: Option<String>,
+        #[serde(default)]
+        filters: String,
         #[serde(default = "default_limit")]
         limit: usize,
     },
@@ -160,6 +164,20 @@ enum ToolCall {
     Eject {
         path: String,
     },
+    ListSearches {},
+    SaveSearch {
+        name: String,
+        query: String,
+        path: Option<String>,
+        at: Option<usize>,
+    },
+    RenameSearch {
+        name: String,
+        to: String,
+    },
+    RemoveSearch {
+        name: String,
+    },
 }
 
 fn folders_first() -> bool {
@@ -223,9 +241,8 @@ impl Server {
 
     fn call(&mut self, call: ToolCall) -> Value {
         let text = match call {
-            ToolCall::FindFiles { query, limit } => self
-                .index()
-                .and_then(|index| index.find(&query, limit))
+            ToolCall::FindFiles { query, limit } => Query::parse(&query)
+                .and_then(|query| self.index()?.search(&query, &Scope::Everywhere, limit))
                 .map(|hits| {
                     hits.iter().fold(String::new(), |mut out, hit| {
                         let _ = writeln!(out, "{}{}", hit.path.display(), suffix(hit.kind));
@@ -236,11 +253,17 @@ impl Server {
                 pattern,
                 mode,
                 path,
+                filters,
                 limit,
             } => {
-                let within = path.as_deref().map(expand_home);
-                self.index()
-                    .and_then(|index| index.grep(&pattern, mode, within.as_deref(), limit))
+                let scope =
+                    path.map_or(Scope::Everywhere, |path| Scope::Folder(expand_home(&path)));
+                let caps = Caps {
+                    files: limit,
+                    ..Caps::default()
+                };
+                Query::parse(&filters)
+                    .and_then(|filters| self.index()?.grep(&pattern, mode, &filters, &scope, caps))
                     .map(|found| {
                         let mut out = String::new();
                         for file in &found.files {
@@ -250,7 +273,9 @@ impl Server {
                             }
                         }
                         if !found.complete {
-                            out.push_str("(search stopped early; narrow it with path)\n");
+                            out.push_str(
+                                "(search stopped early; narrow it with path or filters)\n",
+                            );
                         }
                         out
                     })
@@ -391,6 +416,36 @@ impl Server {
                 };
                 volumes::eject(&expand_home(&path), &origin, &mut self.ops).map(|done| done + "\n")
             }
+            ToolCall::ListSearches {} => self.places.searches().map(|searches| {
+                if searches.is_empty() {
+                    return "No saved searches.\n".into();
+                }
+                searches.iter().fold(String::new(), |mut out, search| {
+                    let _ = writeln!(out, "{}", saved_search(search));
+                    out
+                })
+            }),
+            ToolCall::SaveSearch {
+                name,
+                query,
+                path,
+                at,
+            } => {
+                let scope =
+                    path.map_or(Scope::Everywhere, |path| Scope::Folder(expand_home(&path)));
+                let search = SavedSearch { name, query, scope };
+                self.places
+                    .save_search(search, at)
+                    .map(|saved| format!("{}\n", saved_search(&saved)))
+            }
+            ToolCall::RenameSearch { name, to } => self
+                .places
+                .rename_search(&name, &to)
+                .map(|()| format!("Renamed {name} to {}.\n", to.trim())),
+            ToolCall::RemoveSearch { name } => self
+                .places
+                .remove_search(&name)
+                .map(|()| format!("Removed the saved search {name}.\n")),
         };
         match text {
             Ok(text) if text.is_empty() => tool_text("No results.", false),
@@ -565,6 +620,21 @@ fn utc(time: SystemTime) -> String {
     )
 }
 
+/// `name: query`, and the folder it searches when it has one.
+fn saved_search(search: &SavedSearch) -> String {
+    match &search.scope {
+        Scope::Everywhere => format!("{}: {}", search.name, search.query),
+        Scope::Folder(folder) => {
+            format!(
+                "{}: {} (in {})",
+                search.name,
+                search.query,
+                folder.display()
+            )
+        }
+    }
+}
+
 /// Favorites, then volumes: one path a line, with what's worth knowing
 /// about it in brackets.
 fn list_places(places: &[Place], volumes: &[Volume]) -> String {
@@ -677,11 +747,13 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 24] = [
+pub const TOOLS: [Tool; 28] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
-    Filters go inline: ext:rs, in:~/Work, type:image, size:>5mb, mtime:<7d, src/**/*.ts, !node_modules/. \
+    Filters go inline: kind:image (or video, audio, document, code, archive, font, app, folder, file, \
+    link), ext:rs, size:>5mb or 1mb..10mb, modified:7d, >1y, today or >=2026-01-01, in:~/Work, globs \
+    such as src/**/*.ts, and !node_modules/. Repeated kind: and ext: widen; other filters narrow. \
     Best matches first.",
         input_schema: || {
             json!({
@@ -697,7 +769,8 @@ pub const TOOLS: [Tool; 24] = [
     Tool {
         name: "grep",
         description: "Search inside files with the content index. Smart case. mode is literal (default), \
-    regex, or symbol (where a name is defined). Pass path to search one folder.",
+    regex, or symbol (where a name is defined). Pass path to search one folder, and filters to pick \
+    files with find_files syntax. Prints path:line: text, at most 5 lines a file.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -705,6 +778,7 @@ pub const TOOLS: [Tool; 24] = [
                     "pattern": {"type": "string"},
                     "mode": {"type": "string", "enum": ["literal", "regex", "symbol"], "default": "literal"},
                     "path": {"type": "string", "description": "Folder to search in; ~ is your home."},
+                    "filters": {"type": "string", "description": "Which files to read, such as kind:code ext:rs size:<1mb modified:7d."},
                     "limit": {"type": "integer", "minimum": 1, "default": 50, "description": "Most files to return."}
                 },
                 "required": ["pattern"]
@@ -904,6 +978,51 @@ pub const TOOLS: [Tool; 24] = [
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "Where it's mounted, as list_places prints it."}},
                 "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "list_searches",
+        description: "The Monodrive sidebar's saved searches in order, one a line: name: query, \
+    then (in folder) when it searches one folder. Runs none of them.",
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "save_search",
+        description: "Save a search in the sidebar, in find_files syntax, without running it. \
+    Saving under a taken name replaces that search; at moves it (0 is first). Prints it as saved.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "query": {"type": "string", "description": "Such as kind:image size:>1mb."},
+                    "path": {"type": "string", "description": "Folder it searches; everywhere by default. ~ is your home."},
+                    "at": {"type": "integer", "minimum": 0, "description": "Position; last by default."}
+                },
+                "required": ["name", "query"]
+            })
+        },
+    },
+    Tool {
+        name: "rename_search",
+        description: "Rename a saved search.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "to": {"type": "string"}},
+                "required": ["name", "to"]
+            })
+        },
+    },
+    Tool {
+        name: "remove_search",
+        description: "Remove a saved search from the sidebar. Changes no files.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"]
             })
         },
     },
@@ -1370,6 +1489,78 @@ mod tests {
             assert_eq!(reply["result"]["isError"], true);
             assert!(text(&reply).ends_with(refusal), "{reply}");
         }
+    }
+
+    #[test]
+    fn a_bad_filter_is_a_tool_error_that_never_starts_the_index() {
+        let mut server = server();
+        for (call_args, error) in [
+            (
+                json!({"name": "find_files", "arguments": {"query": "cat kind:bogus"}}),
+                "kind:bogus: kinds are image, video",
+            ),
+            (
+                json!({"name": "grep", "arguments": {"pattern": "TODO", "filters": "size:big"}}),
+                "size:big: give a size",
+            ),
+        ] {
+            let reply = call(&mut server, call_args);
+            assert_eq!(reply["result"]["isError"], true);
+            assert!(text(&reply).starts_with(error), "{reply}");
+        }
+        assert!(server.index.is_none());
+    }
+
+    #[test]
+    fn search_tools_save_list_rename_and_remove_without_searching() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = server();
+        server.places = places(dir.path());
+        let home = std::env::var("HOME").unwrap();
+        let reply = call(&mut server, json!({"name": "list_searches"}));
+        assert_eq!(text(&reply), "No saved searches.\n");
+        for (args, printed) in [
+            (
+                json!({"name": "Photos", "query": "kind:image  size:>1MB", "path": "~/Pictures"}),
+                format!("Photos: kind:image size:>1mb (in {home}/Pictures)\n"),
+            ),
+            (
+                json!({"name": "Recent", "query": "modified:<7d", "at": 0}),
+                "Recent: modified:7d\n".into(),
+            ),
+        ] {
+            let reply = call(
+                &mut server,
+                json!({"name": "save_search", "arguments": args}),
+            );
+            assert_eq!(text(&reply), printed);
+        }
+        let reply = call(
+            &mut server,
+            json!({"name": "rename_search", "arguments": {"name": "Recent", "to": "This week"}}),
+        );
+        assert_eq!(text(&reply), "Renamed Recent to This week.\n");
+        let reply = call(&mut server, json!({"name": "list_searches"}));
+        assert_eq!(
+            text(&reply),
+            format!("This week: modified:7d\nPhotos: kind:image size:>1mb (in {home}/Pictures)\n")
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "remove_search", "arguments": {"name": "Photos"}}),
+        );
+        assert_eq!(text(&reply), "Removed the saved search Photos.\n");
+        let reply = call(
+            &mut server,
+            json!({"name": "save_search", "arguments": {"name": "Bad", "query": "in:~/a in:~/b"}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        let reply = call(
+            &mut server,
+            json!({"name": "remove_search", "arguments": {"name": "Photos"}}),
+        );
+        assert_eq!(text(&reply), "Photos isn't a saved search.");
+        assert!(server.index.is_none());
     }
 
     #[test]
