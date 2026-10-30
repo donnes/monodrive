@@ -127,6 +127,8 @@ pub struct Preferences {
     pub grid_label: RowSize,
     /// Images show their pictures in the grid.
     pub thumbnails: bool,
+    /// A drag resting on a folder opens it.
+    pub open_folders_while_dragging: bool,
     /// Agents may change files over MCP. The operation owner reads it from
     /// the saved file, by this name.
     pub agents_change_files: bool,
@@ -169,6 +171,7 @@ impl Default for Preferences {
             grid_icon: 72,
             grid_label: RowSize::Medium,
             thumbnails: true,
+            open_folders_while_dragging: true,
             agents_change_files: true,
             onboarding_version: 0,
         }
@@ -188,6 +191,7 @@ impl Preferences {
         self.grid_icon = defaults.grid_icon;
         self.grid_label = defaults.grid_label;
         self.thumbnails = defaults.thumbnails;
+        self.open_folders_while_dragging = defaults.open_folders_while_dragging;
     }
 
     pub fn restore_general(&mut self) {
@@ -213,6 +217,7 @@ impl Preferences {
             grid_icon: self.grid_icon,
             grid_label: self.grid_label,
             thumbnails: self.thumbnails,
+            open_folders_while_dragging: self.open_folders_while_dragging,
             agents_change_files: self.agents_change_files,
             onboarding_version: self.onboarding_version,
             ..Self::default()

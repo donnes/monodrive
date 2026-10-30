@@ -2015,3 +2015,33 @@ fn a_target_is_read_once_per_drag_and_one_that_cant_be_stays_a_copy(cx: &mut Tes
     press(cx, "escape");
     cx.simulate_mouse_up(second, MouseButton::Left, with(""));
 }
+
+#[gpui::test]
+fn resting_on_a_favorite_or_a_drive_opens_it_in_the_pane_commands_act_on(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let ext = tempfile::tempdir().unwrap();
+    let drive = ext.path().canonicalize().unwrap();
+    let world = world(vec![startup(), volume("Ext", &drive, "ext", 100, 10)], cx);
+    let (one, _) = two_favorites(&world);
+    let (browser, cx) = open(&world, &project, cx);
+    let rest = |cx: &mut VisualTestContext| {
+        cx.executor().advance_clock(super::drag::SPRING_DELAY);
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    };
+    let last = favorites(&browser, cx).len() + 2;
+    let (favorite, volume_row) = (center(cx, "place-1"), center(cx, &format!("place-{last}")));
+    let file = row(&browser, 2, cx);
+    carry(file, favorite, "", cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), one);
+    hover(volume_row, "", cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), drive);
+    press(cx, "escape");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(here(&browser, cx), project);
+    cx.simulate_mouse_up(volume_row, MouseButton::Left, with(""));
+}

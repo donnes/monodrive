@@ -888,6 +888,21 @@ impl SettingsView {
                             cx,
                         ),
                     ),
+                    row(
+                        "Open folders while dragging",
+                        Some("Resting on a folder for a moment opens it. Space opens it at once."),
+                        self.focusable(
+                            "open-folders-while-dragging",
+                            true,
+                            toggle(
+                                "open-folders-while-dragging",
+                                "Open folders while dragging",
+                                p.open_folders_while_dragging,
+                                |p, on| p.open_folders_while_dragging = on,
+                            ),
+                            cx,
+                        ),
+                    ),
                 ],
             ),
             group(

@@ -7,7 +7,7 @@ use monodrive_core::entries::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Selection {
     /// Each selected entry's listed size, so the total needs no lookup.
     paths: HashMap<PathBuf, u64>,

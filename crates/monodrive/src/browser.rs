@@ -1489,8 +1489,9 @@ impl Render for Browser {
                 // Esc ends a drag first, then closes Quick Look, then leaves
                 // search, then lets go of the selection.
                 .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+                    let back = this.drag.cancel();
                     if cx.stop_active_drag(window) {
-                        return;
+                        return this.spring_back(back, window, cx);
                     }
                     this.toast = None;
                     if this.close_quick_look() {
@@ -1555,8 +1556,12 @@ impl Render for Browser {
                     cx.listener(|this, _: &GoToFolder, window, cx| this.open_goto(window, cx)),
                 )
                 // Not while a name is edited, so Space types there.
-                .when(!renaming && selected, |d| {
+                // During a drag, Space opens what it rests on, selected or not.
+                .when(!renaming && (selected || self.drag.active()), |d| {
                     d.on_action(cx.listener(|this, _: &QuickLook, window, cx| {
+                        if this.drag.active() {
+                            return this.spring_now(window, cx);
+                        }
                         this.toggle_quick_look(window, cx)
                     }))
                 })

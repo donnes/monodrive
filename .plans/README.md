@@ -39,7 +39,7 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - Top bar: one job, where am I among which tabs. Back and forward, the folder name (which becomes the first tab), and the ring. Path, selection and free space go in a thin hideable bar under the files, one per pane. Rename errors sit under the field.
 - 07: a capacity bar under each drive, an Edit mode for Favorites, a Finder-style Connect to Server sheet, the Settings icon at the bottom right of the sidebar with a Trash icon button at the bottom left.
 - 08: compact tabs in the title bar; two equal panes with their own path lines, plus a way to collapse the sidebar.
-- 09: an outline on the target and a pill by the pointer that says what will happen.
+- 09: an outline on the target and a pill by the pointer that says what will happen. Spring-loaded folders: resting about 1 second opens the folder, Space opens at once, Esc returns, with a setting.
 - 10: a docked inspector that follows the selection, like Spacedrive's (large icon, name and kind, then Details, Dates and Storage sections), and Open With as a context menu submenu.
 - 11: no filter UI for now; the maintainer will rethink it. Core and MCP filters stay. Matching lines under each file, and saved and recent searches in the search field's menu.
 - 12: rename in the list, with a bar across it.
@@ -116,4 +116,4 @@ These are separate follow-on tracks. They do not require every storage backend t
 - Tags remain excluded unless a concrete workflow changes that decision.
 - Automatic bidirectional sync, a distributed filesystem, virtual mounts and a broad plugin runtime are not prerequisites for remote file management.
 - Keep the macOS app scope. Browsing a Linux server through SFTP does not require a Linux app. A Linux indexing helper needs a separate scope decision.
-- Do not copy Finder's spring-loaded folders, per-folder view persistence or `.DS_Store` behavior.
+- Do not copy Finder's per-folder view persistence or `.DS_Store` behavior.

@@ -9,14 +9,16 @@
 //! undone.
 
 use super::Browser;
-use super::pane::{Pane, text_width};
+use super::pane::{Pane, SpringReturn, text_width};
 use super::sidebar::{Drives, Places};
 use crate::file_icons;
+use crate::preferences::Preferences;
 use crate::theme::{self, Elevation, content};
 use gpui::{
-    App, Context, Div, DragMoveEvent, Entity, EntityId, ExternalDragPayload, ExternalPaths,
-    FileDragPaths, FontWeight, Modifiers, MouseButton, MouseUpEvent, Pixels, PlatformInput, Point,
-    Render, Stateful, Task, Window, div, prelude::*, px,
+    Animation, AnimationExt, AnyElement, App, Context, Div, DragMoveEvent, Entity, EntityId,
+    ExternalDragPayload, ExternalPaths, FileDragPaths, FontWeight, Modifiers, MouseButton,
+    MouseUpEvent, Pixels, PlatformInput, Point, Render, Stateful, Task, Window, div, prelude::*,
+    px,
 };
 use monodrive_core::entries::{Entry, Kind};
 use objc2_app_kit::{NSEvent, NSEventModifierFlags};
@@ -28,6 +30,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// How long a drag rests on a folder before it opens, the pulse included.
+pub(super) const SPRING_DELAY: Duration = Duration::from_millis(1000);
+/// The outline's one pulse, just before it opens.
+const SPRING_PULSE: Duration = Duration::from_millis(150);
 /// How often a drag checks that the button is still down.
 const BUTTON_CHECK: Duration = Duration::from_millis(50);
 /// The drag image's icon.
@@ -236,10 +242,26 @@ struct Session {
     /// What the frame shows, worked out once per target, keys and answer about
     /// its volume, since a selection can run to thousands.
     decided: Option<(Target, (bool, bool, bool), Decision)>,
+    /// What the spring timer below is for, or was: a target that has opened
+    /// doesn't open again while the pointer stays on it.
+    spring_for: Option<Target>,
+    spring_timer: Option<Task<()>>,
+    /// The outline's pulse is on, just before opening.
+    pulsing: bool,
+    /// What Esc goes back to: the tab on screen and each pane opened in.
+    spring_tab: Option<Entity<Pane>>,
+    spring_returns: Vec<(Entity<Pane>, SpringReturn)>,
     /// Watches the button while the window owns the drag.
     button_watch: Option<Task<()>>,
     /// The files came from another app, whose drag AppKit ends.
     external: bool,
+}
+
+/// What a cancelled drag goes back to.
+#[derive(Default)]
+pub(super) struct SpringBack {
+    tab: Option<Entity<Pane>>,
+    panes: Vec<(Entity<Pane>, SpringReturn)>,
 }
 
 #[derive(Default)]
@@ -271,6 +293,11 @@ impl Drag {
             sources_asked: false,
             target_devices: HashMap::new(),
             decided: None,
+            spring_for: None,
+            spring_timer: None,
+            pulsing: false,
+            spring_tab: None,
+            spring_returns: Vec::new(),
             button_watch: None,
             external: false,
         });
@@ -368,6 +395,75 @@ impl Drag {
         .flatten()
     }
 
+    /// What's under the pointer, if it opens when rested on: a folder, a tab, a
+    /// favorite or a drive that would take the files.
+    fn springable(&self) -> Option<Target> {
+        self.decision(|target, decision| {
+            let opens = matches!(decision, Decision::Send { .. })
+                && matches!(
+                    target,
+                    Target::Folder {
+                        spot: Spot::Row(..) | Spot::Tab(_) | Spot::Place(_),
+                        ..
+                    }
+                );
+            opens.then(|| target.clone())
+        })
+        .flatten()
+    }
+
+    /// Whether the pointer has come to a new place to time, which ends the
+    /// timer for the last one.
+    fn spring_moved_to(&self, target: &Option<Target>) -> bool {
+        let mut state = self.0.borrow_mut();
+        let Some(session) = state.session.as_mut() else {
+            return false;
+        };
+        if session.spring_for == *target {
+            return false;
+        }
+        session.spring_for = target.clone();
+        session.spring_timer = None;
+        session.pulsing = false;
+        true
+    }
+
+    fn keep_spring_timer(&self, timer: Task<()>) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut() {
+            session.spring_timer = Some(timer);
+        }
+    }
+
+    fn set_pulsing(&self, on: bool) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut() {
+            session.pulsing = on;
+        }
+    }
+
+    /// `outline`, with its one pulse if it's about to open.
+    pub(super) fn pulsed(&self, outline: Div) -> AnyElement {
+        let pulsing = self.0.borrow().session.as_ref().is_some_and(|s| s.pulsing);
+        if !pulsing {
+            return outline.into_any_element();
+        }
+        outline
+            .with_animation(
+                "spring-pulse",
+                Animation::new(SPRING_PULSE),
+                |outline, t| outline.opacity(0.3 + 0.7 * (2. * t - 1.).abs()),
+            )
+            .into_any_element()
+    }
+
+    /// The drag ends for Esc: what to go back to.
+    pub(super) fn cancel(&self) -> SpringBack {
+        let session = self.0.borrow_mut().session.take();
+        session.map_or_else(SpringBack::default, |session| SpringBack {
+            tab: session.spring_tab,
+            panes: session.spring_returns,
+        })
+    }
+
     /// There's a drag of the window's own, not yet watched.
     fn needs_button_watch(&self) -> bool {
         let state = self.0.borrow();
@@ -417,6 +513,24 @@ impl Drag {
             && let Some(known) = session.target_devices.get_mut(folder)
         {
             *known = device;
+        }
+    }
+
+    /// Keeps where `pane` is, the first time this drag opens something there.
+    fn remember_pane(&self, pane: &Entity<Pane>, cx: &App) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut()
+            && !session.spring_returns.iter().any(|(kept, _)| kept == pane)
+        {
+            let back = pane.read(cx).before_spring();
+            session.spring_returns.push((pane.clone(), back));
+        }
+    }
+
+    fn remember_tab(&self, shown: &Entity<Pane>) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut()
+            && session.spring_tab.is_none()
+        {
+            session.spring_tab = Some(shown.clone());
         }
     }
 
@@ -675,6 +789,97 @@ impl Browser {
         self.drag.settle(cx.has_active_drag(), held_keys(window));
         self.read_volumes(cx);
         self.watch_button(window, cx);
+        self.time_spring(window, cx);
+    }
+
+    /// Times the rest on what's under the pointer, with one timer, which a new
+    /// place replaces. A drag out of the window ends the session, and the timer.
+    fn time_spring(&self, window: &Window, cx: &mut Context<Self>) {
+        let wanted = cx
+            .global::<Preferences>()
+            .open_folders_while_dragging
+            .then(|| self.drag.springable())
+            .flatten();
+        if !self.drag.spring_moved_to(&wanted) {
+            return;
+        }
+        let Some(target) = wanted else {
+            return;
+        };
+        let drag = self.drag.clone();
+        let timer = cx.spawn_in(window, async move |this, cx| {
+            let rest = SPRING_DELAY - SPRING_PULSE;
+            cx.background_executor().timer(rest).await;
+            drag.set_pulsing(true);
+            let _ = this.update(cx, |_, cx| cx.notify());
+            cx.background_executor().timer(SPRING_PULSE).await;
+            drag.set_pulsing(false);
+            let _ = this.update_in(cx, |this, window, cx| this.spring(&target, window, cx));
+        });
+        self.drag.keep_spring_timer(timer);
+    }
+
+    /// Space: what the drag rests on opens now, and the timer has nothing left.
+    pub(super) fn spring_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !cx.global::<Preferences>().open_folders_while_dragging {
+            return;
+        }
+        let Some(target) = self.drag.springable() else {
+            return;
+        };
+        self.drag.spring_moved_to(&Some(target.clone()));
+        self.spring(&target, window, cx);
+    }
+
+    /// Opens `target` under the drag, which goes on over the new listing. What
+    /// the pill showed there no longer counts once the listing lands, since a
+    /// release checks what's under the pointer.
+    fn spring(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Self>) {
+        let Target::Folder { spot, path, .. } = target else {
+            return;
+        };
+        if !cx.has_active_drag() {
+            return;
+        }
+        self.drag.remember_tab(&self.tabs[self.active].pane);
+        let opens_in = match spot {
+            Spot::Tab(ix) => {
+                if *ix != self.active && *ix < self.tabs.len() {
+                    self.show_tab(*ix, window, cx);
+                }
+                return;
+            }
+            Spot::Row(id, _) => self
+                .shown_panes()
+                .into_iter()
+                .find(|pane| pane.entity_id() == *id),
+            Spot::Place(_) => Some(self.pane().clone()),
+            Spot::Pane(_) | Spot::Crumb(..) => None,
+        };
+        let Some(pane) = opens_in.filter(|pane| pane.read(cx).folder() != path) else {
+            return;
+        };
+        self.drag.remember_pane(&pane, cx);
+        pane.update(cx, |pane, cx| pane.navigate(path.clone(), cx));
+    }
+
+    /// Esc: the tab and the panes as they were, Back history and all.
+    pub(super) fn spring_back(
+        &mut self,
+        back: SpringBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = back.tab
+            && let Some(ix) = self.tabs.iter().position(|t| t.panes().any(|p| *p == tab))
+            && ix != self.active
+        {
+            self.show_tab(ix, window, cx);
+        }
+        for (pane, to) in back.panes {
+            pane.update(cx, |pane, cx| pane.spring_back(to, cx));
+        }
+        cx.notify();
     }
 
     /// A mouse-up can go missing, as GPUI's own drag replay allows for when a

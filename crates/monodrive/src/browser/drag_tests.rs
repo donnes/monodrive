@@ -2,7 +2,7 @@
 //! events and an operation owner of the test's own. Nothing reaches the real
 //! Trash: an undo here is of a move, which goes back by rename.
 
-use super::drag::Spot;
+use super::drag::{SPRING_DELAY, Spot};
 use super::pane::*;
 use super::tests::*;
 use super::*;
@@ -474,4 +474,209 @@ fn releasing_a_resting_drag_drops_on_what_the_pill_shows(cx: &mut TestAppContext
     finish_job(&mut owned, cx);
     assert!(project.join("docs/a.txt").exists());
     release(owned, cx);
+}
+
+/// Lets a drag rest for the whole delay, on the test's clock.
+fn rest(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(SPRING_DELAY);
+    cx.run_until_parked();
+    draw(cx);
+}
+
+fn here(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> PathBuf {
+    in_pane(browser, cx, |pane, _| pane.folder().to_path_buf())
+}
+
+fn stops(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> (usize, usize) {
+    in_pane(browser, cx, |pane, _| (pane.history.len(), pane.at))
+}
+
+#[gpui::test]
+fn resting_on_a_folder_opens_it_once_and_moving_off_cancels(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let (docs, zeta, file) = (
+        row(&browser, 0, cx),
+        row(&browser, 1, cx),
+        row(&browser, 2, cx),
+    );
+    carry(file, docs, "", cx);
+    // Off before the delay: not opened, and the new place's time starts over.
+    cx.executor().advance_clock(SPRING_DELAY / 2);
+    hover(zeta, "", cx);
+    cx.executor().advance_clock(SPRING_DELAY / 2);
+    cx.run_until_parked();
+    draw(cx);
+    assert_eq!(here(&browser, cx), project);
+    // All the way: it opens.
+    rest(cx);
+    assert_eq!(here(&browser, cx), project.join("zeta"));
+    assert_eq!(stops(&browser, cx), (2, 1));
+    // Once: the empty listing under the pointer takes no further stop.
+    rest(cx);
+    rest(cx);
+    assert_eq!(stops(&browser, cx), (2, 1));
+    press(cx, "escape");
+    cx.simulate_mouse_up(zeta, MouseButton::Left, with(""));
+}
+
+#[gpui::test]
+fn space_opens_at_once_and_nesting_goes_on_in_what_opened(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::create_dir(project.join("docs/deep")).unwrap();
+    let (browser, cx) = browse(&project, cx);
+    let (docs, file) = (row(&browser, 0, cx), row(&browser, 2, cx));
+    carry(file, docs, "", cx);
+    press(cx, "space");
+    draw(cx);
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    // No Quick Look took it.
+    assert!(browser.read_with(cx, |b, _| b.preview.is_none()));
+    // Nothing's selected in the new folder, and Space still reaches the drag.
+    assert!(shown(&browser, cx).1.is_empty());
+    let deep = row(&browser, 0, cx);
+    hover(deep, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to deep");
+    press(cx, "space");
+    draw(cx);
+    assert_eq!(here(&browser, cx), project.join("docs/deep"));
+    assert_eq!(stops(&browser, cx), (3, 2));
+    press(cx, "escape");
+    cx.simulate_mouse_up(deep, MouseButton::Left, with(""));
+}
+
+#[gpui::test]
+fn esc_returns_the_folder_the_selection_and_the_history(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::create_dir(project.join("docs/deep")).unwrap();
+    let (browser, cx) = browse(&project, cx);
+    // docs open in place, with a stop behind this one to keep.
+    press(cx, "down cmd-down cmd-[ down right");
+    let before = stops(&browser, cx);
+    let rows = shown(&browser, cx).0;
+    let (docs, file) = (row(&browser, 0, cx), row(&browser, rows.len() - 1, cx));
+    cx.simulate_click(file, with(""));
+    let chosen = shown(&browser, cx).1;
+    carry(file, docs, "", cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    let deep = row(&browser, 0, cx);
+    hover(deep, "", cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), project.join("docs/deep"));
+    press(cx, "escape");
+    draw(cx);
+    assert_eq!(here(&browser, cx), project);
+    assert_eq!(stops(&browser, cx), before);
+    assert_eq!(shown(&browser, cx).0, rows);
+    assert_eq!(shown(&browser, cx).1, chosen);
+    assert!(!dragging(&browser, cx));
+    cx.simulate_mouse_up(deep, MouseButton::Left, with(""));
+    assert!(project.join("a.txt").exists());
+}
+
+#[gpui::test]
+fn a_drop_lands_in_what_opened_and_its_stop_stays_in_history(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let mut owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    let (docs, file) = (row(&browser, 0, cx), row(&browser, 2, cx));
+    carry(file, docs, "", cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    // The row it rested on is gone, and until a move looks again, what the pill
+    // showed isn't there: the platform's next replay of the move finds the pane.
+    hover(docs, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to docs");
+    cx.simulate_mouse_up(docs, MouseButton::Left, with(""));
+    finish_job(&mut owned, cx);
+    assert!(project.join("docs/a.txt").exists() && !project.join("a.txt").exists());
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    assert_eq!(stops(&browser, cx), (2, 1));
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn what_would_be_refused_a_package_or_the_setting_off_stays_shut(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::create_dir(project.join("Tool.app")).unwrap();
+    let (browser, cx) = browse(&project, cx);
+    // Rows: docs, Tool.app, zeta, a.txt.
+    let (docs, app, file) = (
+        row(&browser, 0, cx),
+        row(&browser, 1, cx),
+        row(&browser, 3, cx),
+    );
+    carry(docs, docs + point(px(0.), px(2.)), "", cx);
+    assert_eq!(
+        says(&browser, cx).unwrap(),
+        "\"docs\" can't go inside itself."
+    );
+    rest(cx);
+    assert_eq!(here(&browser, cx), project);
+    press(cx, "space");
+    assert_eq!(here(&browser, cx), project);
+    press(cx, "escape");
+    cx.simulate_mouse_up(docs, MouseButton::Left, with(""));
+    carry(file, app, "", cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), project);
+    press(cx, "escape");
+    cx.simulate_mouse_up(app, MouseButton::Left, with(""));
+    cx.update(|_, cx| preferences::update(cx, |p| p.open_folders_while_dragging = false));
+    carry(file, docs, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to docs");
+    rest(cx);
+    press(cx, "space");
+    assert_eq!(here(&browser, cx), project);
+    press(cx, "escape");
+    cx.simulate_mouse_up(docs, MouseButton::Left, with(""));
+}
+
+#[gpui::test]
+fn resting_on_a_tab_switches_to_it_and_esc_comes_back(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-t down cmd-down");
+    draw(cx);
+    let tab = cx.debug_bounds("tab-0").unwrap().center();
+    let inner = row(&browser, 0, cx);
+    carry(inner, tab, "", cx);
+    assert_eq!(browser.read_with(cx, |b, _| b.active), 1);
+    rest(cx);
+    assert_eq!(browser.read_with(cx, |b, _| b.active), 0);
+    press(cx, "escape");
+    draw(cx);
+    assert_eq!(browser.read_with(cx, |b, _| b.active), 1);
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    cx.simulate_mouse_up(tab, MouseButton::Left, with(""));
+}
+
+#[gpui::test]
+fn a_drag_from_another_app_springs_and_leaving_cancels_what_was_pending(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let given = elsewhere.path().join("given.txt");
+    std::fs::write(&given, "").unwrap();
+    let (browser, cx) = browse(&project, cx);
+    let docs = row(&browser, 0, cx);
+    let enter = |cx: &mut VisualTestContext| {
+        cx.simulate_event(FileDropEvent::Entered {
+            position: docs,
+            paths: ExternalPaths([given.clone()].into_iter().collect()),
+        });
+        draw(cx);
+        cx.simulate_event(FileDropEvent::Pending { position: docs });
+        draw(cx);
+    };
+    enter(cx);
+    cx.executor().advance_clock(SPRING_DELAY / 2);
+    cx.simulate_event(FileDropEvent::Exited);
+    draw(cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), project);
+    enter(cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    cx.simulate_event(FileDropEvent::Exited);
 }

@@ -83,6 +83,15 @@ pub(super) enum PaneEvent {
     Moved,
 }
 
+/// Where a pane was before a drag opened folders in it.
+pub(super) struct SpringReturn {
+    history: Vec<Stop>,
+    at: usize,
+    expanded: HashSet<PathBuf>,
+    selection: Selection,
+    query: String,
+}
+
 /// Why a restored pane shows no files.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Unavailable {
@@ -524,6 +533,34 @@ impl Pane {
         self.history.push(Stop::folder(folder));
         self.at = self.history.len() - 1;
         self.show_folder(cx);
+    }
+
+    /// What to come back to if a drag that opens folders here is cancelled.
+    pub(super) fn before_spring(&self) -> SpringReturn {
+        SpringReturn {
+            history: self.history.clone(),
+            at: self.at,
+            expanded: self.expanded.clone(),
+            selection: self.selection.clone(),
+            query: self.query.clone(),
+        }
+    }
+
+    /// Back to `to`, as if the drag had opened nothing.
+    pub(super) fn spring_back(&mut self, to: SpringReturn, cx: &mut Context<Self>) {
+        self.collapse_all();
+        self.reselect = None;
+        self.select_after.clear();
+        self.history = to.history;
+        self.at = to.at;
+        self.expanded = to.expanded;
+        self.selection = to.selection;
+        self.query = to.query;
+        let (query, end) = (self.query.clone(), self.query.len());
+        self.search
+            .update(cx, |field, cx| field.set_text(&query, end..end, cx));
+        cx.emit(PaneEvent::Moved);
+        self.reload(cx);
     }
 
     pub(super) fn step_history(&mut self, step: isize, cx: &mut Context<Self>) {
@@ -2291,8 +2328,11 @@ impl Pane {
                             .map(|d| Self::context_target(d, ix, cx))
                             .when(drops, |d| Self::takes_drops(d, ix, cx))
                             .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
-                                d.relative()
-                                    .child(theme::drop_outline().rounded(px(theme::RADIUS_ROW)))
+                                d.relative().child(
+                                    self.drag.pulsed(
+                                        theme::drop_outline().rounded(px(theme::RADIUS_ROW)),
+                                    ),
+                                )
                             })
                     });
                 div().flex().px_1().children(cells).into_any_element()
@@ -2419,8 +2459,10 @@ impl Pane {
                         .map(|d| Self::context_target(d, ix, cx))
                         .when(drops, |d| Self::takes_drops(d, ix, cx))
                         .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
-                            d.relative()
-                                .child(theme::drop_outline().rounded(px(theme::RADIUS_ROW)))
+                            d.relative().child(
+                                self.drag
+                                    .pulsed(theme::drop_outline().rounded(px(theme::RADIUS_ROW))),
+                            )
                         })
                         .into_any_element(),
                 )

@@ -492,7 +492,7 @@ impl Browser {
                 offers(d, move |_| drag.offer(target.clone()))
             })
             .when(self.drag.outlines(&Spot::Tab(ix)), |d| {
-                d.child(theme::drop_outline().rounded_full())
+                d.child(self.drag.pulsed(theme::drop_outline().rounded_full()))
             })
             .child(div().min_w_0().truncate().child(title))
             .when(hovered && !alone, |d| {

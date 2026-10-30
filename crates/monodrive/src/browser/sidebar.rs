@@ -673,9 +673,11 @@ impl Browser {
         })
         .when(outlined, |d| {
             d.relative().child(
-                theme::drop_outline()
-                    .bottom(px(theme::ROW_GAP))
-                    .rounded(px(theme::RADIUS_ROW)),
+                self.drag.pulsed(
+                    theme::drop_outline()
+                        .bottom(px(theme::ROW_GAP))
+                        .rounded(px(theme::RADIUS_ROW)),
+                ),
             )
         })
     }
