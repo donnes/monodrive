@@ -627,7 +627,7 @@ impl Item<'_> {
 }
 
 /// `path` as "name 2.ext", "name 3.ext" and on: the first that's free.
-fn numbered(path: &Path) -> Option<PathBuf> {
+pub(super) fn numbered(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
     let (stem, ext) = match name.rfind('.') {
         Some(dot) if dot > 0 => name.split_at(dot),

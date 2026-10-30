@@ -16,6 +16,7 @@ fn paths(dir: &Path) -> Paths {
     Paths {
         state,
         settings: dir.join("settings.json"),
+        trash: dir.join("Trash"),
     }
 }
 
@@ -308,6 +309,36 @@ fn the_agents_setting_gates_agents_but_not_the_window() {
     assert!(engine.submit(submission(agent(), Request::Undo)).is_err());
     assert!(!files.join("off").exists());
     assert!(run(&mut engine, folder("window")).is_ok());
+}
+
+#[test]
+fn empty_trash_erases_only_what_was_listed_in_the_trash_and_only_for_the_window() {
+    let (dir, files, mut engine) = engine();
+    let trash = dir.path().join("Trash");
+    std::fs::create_dir_all(trash.join("old folder/inside")).unwrap();
+    std::fs::write(trash.join("old folder/inside/x.txt"), "x").unwrap();
+    std::fs::write(trash.join("old.txt"), "old").unwrap();
+    std::fs::write(trash.join(".DS_Store"), "").unwrap();
+    let keep = files.join("keep.txt");
+    std::fs::write(&keep, "keep").unwrap();
+    assert!(run(&mut engine, rename(&keep, "kept.txt")).is_ok());
+    let listed = trash_items(&trash).unwrap();
+    assert_eq!(listed, [trash.join("old folder"), trash.join("old.txt")]);
+    // Something that arrives after the count isn't erased with it.
+    std::fs::write(trash.join("new.txt"), "new").unwrap();
+    let empty = |paths: Vec<PathBuf>| Request::EmptyTrash { paths };
+    let agent = Origin::Agent { client: None };
+    let refused = engine
+        .submit(submission(agent, empty(listed.clone())))
+        .unwrap_err();
+    assert!(refused.starts_with("Only a person"), "{refused}");
+    assert!(run(&mut engine, empty(vec![files.join("kept.txt")])).is_err());
+    assert_eq!(moved(run(&mut engine, empty(listed.clone()))), listed);
+    assert_eq!(trash_items(&trash).unwrap(), [trash.join("new.txt")]);
+    assert!(trash.join(".DS_Store").exists() && files.join("kept.txt").exists());
+    // It joins no history: undo still reaches the rename before it.
+    assert!(run(&mut engine, Request::Undo).is_ok());
+    assert!(keep.exists());
 }
 
 #[test]

@@ -3,12 +3,13 @@
 //! at a UI change.
 //!
 //! `cargo run -p monodrive --example snapshot -- [folder]` writes
-//! `target/snapshots/list.png`, `grid.png` and `activity.png`. Without a
-//! folder it draws a made-up one, so the pictures show nobody's files.
-//! Activity shows real jobs, run by an operation owner on a temp folder.
+//! `target/snapshots/list.png`, `grid.png`, `rename.png` and
+//! `activity.png`. Without a folder it draws a made-up one, so the pictures
+//! show nobody's files. Rename edits the fifth name in place. Activity
+//! shows real jobs, run by an operation owner on a temp folder.
 
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
-use monodrive::browser::{Browser, Operations, ShowActivity};
+use monodrive::browser::{Browser, Operations, Rename, SelectNext, ShowActivity};
 use monodrive::preferences::{Preferences, View};
 use monodrive_core::ops::{self, Conflict, Origin, Request};
 use std::path::{Path, PathBuf};
@@ -49,6 +50,29 @@ fn main() -> gpui::Result<()> {
         cx.capture_screenshot(window.into())?.save(&path)?;
         println!("{}", path.display());
     }
+    cx.update(|cx| cx.set_global(Preferences::default()));
+    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+        cx.new(|cx| Browser::new(folder.clone(), cx))
+    })?;
+    cx.run_until_parked();
+    // Each command needs the frame drawn after the last: what's selected
+    // decides which commands the browser takes.
+    for action in [&SelectNext as &dyn gpui::Action; 5]
+        .into_iter()
+        .chain([&Rename as &dyn gpui::Action])
+    {
+        cx.update_window(window.into(), |root, window, cx| {
+            if let Ok(browser) = root.downcast::<Browser>() {
+                window.focus(&browser.focus_handle(cx), cx);
+            }
+            window.dispatch_action(action.boxed_clone(), cx);
+            window.refresh();
+        })?;
+        cx.run_until_parked();
+    }
+    let path = out.join("rename.png");
+    cx.capture_screenshot(window.into())?.save(&path)?;
+    println!("{}", path.display());
     let scratch = tempfile::tempdir_in(&out)?;
     let client = jobs(scratch.path())?;
     cx.update(|cx| cx.set_global(Operations(Arc::new(Mutex::new(client)))));
@@ -76,6 +100,7 @@ fn jobs(dir: &Path) -> gpui::Result<ops::Client> {
     let paths = ops::Paths {
         state: dir.join("state"),
         settings: dir.join("settings.json"),
+        trash: dir.join("Trash"),
     };
     let owner = ops::Owner::bind(paths.clone()).map_err(std::io::Error::other)?;
     std::thread::spawn(move || owner.serve());

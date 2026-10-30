@@ -12,6 +12,7 @@ mod frame;
 mod goto;
 mod palette;
 mod palettes;
+mod pasteboard;
 pub mod preferences;
 #[cfg(feature = "profile")]
 mod profile;
@@ -48,6 +49,7 @@ pub fn run(folder: Option<PathBuf>) {
                 let client = monodrive_core::ops::Client::new(paths, std::env::current_exe().ok());
                 cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));
             }
+            cx.set_global(pasteboard::Pasteboard::general());
             commands::apply(cx);
             // A changed shortcut rebuilds the keymap and the menu bar; Show
             // Hidden Files' checkmark rebuilds the menu bar alone.

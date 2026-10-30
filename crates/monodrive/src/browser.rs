@@ -7,6 +7,7 @@ use crate::commands::{self, OpenPalette};
 use crate::file_icons;
 use crate::goto::{GotoEvent, GotoView};
 use crate::palette::{PaletteEvent, PaletteView};
+use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, View, WorkspaceStyle};
 use crate::selection::Selection;
 use crate::settings::{self, SettingsView};
@@ -19,18 +20,18 @@ use gpui::RenderImage;
 use gpui::{
     Action, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
     FocusHandle, Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, Keystroke, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollStrategy,
-    ScrollWheelEvent, Task, UniformListScrollHandle, Window, WindowAppearance, WindowControlArea,
-    actions, canvas, div, prelude::*, px, uniform_list,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, PromptLevel,
+    ScrollStrategy, ScrollWheelEvent, Subscription, Task, UniformListScrollHandle, Window,
+    WindowAppearance, WindowControlArea, actions, canvas, div, prelude::*, px, uniform_list,
 };
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::{Index, Progress, Status};
-use monodrive_core::ops::{self, Origin, Request};
+use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 actions!(
@@ -85,6 +86,16 @@ actions!(
         Undo,
         Redo,
         ShowActivity,
+        Rename,
+        CommitRename,
+        CancelRename,
+        NewFolder,
+        NewFolderWithSelection,
+        NewFile,
+        Duplicate,
+        MoveToTrash,
+        EmptyTrash,
+        MoveHere,
     ]
 );
 
@@ -117,9 +128,6 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("shift-down", ExtendNext, Some("FileList")),
         KeyBinding::new("shift-left", ExtendLeft, Some("FileList")),
         KeyBinding::new("shift-right", ExtendRight, Some("FileList")),
-        // Select All is one action, as in AppKit: the search field selects
-        // its text, the list its entries.
-        KeyBinding::new("cmd-a", text_field::SelectAll, Some("FileList")),
         // Home, End and the page keys scroll without moving the selection,
         // as on macOS; the search field keeps them for its caret.
         KeyBinding::new("home", ScrollToTop, Some("FileList")),
@@ -129,6 +137,14 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", PlacePrevious, Some("Sidebar")),
         KeyBinding::new("down", PlaceNext, Some("Sidebar")),
         KeyBinding::new("enter", OpenPlace, Some("Sidebar")),
+        // Return in the search field opens the best hit.
+        KeyBinding::new("enter", OpenSelected, Some("Search")),
+        KeyBinding::new("enter", CommitRename, Some("Rename")),
+        KeyBinding::new("escape", CancelRename, Some("Rename")),
+        // The list's arrows would move the selection out from under the
+        // name; in it they go to its start and end, as in Finder.
+        KeyBinding::new("up", text_field::Home, Some("Rename")),
+        KeyBinding::new("down", text_field::End, Some("Rename")),
         // → steps from the sidebar into the files, as it does into a folder.
         KeyBinding::new("right", FocusList, Some("Sidebar")),
     ]);
@@ -209,9 +225,13 @@ pub struct Browser {
     /// Hands disk changes from fsearch's thread to this view.
     _changes: Task<()>,
     error: Option<String>,
-    /// Why the last undo or redo didn't happen, until the next one or
-    /// leaving the folder.
+    /// Why the last change didn't happen, until the next one or leaving
+    /// the folder.
     notice: Option<String>,
+    /// The name being edited in place.
+    renaming: Option<Renaming>,
+    /// What a change made, to select once the listing that has it lands.
+    select_after: Vec<PathBuf>,
     /// The trimmed search text; empty while showing the folder.
     query: String,
     selection: Selection,
@@ -309,6 +329,8 @@ impl Browser {
             _changes: Task::ready(()),
             error: None,
             notice: None,
+            renaming: None,
+            select_after: Vec::new(),
             query: String::new(),
             selection: Selection::default(),
             scroll: UniformListScrollHandle::new(),
@@ -462,8 +484,19 @@ impl Browser {
                 } else {
                     (!this.entries.is_empty()).then_some(0)
                 };
-                if let Some(ix) = first {
+                let made = std::mem::take(&mut this.select_after);
+                if this.entries.iter().any(|e| made.contains(&e.path)) {
+                    this.selection.clear();
+                    for entry in this.entries.iter().filter(|e| made.contains(&e.path)) {
+                        this.selection.toggle(entry);
+                    }
+                } else if let Some(ix) = first {
                     this.selection.select(&this.entries[ix]);
+                }
+                if let Some(renaming) = &this.renaming
+                    && !this.entries.iter().any(|e| e.path == renaming.path)
+                {
+                    this.renaming = None;
                 }
                 // A refresh leaves the view where it was.
                 match this.cursor_ix() {
@@ -622,7 +655,7 @@ impl Browser {
     /// holding ← to fold a tree stops at its top instead of climbing on.
     fn collapse(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        if keystroke.key != "left" || keystroke.modifiers.modified() {
+        if keystroke.key != "left" || keystroke.modifiers.modified() || self.renaming.is_some() {
             return;
         }
         cx.stop_propagation();
@@ -1268,7 +1301,8 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(text) = typed(&event.keystroke) else {
+        // A name being edited takes its own typing.
+        let Some(text) = typed(&event.keystroke).filter(|_| self.renaming.is_none()) else {
             return;
         };
         let text = text.to_owned();
@@ -1480,28 +1514,454 @@ impl Browser {
         cx.notify();
     }
 
-    /// Undoes or redoes the last operation in the history the window shares
-    /// with agents, off the UI thread. The listing follows the disk.
-    fn reverse(&mut self, request: Request, cx: &mut Context<Self>) {
+    /// Runs `work` with the operation owner off the UI thread, then `done`
+    /// with what it returned. Without an owner, as in benchmarks, nothing
+    /// runs and it returns false.
+    fn with_owner<T: Send + 'static>(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        work: impl FnOnce(&mut ops::Client) -> Result<T, String> + Send + 'static,
+        done: impl FnOnce(&mut Self, Result<T, String>, &mut Window, &mut Context<Self>) + 'static,
+    ) -> bool {
         let Some(ops) = cx.try_global::<Operations>().map(|ops| ops.0.clone()) else {
-            return;
+            return false;
         };
-        self.notice = None;
-        let work = cx.background_executor().spawn(async move {
-            let mut client = ops.lock().unwrap_or_else(PoisonError::into_inner);
-            client.submit(Origin::Window, request)
-        });
-        cx.spawn(async move |this, cx| {
-            let notice = match work.await {
-                Ok(outcome) => outcome.failures().next().map(str::to_owned),
-                Err(e) => Some(e),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.notice = notice;
+        let work = cx
+            .background_executor()
+            .spawn(async move { work(&mut lock(&ops)) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = work.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                done(this, result, window, cx);
                 cx.notify();
             });
         })
         .detach();
+        true
+    }
+
+    /// Asks the owner for a change, shared with agents' history.
+    fn submit(&mut self, request: Request, window: &Window, cx: &mut Context<Self>) {
+        // What these put somewhere is selected once it lists.
+        let select = matches!(
+            request,
+            Request::NewFolder { .. }
+                | Request::NewFile { .. }
+                | Request::Duplicate { .. }
+                | Request::Undo
+                | Request::Redo
+        );
+        self.notice = None;
+        self.with_owner(
+            window,
+            cx,
+            move |owner| owner.submit(Origin::Window, request),
+            move |this, outcome, _, cx| this.settle(outcome, select, cx),
+        );
+    }
+
+    /// Shows how a change went: why anything didn't happen, in the title
+    /// bar, and the folder as it is now, with what the change put here
+    /// selected (`select`) or what it moved still selected where it went.
+    /// The disk's own events would refresh it too, but only once the index
+    /// runs.
+    fn settle(&mut self, outcome: Result<Outcome, String>, select: bool, cx: &mut Context<Self>) {
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                self.notice = Some(e);
+                return;
+            }
+        };
+        self.notice = outcome.failures().next().map(str::to_owned);
+        let landed = outcome
+            .items
+            .iter()
+            .filter_map(|item| Some((&item.path, item.result.as_ref().ok()?)));
+        if select {
+            self.select_after = landed.map(|(_, to)| to.clone()).collect();
+        } else {
+            for (from, to) in landed {
+                self.selection.rename(from, to);
+            }
+        }
+        self.list(!select, cx);
+    }
+
+    /// The selected paths, in the order shown.
+    fn chosen(&self) -> Vec<PathBuf> {
+        self.selection
+            .in_order(&self.entries)
+            .into_iter()
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    /// New Folder and New File: an untitled one here, its name ready to
+    /// edit.
+    fn new_item(&mut self, folder: bool, window: &Window, cx: &mut Context<Self>) {
+        let here = self.folder().to_path_buf();
+        self.notice = None;
+        self.with_owner(
+            window,
+            cx,
+            move |owner| {
+                let name = if folder {
+                    "untitled folder"
+                } else {
+                    "untitled"
+                };
+                let path = ops::free_name(&here.join(name));
+                let request = if folder {
+                    Request::NewFolder { path }
+                } else {
+                    Request::NewFile { path }
+                };
+                owner.submit(Origin::Window, request)
+            },
+            move |this, outcome, window, cx| this.rename_made(outcome, folder, window, cx),
+        );
+    }
+
+    /// Makes a folder beside the selection and moves the selection into it
+    /// as one job, then edits the folder's name. The job's undo puts the
+    /// items back; New Folder's own undo is a step of its own.
+    fn new_folder_with_selection(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let chosen = self.chosen();
+        let Some(here) = chosen.first().and_then(|path| path.parent()) else {
+            return;
+        };
+        let here = here.to_path_buf();
+        if chosen
+            .iter()
+            .any(|path| path.parent() != Some(here.as_path()))
+        {
+            self.notice = Some("A new folder can only take items from one folder.".into());
+            return cx.notify();
+        }
+        self.notice = None;
+        self.with_owner(
+            window,
+            cx,
+            move |owner| {
+                let path = ops::free_name(&here.join("New Folder With Items"));
+                let made =
+                    owner.submit(Origin::Window, Request::NewFolder { path: path.clone() })?;
+                let request = Request::Move {
+                    paths: chosen,
+                    into: path,
+                    conflict: Conflict::Stop,
+                };
+                owner.submit(Origin::Window, request)?;
+                Ok(made)
+            },
+            |this, outcome, window, cx| this.rename_made(outcome, true, window, cx),
+        );
+    }
+
+    /// Selects what a New Folder or New File made and edits its name.
+    fn rename_made(
+        &mut self,
+        outcome: Result<Outcome, String>,
+        folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let made = outcome
+            .as_ref()
+            .ok()
+            .and_then(|outcome| outcome.items.first())
+            .and_then(|item| item.result.clone().ok());
+        self.settle(outcome, true, cx);
+        if let Some(path) = made {
+            self.start_rename(path, folder, window, cx);
+        }
+    }
+
+    /// Copy: the selected files on the pasteboard, for any app to paste.
+    fn copy_files(&self, cx: &App) {
+        if let Some(board) = cx.try_global::<Pasteboard>() {
+            board.write_files(&self.chosen());
+        }
+    }
+
+    /// Paste, or with `moving` Move Here: the files on the pasteboard, from
+    /// any app, into this folder as one job. A job that reaches a name
+    /// that's taken waits in Activity for a choice, so Activity opens when
+    /// one will.
+    fn paste(&mut self, moving: bool, window: &Window, cx: &mut Context<Self>) {
+        let Some(board) = cx.try_global::<Pasteboard>() else {
+            return;
+        };
+        let paths = board.files();
+        let into = self.folder().to_path_buf();
+        if paths.is_empty() {
+            return;
+        }
+        // Pasted where they already are, they're duplicated, as in Finder;
+        // moved there, nothing changes.
+        if paths
+            .iter()
+            .all(|path| path.parent() == Some(into.as_path()))
+        {
+            if !moving {
+                self.submit(Request::Duplicate { paths }, window, cx);
+            }
+            return;
+        }
+        self.notice = None;
+        self.with_owner(
+            window,
+            cx,
+            move |owner| {
+                let taken = paths.iter().any(|path| {
+                    path.file_name()
+                        .is_some_and(|name| into.join(name).symlink_metadata().is_ok())
+                });
+                let conflict = Conflict::Stop;
+                let request = if moving {
+                    Request::Move {
+                        paths,
+                        into,
+                        conflict,
+                    }
+                } else {
+                    Request::Copy {
+                        paths,
+                        into,
+                        conflict,
+                    }
+                };
+                owner.submit(Origin::Window, request).map(|_| taken)
+            },
+            |this, taken, window, cx| match taken {
+                Ok(true) => this.open_activity(window, cx),
+                Ok(false) => {}
+                Err(e) => this.notice = Some(e),
+            },
+        );
+    }
+
+    /// Empty Trash: erases what's in the Trash for good, once a person has
+    /// confirmed how many items that is.
+    fn empty_trash(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.notice = None;
+        self.with_owner(
+            window,
+            cx,
+            |owner| owner.trash_items(),
+            |this, items, window, cx| {
+                let items = match items {
+                    Ok(items) if items.is_empty() => {
+                        this.notice = Some("The Trash is empty.".into());
+                        return;
+                    }
+                    Ok(items) => items,
+                    Err(e) => {
+                        this.notice = Some(e);
+                        return;
+                    }
+                };
+                let count = match items.len() {
+                    1 => "1 item".to_string(),
+                    n => format!("{n} items"),
+                };
+                let answer = window.prompt(
+                    PromptLevel::Warning,
+                    &format!("Permanently erase {count} in the Trash?"),
+                    Some("You can't undo this."),
+                    &["Empty Trash", "Cancel"],
+                    cx,
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    if answer.await == Ok(0) {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.submit(Request::EmptyTrash { paths: items }, window, cx)
+                        });
+                    }
+                })
+                .detach();
+            },
+        );
+    }
+
+    /// ↩: edits the selected item's name in place.
+    fn rename_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = self.selection.in_order(&self.entries);
+        let [only] = chosen.as_slice() else {
+            return;
+        };
+        let (path, folder) = (only.path.clone(), only.kind == Kind::Dir);
+        if let Some(ix) = self.entries.iter().position(|e| e.path == path) {
+            self.reveal(ix, ScrollStrategy::Nearest);
+        }
+        self.start_rename(path, folder, window, cx);
+    }
+
+    /// Edits `path`'s name in place, selected up to its extension as in
+    /// Finder, or whole for a folder. It needn't be listed yet.
+    fn start_rename(
+        &mut self,
+        path: PathBuf,
+        folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let stem = name
+            .rfind('.')
+            .filter(|dot| *dot > 0 && !folder)
+            .unwrap_or(name.len());
+        let prefs = cx.global::<Preferences>();
+        let size = match self.view {
+            View::List => prefs.row_size.metrics().2,
+            View::Grid => prefs.grid_label.metrics().2,
+        };
+        let field = cx.new(|cx| {
+            let mut field = TextField::new("Name", "", cx).with_font_size(size);
+            field.set_text(&name, 0..stem, cx);
+            field
+        });
+        let focus = field.focus_handle(cx);
+        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            this.commit_rename(window, cx)
+        });
+        window.focus(&focus, cx);
+        self.renaming = Some(Renaming {
+            path,
+            field,
+            error: None,
+            sending: false,
+            _blur: blur,
+        });
+        cx.notify();
+    }
+
+    /// ↩, or clicking away: renames through the owner. A name that can't be
+    /// used keeps the field open with the reason; the same name just closes
+    /// it.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.renaming.as_ref().filter(|r| !r.sending) else {
+            return;
+        };
+        let path = renaming.path.clone();
+        let name = renaming.field.read(cx).text().to_string();
+        if path.file_name() == Some(name.as_ref()) {
+            return self.end_rename(window, cx);
+        }
+        let request = Request::Rename {
+            path: path.clone(),
+            name,
+        };
+        let sent = self.with_owner(
+            window,
+            cx,
+            move |owner| owner.submit(Origin::Window, request),
+            move |this, outcome, window, cx| {
+                let failure = match &outcome {
+                    Ok(outcome) => outcome.failures().next().map(str::to_owned),
+                    Err(e) => Some(e.clone()),
+                };
+                let still = this.renaming.as_mut().filter(|r| r.path == path);
+                match (failure, still) {
+                    (Some(why), Some(renaming)) => {
+                        renaming.sending = false;
+                        renaming.error = Some(why);
+                        window.focus(&renaming.field.focus_handle(cx), cx);
+                    }
+                    (Some(why), None) => this.notice = Some(why),
+                    (None, still) => {
+                        if still.is_some() {
+                            this.end_rename(window, cx);
+                        }
+                        this.settle(outcome, false, cx);
+                    }
+                }
+            },
+        );
+        match self.renaming.as_mut() {
+            Some(renaming) if sent => renaming.sending = true,
+            _ => self.end_rename(window, cx),
+        }
+    }
+
+    /// Closes the name being edited; the list takes the keys back unless
+    /// a click already sent them elsewhere.
+    fn end_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(renaming) = self.renaming.take()
+            && renaming.field.focus_handle(cx).is_focused(window)
+        {
+            self.focus_list(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The name being edited in place, if it's `path`'s, and why the last
+    /// name didn't take: beside it in the list, under it in the grid
+    /// (`stacked`).
+    fn rename_field(
+        &self,
+        path: &Path,
+        width: f32,
+        stacked: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let renaming = self.renaming.as_ref().filter(|r| r.path == path)?;
+        // Solid over the selection's accent, whatever the pane's glass.
+        let mut fill = theme::pane_fill();
+        fill.a = 1.;
+        let field = div()
+            .key_context("Rename")
+            .on_action(
+                cx.listener(|this, _: &CommitRename, window, cx| this.commit_rename(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CancelRename, window, cx| this.end_rename(window, cx)),
+            )
+            // A click in the name places the caret; it isn't a click on
+            // the row or the list.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .w(px(width))
+            .flex_shrink_0()
+            .px(px(4.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(accent())
+            .bg(fill)
+            .text_color(content(1.))
+            .child(renaming.field.clone());
+        let error = renaming.error.clone().map(|why| {
+            div()
+                .min_w_0()
+                .px(px(6.))
+                .rounded(px(4.))
+                .bg(fill)
+                .text_size(px(11.))
+                .text_color(accent())
+                .when(stacked, |d| d.max_w(px(width)).text_center())
+                .when(!stacked, |d| d.truncate())
+                .child(why)
+        });
+        Some(
+            div()
+                .min_w_0()
+                .flex()
+                .gap_1()
+                .map(|d| {
+                    if stacked {
+                        d.flex_col().items_center()
+                    } else {
+                        d.items_center()
+                    }
+                })
+                .child(field)
+                .children(error),
+        )
     }
 
     /// Copies the selected paths, one per line in the order shown, or the
@@ -1598,6 +2058,7 @@ impl Browser {
             .child(drag_area().h(px(theme::TITLE_BAR_HEIGHT)).w_full())
             .child(
                 div()
+                    .key_context("Search")
                     .h(px(32.))
                     .mb(px(2.))
                     .px(px(6.))
@@ -1858,8 +2319,8 @@ impl Browser {
         let label = prefs.grid_label.metrics().2;
         let (cell, height) = (self.cell_width, grid_cell(prefs.grid_icon).1);
         let across = self.across;
-        let active =
-            self.list_focus.is_focused(window) || self.search.focus_handle(cx).is_focused(window);
+        let active = self.list_focus.contains_focused(window, cx)
+            || self.search.focus_handle(cx).is_focused(window);
         // Sharp on Retina screens.
         let pixels = (side * window.scale_factor()).ceil() as u32;
         range
@@ -1911,8 +2372,9 @@ impl Browser {
                                     .when(selected, |d| d.bg(content(0.1)))
                                     .child(art),
                             )
-                            .child(
-                                div()
+                            .child(match self.rename_field(&entry.path, cell - 8., true, cx) {
+                                Some(field) => field.text_size(px(label)).into_any_element(),
+                                None => div()
                                     .max_w(px(cell - 8.))
                                     .px(px(5.))
                                     .rounded(px(5.))
@@ -1935,8 +2397,9 @@ impl Browser {
                                         px(cell - 18.),
                                         px(label),
                                         window,
-                                    )),
-                            )
+                                    ))
+                                    .into_any_element(),
+                            })
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 this.click_entry(ix, event, window, cx)
                             }))
@@ -1957,8 +2420,8 @@ impl Browser {
         let today = Local::now().date_naive();
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
         // Finder greys the selection when the list isn't where keys go.
-        let active =
-            self.list_focus.is_focused(window) || self.search.focus_handle(cx).is_focused(window);
+        let active = self.list_focus.contains_focused(window, cx)
+            || self.search.focus_handle(cx).is_focused(window);
         range
             .filter_map(|ix| {
                 let entry = self.entries.get(ix)?;
@@ -2006,13 +2469,15 @@ impl Browser {
                                 .gap_2()
                                 .when(tree, |d| d.child(self.disclosure(ix, depth, open, cx)))
                                 .child(file_icons::icon(entry, icon_size, window, cx))
-                                .child(
-                                    div()
+                                .child(match self.rename_field(&entry.path, 260., false, cx) {
+                                    Some(field) => field.into_any_element(),
+                                    None => div()
                                         .flex_shrink_0()
                                         .max_w(px(360.))
                                         .truncate()
-                                        .child(entry.name.clone()),
-                                )
+                                        .child(entry.name.clone())
+                                        .into_any_element(),
+                                })
                                 .children(parent.map(|parent| {
                                     div().min_w_0().truncate().text_color(muted).child(parent)
                                 })),
@@ -2219,6 +2684,19 @@ impl Render for Browser {
                 this.selection.select_all(&this.entries);
                 cx.notify();
             }))
+            // Copy and Paste are AppKit's actions, as Select All is: here
+            // they're files. Leaving one out turns its menu item off.
+            .when(!self.selection.is_empty(), |d| {
+                d.on_action(cx.listener(|this, _: &text_field::Copy, _, cx| this.copy_files(cx)))
+            })
+            .when(self.query.is_empty(), |d| {
+                d.on_action(cx.listener(|this, _: &text_field::Paste, window, cx| {
+                    this.paste(false, window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &MoveHere, window, cx| this.paste(true, window, cx)),
+                )
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -2329,8 +2807,57 @@ impl Render for Browser {
                         this.selection.clear();
                         cx.notify();
                     }))
-                    .on_action(cx.listener(|this, _: &Undo, _, cx| this.reverse(Request::Undo, cx)))
-                    .on_action(cx.listener(|this, _: &Redo, _, cx| this.reverse(Request::Redo, cx)))
+                    .on_action(
+                        cx.listener(|this, _: &EmptyTrash, window, cx| {
+                            this.empty_trash(window, cx)
+                        }),
+                    )
+            })
+            // While a name is edited, its field has the keys, and nothing
+            // else changes files.
+            .when(!sheet && self.renaming.is_none(), |d| {
+                d.on_action(
+                    cx.listener(|this, _: &Undo, window, cx| {
+                        this.submit(Request::Undo, window, cx)
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &Redo, window, cx| {
+                        this.submit(Request::Redo, window, cx)
+                    }),
+                )
+                .when(self.query.is_empty(), |d| {
+                    d.on_action(cx.listener(|this, _: &NewFolder, window, cx| {
+                        this.new_item(true, window, cx)
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &NewFile, window, cx| {
+                            this.new_item(false, window, cx)
+                        }),
+                    )
+                })
+                .when(self.selection.len() == 1, |d| {
+                    d.on_action(
+                        cx.listener(|this, _: &Rename, window, cx| {
+                            this.rename_selected(window, cx)
+                        }),
+                    )
+                })
+                .when(!self.selection.is_empty(), |d| {
+                    d.on_action(cx.listener(|this, _: &Duplicate, window, cx| {
+                        let paths = this.chosen();
+                        this.submit(Request::Duplicate { paths }, window, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
+                        let paths = this.chosen();
+                        this.submit(Request::Trash { paths }, window, cx)
+                    }))
+                    .on_action(cx.listener(
+                        |this, _: &NewFolderWithSelection, window, cx| {
+                            this.new_folder_with_selection(window, cx)
+                        },
+                    ))
+                })
             })
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
@@ -2469,6 +2996,23 @@ fn sort_by(by: SortBy, cx: &mut App) {
             p.sort = sorted_by(p.sort, by);
         }
     });
+}
+
+/// A name being edited in place.
+struct Renaming {
+    path: PathBuf,
+    field: Entity<TextField>,
+    /// Why the last name didn't take, shown beside the field.
+    error: Option<String>,
+    /// Sent to the owner and not yet answered, so a blur meanwhile doesn't
+    /// send it again.
+    sending: bool,
+    /// Clicking away commits.
+    _blur: Subscription,
+}
+
+fn lock(ops: &Mutex<ops::Client>) -> MutexGuard<'_, ops::Client> {
+    ops.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The sheet over the window, one at a time.
@@ -2850,7 +3394,7 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
 
     /// A browser on `folder` with the app's keys and default preferences,
-    /// focused on its list. Type navigation keys only: a printable key
+    /// active and focused on its list. Type navigation keys only: a printable key
     /// starts a search, and a search starts the whole-disk index.
     fn browse<'a>(
         folder: &Path,
@@ -2862,7 +3406,9 @@ mod tests {
         });
         let folder = folder.to_path_buf();
         let (browser, cx) = cx.add_window_view(|_, cx| Browser::new(folder, cx));
+        // Active, as `run` makes it: an inactive window reports no blur.
         cx.update(|window, cx| {
+            window.activate_window();
             let list = browser.read(cx).list_focus.clone();
             window.focus(&list, cx);
         });
@@ -2912,14 +3458,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn enter_opens_a_folder_and_back_returns_with_it_selected(cx: &mut TestAppContext) {
+    fn open_goes_into_a_folder_and_back_returns_with_it_selected(cx: &mut TestAppContext) {
         let (_dir, project) = folder();
         let (browser, cx) = browse(&project, cx);
         assert_eq!(
             shown(&browser, cx),
             (vec!["docs".into(), "zeta".into(), "a.txt".into()], vec![])
         );
-        press(cx, "down enter");
+        press(cx, "down cmd-down");
         assert_eq!(shown(&browser, cx).0, ["inner.md"]);
         press(cx, "cmd-[");
         assert_eq!(
@@ -3137,7 +3683,7 @@ mod tests {
             std::fs::write(many.join(format!("{ix:02}.txt")), "").unwrap();
         }
         let (_browser, cx) = browse(&many, cx);
-        press(cx, "cmd-a enter");
+        press(cx, "cmd-a cmd-o");
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Cancel");
     }
@@ -3324,6 +3870,7 @@ mod tests {
         let paths = ops::Paths {
             state: state.path().join("state"),
             settings: state.path().join("settings.json"),
+            trash: state.path().join("Trash"),
         };
         let serve = || {
             let owner = ops::Owner::bind(paths.clone()).unwrap();
@@ -3356,5 +3903,228 @@ mod tests {
         assert_eq!(notice.as_deref(), Some("Nothing to redo."));
         cx.update(|_, cx| drop(cx.remove_global::<Operations>()));
         serving.join().unwrap().unwrap();
+    }
+
+    /// An operation owner on a temp state folder, with a Trash of its own,
+    /// that the window's commands reach, and a private pasteboard so Copy
+    /// and Paste leave the user's alone.
+    struct Owned {
+        state: tempfile::TempDir,
+        serving: std::thread::JoinHandle<std::io::Result<()>>,
+    }
+
+    fn own(cx: &mut TestAppContext) -> Owned {
+        let state = tempfile::tempdir().unwrap();
+        let paths = ops::Paths {
+            state: state.path().join("state"),
+            settings: state.path().join("settings.json"),
+            trash: state.path().join("Trash"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let client = ops::Client::new(paths, None);
+        cx.update(|cx| {
+            cx.set_global(Operations(Arc::new(Mutex::new(client))));
+            let board = objc2_app_kit::NSPasteboard::pasteboardWithUniqueName();
+            cx.set_global(Pasteboard(board));
+        });
+        Owned { state, serving }
+    }
+
+    /// Lets the owner go once its jobs are done, and the pasteboard with it.
+    fn release(owned: Owned, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            drop(cx.remove_global::<Operations>());
+            let board = cx.remove_global::<Pasteboard>();
+            // SAFETY: a unique pasteboard this test made and no longer uses.
+            let _: () = unsafe { objc2::msg_send![&*board.0, releaseGlobally] };
+        });
+        owned.serving.join().unwrap().unwrap();
+    }
+
+    fn notice(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
+        browser.read_with(cx, |browser, _| browser.notice.clone())
+    }
+
+    /// The name being edited, and why the last one didn't take.
+    fn editing(
+        browser: &Entity<Browser>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(String, Option<String>)> {
+        browser.read_with(cx, |browser, cx| {
+            let renaming = browser.renaming.as_ref()?;
+            let text = renaming.field.read(cx).text().to_string();
+            Some((text, renaming.error.clone()))
+        })
+    }
+
+    fn retype(cx: &mut VisualTestContext, name: &str) {
+        press(cx, "cmd-a");
+        if name.is_empty() {
+            press(cx, "backspace");
+        } else {
+            cx.simulate_input(name);
+        }
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn return_renames_in_place_and_the_selection_follows(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let owned = own(cx);
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down down down enter");
+        // The name is selected up to its extension, so typing keeps it.
+        cx.simulate_input("b");
+        cx.run_until_parked();
+        assert_eq!(editing(&browser, cx), Some(("b.txt".into(), None)));
+        // A name that can't be used says why and stays open.
+        for (name, why) in [
+            ("zeta", "already exists"),
+            ("x/y", "can't be a name"),
+            ("", "can't be a name"),
+        ] {
+            retype(cx, name);
+            press(cx, "enter");
+            let (text, error) = editing(&browser, cx).unwrap();
+            assert_eq!(text, name);
+            assert!(
+                error.as_deref().is_some_and(|e| e.contains(why)),
+                "{name}: {error:?}"
+            );
+        }
+        assert!(project.join("a.txt").exists());
+        retype(cx, "b.txt");
+        press(cx, "enter");
+        assert_eq!(editing(&browser, cx), None);
+        assert!(project.join("b.txt").exists() && !project.join("a.txt").exists());
+        assert_eq!(shown(&browser, cx).1, ["b.txt"]);
+        // Escape leaves the name as it was.
+        press(cx, "enter");
+        retype(cx, "gone.txt");
+        press(cx, "escape");
+        assert_eq!(editing(&browser, cx), None);
+        assert_eq!(
+            shown(&browser, cx),
+            (
+                vec!["docs".into(), "zeta".into(), "b.txt".into()],
+                vec!["b.txt".into()]
+            )
+        );
+        // Clicking away keeps the new name.
+        press(cx, "enter");
+        retype(cx, "c.txt");
+        let docs = row(&browser, 0, cx);
+        cx.simulate_click(docs, with(""));
+        assert_eq!(editing(&browser, cx), None);
+        assert!(project.join("c.txt").exists());
+        assert_eq!(shown(&browser, cx).1, ["docs"]);
+        release(owned, cx);
+    }
+
+    #[gpui::test]
+    fn new_folder_counts_on_from_untitled_and_starts_its_name(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let owned = own(cx);
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "cmd-shift-n");
+        assert!(project.join("untitled folder").is_dir());
+        assert_eq!(
+            editing(&browser, cx),
+            Some(("untitled folder".into(), None))
+        );
+        assert_eq!(shown(&browser, cx).1, ["untitled folder"]);
+        press(cx, "escape");
+        press(cx, "cmd-shift-n");
+        assert_eq!(
+            editing(&browser, cx),
+            Some(("untitled folder 2".into(), None))
+        );
+        cx.simulate_input("notes");
+        press(cx, "enter");
+        assert!(project.join("notes").is_dir() && !project.join("untitled folder 2").exists());
+        assert_eq!(shown(&browser, cx).1, ["notes"]);
+        cx.dispatch_action(NewFile);
+        cx.run_until_parked();
+        assert!(project.join("untitled").is_file());
+        assert_eq!(editing(&browser, cx), Some(("untitled".into(), None)));
+        press(cx, "escape");
+        release(owned, cx);
+    }
+
+    #[gpui::test]
+    fn duplicate_selects_the_copy_and_trash_undoes(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let owned = own(cx);
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down down down cmd-d");
+        assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
+        assert!(project.join("a.txt").exists());
+        // This goes to the user's own Trash, and comes back out before the
+        // test ends.
+        press(cx, "cmd-backspace");
+        assert!(!project.join("a copy.txt").exists());
+        assert_eq!(
+            shown(&browser, cx),
+            (vec!["docs".into(), "zeta".into(), "a.txt".into()], vec![])
+        );
+        press(cx, "cmd-z");
+        assert!(project.join("a copy.txt").exists());
+        assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
+        assert_eq!(notice(&browser, cx), None);
+        release(owned, cx);
+    }
+
+    #[gpui::test]
+    fn copy_and_paste_carry_files_through_the_pasteboard(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        std::fs::write(project.join("zeta/a.txt"), "theirs").unwrap();
+        let owned = own(cx);
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down down down cmd-c");
+        let on_board = cx.update(|_, cx| cx.global::<Pasteboard>().files());
+        assert_eq!(on_board, [project.join("a.txt")]);
+        // Pasted where it is, it's duplicated.
+        press(cx, "cmd-v");
+        assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
+        // Into a folder where the name is taken, the copy waits for a
+        // choice, and Activity shows it.
+        press(cx, "up cmd-down cmd-v");
+        let activity = browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Activity(_))));
+        assert!(activity);
+        press(cx, "escape cmd-[ up cmd-down cmd-alt-v");
+        release(owned, cx);
+        assert_eq!(read(&project.join("zeta/a.txt")), "theirs");
+        assert!(project.join("docs/a.txt").exists() && !project.join("a.txt").exists());
+    }
+
+    #[gpui::test]
+    fn empty_trash_says_how_many_and_erases_only_once_confirmed(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let owned = own(cx);
+        let trash = owned.state.path().join("Trash");
+        std::fs::create_dir(&trash).unwrap();
+        for name in ["old.txt", "older.txt"] {
+            std::fs::write(trash.join(name), "").unwrap();
+        }
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "cmd-shift-backspace");
+        let (asked, _) = cx.pending_prompt().unwrap();
+        assert_eq!(asked, "Permanently erase 2 items in the Trash?");
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(ops::trash_items(&trash).unwrap().len(), 2);
+        press(cx, "cmd-shift-backspace");
+        cx.simulate_prompt_answer("Empty Trash");
+        cx.run_until_parked();
+        assert!(ops::trash_items(&trash).unwrap().is_empty());
+        press(cx, "cmd-shift-backspace");
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(notice(&browser, cx).as_deref(), Some("The Trash is empty."));
+        release(owned, cx);
+    }
+
+    fn read(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap()
     }
 }

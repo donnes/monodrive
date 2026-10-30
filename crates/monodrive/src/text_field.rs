@@ -16,7 +16,6 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 const CONTEXT: &str = "TextField";
-const LINE_HEIGHT: f32 = 20.;
 const FONT_SIZE: f32 = 14.;
 
 actions!(
@@ -54,7 +53,6 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("right", Right, context),
         KeyBinding::new("shift-left", SelectLeft, context),
         KeyBinding::new("shift-right", SelectRight, context),
-        KeyBinding::new("cmd-a", SelectAll, context),
         KeyBinding::new("home", Home, context),
         KeyBinding::new("end", End, context),
         KeyBinding::new("cmd-left", Home, context),
@@ -67,9 +65,6 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("alt-shift-right", SelectWordRight, context),
         KeyBinding::new("alt-backspace", DeleteWordLeft, context),
         KeyBinding::new("cmd-backspace", DeleteToHome, context),
-        KeyBinding::new("cmd-v", Paste, context),
-        KeyBinding::new("cmd-c", Copy, context),
-        KeyBinding::new("cmd-x", Cut, context),
     ]);
 }
 
@@ -80,6 +75,7 @@ pub struct TextField {
     focus: FocusHandle,
     label: SharedString,
     placeholder: SharedString,
+    font_size: f32,
     content: SharedString,
     /// Byte offsets into `content`, always on char boundaries.
     selection: Range<usize>,
@@ -111,6 +107,7 @@ impl TextField {
             focus: cx.focus_handle(),
             label: label.into(),
             placeholder: placeholder.into(),
+            font_size: FONT_SIZE,
             content: SharedString::default(),
             selection: 0..0,
             reversed: false,
@@ -122,8 +119,24 @@ impl TextField {
         }
     }
 
+    /// Matches the text it edits in place, as a renamed file's name.
+    pub fn with_font_size(mut self, size: f32) -> Self {
+        self.font_size = size;
+        self
+    }
+
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// Sets the text with `selected` selected, as an edit starts.
+    pub fn set_text(&mut self, text: &str, selected: Range<usize>, cx: &mut Context<Self>) {
+        self.content = SharedString::from(text.to_owned());
+        self.selection = self.clip(selected.start)..self.clip(selected.end);
+        self.reversed = false;
+        self.marked = None;
+        cx.emit(Changed);
+        cx.notify();
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -401,6 +414,11 @@ impl TextField {
     }
 }
 
+/// 20 pt lines for the 14 pt default, as before sizes varied.
+fn line_height(font_size: f32) -> f32 {
+    font_size + 6.
+}
+
 fn from16(text: &str, offset: usize) -> usize {
     let mut units = 0;
     for (byte, ch) in text.char_indices() {
@@ -555,7 +573,7 @@ impl Element for FieldElement {
     ) -> (LayoutId, ()) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = px(LINE_HEIGHT).into();
+        style.size.height = px(line_height(self.field.read(cx).font_size)).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -603,7 +621,7 @@ impl Element for FieldElement {
         };
         let line = window
             .text_system()
-            .shape_line(text, px(FONT_SIZE), &runs, None);
+            .shape_line(text, px(field.font_size), &runs, None);
         // Keep the caret in view as the text outgrows the field.
         let caret = if empty {
             px(0.)
@@ -702,7 +720,7 @@ impl Render for TextField {
             .track_focus(&self.focus)
             .w_full()
             .min_w_0()
-            .text_size(px(FONT_SIZE))
+            .text_size(px(self.font_size))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))

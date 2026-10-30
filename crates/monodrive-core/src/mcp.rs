@@ -671,6 +671,7 @@ mod tests {
         let paths = ops::Paths {
             state: "/nonexistent/monodrive-test".into(),
             settings: "/nonexistent/monodrive-test/settings.json".into(),
+            trash: "/nonexistent/monodrive-test/Trash".into(),
         };
         Server::new(ops::Client::new(paths, None))
     }
@@ -734,6 +735,7 @@ mod tests {
         let paths = ops::Paths {
             state: dir.path().join("state"),
             settings: dir.path().join("settings.json"),
+            trash: dir.path().join("Trash"),
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
@@ -790,6 +792,7 @@ mod tests {
         let paths = ops::Paths {
             state: dir.path().join("state"),
             settings: dir.path().join("settings.json"),
+            trash: dir.path().join("Trash"),
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());

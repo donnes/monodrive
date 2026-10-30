@@ -25,15 +25,19 @@ pub struct Paths {
     pub state: PathBuf,
     /// The app's settings.json, read for the Agents setting.
     pub settings: PathBuf,
+    /// The Trash that Empty Trash erases.
+    pub trash: PathBuf,
 }
 
 impl Paths {
     /// Monodrive's own, in its support folder.
     pub fn user() -> Option<Self> {
         let support = crate::support_dir()?;
+        let home = PathBuf::from(std::env::var_os("HOME")?);
         Some(Self {
             state: support.join("ops"),
             settings: support.join("settings.json"),
+            trash: home.join(".Trash"),
         })
     }
 }
@@ -91,6 +95,11 @@ pub enum Request {
     },
     Undo,
     Redo,
+    /// Erases these items in the Trash for good, with no undo. Only the
+    /// window asks, once a person has confirmed it.
+    EmptyTrash {
+        paths: Vec<PathBuf>,
+    },
 }
 
 impl Request {
@@ -108,6 +117,7 @@ impl Request {
             Request::Cancel { .. } => "Cancel",
             Request::Undo => "Undo",
             Request::Redo => "Redo",
+            Request::EmptyTrash { .. } => "Empty Trash",
         }
     }
 }
@@ -619,6 +629,11 @@ impl Engine {
                     .into(),
             );
         }
+        if matches!(submission.request, Request::EmptyTrash { .. })
+            && matches!(submission.origin, Origin::Agent { .. })
+        {
+            return Err("Only a person can empty the Trash, from Monodrive's window.".into());
+        }
         match submission.request {
             Request::Undo => self.reverse(submission, false),
             Request::Redo => self.reverse(submission, true),
@@ -642,7 +657,7 @@ impl Engine {
             match plan {
                 Ok(Plan::Move(step)) => steps.push(step.clone()),
                 Ok(Plan::Create(_)) => creates.push(path.clone()),
-                Err(_) => {}
+                Ok(Plan::Erase) | Err(_) => {}
             }
         }
         let op = self.begin(&submission, None, steps, creates)?;
@@ -668,6 +683,7 @@ impl Engine {
                     });
                     Ok(made)
                 }
+                Plan::Erase => erase(&path).map(|()| path.clone()),
             });
             items.push(Item { path, result });
         }
@@ -692,6 +708,7 @@ impl Engine {
             Request::Duplicate { paths } => each(paths, &|path| {
                 existing(path).map(|_| Plan::Create(Make::Copy))
             }),
+            Request::EmptyTrash { paths } => each(paths, &|path| self.plan_erase(path)),
             _ => Vec::new(),
         }
     }
@@ -724,6 +741,15 @@ impl Engine {
             applied: false,
             stamp,
         })
+    }
+
+    /// Only what's directly in the Trash, never the Trash itself.
+    fn plan_erase(&self, path: &Path) -> Result<Plan, String> {
+        existing(path)?;
+        if path.parent() != Some(self.paths.trash.as_path()) {
+            return Err(format!("{}: not in the Trash.", path.display()));
+        }
+        Ok(Plan::Erase)
     }
 
     fn reverse(&mut self, submission: Submission, redo: bool) -> Result<Outcome, String> {
@@ -843,6 +869,8 @@ enum Plan {
     Move(Step),
     /// Creates or copies the item's path.
     Create(Make),
+    /// Erases the item's path for good: Empty Trash.
+    Erase,
 }
 
 fn absolute(path: &Path) -> Result<(), String> {
@@ -932,6 +960,51 @@ impl Make {
             }
         };
         made.map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Empty Trash is the one permanent erase, confirmed in the window"
+)]
+fn erase(path: &Path) -> Result<(), String> {
+    let folder = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+    let erased = if folder {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    erased.map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What's in the Trash at `trash`, as Empty Trash would erase it. Finder's
+/// own .DS_Store isn't counted or erased.
+pub fn trash_items(trash: &Path) -> Result<Vec<PathBuf>, String> {
+    let fail = |e: std::io::Error| {
+        let why = match e.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                format!("{e}. Monodrive needs Full Disk Access to read the Trash.")
+            }
+            _ => e.to_string(),
+        };
+        format!("{}: {why}", trash.display())
+    };
+    let mut items: Vec<PathBuf> = std::fs::read_dir(trash)
+        .map_err(fail)?
+        .filter_map(Result::ok)
+        .filter(|item| item.file_name() != ".DS_Store")
+        .map(|item| item.path())
+        .collect();
+    items.sort();
+    Ok(items)
+}
+
+/// `path` if nothing's there, else Finder's next free name for it:
+/// "untitled folder 2", "untitled folder 3" and on.
+pub fn free_name(path: &Path) -> PathBuf {
+    match disk::id(path) {
+        None => path.to_path_buf(),
+        Some(_) => jobs::numbered(path).unwrap_or_else(|| path.to_path_buf()),
     }
 }
 

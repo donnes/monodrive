@@ -44,6 +44,8 @@ Before undo or redo changes anything, it checks every item: the same inode is wh
 
 Items go to the Trash through `NSFileManager trashItemAtURL:resultingItemURL:`, and the returned location is recorded for put back. A volume without a Trash fails the item; nothing falls back to permanent deletion. Without Full Disk Access, macOS can refuse to read the Trash, and the error passes through to the user or agent.
 
+Empty Trash is the one permanent erase. The window lists what's in `~/.Trash`, asks the person to confirm that many items, and sends exactly those paths; the owner erases only items directly in that Trash, so anything trashed after the count stays. It's journaled like any operation but joins no history, since nothing can undo it. The owner refuses it from agents whatever the Agents setting says, and no MCP tool asks for it: agents can trash, but only a person erases. Volumes' own Trashes aren't emptied, because reading an unbrowsed external or network volume can raise a privacy prompt.
+
 ## Agents
 
 Agent requests carry `Origin::Agent` with the name the MCP client gave at `initialize`, if any. The person behind an agent isn't known, so it isn't recorded. The owner reads `agents_change_files` from `settings.json` at each agent request and refuses every agent change, undo and redo included, while it's off. It's on by default. This setting controls a feature; it isn't a security boundary. Any process running as the user can edit the settings file.

@@ -12,10 +12,11 @@ gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["font-kit", "runtime_shaders"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 unicode-segmentation = "1"
-# Pins the traffic lights to Monocode's spacing and draws Finder's icons.
+# Pins the traffic lights to Monocode's spacing, draws Finder's icons, and
+# puts files on the pasteboard.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-uniform-type-identifiers", "NSBitmapImageRep", "NSButton", "NSControl", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSResponder", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-uniform-type-identifiers", "NSBitmapImageRep", "NSButton", "NSControl", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSGeometry", "NSString", "NSURL"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes", "UTType"] }
 raw-window-handle = "0.6"
 serde.workspace = true

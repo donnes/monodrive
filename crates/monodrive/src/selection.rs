@@ -141,6 +141,19 @@ impl Selection {
         }
     }
 
+    /// An item moved from `from` to `to`, as by a rename, keeps its place:
+    /// still selected, and still the anchor or cursor if it was.
+    pub fn rename(&mut self, from: &Path, to: &Path) {
+        if let Some(size) = self.paths.remove(from) {
+            self.paths.insert(to.to_path_buf(), size);
+        }
+        for end in [&mut self.anchor, &mut self.cursor] {
+            if end.as_deref() == Some(from) {
+                *end = Some(to.to_path_buf());
+            }
+        }
+    }
+
     pub fn select_all(&mut self, entries: &[Entry]) {
         self.paths = entries
             .iter()

@@ -2,14 +2,17 @@
 //! menu bar, the command palette and the Keyboard settings page all read it,
 //! so a command is defined once. A command's id is its action's name.
 //!
-//! Navigation and editing keys (arrows, Tab, Esc, the text field's keys) are
-//! not commands: they stay with the views that own them and can't be rebound.
+//! Navigation and editing keys (arrows, Tab, Esc, the text field's caret
+//! keys) are not commands: they stay with the views that own them and can't
+//! be rebound. Cut, Copy, Paste and Select All are commands, one action each
+//! as in AppKit: a text field acts on its text, the file list on its files.
 
 use crate::browser::{
-    Back, CopyPath, DeselectAll, EnclosingFolder, FocusSearch, Forward, GoApplications, GoComputer,
-    GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, OpenSelected, OpenSettings, Redo,
-    ResetZoom, ReverseSort, ShowActivity, SortByKind, SortByModified, SortByName, SortBySize,
-    ToggleHiddenFiles, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    Back, CopyPath, DeselectAll, Duplicate, EmptyTrash, EnclosingFolder, FocusSearch, Forward,
+    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, MoveHere,
+    MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenSelected, OpenSettings, Redo,
+    Rename, ResetZoom, ReverseSort, ShowActivity, SortByKind, SortByModified, SortByName,
+    SortBySize, ToggleHiddenFiles, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{activity, browser, goto, palette, settings, text_field};
@@ -79,6 +82,8 @@ pub struct Command {
     pub action: fn() -> Box<dyn Action>,
     /// Starts a new section of its menu.
     pub separated: bool,
+    /// The standard AppKit command it is, so system panels' fields get it.
+    pub os_action: Option<OsAction>,
 }
 
 impl Command {
@@ -113,6 +118,7 @@ pub fn all() -> Vec<Command> {
             context,
             action,
             separated: false,
+            os_action: None,
         }
     }
     fn separated(command: Command) -> Command {
@@ -121,11 +127,25 @@ pub fn all() -> Vec<Command> {
             ..command
         }
     }
+    fn standard(os_action: OsAction, command: Command) -> Command {
+        Command {
+            os_action: Some(os_action),
+            ..command
+        }
+    }
+    const LIST: Option<&str> = Some("FileList");
     use Group::*;
     vec![
         command("Settings…", App, &["cmd-,"], None, || {
             Box::new(OpenSettings)
         }),
+        separated(command(
+            "Empty Trash…",
+            App,
+            &["cmd-shift-backspace"],
+            BROWSER,
+            || Box::new(EmptyTrash),
+        )),
         separated(command("Hide Monodrive", App, &["cmd-h"], None, || {
             Box::new(Hide)
         })),
@@ -136,32 +156,73 @@ pub fn all() -> Vec<Command> {
         separated(command("Quit Monodrive", App, &["cmd-q"], None, || {
             Box::new(Quit)
         })),
-        // Monodrive opens on Return; Finder renames.
+        command("New Folder", File, &["cmd-shift-n"], BROWSER, || {
+            Box::new(NewFolder)
+        }),
         command(
+            "New Folder with Selection",
+            File,
+            &["ctrl-cmd-n"],
+            BROWSER,
+            || Box::new(NewFolderWithSelection),
+        ),
+        command("New File", File, &[], BROWSER, || Box::new(NewFile)),
+        separated(command(
             "Open",
             File,
-            &["enter", "cmd-down", "cmd-o"],
+            &["cmd-down", "cmd-o"],
             BROWSER,
             || Box::new(OpenSelected),
-        ),
-        command("Copy Path", File, &["cmd-alt-c"], BROWSER, || {
-            Box::new(CopyPath)
-        }),
+        )),
+        // Return renames, as in Finder; → and ⌘↓ still go in.
+        separated(command("Rename", File, &["enter"], LIST, || {
+            Box::new(Rename)
+        })),
+        command("Duplicate", File, &["cmd-d"], LIST, || Box::new(Duplicate)),
+        separated(command(
+            "Move to Trash",
+            File,
+            &["cmd-backspace"],
+            LIST,
+            || Box::new(MoveToTrash),
+        )),
         // From the list only, so ⌘Z while typing a search never changes
         // files; the menu bar's Undo works anywhere in the window.
-        command("Undo", Edit, &["cmd-z"], Some("FileList"), || {
-            Box::new(Undo)
+        command("Undo", Edit, &["cmd-z"], LIST, || Box::new(Undo)),
+        command("Redo", Edit, &["cmd-shift-z"], LIST, || Box::new(Redo)),
+        standard(
+            OsAction::Cut,
+            separated(command("Cut", Edit, &["cmd-x"], None, || {
+                Box::new(text_field::Cut)
+            })),
+        ),
+        standard(
+            OsAction::Copy,
+            command("Copy", Edit, &["cmd-c"], None, || {
+                Box::new(text_field::Copy)
+            }),
+        ),
+        standard(
+            OsAction::Paste,
+            command("Paste", Edit, &["cmd-v"], None, || {
+                Box::new(text_field::Paste)
+            }),
+        ),
+        command("Move Here", Edit, &["cmd-alt-v"], LIST, || {
+            Box::new(MoveHere)
         }),
-        command("Redo", Edit, &["cmd-shift-z"], Some("FileList"), || {
-            Box::new(Redo)
+        standard(
+            OsAction::SelectAll,
+            command("Select All", Edit, &["cmd-a"], None, || {
+                Box::new(text_field::SelectAll)
+            }),
+        ),
+        command("Deselect All", Edit, &["cmd-alt-a"], BROWSER, || {
+            Box::new(DeselectAll)
         }),
-        separated(command(
-            "Deselect All",
-            Edit,
-            &["cmd-alt-a"],
-            BROWSER,
-            || Box::new(DeselectAll),
-        )),
+        separated(command("Copy Path", Edit, &["cmd-alt-c"], BROWSER, || {
+            Box::new(CopyPath)
+        })),
         command("Back", Go, &["cmd-["], BROWSER, || Box::new(Back)),
         command("Forward", Go, &["cmd-]"], BROWSER, || Box::new(Forward)),
         command("Enclosing Folder", Go, &["cmd-up"], BROWSER, || {
@@ -252,12 +313,14 @@ fn valid(keys: &str) -> bool {
 }
 
 /// Contexts drawn inside others, whose keys therefore compete: the list,
-/// sidebar and search field inside the browser, the field inside the palette
-/// and Go to Folder.
-const NESTED: [(&str, &str); 5] = [
+/// sidebar and search field inside the browser, the name being edited in the
+/// list, the field inside the palette and Go to Folder.
+const NESTED: [(&str, &str); 7] = [
     ("Browser", "FileList"),
     ("Browser", "Sidebar"),
+    ("Browser", "Search"),
     ("Browser", "TextField"),
+    ("FileList", "Rename"),
     ("Palette", "TextField"),
     ("GoTo", "TextField"),
 ];
@@ -452,7 +515,7 @@ fn install_menus(cx: &mut App) {
             items.push(MenuItem::Action {
                 name: command.title.into(),
                 action: (command.action)(),
-                os_action: None,
+                os_action: command.os_action,
                 checked: ticked.contains(&command.id()),
                 disabled: false,
             });
@@ -467,25 +530,7 @@ fn install_menus(cx: &mut App) {
     cx.set_menus(vec![
         menu(Group::App, items(Group::App)),
         menu(Group::File, items(Group::File)),
-        menu(Group::Edit, {
-            // Finder's order: Undo and Redo, the clipboard, then the rest.
-            let mut edit = items(Group::Edit);
-            let at = edit
-                .iter()
-                .position(|item| matches!(item, MenuItem::Separator))
-                .unwrap_or(edit.len());
-            edit.splice(
-                at..at,
-                [
-                    MenuItem::separator(),
-                    MenuItem::os_action("Cut", text_field::Cut, OsAction::Cut),
-                    MenuItem::os_action("Copy", text_field::Copy, OsAction::Copy),
-                    MenuItem::os_action("Paste", text_field::Paste, OsAction::Paste),
-                    MenuItem::os_action("Select All", text_field::SelectAll, OsAction::SelectAll),
-                ],
-            );
-            edit
-        }),
+        menu(Group::Edit, items(Group::Edit)),
         menu(Group::Go, items(Group::Go)),
         menu(Group::View, items(Group::View)),
         menu(Group::Window, items(Group::Window)),

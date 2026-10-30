@@ -292,6 +292,12 @@ impl Client {
         self.ask(&Message::Submit(submission))
     }
 
+    /// What Empty Trash would erase now. Read here, not by the owner, so it
+    /// needs no connection.
+    pub fn trash_items(&self) -> Result<Vec<PathBuf>, String> {
+        super::trash_items(&self.paths.trash)
+    }
+
     /// Every job still going and the latest finished, newest first.
     pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
         self.ask(&Message::Jobs)
