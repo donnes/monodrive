@@ -56,6 +56,11 @@ pub struct Volume {
 /// The volumes Finder shows, the startup disk first. Each read can wait on
 /// a slow network share, so call it off the UI thread.
 pub fn list() -> Vec<Volume> {
+    mounted(false)
+}
+
+/// Every mounted volume, or with `hidden` false only those Finder shows.
+fn mounted(hidden: bool) -> Vec<Volume> {
     objc2::rc::autoreleasepool(|_| {
         // SAFETY: these are Foundation's constant keys.
         let keys = unsafe {
@@ -74,7 +79,7 @@ pub fn list() -> Vec<Volume> {
             ]
         };
         let keys = NSArray::from_slice(&keys);
-        let mut volumes: Vec<Volume> = mounts()
+        let mut volumes: Vec<Volume> = mounts(hidden)
             .into_iter()
             .filter_map(|(mount, device)| {
                 let url = NSURL::fileURLWithPath(&NSString::from_str(&mount.to_string_lossy()));
@@ -88,11 +93,11 @@ pub fn list() -> Vec<Volume> {
     })
 }
 
-/// Where the kernel has a volume mounted that Finder would show, and the
+/// Where the kernel has volumes mounted, hidden ones only if asked, and the
 /// device it's mounted from, such as `disk4s1`. Read from the mount table,
 /// not NSFileManager, whose list lags a mount by a moment, so a `watch`
 /// callback that lists again sees the new volume.
-fn mounts() -> Vec<(PathBuf, Option<CString>)> {
+fn mounts(hidden: bool) -> Vec<(PathBuf, Option<CString>)> {
     // SAFETY: a null buffer asks only for the count.
     let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
     // Room for a few mounted between the two calls.
@@ -110,7 +115,7 @@ fn mounts() -> Vec<(PathBuf, Option<CString>)> {
     }
     table
         .iter()
-        .filter(|fs| fs.f_flags & libc::MNT_DONTBROWSE as u32 == 0)
+        .filter(|fs| hidden || fs.f_flags & libc::MNT_DONTBROWSE as u32 == 0)
         .map(|fs| {
             // SAFETY: the kernel NUL-terminates both names.
             let (path, from) = unsafe {
@@ -226,7 +231,8 @@ pub fn eject(mount: &Path, origin: &Origin, ops: &mut ops::Client) -> Result<Str
                 .into(),
         );
     }
-    let volumes = list();
+    // Hidden ones too: a whole-disk eject takes them along, jobs and all.
+    let volumes = mounted(true);
     let volume = volumes
         .iter()
         .find(|volume| volume.mount == mount)
