@@ -30,14 +30,20 @@ icons!(
     "chevron-down-hi",
     "chevron-left",
     "chevron-right",
+    "clock",
+    "eject",
     "file",
     "folder-01",
+    "grip-vertical",
+    "hard-drive",
     "keyboard",
     "palette",
     "rotate-ccw",
     "search",
+    "server",
     "settings",
     "sliders",
+    "trash",
 );
 
 impl AssetSource for Assets {

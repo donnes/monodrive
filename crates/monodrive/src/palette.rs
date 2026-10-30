@@ -268,6 +268,47 @@ pub fn card(
         )
 }
 
+/// What a card's button looks like.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    Plain,
+    /// What ↩ does.
+    Default,
+    /// What ↩ does, and it can't be undone.
+    Danger,
+    /// It still says what it would do.
+    Disabled,
+}
+
+pub fn button(id: &'static str, label: &'static str, look: Look) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(Role::Button)
+        .aria_label(label)
+        .h(px(28.))
+        .px_3()
+        .flex_shrink_0()
+        .rounded(px(7.))
+        .flex()
+        .items_center()
+        .text_size(px(13.))
+        .when(look != Look::Disabled, |d| d.cursor_pointer())
+        .map(|d| match look {
+            Look::Plain => d.bg(content(0.08)).hover(|s| s.bg(content(0.14))),
+            Look::Default => d
+                .bg(accent())
+                .text_color(on_accent())
+                .hover(|s| s.opacity(0.9)),
+            Look::Danger => d
+                .bg(theme::danger())
+                .text_color(gpui::white())
+                .hover(|s| s.opacity(0.9)),
+            Look::Disabled => d.bg(content(0.08)).text_color(content(0.3)),
+        })
+        .child(label)
+}
+
 /// What a command is found by: "Go: Back".
 fn haystack(command: &Command) -> String {
     format!("{}: {}", command.group.label(), command.title)

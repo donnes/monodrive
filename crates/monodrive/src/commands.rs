@@ -8,15 +8,17 @@
 //! as in AppKit: a text field acts on its text, the file list on its files.
 
 use crate::browser::{
-    Back, CopyPath, DeselectAll, Duplicate, EmptyTrash, EnclosingFolder, FocusSearch, Forward,
-    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, MoveHere,
-    MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenInTerminal, OpenSelected,
-    OpenSettings, QuickLook, Redo, Rename, ResetZoom, RevealInFinder, ReverseSort,
-    ShowCopiesAndMoves, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
-    ToggleHiddenFiles, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    AddToSidebar, Back, ClearRecents, ConnectToServer, CopyPath, DeselectAll, Duplicate,
+    EditFavorites, Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GoApplications,
+    GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents, GoToFolder, GoTrash,
+    MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenInTerminal,
+    OpenSelected, OpenSettings, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom,
+    RevealInFinder, ReverseSort, ShowCopiesAndMoves, ShowPackageContents, SortByKind,
+    SortByModified, SortByName, SortBySize, ToggleHiddenFiles, Undo, ViewAsGrid, ViewAsList,
+    ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
-use crate::{browser, empty_trash, goto, jobs, menu, palette, settings, text_field};
+use crate::{browser, connect, empty_trash, goto, jobs, menu, palette, settings, text_field};
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
     OsAction, actions,
@@ -218,6 +220,38 @@ pub fn all() -> Vec<Command> {
                 Box::new(OpenInTerminal)
             }),
         ),
+        // What's on offer depends on the row: each is there only where it
+        // would run, which the views decide.
+        on(
+            SELECTION,
+            separated(command(
+                "Add to Sidebar",
+                File,
+                &["ctrl-cmd-t"],
+                BROWSER,
+                || Box::new(AddToSidebar),
+            )),
+        ),
+        on(
+            &[Scope::Sidebar],
+            separated(command(
+                "Remove from Sidebar",
+                File,
+                &["cmd-backspace"],
+                Some("Sidebar"),
+                || Box::new(RemoveFromSidebar),
+            )),
+        ),
+        on(
+            &[Scope::Sidebar],
+            command("Eject", File, &["cmd-e"], BROWSER, || Box::new(Eject)),
+        ),
+        on(
+            &[Scope::Sidebar],
+            command("Clear Recents", File, &[], BROWSER, || {
+                Box::new(ClearRecents)
+            }),
+        ),
         // Finder offers it on several items only, though ⌃⌘N takes one.
         on(
             &[Scope::Several],
@@ -255,6 +289,10 @@ pub fn all() -> Vec<Command> {
                 LIST,
                 || Box::new(MoveToTrash),
             )),
+        ),
+        on(
+            SELECTION,
+            command("Put Back", File, &[], BROWSER, || Box::new(PutBack)),
         ),
         // From the list only, so ⌘Z while typing a search never changes
         // files; the menu bar's Undo works anywhere in the window.
@@ -307,9 +345,10 @@ pub fn all() -> Vec<Command> {
         command("Enclosing Folder", Go, &["cmd-up"], BROWSER, || {
             Box::new(EnclosingFolder)
         }),
-        separated(command("Home", Go, &["cmd-shift-h"], BROWSER, || {
-            Box::new(GoHome)
+        separated(command("Recents", Go, &["cmd-shift-f"], BROWSER, || {
+            Box::new(GoRecents)
         })),
+        command("Home", Go, &["cmd-shift-h"], BROWSER, || Box::new(GoHome)),
         command("Desktop", Go, &["cmd-shift-d"], BROWSER, || {
             Box::new(GoDesktop)
         }),
@@ -325,8 +364,12 @@ pub fn all() -> Vec<Command> {
         command("Macintosh HD", Go, &["cmd-shift-c"], BROWSER, || {
             Box::new(GoComputer)
         }),
+        command("Trash", Go, &[], BROWSER, || Box::new(GoTrash)),
         command("Go to Folder…", Go, &["cmd-shift-g"], BROWSER, || {
             Box::new(GoToFolder)
+        }),
+        command("Connect to Server…", Go, &["cmd-k"], BROWSER, || {
+            Box::new(ConnectToServer)
         }),
         separated(command("Search", Go, &["cmd-f"], BROWSER, || {
             Box::new(FocusSearch)
@@ -346,6 +389,9 @@ pub fn all() -> Vec<Command> {
             None,
             || Box::new(OpenPalette),
         )),
+        separated(command("Edit Favorites", View, &[], BROWSER, || {
+            Box::new(EditFavorites)
+        })),
         on(
             FOLDER,
             separated(command("Show Hidden Files", View, &["cmd->"], None, || {
@@ -418,8 +464,8 @@ fn valid(keys: &str) -> bool {
 
 /// Contexts drawn inside others, whose keys therefore compete: the list,
 /// sidebar and search field inside the browser, the name being edited in the
-/// list, the field inside the palette and Go to Folder.
-const NESTED: [(&str, &str); 7] = [
+/// list, the field inside the palette, Go to Folder and Connect to Server.
+const NESTED: [(&str, &str); 8] = [
     ("Browser", "FileList"),
     ("Browser", "Sidebar"),
     ("Browser", "Search"),
@@ -427,6 +473,7 @@ const NESTED: [(&str, &str); 7] = [
     ("FileList", "Rename"),
     ("Palette", "TextField"),
     ("GoTo", "TextField"),
+    ("Connect", "TextField"),
 ];
 
 fn overlap(a: Option<&str>, b: Option<&str>) -> bool {
@@ -581,6 +628,7 @@ pub fn apply(cx: &mut App) {
     settings::bind(cx);
     palette::bind(cx);
     goto::bind(cx);
+    connect::bind(cx);
     jobs::bind(cx);
     empty_trash::bind(cx);
     menu::bind(cx);
@@ -791,10 +839,12 @@ mod tests {
                 "Show Package Contents",
                 "Reveal in Finder",
                 "Open in Terminal",
+                "| Add to Sidebar ⌃⌘T",
                 "| Rename ↩",
                 "Duplicate ⌘D",
                 "Quick Look ⌘Y",
                 "| Move to Trash ⌘⌫",
+                "Put Back",
                 "| Copy ⌘C",
                 "| Copy Path ⌥⌘C",
             ]
@@ -814,11 +864,19 @@ mod tests {
                 "Sort by Kind ⌃⌥⌘4",
             ]
         );
-        assert_eq!(shown(&[Scope::Sidebar], &prefs, &all), ["Open ⌘↓"]);
+        assert_eq!(
+            shown(&[Scope::Sidebar], &prefs, &all),
+            [
+                "Open ⌘↓",
+                "| Remove from Sidebar ⌘⌫",
+                "Eject ⌘E",
+                "Clear Recents"
+            ]
+        );
         // New Folder with Selection is for several, after the ways to open.
         let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
         assert_eq!(
-            several[3..5],
+            several[4..6],
             ["| New Folder with Selection ⌃⌘N", "Rename ↩"]
         );
         // What wouldn't run now is left out, and so is a separator with

@@ -1,0 +1,629 @@
+//! The sidebar, the Trash, Recents and Connect to Server, driven through the
+//! real `Browser` over temp folders. `Fake` stands in for the system, so
+//! nothing here mounts or ejects anything, and `Store` is a temp folder's.
+
+use super::tests::*;
+use super::*;
+use gpui::{TestAppContext, VisualTestContext};
+use monodrive_core::places::Store;
+use monodrive_core::servers::Cancel;
+use monodrive_core::volumes::{Volume, VolumeId};
+
+#[derive(Default)]
+struct Fake {
+    volumes: Mutex<Vec<Volume>>,
+    /// Why the next eject is refused.
+    refusal: Mutex<Option<String>>,
+    ejected: Mutex<Vec<PathBuf>>,
+    /// What the next mount answers.
+    mounted: Mutex<Option<Result<PathBuf, String>>>,
+    opened: Mutex<Vec<PathBuf>>,
+}
+
+impl Drives for Fake {
+    fn list(&self) -> Vec<Volume> {
+        self.volumes.lock().unwrap().clone()
+    }
+
+    fn eject(&self, mount: &Path, _: &mut ops::Client) -> Result<String, String> {
+        if let Some(why) = self.refusal.lock().unwrap().take() {
+            return Err(why);
+        }
+        self.ejected.lock().unwrap().push(mount.into());
+        self.volumes.lock().unwrap().retain(|v| v.mount != mount);
+        Ok("Ejected it.".into())
+    }
+
+    fn mount(&self, _: &str, _: &Arc<Cancel>) -> Result<PathBuf, String> {
+        self.mounted.lock().unwrap().take().expect("a mount answer")
+    }
+
+    fn open(&self, path: &Path, _: &App) {
+        self.opened.lock().unwrap().push(path.into());
+    }
+}
+
+fn volume(name: &str, mount: &Path, id: &str, total: u64, free: u64) -> Volume {
+    Volume {
+        name: name.into(),
+        mount: mount.into(),
+        disk: None,
+        id: Some(VolumeId::Uuid(id.into())),
+        total,
+        free,
+        read_only: false,
+        network: false,
+        ejectable: true,
+        removable: true,
+        startup: false,
+    }
+}
+
+fn startup() -> Volume {
+    Volume {
+        ejectable: false,
+        removable: false,
+        startup: true,
+        ..volume("Macintosh HD", "/".as_ref(), "root", 1000, 400)
+    }
+}
+
+struct World {
+    /// Keeps the store's and the Trash's folder.
+    dir: tempfile::TempDir,
+    store: Store,
+    fake: Arc<Fake>,
+    volumes_changed: async_channel::Sender<()>,
+    lists_changed: async_channel::Sender<()>,
+    volume_changes: async_channel::Receiver<()>,
+    list_changes: async_channel::Receiver<()>,
+}
+
+/// Isolated places with `volumes` mounted, set as the app's. Call it before
+/// `browse`, which is when the sidebar first reads them.
+fn world(volumes: Vec<Volume>, cx: &mut TestAppContext) -> World {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().canonicalize().unwrap();
+    let store = Store {
+        places: real.join("support/places.json"),
+        recents: real.join("support/recents.json"),
+    };
+    let trash = real.join("Trash");
+    std::fs::create_dir(&trash).unwrap();
+    let fake = Arc::new(Fake {
+        volumes: Mutex::new(volumes),
+        ..Fake::default()
+    });
+    let places = Places {
+        store: store.clone(),
+        trash: trash.clone(),
+        drives: fake.clone(),
+    };
+    cx.update(|cx| cx.set_global(places));
+    let (volumes_changed, volume_changes) = async_channel::unbounded();
+    let (lists_changed, list_changes) = async_channel::unbounded();
+    World {
+        dir,
+        store,
+        fake,
+        volumes_changed,
+        lists_changed,
+        volume_changes,
+        list_changes,
+    }
+}
+
+/// A browser on `folder` that hears `world`'s watches.
+fn open<'a>(
+    world: &World,
+    folder: &Path,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Browser>, &'a mut VisualTestContext) {
+    let (browser, cx) = browse(folder, cx);
+    browser.update(cx, |browser, cx| {
+        browser.hear_places(
+            (),
+            world.volume_changes.clone(),
+            world.list_changes.clone(),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    (browser, cx)
+}
+
+/// The favorites as the sidebar last read them.
+fn favorites(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Vec<PathBuf> {
+    browser.read_with(cx, |browser, _| {
+        let places = &browser.sidebar.places;
+        places.iter().map(|p| p.favorite.path.clone()).collect()
+    })
+}
+
+fn saved(store: &Store) -> Vec<PathBuf> {
+    let places = store.places(&[startup()]).unwrap();
+    places.into_iter().map(|p| p.favorite.path).collect()
+}
+
+fn on_screen(cx: &mut VisualTestContext, selector: &str) -> bool {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.debug_bounds(selector.to_string().leak()).is_some()
+}
+
+fn press_on(cx: &mut VisualTestContext, selector: &str) {
+    click(cx, selector.to_string().leak());
+}
+
+fn center(cx: &mut VisualTestContext, selector: &str) -> Point<Pixels> {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.debug_bounds(selector.to_string().leak())
+        .unwrap()
+        .center()
+}
+
+fn here(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> PathBuf {
+    browser.read_with(cx, |browser, _| browser.folder().to_path_buf())
+}
+
+/// Pins two folders ahead of the default favorites and returns them.
+fn two_favorites(world: &World) -> (PathBuf, PathBuf) {
+    let root = world.dir.path().canonicalize().unwrap();
+    let (one, two) = (root.join("One"), root.join("Two"));
+    for folder in [&one, &two] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    let volumes = [startup()];
+    world.store.pin(&one, Some(0), &volumes).unwrap();
+    world.store.pin(&two, Some(1), &volumes).unwrap();
+    (one, two)
+}
+
+#[gpui::test]
+fn drives_show_how_full_each_is_with_marks_and_follow_the_watch(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let locked = Volume {
+        read_only: true,
+        ..volume("Installer", "/Volumes/Installer".as_ref(), "I", 100, 0)
+    };
+    let world = world(
+        vec![
+            startup(),
+            volume("Backup", "/Volumes/Backup".as_ref(), "B", 1000, 250),
+            locked,
+        ],
+        cx,
+    );
+    let (browser, cx) = open(&world, &project, cx);
+    let names = |browser: &Entity<Browser>, cx: &mut VisualTestContext| {
+        browser.read_with(cx, |browser, _| {
+            let volumes = &browser.sidebar.volumes;
+            volumes.iter().map(|v| v.name.clone()).collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(names(&browser, cx), ["Macintosh HD", "Backup", "Installer"]);
+    assert!(on_screen(cx, "volume-bar-1"));
+    let bar = cx.debug_bounds("volume-bar-1").unwrap().size.width.as_f32();
+    let used = cx
+        .debug_bounds("volume-used-1")
+        .unwrap()
+        .size
+        .width
+        .as_f32();
+    assert!((used / bar - 0.75).abs() < 0.01, "{used} of {bar}");
+    // Only the read-only one is marked; the startup disk has no Eject.
+    assert!(on_screen(cx, "read-only-2"));
+    assert!(!on_screen(cx, "read-only-1"));
+    assert!(!on_screen(cx, "volume-eject-0"));
+    assert!(on_screen(cx, "volume-eject-1"));
+    // The status line has the space of the volume the folder is on.
+    let space = browser.read_with(cx, |browser, _| browser.space_here());
+    assert_eq!(
+        space,
+        Some(format!(
+            "{} free of {}",
+            format_bytes(400),
+            format_bytes(1000)
+        ))
+    );
+
+    // Nothing new is listed until the watch speaks: no polling.
+    world.fake.volumes.lock().unwrap().truncate(2);
+    cx.run_until_parked();
+    assert_eq!(names(&browser, cx).len(), 3);
+    world.volumes_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(names(&browser, cx), ["Macintosh HD", "Backup"]);
+    assert!(!on_screen(cx, "volume-bar-2"));
+}
+
+#[gpui::test]
+fn eject_shows_macos_refusal_and_leaves_a_drive_that_went(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = dir.path().canonicalize().unwrap();
+    let world = world(
+        vec![startup(), volume("Backup", &mount, "B", 1000, 250)],
+        cx,
+    );
+    let owned = own(cx);
+    let (browser, cx) = open(&world, &mount, cx);
+    *world.fake.refusal.lock().unwrap() = Some("Backup: Spotify (pid 7) is using it.".into());
+    press_on(cx, "volume-eject-1");
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Backup: Spotify (pid 7) is using it.".into(), true, false))
+    );
+    assert!(world.fake.ejected.lock().unwrap().is_empty());
+    // Clicking Eject doesn't also open the drive's row.
+    assert_eq!(browser.read_with(cx, |b, _| b.history.len()), 1);
+
+    press_on(cx, "volume-eject-1");
+    assert_eq!(*world.fake.ejected.lock().unwrap(), vec![mount.clone()]);
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Ejected it.".into(), false, false))
+    );
+    assert_eq!(browser.read_with(cx, |b, _| b.sidebar.volumes.len()), 1);
+    assert_eq!(here(&browser, cx), home());
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn edit_mode_shows_handles_and_removes_and_reorders_for_good(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (one, two) = two_favorites(&world);
+    let (browser, cx) = open(&world, &project, cx);
+    assert_eq!(favorites(&browser, cx)[..2], [one.clone(), two.clone()]);
+    // Outside Edit mode: no handles or ✕, and a click opens the row.
+    assert!(!on_screen(cx, "favorite-handle-0"));
+    assert!(!on_screen(cx, "favorite-remove-0"));
+    press_on(cx, "place-1");
+    assert_eq!(here(&browser, cx), one);
+    press(cx, "cmd-[");
+
+    click(cx, "favorites-edit");
+    assert!(on_screen(cx, "favorite-handle-0"));
+    assert!(on_screen(cx, "favorite-remove-0"));
+    // In Edit mode a click on the row goes nowhere, and Recents has no ✕.
+    press_on(cx, "place-1");
+    assert_eq!(here(&browser, cx), project);
+    let rows = favorites(&browser, cx).len();
+    assert!(!on_screen(cx, &format!("favorite-remove-{rows}")));
+
+    // Dragging the first handle onto the third row moves it there.
+    let from = center(cx, "favorite-handle-0");
+    let to = center(cx, "place-3");
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert_eq!(saved(&world.store)[2], one);
+    assert_eq!(saved(&world.store)[0], two);
+    assert_eq!(favorites(&browser, cx)[2], one);
+
+    // The ✕ forgets only the bookmark.
+    press_on(cx, "favorite-remove-2");
+    assert!(!saved(&world.store).contains(&one));
+    assert!(one.is_dir());
+    assert!(!favorites(&browser, cx).contains(&one));
+
+    // Done, or Esc, is the way out.
+    click(cx, "favorites-edit");
+    assert!(!on_screen(cx, "favorite-handle-0"));
+    click(cx, "favorites-edit");
+    press(cx, "escape");
+    assert!(!on_screen(cx, "favorite-handle-0"));
+}
+
+#[gpui::test]
+fn an_unavailable_favorite_says_why_and_never_opens_another_drive(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let dir = tempfile::tempdir().unwrap();
+    let mount = dir.path().canonicalize().unwrap().join("Backup");
+    std::fs::create_dir_all(mount.join("Photos")).unwrap();
+    // Pinned on drive A; drive B of the same name now mounts where A did.
+    let world = world(vec![startup(), volume("Backup", &mount, "B", 10, 5)], cx);
+    let drive_a = [startup(), volume("Backup", &mount, "A", 10, 5)];
+    let photos = mount.join("Photos");
+    world.store.pin(&photos, Some(0), &drive_a).unwrap();
+    let (browser, cx) = open(&world, &project, cx);
+    assert_eq!(favorites(&browser, cx)[0], photos);
+    press_on(cx, "place-1");
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Backup isn't connected.".into(), true, false))
+    );
+    assert_eq!(here(&browser, cx), project);
+    // It can still be moved and forgotten while it's away.
+    click(cx, "favorites-edit");
+    browser.update(cx, |b, cx| b.move_favorite(0, 1, cx));
+    cx.run_until_parked();
+    let held = world.store.places(&drive_a).unwrap();
+    assert_eq!(held[1].favorite.path, photos);
+    assert_eq!(held[1].favorite.volume.as_ref().unwrap().name, "Backup");
+    press_on(cx, "favorite-remove-1");
+    assert!(!saved(&world.store).contains(&photos));
+    assert!(photos.is_dir());
+}
+
+#[gpui::test]
+fn add_to_sidebar_takes_a_folder_and_remove_forgets_it(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    // Rows: docs, zeta, a.txt. ⌃⌘T does nothing on a file.
+    press(cx, "down down down ctrl-cmd-t");
+    assert!(!saved(&world.store).iter().any(|p| p.ends_with("a.txt")));
+    press(cx, "up up ctrl-cmd-t");
+    let real = project.canonicalize().unwrap();
+    let (docs, zeta) = (real.join("docs"), real.join("zeta"));
+    assert_eq!(favorites(&browser, cx).last(), Some(&docs));
+    assert_eq!(saved(&world.store).last(), Some(&docs));
+
+    // An agent's change shows when the watch speaks.
+    world.store.pin(&zeta, None, &[startup()]).unwrap();
+    assert!(!favorites(&browser, cx).contains(&zeta));
+    world.lists_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(favorites(&browser, cx).last(), Some(&zeta));
+
+    // The menu on each kind of row offers what applies.
+    let rows = favorites(&browser, cx).len();
+    let menu_on = |row: usize, cx: &mut VisualTestContext| {
+        let at = center(cx, &format!("place-{row}"));
+        right_click(cx, at);
+        cx.run_until_parked();
+        let titles = menu(&browser, cx).unwrap().0;
+        press(cx, "escape");
+        titles
+    };
+    assert_eq!(menu_on(rows, cx), ["Open", "Remove from Sidebar"]);
+    assert_eq!(menu_on(0, cx), ["Open", "Clear Recents"]);
+    assert_eq!(menu_on(rows + 1, cx), ["Open"]);
+
+    // Remove from Sidebar through that menu.
+    let at = center(cx, &format!("place-{rows}"));
+    right_click(cx, at);
+    cx.run_until_parked();
+    press(cx, "down down enter");
+    assert!(!saved(&world.store).contains(&zeta));
+    assert!(zeta.is_dir());
+}
+
+#[gpui::test]
+fn the_trash_opens_with_its_bar_and_back_returns(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let owned = own(cx);
+    // Empty Trash erases the owner's Trash, as it's the app's one in `run`.
+    let trash = owned.paths.trash.clone();
+    cx.update(|cx| cx.global_mut::<Places>().trash = trash.clone());
+    std::fs::create_dir_all(&trash).unwrap();
+    for name in ["old.txt", "older.txt"] {
+        std::fs::write(trash.join(name), "").unwrap();
+    }
+    let (browser, cx) = open(&world, &project, cx);
+    assert!(!on_screen(cx, "put-back"));
+    click(cx, "open-trash");
+    assert_eq!(shown(&browser, cx).0, ["old.txt", "older.txt"]);
+    assert_eq!(browser.read_with(cx, |b, _| b.trash_header.count), Some(2));
+    assert!(on_screen(cx, "put-back"));
+    assert!(on_screen(cx, "empty-trash"));
+    assert_eq!(
+        browser.read_with(cx, |b, _| b.put_back().1),
+        Some("Select items to put back.".to_string())
+    );
+
+    // Monodrive didn't trash this, so it never guesses where it came from.
+    press(cx, "down");
+    let (known, why) = browser.read_with(cx, |b, _| b.put_back());
+    assert!(known.is_empty());
+    assert!(why.unwrap().contains("doesn't know where it came from"));
+    click(cx, "put-back");
+    assert!(trash.join("old.txt").exists());
+    assert_eq!(toast(&browser, cx), None);
+
+    // Back returns; the bar leaves with the Trash.
+    press(cx, "cmd-[");
+    assert_eq!(here(&browser, cx), project);
+    assert!(!on_screen(cx, "put-back"));
+
+    // Its button opens the same card as ⇧⌘⌫, and an empty Trash can't empty.
+    press(cx, "cmd-]");
+    click(cx, "empty-trash");
+    assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::EmptyTrash(_)))));
+    press(cx, "enter");
+    assert_eq!(browser.read_with(cx, |b, _| b.trash_header.count), Some(0));
+    click(cx, "empty-trash");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn put_back_returns_what_monodrive_trashed(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let owned = own(cx);
+    let notes = project.canonicalize().unwrap().join("put-back-test.txt");
+    std::fs::write(&notes, "keep").unwrap();
+    let (browser, cx) = open(&world, &project, cx);
+    // Through the window's owner, so its history knows. The file does go to
+    // the real Trash, and this test takes it back out.
+    let trashed = cx.update(|_, cx| {
+        let owner = cx.global::<Operations>().0.clone();
+        let outcome = lock(&owner)
+            .submit(
+                Origin::Window,
+                Request::Trash {
+                    paths: vec![notes.clone()],
+                },
+            )
+            .unwrap();
+        outcome.items[0].result.clone().unwrap()
+    });
+    assert!(!notes.exists());
+    click(cx, "open-trash");
+    // The Trash's rows, as if listed: this test's Trash is a temp folder.
+    let entry = monodrive_core::entries::entry_at(&trashed).unwrap();
+    browser.update(cx, |browser, cx| {
+        browser.selection.select(&entry);
+        browser.entries = vec![entry];
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let (known, why) = browser.read_with(cx, |b, _| b.put_back());
+    assert_eq!(known, vec![trashed.clone()]);
+    assert_eq!(why, None);
+    click(cx, "put-back");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "keep");
+    assert!(!trashed.exists());
+    let said = toast(&browser, cx).unwrap();
+    assert!(said.0.starts_with("Put back") && !said.1, "{said:?}");
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn recents_list_what_was_opened_mark_what_went_and_clear(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let project = project.canonicalize().unwrap();
+    let (kept, gone) = (project.join("a.txt"), project.join("gone.txt"));
+    world.store.opened(&gone).unwrap();
+    let (browser, cx) = open(&world, &project, cx);
+    // Opening a file in the window opens it in its app and remembers it.
+    press(cx, "down down down cmd-o");
+    assert_eq!(*world.fake.opened.lock().unwrap(), vec![kept.clone()]);
+    assert_eq!(world.store.recents().unwrap()[0], kept);
+
+    press(cx, "cmd-shift-f");
+    assert_eq!(shown(&browser, cx).0, ["a.txt", "gone.txt"]);
+    let missing = browser.read_with(cx, |b, _| b.missing.clone());
+    assert_eq!(missing, HashSet::from([gone.clone()]));
+    // A gone one stays in the list, and opening it says so.
+    press(cx, "down down cmd-o");
+    let said = toast(&browser, cx).unwrap();
+    assert_eq!(said.0, "\"gone.txt\" is no longer there.");
+    assert_eq!(world.fake.opened.lock().unwrap().len(), 1);
+
+    // What opened elsewhere shows when the watch speaks.
+    world.store.opened(&project.join("zeta")).unwrap();
+    world.lists_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(shown(&browser, cx).0[0], "zeta");
+
+    // Back leaves it, and Forward comes back to it.
+    press(cx, "cmd-[");
+    assert!(browser.read_with(cx, |b, _| !b.showing_recents()));
+    assert_eq!(shown(&browser, cx).0, ["docs", "zeta", "a.txt"]);
+    press(cx, "cmd-]");
+    assert!(browser.read_with(cx, |b, _| b.showing_recents()));
+
+    // Clear Recents is in the Recents row's menu.
+    let at = center(cx, "place-0");
+    right_click(cx, at);
+    cx.run_until_parked();
+    press(cx, "down down enter");
+    assert_eq!(world.store.recents(), Ok(Vec::new()));
+    assert!(shown(&browser, cx).0.is_empty());
+}
+
+#[gpui::test]
+fn connect_validates_shows_failures_and_saves_only_what_connected(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    world.store.save_server("smb://nas.local/media").unwrap();
+    world
+        .store
+        .save_server("smb://studio.local/projects")
+        .unwrap();
+    let (browser, cx) = open(&world, &project, cx);
+    let error = |browser: &Entity<Browser>, cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, cx| match &b.sheet {
+            Some(Sheet::Connect(view)) => view.read(cx).error.clone(),
+            _ => panic!("the card is open"),
+        })
+    };
+    let typed = |browser: &Entity<Browser>, cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, cx| match &b.sheet {
+            Some(Sheet::Connect(view)) => view.read(cx).field.read(cx).text().to_owned(),
+            _ => panic!("the card is open"),
+        })
+    };
+    press(cx, "cmd-k");
+    // ↩ with nothing typed, and with a password, stops here: no mount answer
+    // is set, so reaching the mount would panic.
+    press(cx, "enter");
+    assert!(
+        error(&browser, cx)
+            .unwrap()
+            .starts_with("Type a server address")
+    );
+    cx.simulate_input("smb://me:secret@nas/media");
+    press(cx, "enter");
+    assert!(
+        error(&browser, cx)
+            .unwrap()
+            .starts_with("Leave the password out")
+    );
+    assert_eq!(world.store.servers().unwrap().len(), 2);
+
+    // A click fills the address, ↩ connects, and a failure stays in the card.
+    press_on(cx, "saved-server-1");
+    assert_eq!(typed(&browser, cx), "smb://studio.local/projects");
+    *world.fake.mounted.lock().unwrap() = Some(Err(
+        "smb://studio.local/projects: the server didn't answer.".into(),
+    ));
+    press(cx, "enter");
+    assert_eq!(
+        error(&browser, cx).as_deref(),
+        Some("smb://studio.local/projects: the server didn't answer.")
+    );
+
+    // ✕ forgets a saved one and doesn't fill the address.
+    press_on(cx, "forget-server-0");
+    assert_eq!(
+        world.store.servers(),
+        Ok(vec!["smb://studio.local/projects".to_string()])
+    );
+    assert_eq!(typed(&browser, cx), "smb://studio.local/projects");
+
+    // A new one saves once it's connected; the card closes and the share
+    // shows in the sidebar, without listing it.
+    press(cx, "cmd-a");
+    cx.simulate_input("nas2.local/photos");
+    cx.run_until_parked();
+    let mount: PathBuf = "/Volumes/photos".into();
+    *world.fake.mounted.lock().unwrap() = Some(Ok(mount.clone()));
+    world
+        .fake
+        .volumes
+        .lock()
+        .unwrap()
+        .push(volume("photos", &mount, "P", 10, 5));
+    press(cx, "enter");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    assert_eq!(
+        world.store.servers(),
+        Ok(vec![
+            "smb://studio.local/projects".to_string(),
+            "smb://nas2.local/photos".to_string()
+        ])
+    );
+    assert_eq!(here(&browser, cx), project);
+    assert_eq!(browser.read_with(cx, |b, _| b.sidebar.volumes.len()), 2);
+    let said = toast(&browser, cx).unwrap();
+    assert!(
+        said.0.starts_with("Connected smb://nas2.local/photos"),
+        "{said:?}"
+    );
+
+    // Esc and Cancel leave without connecting.
+    press(cx, "cmd-k escape");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    press(cx, "cmd-k");
+    click(cx, "connect-cancel");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+}

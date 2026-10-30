@@ -6,6 +6,7 @@ pub mod assets;
 mod background;
 pub mod browser;
 mod commands;
+pub mod connect;
 mod empty_trash;
 pub mod file_icons;
 mod frame;
@@ -60,6 +61,30 @@ pub fn run(folder: Option<PathBuf>) {
                     })
                     .ok();
                 cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));
+            }
+            let (volumes_changed, volume_changes) = async_channel::unbounded();
+            let (lists_changed, list_changes) = async_channel::unbounded();
+            let mut place_watches = None;
+            if let (Some(store), Some(paths)) = (
+                monodrive_core::places::Store::user(),
+                monodrive_core::ops::Paths::user(),
+            ) {
+                place_watches = Some((
+                    monodrive_core::volumes::watch(move || {
+                        let _ = volumes_changed.try_send(());
+                    })
+                    .ok(),
+                    store
+                        .watch(move || {
+                            let _ = lists_changed.try_send(());
+                        })
+                        .ok(),
+                ));
+                cx.set_global(browser::Places {
+                    store,
+                    trash: paths.trash,
+                    drives: Arc::new(browser::System),
+                });
             }
             cx.set_global(pasteboard::Pasteboard::general());
             commands::apply(cx);
@@ -131,17 +156,22 @@ pub fn run(folder: Option<PathBuf>) {
                         if let Some(watch) = watch {
                             browser.hear_jobs(watch, changes, cx);
                         }
+                        browser.hear_places(place_watches, volume_changes, list_changes, cx);
                         browser
                     });
                     window.focus(&view.focus_handle(cx), cx);
                     traffic_lights::pin(window, theme::TITLE_BAR_HEIGHT * window.content_zoom());
                     // AppKit rebuilds the buttons on some titlebar changes.
                     view.update(cx, |_, cx| {
-                        cx.observe_window_activation(window, |_, window, _| {
+                        cx.observe_window_activation(window, |browser, window, cx| {
                             traffic_lights::pin(
                                 window,
                                 theme::TITLE_BAR_HEIGHT * window.content_zoom(),
-                            )
+                            );
+                            // Files may have come and gone while away.
+                            if window.is_window_active() {
+                                browser.load_volumes(cx);
+                            }
                         })
                         .detach();
                         // The System theme follows macOS's appearance.

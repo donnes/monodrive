@@ -1,8 +1,17 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
+mod sidebar;
+mod trash;
+
+#[cfg(test)]
+mod places_tests;
+
+pub use sidebar::{Drives, Places, System};
+
 use crate::background::{Backdrop, Look};
 use crate::commands::{self, OpenPalette, Scope};
+use crate::connect::ConnectView;
 use crate::empty_trash::{self, EmptyTrashView};
 use crate::file_icons;
 use crate::goto::{GotoEvent, GotoView};
@@ -15,13 +24,13 @@ use crate::quick_look::{self, Preview};
 use crate::selection::Selection;
 use crate::settings::{self, SettingsView};
 use crate::text_field::{self, TextField};
-use crate::theme::{self, accent, content, danger, icon, icon_button, on_accent, section_label};
+use crate::theme::{self, accent, content, danger, icon, icon_button, on_accent};
 use crate::thumbnails::{self, Thumb};
 use crate::{traffic_lights, workspace};
 use chrono::{DateTime, Local};
 use gpui::RenderImage;
 use gpui::{
-    Action, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
+    App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
     FocusHandle, Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollStrategy,
     ScrollWheelEvent, Subscription, Task, UniformListScrollHandle, Window, WindowAppearance,
@@ -104,6 +113,17 @@ actions!(
         OpenInTerminal,
         QuickLook,
         ShowContextMenu,
+        AddToSidebar,
+        RemoveFromSidebar,
+        Eject,
+        ClearRecents,
+        PutBack,
+        GoRecents,
+        GoTrash,
+        ConnectToServer,
+        EditFavorites,
+        FavoriteUp,
+        FavoriteDown,
     ]
 );
 
@@ -153,6 +173,9 @@ pub fn bind(cx: &mut App) {
         // name; in it they go to its start and end, as in Finder.
         KeyBinding::new("up", text_field::Home, Some("Rename")),
         KeyBinding::new("down", text_field::End, Some("Rename")),
+        // In Edit mode, the keys' way to do what dragging a handle does.
+        KeyBinding::new("alt-up", FavoriteUp, Some("Sidebar")),
+        KeyBinding::new("alt-down", FavoriteDown, Some("Sidebar")),
         // → steps from the sidebar into the files, as it does into a folder.
         KeyBinding::new("right", FocusList, Some("Sidebar")),
         // The context menu on the selection, as on other desktops. GPUI's
@@ -188,8 +211,8 @@ pub struct Browser {
     search: Entity<TextField>,
     /// Started with the window; searches wait on it.
     index: Arc<OnceLock<Result<Index, String>>>,
-    history: Vec<PathBuf>,
-    /// Position in `history` of the folder on screen.
+    history: Vec<Stop>,
+    /// Position in `history` of what's on screen.
     at: usize,
     /// The rows on screen: the folder's entries with the contents of each
     /// expanded folder under it, or the search results while `query` is set.
@@ -295,6 +318,14 @@ pub struct Browser {
     preview: Option<Preview>,
     /// The Quick Look panel, from the first time it opens.
     quick_look: Option<quick_look::Panel>,
+    /// What the sidebar lists.
+    sidebar: sidebar::Sidebar,
+    /// What the Trash's bar shows while the Trash is on screen.
+    trash_header: trash::TrashHeader,
+    /// Rows in Recents whose files are gone.
+    missing: HashSet<PathBuf>,
+    /// Whether this lone selected entry is a folder, as last worked out.
+    lone_folder: Option<(PathBuf, bool)>,
 }
 
 impl Browser {
@@ -338,7 +369,11 @@ impl Browser {
         // Repaints the ring as the jobs change.
         cx.observe(&jobs, |_, _, cx| cx.notify()).detach();
         // Whatever moves the selection repaints, so Quick Look follows it here.
-        cx.observe_self(|this, _| this.follow_selection()).detach();
+        cx.observe_self(|this, cx| {
+            this.follow_selection();
+            this.follow_trash_selection(cx);
+        })
+        .detach();
         let mut browser = Self {
             focus: cx.focus_handle(),
             list_focus: cx.focus_handle().tab_stop(true),
@@ -349,7 +384,10 @@ impl Browser {
             reselect: None,
             search,
             index: Arc::default(),
-            history: vec![folder],
+            history: vec![Stop {
+                folder,
+                recents: false,
+            }],
             at: 0,
             entries: Vec::new(),
             depths: Vec::new(),
@@ -400,8 +438,13 @@ impl Browser {
             package: None,
             preview: None,
             quick_look: None,
+            sidebar: sidebar::Sidebar::default(),
+            trash_header: trash::TrashHeader::default(),
+            missing: HashSet::new(),
+            lone_folder: None,
         };
         browser.reload(cx);
+        browser.load_volumes(cx);
         browser
     }
 
@@ -411,14 +454,17 @@ impl Browser {
     }
 
     fn folder(&self) -> &Path {
-        &self.history[self.at]
+        &self.history[self.at].folder
     }
 
     fn navigate(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         self.reselect = Some(self.folder().to_path_buf());
         self.collapse_all();
         self.history.truncate(self.at + 1);
-        self.history.push(folder);
+        self.history.push(Stop {
+            folder,
+            recents: false,
+        });
         self.at = self.history.len() - 1;
         self.show_folder(cx);
     }
@@ -466,6 +512,9 @@ impl Browser {
         let folder = self.folder().to_path_buf();
         let query = self.query.clone();
         let index = self.index.clone();
+        let recents = self
+            .showing_recents()
+            .then(|| cx.try_global::<Places>().map(|places| places.store.clone()));
         let (show_hidden, sort) = {
             let prefs = cx.global::<Preferences>();
             (prefs.show_hidden, prefs.sort)
@@ -487,7 +536,11 @@ impl Browser {
                     Ok(index) => index.find(&query, SEARCH_LIMIT),
                     Err(e) => Err(e.clone()),
                 };
-                return hits.map(|hits| (hits, HashMap::new(), Watch::default()));
+                return hits.map(|hits| (hits, HashMap::new(), Watch::default(), HashSet::new()));
+            }
+            if let Some(store) = recents {
+                let (rows, missing) = trash::recent_entries(trash::read_recents(store.as_ref())?);
+                return Ok((rows, HashMap::new(), Watch::default(), missing));
             }
             let root = entries::list_dir(&folder, show_hidden, sort)
                 .map_err(|e| format!("{}: {e}", folder.display()))?;
@@ -506,22 +559,24 @@ impl Browser {
                     (dir, list)
                 })
                 .collect();
-            Ok((root, children, watch))
+            Ok((root, children, watch, HashSet::new()))
         });
         self.loading = cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.listing = false;
                 match result {
-                    Ok((root, children, watch)) => {
+                    Ok((root, children, watch, missing)) => {
                         this.root = root;
                         this.children = children;
                         this.watch = watch;
+                        this.missing = missing;
                         this.error = None;
                     }
                     Err(e) => {
                         this.root.clear();
                         this.children.clear();
+                        this.missing.clear();
                         this.error = Some(e);
                     }
                 }
@@ -555,6 +610,7 @@ impl Browser {
                     Some(ix) => this.reveal(ix, ScrollStrategy::Center),
                     None => this.scroll.scroll_to_item(0, ScrollStrategy::Top),
                 }
+                this.refresh_trash(cx);
                 cx.notify();
             });
         });
@@ -563,7 +619,7 @@ impl Browser {
     /// Refreshes the listing shortly after the disk changes under a folder on
     /// screen.
     fn disk_changed(&mut self, batch: &[(PathBuf, bool)], cx: &mut Context<Self>) {
-        if !self.query.is_empty() {
+        if !self.showing_folder() {
             return;
         }
         // What a pending listing will watch isn't known until it lands, and
@@ -610,7 +666,7 @@ impl Browser {
                 this.refresh = None;
                 // A listing that started since reads the disk after the
                 // change; it rechecks what it holds when it lands.
-                if this.query.is_empty() && !this.listing {
+                if this.showing_folder() && !this.listing {
                     this.list(true, cx);
                 }
             });
@@ -630,7 +686,7 @@ impl Browser {
     /// `rebuild`; `follow` scrolls to the selection if rows moved it.
     fn relayout(&mut self, follow: bool) {
         let before = self.cursor_ix();
-        let rows = if self.query.is_empty() && self.view == View::List {
+        let rows = if self.showing_folder() && self.view == View::List {
             flatten(&self.root, &self.children, &self.expanded)
         } else {
             self.root.iter().cloned().map(|entry| (entry, 0)).collect()
@@ -690,7 +746,7 @@ impl Browser {
         if self.view == View::Grid {
             return self.select(Move::By(1), false, cx);
         }
-        if !self.query.is_empty() || self.listing {
+        if !self.showing_folder() || self.listing {
             return;
         }
         let Some(ix) = self.cursor_ix() else { return };
@@ -713,7 +769,7 @@ impl Browser {
         if self.view == View::Grid {
             return self.select(Move::By(-1), false, cx);
         }
-        if !self.query.is_empty() || self.listing {
+        if !self.showing_folder() || self.listing {
             return;
         }
         let cursor = self.cursor_ix();
@@ -904,6 +960,28 @@ impl Browser {
             .map(|(path, _)| path.clone())
     }
 
+    /// The lone selected entry, if it's a folder or a link that may lead to
+    /// one: what Add to Sidebar pins. Each frame asks, so the answer is kept
+    /// for the entry it was worked out for.
+    fn lone_folder(&mut self) -> Option<PathBuf> {
+        let only = self.selection.only()?;
+        if self
+            .lone_folder
+            .as_ref()
+            .is_none_or(|(path, _)| path != only)
+        {
+            let is = self
+                .entries
+                .iter()
+                .any(|e| e.path == only && matches!(e.kind, Kind::Dir | Kind::Link));
+            self.lone_folder = Some((only.to_path_buf(), is));
+        }
+        self.lone_folder
+            .as_ref()
+            .filter(|(_, is)| *is)
+            .map(|(path, _)| path.clone())
+    }
+
     /// Asks for a context menu at `at` in the window, whose commands run as
     /// if from `origin`.
     fn request_menu(
@@ -978,27 +1056,6 @@ impl Browser {
                 this.context_click(Some(ix), event.position, window, cx)
             }),
         )
-    }
-
-    /// A right-click on the sidebar's place `ix`.
-    fn place_menu(
-        &mut self,
-        ix: usize,
-        at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.stop_propagation();
-        window.prevent_default();
-        self.sidebar_cursor = ix;
-        window.focus(&self.sidebar_focus, cx);
-        self.request_menu(vec![Scope::Sidebar], at, self.sidebar_focus.clone(), cx);
-    }
-
-    fn open_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((_, _, path)) = places().into_iter().nth(self.sidebar_cursor) {
-            self.go(path, window, cx);
-        }
     }
 
     /// Open in Terminal: at each selected folder and the folder holding
@@ -1272,7 +1329,7 @@ impl Browser {
             .collect();
         if files.len() <= OPEN_WITHOUT_ASKING {
             for file in &files {
-                cx.open_with_system(file);
+                self.open_file(file, cx);
             }
             return;
         }
@@ -1283,11 +1340,11 @@ impl Browser {
             &["Open", "Cancel"],
             cx,
         );
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             if answer.await == Ok(0) {
-                cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
                     for file in &files {
-                        cx.open_with_system(file);
+                        this.open_file(file, cx);
                     }
                 });
             }
@@ -1456,13 +1513,13 @@ impl Browser {
                         if is_dir {
                             this.navigate(path, cx);
                         } else {
-                            cx.open_with_system(&path);
+                            this.open_file(&path, cx);
                         }
                     });
                 })
                 .detach();
             }
-            _ => cx.open_with_system(&path),
+            _ => self.open_file(&path, cx),
         }
     }
 
@@ -1531,8 +1588,7 @@ impl Browser {
         if !self.sidebar_focus.is_focused(window) {
             return;
         }
-        let folder = self.folder();
-        if let Some(ix) = places().iter().position(|(_, _, path)| path == folder) {
+        if let Some(ix) = self.cursor_on_folder() {
             self.move_sidebar_cursor(ix, cx);
         }
     }
@@ -1802,7 +1858,7 @@ impl Browser {
             .is_some_and(|name| name.to_string_lossy().starts_with('.'));
         // Asked after any navigation, which clears the last folder's peek.
         let needs_peek = |this: &Self| hidden && !this.show_hidden && !this.peek_hidden;
-        if folder == self.folder() && self.query.is_empty() {
+        if folder == self.folder() && self.showing_folder() {
             let found = select
                 .as_ref()
                 .filter(|_| !self.listing)
@@ -1941,6 +1997,9 @@ impl Browser {
             let undo =
                 (changed && !matches!(request, Request::EmptyTrash { .. })).then_some(outcome.op);
             self.toast(said, false, undo, cx);
+            if matches!(request, Request::EmptyTrash { .. }) {
+                self.load_volumes(cx);
+            }
         } else {
             // An undo leaves the last toast's Undo stale.
             self.toast = None;
@@ -2103,7 +2162,9 @@ impl Browser {
     fn job_finished(&mut self, job: Job, cx: &mut Context<Self>) {
         let undo = job.undoable.then_some(job.run);
         self.toast(jobs::title(&job), false, undo, cx);
-        if self.query.is_empty() && job.into == self.folder() {
+        // A job's bytes may have moved between volumes.
+        self.load_volumes(cx);
+        if self.showing_folder() && job.into == self.folder() {
             self.select_after = job
                 .tasks
                 .into_iter()
@@ -2391,131 +2452,6 @@ impl Browser {
             }))
     }
 
-    fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut shown = places().into_iter().enumerate();
-        // A click focuses the sidebar too; only keys move its cursor, so
-        // only they show it.
-        let cursor = (self.sidebar_focus.is_focused(window) && window.last_input_was_keyboard())
-            .then_some(self.sidebar_cursor);
-        let focused = self.search.focus_handle(cx).is_focused(window);
-        let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
-        div()
-            .relative()
-            .w(px(width))
-            .flex_shrink_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .px_2()
-            .child(drag_area().h(px(theme::TITLE_BAR_HEIGHT)).w_full())
-            .child(
-                div()
-                    .key_context("Search")
-                    .h(px(32.))
-                    .mb(px(2.))
-                    .px(px(6.))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(content(if focused { 0.2 } else { 0.08 }))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(icon("search", 16.).text_color(content(0.35)))
-                    .child(div().flex_1().min_w_0().child(self.search.clone()))
-                    .when_some(
-                        (!focused)
-                            .then(|| commands::shortcut_label(FocusSearch.name(), cx))
-                            .flatten(),
-                        |d, keys| {
-                            d.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(content(0.4))
-                                    .child(keys),
-                            )
-                        },
-                    ),
-            )
-            .child(
-                div()
-                    .id("places")
-                    .key_context("Sidebar")
-                    .track_focus(&self.sidebar_focus)
-                    .on_key_down(cx.listener(Self::type_to_search))
-                    .on_action(cx.listener(|this, _: &PlacePrevious, _, cx| {
-                        this.move_sidebar_cursor(this.sidebar_cursor.saturating_sub(1), cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &PlaceNext, _, cx| {
-                        this.move_sidebar_cursor((this.sidebar_cursor + 1).min(PLACES - 1), cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &FocusList, window, cx| {
-                        this.focus_list(window, cx);
-                        // Arrive somewhere the arrows can go on from.
-                        if this.selection.is_empty() && !this.entries.is_empty() {
-                            this.select_row(0, cx);
-                        }
-                    }))
-                    .on_action(
-                        cx.listener(|this, _: &OpenPlace, window, cx| this.open_place(window, cx)),
-                    )
-                    // Open from the sidebar's menu, or ⌘O there, opens its place.
-                    .on_action(
-                        cx.listener(|this, _: &OpenSelected, window, cx| {
-                            this.open_place(window, cx)
-                        }),
-                    )
-                    .flex()
-                    .flex_col()
-                    .child(section_label("Favorites"))
-                    .children(
-                        shown
-                            .by_ref()
-                            .take(PLACES - 1)
-                            .map(|(ix, place)| self.place(ix, place, cursor, cx)),
-                    )
-                    .child(section_label("Locations"))
-                    .children(shown.map(|(ix, place)| self.place(ix, place, cursor, cx))),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .h(px(40.))
-                    .flex_shrink_0()
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        icon_button("settings", "Settings", "settings", true)
-                            .track_focus(&self.settings_focus)
-                            .focus_visible(|s| s.bg(content(0.1)).border_1().border_color(accent()))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                            ),
-                    )
-                    .children(self.index_bar(cx)),
-            )
-            .child(
-                // The edge that drags to resize, as NSSplitView's divider does.
-                div()
-                    .id("sidebar-edge")
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .right_0()
-                    .w(px(6.))
-                    .cursor(CursorStyle::ResizeLeftRight)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            this.resizing_sidebar = Some(width - event.position.x.as_f32());
-                            cx.stop_propagation();
-                            cx.notify();
-                        }),
-                    ),
-            )
-    }
-
     /// Follows a drag of the sidebar's edge. Element mouse handlers only fire
     /// while hovered, so this listens to the whole window, which keeps the
     /// resize cursor and tracking even when the pointer outruns the edge or
@@ -2557,53 +2493,6 @@ impl Browser {
         .size_0()
     }
 
-    fn place(
-        &self,
-        ix: usize,
-        (label, glyph, path): Place,
-        cursor: Option<usize>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let selected = self.query.is_empty() && self.folder() == path;
-        div()
-            .id(label)
-            // The sidebar's keyboard cursor. The border is always there, so
-            // showing it doesn't shift the row.
-            .border_1()
-            .border_color(if cursor == Some(ix) {
-                accent().opacity(0.7)
-            } else {
-                gpui::transparent_black()
-            })
-            .role(gpui::Role::Button)
-            .aria_label(label)
-            .aria_selected(selected)
-            .cursor_pointer()
-            .h(px(32.))
-            .px_2()
-            .rounded_md()
-            .flex()
-            .items_center()
-            .gap_2()
-            .text_size(px(14.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(content(if selected { 1. } else { 0.5 }))
-            .when(selected, |d| d.bg(content(0.1)))
-            .hover(|s| s.bg(content(0.1)).text_color(content(1.)))
-            .child(icon(glyph, 16.).text_color(content(if selected { 0.7 } else { 0.35 })))
-            .child(div().flex_1().truncate().child(label))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.place_menu(ix, event.position, window, cx)
-                }),
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.sidebar_cursor = ix;
-                this.go(path.clone(), window, cx);
-            }))
-    }
-
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // As Finder's status bar: what's selected and the size of its files.
         let count = match (self.selection.len(), self.entries.len()) {
@@ -2639,7 +2528,7 @@ impl Browser {
                 .on_click(cx.listener(|this, _, _, cx| this.step_history(1, cx))),
             )
             .map(|d| {
-                if self.query.is_empty() {
+                if self.showing_folder() {
                     d.child(self.path_bar(cx))
                 } else {
                     d.child(
@@ -2647,7 +2536,11 @@ impl Browser {
                             .ml_1()
                             .text_size(px(13.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Search results"),
+                            .child(if self.query.is_empty() {
+                                "Recents"
+                            } else {
+                                "Search results"
+                            }),
                     )
                 }
             })
@@ -2674,9 +2567,32 @@ impl Browser {
                     .text_color(content(0.4))
                     .child(count),
             )
+            .children(self.space_here().map(|space| {
+                div()
+                    .flex_shrink_0()
+                    .ml_2()
+                    .text_size(px(12.))
+                    .text_color(content(0.4))
+                    .child(space)
+            }))
             .children(self.jobs.read(cx).ring().map(|ring| {
                 ring.on_click(cx.listener(|this, _, window, cx| this.toggle_jobs(window, cx)))
             }))
+    }
+
+    /// The free and total space of the volume the folder on screen is on.
+    fn space_here(&self) -> Option<String> {
+        if !self.showing_folder() {
+            return None;
+        }
+        let volume = monodrive_core::volumes::holding(&self.sidebar.volumes, self.folder())?;
+        (volume.total > 0).then(|| {
+            format!(
+                "{} free of {}",
+                format_bytes(volume.free),
+                format_bytes(volume.total)
+            )
+        })
     }
 
     /// The toast at the bottom of the files, with its Undo.
@@ -2809,6 +2725,7 @@ impl Browser {
                     (row * across..((row + 1) * across).min(self.entries.len())).map(|ix| {
                         let entry = &self.entries[ix];
                         let selected = self.selection.contains(&entry.path);
+                        let missing = self.missing.contains(&entry.path);
                         let picture = (thumbs_on && thumbnails::wanted(entry))
                             .then(|| Thumb {
                                 path: entry.path.clone(),
@@ -2837,6 +2754,7 @@ impl Browser {
                             .id(ix)
                             .w(px(cell))
                             .h(px(height))
+                            .when(missing, |d| d.opacity(0.5))
                             .flex_shrink_0()
                             .flex()
                             .flex_col()
@@ -2894,7 +2812,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let searching = !self.query.is_empty();
+        let searching = !self.showing_folder();
         let tree = !searching;
         let today = Local::now().date_naive();
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
@@ -2904,6 +2822,7 @@ impl Browser {
             .filter_map(|ix| {
                 let entry = self.entries.get(ix)?;
                 let selected = self.selection.contains(&entry.path);
+                let missing = self.missing.contains(&entry.path);
                 let depth = self.depths.get(ix).copied().unwrap_or(0);
                 let open = self.is_open_folder(ix);
                 let parent = searching
@@ -2960,21 +2879,22 @@ impl Browser {
                                     div().min_w_0().truncate().text_color(muted).child(parent)
                                 })),
                         )
-                        .child(
-                            column(180., false)
-                                .text_color(muted)
-                                .child(format_date(entry.modified, today)),
-                        )
+                        .child(column(180., false).text_color(muted).child(if missing {
+                            "--".to_string()
+                        } else {
+                            format_date(entry.modified, today)
+                        }))
                         .child(
                             column(80., true)
                                 .text_color(muted)
                                 .child(format_size(entry)),
                         )
-                        .child(
-                            column(110., false)
-                                .text_color(muted)
-                                .child(entry.kind_label()),
-                        )
+                        .child(column(110., false).text_color(muted).child(if missing {
+                            "Missing".to_string()
+                        } else {
+                            entry.kind_label()
+                        }))
+                        .when(missing, |d| d.opacity(0.5))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_entry(ix, event, window, cx)
                         }))
@@ -3016,7 +2936,7 @@ impl Render for Browser {
         }
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
         // Search results stay in relevance order, so no column shows a sort.
-        let sort_shown = self.query.is_empty().then_some(prefs.sort);
+        let sort_shown = self.showing_folder().then_some(prefs.sort);
         let empty = self.root.is_empty() && self.error.is_none();
         let look = prefs.background.clone().map(|path| Look {
             path,
@@ -3138,6 +3058,10 @@ impl Render for Browser {
             });
         }
         let package = self.package().is_some();
+        let lone_folder = self.lone_folder();
+        // Nothing new goes in search results, Recents or the Trash.
+        let can_make_here = self.showing_folder() && !self.in_trash(cx);
+        let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
         // Only the sheet's controls take Tab while it's open.
         let sheet = self.sheet_open();
         let regions = !sheet;
@@ -3190,13 +3114,21 @@ impl Render for Browser {
             .when(!self.selection.is_empty(), |d| {
                 d.on_action(cx.listener(|this, _: &text_field::Copy, _, cx| this.copy_files(cx)))
             })
-            .when(self.query.is_empty(), |d| {
+            .when(can_make_here, |d| {
                 d.on_action(cx.listener(|this, _: &text_field::Paste, window, cx| {
                     this.paste(false, window, cx)
                 }))
                 .on_action(
                     cx.listener(|this, _: &MoveHere, window, cx| this.paste(true, window, cx)),
                 )
+            })
+            .when(self.showing_recents(), |d| {
+                d.on_action(cx.listener(|this, _: &ClearRecents, _, cx| this.clear_recents(cx)))
+            })
+            .when_some(self.ejectable_here(), |d, mount| {
+                d.on_action(cx.listener(move |this, _: &Eject, window, cx| {
+                    this.eject(mount.clone(), window, cx)
+                }))
             })
             .on_action(cx.listener(|this, _: &ShowContextMenu, _, cx| {
                 if this.renaming.is_none() {
@@ -3283,6 +3215,20 @@ impl Render for Browser {
                     .on_action(
                         cx.listener(|this, _: &GoHome, window, cx| this.go(home(), window, cx)),
                     )
+                    .on_action(
+                        cx.listener(|this, _: &GoRecents, window, cx| {
+                            this.open_recents(window, cx)
+                        }),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &GoTrash, window, cx| this.open_trash(window, cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &ConnectToServer, window, cx| {
+                        this.open_connect(window, cx)
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)),
+                    )
                     .on_action(cx.listener(|this, _: &GoDesktop, window, cx| {
                         this.go(home().join("Desktop"), window, cx)
                     }))
@@ -3313,6 +3259,9 @@ impl Render for Browser {
                         this.toast = None;
                         if this.close_quick_look() {
                             return;
+                        }
+                        if this.sidebar.editing {
+                            return this.toggle_editing(cx);
                         }
                         if this.query.is_empty() {
                             this.selection.clear();
@@ -3345,7 +3294,7 @@ impl Render for Browser {
                         this.submit(Request::Redo, window, cx)
                     }),
                 )
-                .when(self.query.is_empty(), |d| {
+                .when(can_make_here, |d| {
                     d.on_action(cx.listener(|this, _: &NewFolder, window, cx| {
                         this.new_item(true, window, cx)
                     }))
@@ -3354,6 +3303,16 @@ impl Render for Browser {
                             this.new_item(false, window, cx)
                         }),
                     )
+                })
+                .when(put_back, |d| {
+                    d.on_action(cx.listener(|this, _: &PutBack, window, cx| {
+                        this.put_back_selected(window, cx)
+                    }))
+                })
+                .when_some(lone_folder, |d, path| {
+                    d.on_action(cx.listener(move |this, _: &AddToSidebar, _, cx| {
+                        this.add_to_sidebar(path.clone(), cx)
+                    }))
                 })
                 .when(self.selection.len() == 1, |d| {
                     d.on_action(
@@ -3469,6 +3428,7 @@ impl Render for Browser {
                             .flex()
                             .flex_col()
                             .child(self.backdrop.clone())
+                            .children(self.trash_bar(cx))
                             // The grid sorts from the View menu and Settings.
                             .when(self.view == View::List, |d| {
                                 d.child(
@@ -3516,6 +3476,7 @@ impl Render for Browser {
                 Sheet::Goto(view) => view.clone().into_any_element(),
                 Sheet::Jobs => self.jobs_popover(cx).into_any_element(),
                 Sheet::EmptyTrash(view) => view.clone().into_any_element(),
+                Sheet::Connect(view) => view.clone().into_any_element(),
             }))
             .children(self.menu.as_ref().map(|menu| menu.view.clone()))
             // Last, so its window listeners run before any element's.
@@ -3586,6 +3547,7 @@ fn said(request: &Request, outcome: &Outcome) -> Option<String> {
             format!("Moved {what} into {}", jobs::quoted(path))
         }
         Request::EmptyTrash { .. } => format!("Erased {what} for good"),
+        Request::PutBack { .. } => format!("Put back {what}"),
         _ => return None,
     })
 }
@@ -3638,6 +3600,13 @@ enum Sheet {
     /// The copies and moves popover; `jobs` draws it.
     Jobs,
     EmptyTrash(Entity<EmptyTrashView>),
+    Connect(Entity<ConnectView>),
+}
+
+/// A place in the history: a folder, or Recents in front of one.
+struct Stop {
+    folder: PathBuf,
+    recents: bool,
 }
 
 /// A grid cell's name in at most two lines, as Finder sets it: the first
@@ -3905,26 +3874,10 @@ fn tree_step(depths: &[usize], ix: usize, arrow: Arrow, open: Option<bool>) -> T
     }
 }
 
-/// The sidebar's places, Favorites then Locations, in their order on screen.
-type Place = (&'static str, &'static str, PathBuf);
-const PLACES: usize = 6;
-
 fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| "/".into())
-}
-
-fn places() -> [Place; PLACES] {
-    let home = home();
-    [
-        ("Home", "folder-01", home.clone()),
-        ("Desktop", "folder-01", home.join("Desktop")),
-        ("Documents", "folder-01", home.join("Documents")),
-        ("Downloads", "arrow-down-circle", home.join("Downloads")),
-        ("Applications", "app-window", "/Applications".into()),
-        ("Macintosh HD", "folder-01", "/".into()),
-    ]
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4013,7 +3966,7 @@ mod tests {
     /// A browser on `folder` with the app's keys and default preferences,
     /// active and focused on its list. Type navigation keys only: a printable key
     /// starts a search, and a search starts the whole-disk index.
-    fn browse<'a>(
+    pub(super) fn browse<'a>(
         folder: &Path,
         cx: &'a mut TestAppContext,
     ) -> (Entity<Browser>, &'a mut VisualTestContext) {
@@ -4035,7 +3988,10 @@ mod tests {
 
     /// The rows shown, folders inside open folders indented, and the
     /// selected row.
-    fn shown(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> (Vec<String>, Vec<String>) {
+    pub(super) fn shown(
+        browser: &Entity<Browser>,
+        cx: &mut VisualTestContext,
+    ) -> (Vec<String>, Vec<String>) {
         browser.read_with(cx, |browser, _| {
             let rows = browser
                 .entries
@@ -4053,7 +4009,7 @@ mod tests {
         })
     }
 
-    fn press(cx: &mut VisualTestContext, keys: &str) {
+    pub(super) fn press(cx: &mut VisualTestContext, keys: &str) {
         for key in keys.split(' ') {
             cx.simulate_keystrokes(key);
             cx.run_until_parked();
@@ -4063,7 +4019,7 @@ mod tests {
     /// `project/` holding `docs/` (with `inner.md`), `zeta/`, `a.txt` and
     /// the hidden `.env`. It sits in a temp folder, since tempfile's own
     /// folders are hidden and wouldn't list in their parent.
-    fn folder() -> (tempfile::TempDir, PathBuf) {
+    pub(super) fn folder() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         std::fs::create_dir_all(project.join("docs")).unwrap();
@@ -4205,7 +4161,11 @@ mod tests {
     }
 
     /// The middle of list row `ix` in the window, as the last frame laid out.
-    fn row(browser: &Entity<Browser>, ix: usize, cx: &mut VisualTestContext) -> Point<Pixels> {
+    pub(super) fn row(
+        browser: &Entity<Browser>,
+        ix: usize,
+        cx: &mut VisualTestContext,
+    ) -> Point<Pixels> {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         browser.read_with(cx, |browser, cx| {
@@ -4215,7 +4175,7 @@ mod tests {
         })
     }
 
-    fn with(modifiers: &str) -> Modifiers {
+    pub(super) fn with(modifiers: &str) -> Modifiers {
         Modifiers {
             platform: modifiers.contains("cmd"),
             shift: modifiers.contains("shift"),
@@ -4591,9 +4551,9 @@ mod tests {
     /// An operation owner on a temp state folder, with a Trash of its own,
     /// that the window's commands reach, and a private pasteboard so Copy
     /// and Paste leave the user's alone.
-    struct Owned {
+    pub(super) struct Owned {
         state: tempfile::TempDir,
-        paths: ops::Paths,
+        pub(super) paths: ops::Paths,
         serving: std::thread::JoinHandle<std::io::Result<()>>,
     }
 
@@ -4605,7 +4565,7 @@ mod tests {
         (serving, Operations(Arc::new(Mutex::new(client))))
     }
 
-    fn own(cx: &mut TestAppContext) -> Owned {
+    pub(super) fn own(cx: &mut TestAppContext) -> Owned {
         let state = tempfile::tempdir().unwrap();
         let paths = ops::Paths {
             state: state.path().join("state"),
@@ -4640,7 +4600,7 @@ mod tests {
     }
 
     /// Lets the owner go once its jobs are done, and the pasteboard with it.
-    fn release(owned: Owned, cx: &mut VisualTestContext) {
+    pub(super) fn release(owned: Owned, cx: &mut VisualTestContext) {
         cx.update(|_, cx| {
             drop(cx.remove_global::<Operations>());
             let board = cx.remove_global::<Pasteboard>();
@@ -4651,7 +4611,7 @@ mod tests {
     }
 
     /// The toast's text, whether it's a failure, and whether it offers Undo.
-    fn toast(
+    pub(super) fn toast(
         browser: &Entity<Browser>,
         cx: &mut VisualTestContext,
     ) -> Option<(String, bool, bool)> {
@@ -4662,7 +4622,7 @@ mod tests {
     }
 
     /// Draws a frame, then clicks the middle of what `selector` marks.
-    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    pub(super) fn click(cx: &mut VisualTestContext, selector: &'static str) {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         let at = cx.debug_bounds(selector).unwrap().center();
@@ -4896,7 +4856,7 @@ mod tests {
     }
 
     /// The context menu's rows and the one highlighted, while it's open.
-    fn menu(
+    pub(super) fn menu(
         browser: &Entity<Browser>,
         cx: &mut VisualTestContext,
     ) -> Option<(Vec<&'static str>, Option<&'static str>)> {
@@ -4909,7 +4869,7 @@ mod tests {
     }
 
     /// As a pointer does it: it arrives, then presses.
-    fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+    pub(super) fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
         cx.simulate_mouse_move(at, None, with(""));
         cx.simulate_mouse_down(at, MouseButton::Right, with(""));
         cx.simulate_mouse_move(at, MouseButton::Right, with(""));

@@ -75,6 +75,8 @@ Items go to the Trash through `NSFileManager trashItemAtURL:resultingItemURL:`, 
 
 Empty Trash is the one permanent erase. The window lists what's in `~/.Trash`, asks the person to confirm that many items in its own card (↩ empties, Esc cancels), and sends each item's path with its device and inode. The owner erases an item only if it's still that same item directly in the Trash, and refuses everything if the Trash folder is no longer a real folder (a link would lead the erase elsewhere). Anything trashed after the count, even under a counted name, stays and is reported as skipped. It's journaled like any operation but joins no history, since nothing can undo it. The owner refuses it from agents whatever the Agents setting says, and no MCP tool asks for it: agents can trash, but only a person erases. Volumes' own Trashes aren't emptied, because reading an unbrowsed external or network volume can raise a privacy prompt.
 
+The window shows `~/.Trash` as a folder with a bar over its list. Put Back asks the owner where each selected item came from, by its identity in the history, and acts only on those it knows. It never guesses, so what Finder trashed or what's past the journal's retention stays, and the bar says why.
+
 ## Agents
 
 Agent requests carry `Origin::Agent` with the name the MCP client gave at `initialize`, if any. The person behind an agent isn't known, so it isn't recorded. The owner reads `agents_change_files` from `settings.json` at each agent request and refuses every agent change, undo and redo included, while it's off. It's on by default. This setting controls a feature; it isn't a security boundary. Any process running as the user can edit the settings file.

@@ -2,11 +2,11 @@
 //! erased for good. Esc, Cancel or a click outside keeps them; ↩ empties, as
 //! Finder's default button does.
 
-use crate::palette;
-use crate::theme::{content, danger};
+use crate::palette::{self, Look};
+use crate::theme::content;
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Role, Window,
-    actions, div, prelude::*, px,
+    App, Context, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Window, actions,
+    div, prelude::*, px,
 };
 use monodrive_core::ops::TrashItem;
 
@@ -58,20 +58,6 @@ impl Render for EmptyTrashView {
             1 => "1 item".to_string(),
             n => format!("{n} items"),
         };
-        let button = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .role(Role::Button)
-                .aria_label(label)
-                .h(px(28.))
-                .px_3()
-                .rounded(px(7.))
-                .flex()
-                .items_center()
-                .text_size(px(13.))
-                .cursor_pointer()
-        };
         let body = div()
             .px_2()
             .py_1()
@@ -90,18 +76,11 @@ impl Render for EmptyTrashView {
                     .justify_end()
                     .gap_2()
                     .child(
-                        button("empty-trash-cancel", "Cancel")
-                            .bg(content(0.08))
-                            .hover(|s| s.bg(content(0.14)))
-                            .child("Cancel")
+                        palette::button("empty-trash-cancel", "Cancel", Look::Plain)
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(Answer::Cancel))),
                     )
                     .child(
-                        button("empty-trash-confirm", "Empty Trash")
-                            .bg(danger())
-                            .text_color(gpui::white())
-                            .hover(|s| s.opacity(0.9))
-                            .child("Empty Trash")
+                        palette::button("empty-trash-confirm", "Empty Trash", Look::Danger)
                             .on_click(cx.listener(|this, _, _, cx| this.empty(cx))),
                     ),
             );

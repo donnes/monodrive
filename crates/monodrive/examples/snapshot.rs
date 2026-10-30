@@ -13,15 +13,25 @@
 //! ring show an agent's move there, waiting at a name that's taken. Then the
 //! last entry is renamed to a name that's taken, then to a free one, which
 //! is undone after the picture, and Empty Trash counts a Trash of 12 items.
+//!
+//! The sidebar shows a made-up set of volumes and a temp folder's favorites,
+//! so nothing real is listed, mounted or ejected. The last pictures are
+//! `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
+//! `recents.png`.
 
 use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
 use monodrive::browser::{
-    Browser, CancelRename, CommitRename, EmptyTrash, Operations, Rename, SelectLast, SelectNext,
-    ShowContextMenu, ShowCopiesAndMoves, Undo,
+    Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
+    GoRecents, GoTrash, Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu,
+    ShowCopiesAndMoves, Undo,
 };
+use monodrive::connect;
 use monodrive::preferences::{Preferences, View};
 use monodrive_core::ops::{self, Conflict, Origin, Request};
+use monodrive_core::places::Store;
+use monodrive_core::servers::Cancel;
+use monodrive_core::volumes::{Volume, VolumeId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +49,11 @@ fn main() -> gpui::Result<()> {
         Arc::new(monodrive::assets::Assets),
         gpui_platform::current_headless_renderer,
     );
+    let scratch = tempfile::tempdir_in(&out)?;
+    let trash = scratch.path().join("Trash");
+    std::fs::create_dir_all(&trash)?;
+    let places = made_up_places(scratch.path(), &trash)?;
+    cx.update(|cx| cx.set_global(places));
     for (name, view) in [("list", View::List), ("grid", View::Grid)] {
         cx.update(|cx| {
             cx.set_global(Preferences {
@@ -110,13 +125,11 @@ fn main() -> gpui::Result<()> {
         cx.capture_screenshot(window.into())?.save(&path)?;
         println!("{}", path.display());
     }
-    let scratch = tempfile::tempdir_in(&out)?;
     let paths = ops::Paths {
         state: scratch.path().join("state"),
         settings: scratch.path().join("settings.json"),
-        trash: scratch.path().join("Trash"),
+        trash,
     };
-    std::fs::create_dir_all(&paths.trash)?;
     for ix in 1..=12 {
         std::fs::write(paths.trash.join(format!("old {ix}.txt")), "")?;
     }
@@ -183,7 +196,122 @@ fn main() -> gpui::Result<()> {
     dispatch(&mut cx, window, &Undo)?;
     dispatch(&mut cx, window, &EmptyTrash)?;
     save(&mut cx, window, &out, "empty-trash")?;
+
+    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+        cx.new(|cx| Browser::new(folder.clone(), cx))
+    })?;
+    cx.run_until_parked();
+    dispatch(&mut cx, window, &EditFavorites)?;
+    save(&mut cx, window, &out, "sidebar-edit")?;
+    dispatch(&mut cx, window, &EditFavorites)?;
+    dispatch(&mut cx, window, &ConnectToServer)?;
+    save(&mut cx, window, &out, "connect")?;
+    type_text(&mut cx, window, "smb://studio.local/projects")?;
+    dispatch(&mut cx, window, &connect::Go)?;
+    save(&mut cx, window, &out, "connect-failed")?;
+    dispatch(&mut cx, window, &connect::Dismiss)?;
+    dispatch(&mut cx, window, &GoTrash)?;
+    save(&mut cx, window, &out, "trash")?;
+    dispatch(&mut cx, window, &GoRecents)?;
+    save(&mut cx, window, &out, "recents")?;
     Ok(())
+}
+
+/// Volumes that aren't there, each showing something the sidebar can show.
+struct MadeUp;
+
+impl Drives for MadeUp {
+    fn list(&self) -> Vec<Volume> {
+        const GB: u64 = 1_000_000_000;
+        let volume = |name: &str, total: u64, free: u64| Volume {
+            name: name.into(),
+            mount: Path::new("/Volumes").join(name),
+            disk: None,
+            id: Some(VolumeId::Uuid(name.into())),
+            total: total * GB,
+            free: free * GB,
+            read_only: false,
+            network: false,
+            ejectable: true,
+            removable: true,
+            startup: false,
+        };
+        vec![
+            Volume {
+                mount: "/".into(),
+                ejectable: false,
+                removable: false,
+                startup: true,
+                ..volume("Macintosh HD", 494, 178)
+            },
+            volume("Backup", 2000, 340),
+            Volume {
+                read_only: true,
+                ..volume("Installer", 14, 0)
+            },
+            Volume {
+                network: true,
+                ejectable: false,
+                removable: false,
+                id: Some(VolumeId::Url("smb://nas.local/media".into())),
+                ..volume("media", 8000, 5100)
+            },
+        ]
+    }
+
+    fn eject(&self, _: &Path, _: &mut ops::Client) -> Result<String, String> {
+        Err("Nothing here ejects.".into())
+    }
+
+    fn mount(&self, address: &str, _: &Arc<Cancel>) -> Result<PathBuf, String> {
+        Err(format!("{address}: the server didn't answer."))
+    }
+
+    fn open(&self, _: &Path, _: &gpui::App) {}
+}
+
+/// A temp folder's places: the default favorites, one on a drive that isn't
+/// connected, saved servers, and recents with one file gone.
+fn made_up_places(dir: &Path, trash: &Path) -> gpui::Result<Places> {
+    let dir = dir.canonicalize()?;
+    let store = Store {
+        places: dir.join("places.json"),
+        recents: dir.join("recents.json"),
+    };
+    let mount = dir.join("Archive");
+    let photos = mount.join("Photos");
+    std::fs::create_dir_all(&photos)?;
+    let archive = Volume {
+        name: "Archive".into(),
+        mount,
+        disk: None,
+        id: Some(VolumeId::Uuid("Archive".into())),
+        total: 0,
+        free: 0,
+        read_only: false,
+        network: false,
+        ejectable: true,
+        removable: true,
+        startup: false,
+    };
+    store
+        .pin(&photos, None, &[archive])
+        .map_err(std::io::Error::other)?;
+    for address in ["smb://nas.local/media", "smb://studio.local/projects"] {
+        store.save_server(address).map_err(std::io::Error::other)?;
+    }
+    for name in ["gone.pdf", "Brief.pdf"] {
+        let opened = dir.join(name);
+        if name != "gone.pdf" {
+            std::fs::write(&opened, "")?;
+        }
+        store.opened(&opened).map_err(std::io::Error::other)?;
+    }
+    Ok(Places {
+        store,
+        trash: trash.into(),
+        drives: Arc::new(MadeUp),
+    })
 }
 
 fn save(
