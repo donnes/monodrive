@@ -378,9 +378,13 @@ pub fn all() -> Vec<Command> {
         command("Go to Folder…", Go, &["cmd-shift-g"], BROWSER, || {
             Box::new(GoToFolder)
         }),
-        command("Connect to Server…", Go, &["cmd-k"], BROWSER, || {
-            Box::new(ConnectToServer)
-        }),
+        command(
+            "Connect to Server…",
+            Go,
+            &["cmd-shift-k"],
+            BROWSER,
+            || Box::new(ConnectToServer),
+        ),
         separated(command("Search", Go, &["cmd-f"], BROWSER, || {
             Box::new(FocusSearch)
         })),
@@ -395,7 +399,7 @@ pub fn all() -> Vec<Command> {
         separated(command(
             "Command Palette…",
             View,
-            &["cmd-shift-p"],
+            &["cmd-k", "cmd-shift-p"],
             None,
             || Box::new(OpenPalette),
         )),
@@ -533,15 +537,18 @@ pub fn is_shortcut_of(stroke: &Keystroke, id: &str, cx: &App) -> bool {
     })
 }
 
-/// The label of the first shortcut command `id` runs on now, if any.
-pub fn shortcut_label(id: &str, cx: &App) -> Option<String> {
+/// The shortcuts command `id` runs on now.
+pub(crate) fn shortcuts_of(id: &str, cx: &App) -> Vec<String> {
     let overrides = &cx.global::<Preferences>().shortcuts;
     all()
         .iter()
-        .find(|command| command.id() == id)?
-        .shortcuts(overrides)
-        .first()
-        .map(|keys| label(keys))
+        .find(|command| command.id() == id)
+        .map_or_else(Vec::new, |command| command.shortcuts(overrides))
+}
+
+/// The label of the first shortcut command `id` runs on now, if any.
+pub fn shortcut_label(id: &str, cx: &App) -> Option<String> {
+    shortcuts_of(id, cx).first().map(|keys| label(keys))
 }
 
 /// A shortcut as macOS shows it: "cmd-shift-p" is "⇧⌘P".
@@ -696,7 +703,7 @@ pub fn menus_ready(cx: &mut App) {
 
 /// The commands that show a checkmark: Show Hidden Files when on, and the
 /// sort in use.
-fn checked(prefs: &Preferences) -> Vec<&'static str> {
+pub(crate) fn checked(prefs: &Preferences) -> Vec<&'static str> {
     let sort = match prefs.sort.by {
         SortBy::Name => SortByName.name(),
         SortBy::Modified => SortByModified.name(),

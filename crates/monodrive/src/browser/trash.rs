@@ -27,7 +27,7 @@ pub(super) struct TrashHeader {
 }
 
 /// The rows for `recents`, newest first. One that's gone stays, marked.
-pub(super) fn recent_entries(recents: Vec<PathBuf>) -> (Vec<Entry>, HashSet<PathBuf>) {
+pub(crate) fn recent_entries(recents: Vec<PathBuf>) -> (Vec<Entry>, HashSet<PathBuf>) {
     let mut missing = HashSet::new();
     let rows = recents
         .into_iter()

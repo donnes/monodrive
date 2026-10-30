@@ -1,4 +1,4 @@
-//! Connect to Server (⌘K), in the palette's card: an address, the saved
+//! Connect to Server (⇧⌘K), in the palette's card: an address, the saved
 //! servers (a click fills the address, ✕ forgets one), Cancel and Connect.
 //! macOS asks for any credentials and keeps them in the Keychain, so none
 //! pass through here. Connecting only mounts; the share then shows in the

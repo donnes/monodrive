@@ -308,7 +308,7 @@ fn failure(address: &str, status: i32, prompt: Prompt) -> String {
     );
     if prompt == Prompt::Never && needs_someone {
         return format!(
-            "{address} needs credentials, and macOS can only ask for them on screen. Connect once from Monodrive's window (⌘K) and keep them in the Keychain."
+            "{address} needs credentials, and macOS can only ask for them on screen. Connect once from Monodrive's window (⇧⌘K) and keep them in the Keychain."
         );
     }
     let why = match status {

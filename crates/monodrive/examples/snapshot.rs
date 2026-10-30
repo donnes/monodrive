@@ -18,7 +18,9 @@
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
 //! `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
-//! `recents.png`. Then `palette.png`, `goto.png`, `settings-menu.png` and one
+//! `recents.png`. Then `palette.png`, `palette-query.png`, the palette's pages
+//! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
+//! `palette-favorites.png`), `palette-selection.png`, `goto.png`, `settings-menu.png` and one
 //! `settings-<page>.png` for each Settings page, `background.png`, the list
 //! over a picture that runs from bright to dark, `narrow.png`, where the path
 //! collapses, and `no-path-bar.png`.
@@ -35,12 +37,15 @@ use monodrive::browser::{
 };
 use monodrive::connect;
 use monodrive::preferences::{Preferences, Theme, View};
+use monodrive_core::cloud::{Availability, CloudFolder};
+use monodrive_core::entries::{Entry, Kind};
+use monodrive_core::index::Index;
 use monodrive_core::ops::{self, Conflict, Origin, Request};
 use monodrive_core::places::Store;
 use monodrive_core::servers::Cancel;
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 fn main() -> gpui::Result<()> {
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
@@ -249,6 +254,28 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     let palette = named(&mut cx, "monodrive::OpenPalette")?;
     dispatch(&mut cx, window, &*palette)?;
     save(&mut cx, window, out, "palette")?;
+    type_text(&mut cx, window, "re")?;
+    save(&mut cx, window, out, "palette-query")?;
+    let open_page = named(&mut cx, "palette::OpenPage")?;
+    for (name, page) in [
+        ("palette-remote", "Remote locations"),
+        ("palette-cloud", "Cloud storage"),
+        ("palette-drives", "Drives"),
+        ("palette-favorites", "Favorites"),
+    ] {
+        let window = open(&mut cx, folder)?;
+        cx.run_until_parked();
+        dispatch(&mut cx, window, &*palette)?;
+        type_text(&mut cx, window, page)?;
+        dispatch(&mut cx, window, &*open_page)?;
+        save(&mut cx, window, out, name)?;
+    }
+
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    dispatch(&mut cx, window, &SelectNext)?;
+    dispatch(&mut cx, window, &*palette)?;
+    save(&mut cx, window, out, "palette-selection")?;
 
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();
@@ -405,6 +432,48 @@ impl Drives for MadeUp {
     }
 
     fn open(&self, _: &Path, _: &gpui::App) {}
+
+    fn cloud(&self) -> Vec<CloudFolder> {
+        let root = Path::new("/Users/you/Library");
+        vec![
+            CloudFolder {
+                name: "iCloud Drive".into(),
+                path: root.join("Mobile Documents/com~apple~CloudDocs"),
+            },
+            CloudFolder {
+                name: "Dropbox".into(),
+                path: root.join("CloudStorage/Dropbox"),
+            },
+            CloudFolder {
+                name: "GoogleDrive-you@example.com".into(),
+                path: root.join("CloudStorage/GoogleDrive-you@example.com"),
+            },
+        ]
+    }
+
+    fn find_files(
+        &self,
+        _: &OnceLock<Result<Index, String>>,
+        query: &str,
+        _: usize,
+    ) -> Result<Vec<Entry>, String> {
+        Ok(["Reports", "report-final.pdf", "report-draft.pdf"]
+            .into_iter()
+            .filter(|name| name.to_lowercase().contains(&query.to_lowercase()))
+            .map(|name| Entry {
+                path: Path::new("/Users/you/Documents").join(name),
+                name: name.into(),
+                kind: if name.contains('.') {
+                    Kind::File
+                } else {
+                    Kind::Dir
+                },
+                size: 0,
+                modified: 0,
+                availability: Availability::Unknown,
+            })
+            .collect())
+    }
 }
 
 /// A temp folder's places: the default favorites, one on a drive that isn't
@@ -436,6 +505,11 @@ fn made_up_places(dir: &Path, trash: &Path) -> gpui::Result<Places> {
         .map_err(std::io::Error::other)?;
     for address in ["smb://nas.local/media", "smb://studio.local/projects"] {
         store.save_server(address).map_err(std::io::Error::other)?;
+    }
+    for host in ["build-box", "me@studio.local"] {
+        store
+            .add_remote(host, None, None)
+            .map_err(std::io::Error::other)?;
     }
     for name in ["gone.pdf", "Brief.pdf"] {
         let opened = dir.join(name);

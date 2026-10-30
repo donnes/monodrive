@@ -1,10 +1,12 @@
-//! The sidebar, the Trash, Recents and Connect to Server, driven through the
-//! real `Browser` over temp folders. `Fake` stands in for the system, so
+//! The sidebar, the Trash, Recents, Connect to Server and the command palette,
+//! driven through the real `Browser` over temp folders. `Fake` stands in for the system, so
 //! nothing here mounts or ejects anything, and `Store` is a temp folder's.
 
 use super::tests::*;
 use super::*;
-use gpui::{TestAppContext, VisualTestContext};
+use crate::palette::{Page, PaletteView};
+use gpui::{Action, TestAppContext, VisualTestContext};
+use monodrive_core::cloud::CloudFolder;
 use monodrive_core::places::Store;
 use monodrive_core::servers::Cancel;
 use monodrive_core::volumes::{Volume, VolumeId};
@@ -18,6 +20,9 @@ struct Fake {
     /// What the next mount answers.
     mounted: Mutex<Option<Result<PathBuf, String>>>,
     opened: Mutex<Vec<PathBuf>>,
+    cloud: Mutex<Vec<CloudFolder>>,
+    /// What the index finds, whatever's asked.
+    files: Mutex<Vec<Entry>>,
 }
 
 impl Drives for Fake {
@@ -40,6 +45,19 @@ impl Drives for Fake {
 
     fn open(&self, path: &Path, _: &App) {
         self.opened.lock().unwrap().push(path.into());
+    }
+
+    fn cloud(&self) -> Vec<CloudFolder> {
+        self.cloud.lock().unwrap().clone()
+    }
+
+    fn find_files(
+        &self,
+        _: &OnceLock<Result<Index, String>>,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<Entry>, String> {
+        Ok(self.files.lock().unwrap().clone())
     }
 }
 
@@ -567,7 +585,7 @@ fn connect_validates_shows_failures_and_saves_only_what_connected(cx: &mut TestA
             _ => panic!("the card is open"),
         })
     };
-    press(cx, "cmd-k");
+    press(cx, "cmd-shift-k");
     // ↩ with nothing typed, and with a password, stops here: no mount answer
     // is set, so reaching the mount would panic.
     press(cx, "enter");
@@ -636,9 +654,9 @@ fn connect_validates_shows_failures_and_saves_only_what_connected(cx: &mut TestA
     );
 
     // Esc and Cancel leave without connecting.
-    press(cx, "cmd-k escape");
+    press(cx, "cmd-shift-k escape");
     assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
-    press(cx, "cmd-k");
+    press(cx, "cmd-shift-k");
     click(cx, "connect-cancel");
     assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
 }
@@ -650,7 +668,7 @@ fn a_connect_card_that_goes_away_cancels_its_mount_and_saves_nothing(cx: &mut Te
     let (browser, cx) = open(&world, &project, cx);
     // Settings and the palette each replace the card without dismissing it.
     for replace in ["cmd-,", "cmd-shift-p"] {
-        press(cx, "cmd-k");
+        press(cx, "cmd-shift-k");
         cx.simulate_input("nas.local/media");
         cx.run_until_parked();
         *world.fake.mounted.lock().unwrap() = Some(Ok("/Volumes/media".into()));
@@ -731,4 +749,483 @@ fn command_backspace_in_the_sidebar_never_reaches_the_lists_selection(cx: &mut T
     cx.run_until_parked();
     assert_eq!(changing_files(cx), [true; 4]);
     release(owned, cx);
+}
+
+/// The palette that's open.
+fn palette(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Entity<PaletteView> {
+    browser.read_with(cx, |b, _| match &b.sheet {
+        Some(Sheet::Palette(view)) => view.clone(),
+        _ => panic!("the palette is open"),
+    })
+}
+
+/// Each row's title, in its section.
+fn sections(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Vec<(String, Vec<String>)> {
+    view.read_with(cx, |view, _| {
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        for row in &view.rows {
+            if out.last().is_none_or(|(name, _)| name != row.section) {
+                out.push((row.section.to_string(), Vec::new()));
+            }
+            out.last_mut().unwrap().1.push(row.title.to_string());
+        }
+        out
+    })
+}
+
+fn titles(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Vec<String> {
+    view.read_with(cx, |view, _| {
+        view.rows.iter().map(|row| row.title.to_string()).collect()
+    })
+}
+
+fn under_keys(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Option<String> {
+    view.read_with(cx, |view, _| {
+        let row = view.rows.get(view.active?)?;
+        Some(row.title.to_string())
+    })
+}
+
+fn type_in(cx: &mut VisualTestContext, text: &str) {
+    cx.simulate_input(text);
+    cx.run_until_parked();
+}
+
+fn found(path: &Path, kind: Kind) -> Entry {
+    Entry {
+        path: path.into(),
+        name: path.file_name().unwrap().to_string_lossy().into_owned(),
+        kind,
+        size: 0,
+        modified: 0,
+        availability: monodrive_core::cloud::Availability::Unknown,
+    }
+}
+
+#[gpui::test]
+fn command_k_and_shift_command_p_open_the_palette_and_rebinding_moves_it(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    for keys in ["cmd-k", "shift-cmd-p"] {
+        press(cx, keys);
+        palette(&browser, cx);
+        press(cx, "escape");
+        assert!(browser.read_with(cx, |b, _| b.sheet.is_none()), "{keys}");
+    }
+    press(cx, "cmd-shift-k");
+    assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Connect(_)))));
+    press(cx, "escape");
+    cx.update(|_, cx| {
+        preferences::update(cx, |p| {
+            p.shortcuts
+                .insert(OpenPalette.name().into(), Some("ctrl-j".into()));
+        });
+        commands::apply(cx);
+    });
+    press(cx, "cmd-k");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    press(cx, "ctrl-j");
+    palette(&browser, cx);
+}
+
+#[gpui::test]
+fn with_nothing_typed_the_palette_shows_its_sections_and_what_would_run(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    let shown = sections(&view, cx);
+    let names: Vec<&str> = shown.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["Actions", "Go to", "View", "Settings"]);
+    assert_eq!(
+        shown[0].1,
+        [
+            "New Folder",
+            "New File",
+            "Paste",
+            "Go to Folder…",
+            "Connect to Server…",
+            "Undo",
+            "Empty Trash…"
+        ]
+    );
+    assert_eq!(
+        shown[1].1,
+        [
+            "Remote locations",
+            "Cloud storage",
+            "Drives",
+            "Favorites",
+            "Recents",
+            "Trash"
+        ]
+    );
+    assert_eq!(shown[2].1[..2], ["as List", "as Grid"]);
+    assert_eq!(shown[3].1, ["Settings…"]);
+    // Only what trashes or erases files is marked.
+    let marked: Vec<String> = view.read_with(cx, |view, _| {
+        let rows = view.rows.iter().filter(|row| row.destructive);
+        rows.map(|row| row.title.to_string()).collect()
+    });
+    assert_eq!(marked, ["Empty Trash…"]);
+    // The arrows go round the ends and skip what wouldn't run.
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("New Folder"));
+    press(cx, "up");
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("Settings…"));
+    press(cx, "down");
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("New Folder"));
+    press(cx, "escape");
+
+    // In the Trash nothing new can be made, so those rows are dimmed.
+    press(cx, "cmd-k");
+    type_in(cx, "trash");
+    press(cx, "enter");
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    let dimmed: Vec<String> = view.read_with(cx, |view, _| {
+        let rows = view.rows.iter().filter(|row| !row.enabled);
+        rows.map(|row| row.title.to_string()).collect()
+    });
+    assert_eq!(dimmed, ["New Folder", "New File", "Paste"]);
+    press(cx, "down");
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("Connect to Server…"));
+}
+
+#[gpui::test]
+fn a_selections_actions_are_what_its_context_menu_offers(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "down down down");
+    let list = browser.read_with(cx, |b, _| b.list_focus.clone());
+    let mut offered: Vec<&str> = cx.update(|window, cx| {
+        commands::context_menu(&[Scope::Selection], cx.global::<Preferences>(), |action| {
+            window.is_action_available_in(action, &list)
+        })
+        .iter()
+        .map(|row| row.title)
+        .collect()
+    });
+    offered.sort();
+    assert!(offered.contains(&"Duplicate"));
+    assert!(!offered.contains(&"Put Back"));
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    let actions = sections(&view, cx).remove(0).1;
+    assert_eq!(actions[0], "Open");
+    let fixed = actions.iter().position(|t| t == "New Folder").unwrap();
+    assert_eq!(actions[fixed - 1], "Move to Trash");
+    let mut chosen: Vec<&str> = actions[..fixed].iter().map(String::as_str).collect();
+    chosen.sort();
+    assert_eq!(chosen, offered);
+}
+
+#[gpui::test]
+fn typing_ranks_commands_places_and_recents_together(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let project = project.canonicalize().unwrap();
+    world.store.opened(&project.join("a.txt")).unwrap();
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "trash");
+    let shown = titles(&view, cx);
+    assert_eq!(shown[0], "Trash");
+    assert!(shown.contains(&"Empty Trash…".to_string()));
+    // Move to Trash is found but wouldn't run, so the keys skip it.
+    assert!(shown.contains(&"Move to Trash".to_string()));
+    press(cx, "cmd-a backspace");
+    type_in(cx, "cloud");
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("Cloud storage"));
+    press(cx, "cmd-a backspace");
+    // A recent, with where it is under it.
+    type_in(cx, "a.txt");
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("a.txt"));
+    let about = view.read_with(cx, |v, _| v.rows[0].subtitle.clone());
+    assert_eq!(
+        about.as_deref(),
+        Some(project.display().to_string().as_str())
+    );
+    press(cx, "enter");
+    assert_eq!(*world.fake.opened.lock().unwrap(), [project.join("a.txt")]);
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    // A favorite the Go menu also reaches shows once, with its shortcut.
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "downloads");
+    let downloads = titles(&view, cx);
+    assert_eq!(
+        downloads.iter().filter(|t| *t == "Downloads").count(),
+        1,
+        "{downloads:?}"
+    );
+    press(cx, "cmd-a backspace");
+    type_in(cx, "zzzzqq");
+    assert!(titles(&view, cx).is_empty());
+}
+
+#[gpui::test]
+fn enter_runs_duplicate_on_the_selection_and_focus_comes_back(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "down down down");
+    press(cx, "cmd-k");
+    cx.simulate_input("duplicate");
+    cx.run_until_parked();
+    let view = palette(&browser, cx);
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("Duplicate"));
+    // Opening and typing leave the selection alone.
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    press(cx, "enter");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    let focused = cx.update(|window, cx| browser.read(cx).list_focus.is_focused(window));
+    assert!(focused);
+    assert!(project.join("a copy.txt").exists());
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn the_palette_over_another_sheet_still_knows_what_would_run(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "down down down");
+    press(cx, "cmd-,");
+    assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Settings(_)))));
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("Open"));
+    assert!(view.read_with(cx, |v, _| v.rows[0].enabled));
+}
+
+#[gpui::test]
+fn a_page_opens_filters_and_goes_back(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let project = project.canonicalize().unwrap();
+    *world.fake.cloud.lock().unwrap() = vec![
+        CloudFolder {
+            name: "iCloud Drive".into(),
+            path: project.join("docs"),
+        },
+        CloudFolder {
+            name: "Dropbox".into(),
+            path: project.join("zeta"),
+        },
+    ];
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "cloud");
+    // → opens it, and its filter starts empty.
+    press(cx, "right");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Cloud);
+    assert_eq!(titles(&view, cx), ["iCloud Drive", "Dropbox"]);
+    type_in(cx, "drop");
+    assert_eq!(titles(&view, cx), ["Dropbox"]);
+    // ← moves the caret while there's text, and Esc goes back regardless,
+    // to what was typed and the row that opened it.
+    press(cx, "left");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Cloud);
+    press(cx, "escape");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Root);
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("Cloud storage"));
+    // Return opens it too, and ← with nothing typed goes back.
+    press(cx, "enter");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Cloud);
+    press(cx, "left");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Root);
+    // The chip goes back by mouse.
+    press(cx, "enter");
+    click(cx, "palette-back");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Root);
+    // A cloud folder opens in the window.
+    press(cx, "enter down enter");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    assert_eq!(here(&browser, cx), project.join("zeta"));
+}
+
+#[gpui::test]
+fn a_page_with_nothing_on_it_says_so(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "cloud");
+    press(cx, "right");
+    assert!(titles(&view, cx).is_empty());
+    assert!(view.read_with(cx, |v, _| v.active.is_none()));
+    // Return has nothing to run, so it stays here.
+    press(cx, "enter");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Cloud);
+}
+
+#[gpui::test]
+fn remote_locations_add_explain_connect_and_forget(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let project = project.canonicalize().unwrap();
+    world.store.save_server("smb://nas.local/media").unwrap();
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "remote");
+    press(cx, "enter");
+    let shown = sections(&view, cx);
+    assert_eq!(
+        shown[0],
+        ("SFTP servers".into(), vec!["Add Server…".into()])
+    );
+    assert_eq!(
+        shown[1],
+        ("SMB servers".into(), vec!["smb://nas.local/media".into()])
+    );
+    let add_enabled = view.read_with(cx, |v, _| v.rows[0].enabled);
+    assert!(!add_enabled);
+    // What's typed is the host. A bad one says why and saves nothing.
+    type_in(cx, "-bad");
+    press(cx, "enter");
+    assert!(view.read_with(cx, |v, _| v.error.is_some()));
+    assert_eq!(world.store.remotes(), Ok(Vec::new()));
+    press(cx, "cmd-a backspace");
+    assert!(view.read_with(cx, |v, _| v.error.is_none()));
+    type_in(cx, "build-box");
+    assert_eq!(titles(&view, cx)[0], "Add \"build-box\"");
+    press(cx, "enter");
+    let saved = world.store.remotes().unwrap();
+    assert_eq!(saved[0].host, "build-box");
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("build-box"));
+    // Browsing isn't built, so choosing one says so instead of doing nothing.
+    press(cx, "enter");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    assert_eq!(
+        toast(&browser, cx).unwrap().0,
+        "Browsing build-box isn't available yet."
+    );
+    // ⌘⌫ forgets it.
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "remote");
+    press(cx, "enter");
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("build-box"));
+    press(cx, "cmd-backspace");
+    assert_eq!(world.store.remotes(), Ok(Vec::new()));
+    assert_eq!(titles(&view, cx)[0], "Add Server…");
+    // A saved SMB server connects through the Connect card.
+    assert_eq!(
+        under_keys(&view, cx).as_deref(),
+        Some("smb://nas.local/media")
+    );
+    *world.fake.mounted.lock().unwrap() = Some(Ok(project.join("docs")));
+    press(cx, "enter");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    let said = toast(&browser, cx).unwrap().0;
+    assert!(
+        said.starts_with("Connected smb://nas.local/media"),
+        "{said}"
+    );
+    // And it can be forgotten here too.
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "remote");
+    press(cx, "enter");
+    press(cx, "cmd-backspace");
+    assert_eq!(world.store.servers(), Ok(Vec::new()));
+    // Off a saved server, ⌘⌫ is the query's own: it deletes to the line's start.
+    press(cx, "escape");
+    press(cx, "cmd-backspace");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Root);
+    assert_eq!(under_keys(&view, cx).as_deref(), Some("New Folder"));
+}
+
+#[gpui::test]
+fn drives_show_free_space_open_and_eject(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let project = project.canonicalize().unwrap();
+    let backup = project.join("zeta");
+    let world = world(
+        vec![startup(), volume("Backup", &backup, "B", 1000, 250)],
+        cx,
+    );
+    let owned = own(cx);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "drives");
+    press(cx, "enter");
+    assert_eq!(titles(&view, cx), ["Macintosh HD", "Backup"]);
+    let about = view.read_with(cx, |v, _| v.rows[1].subtitle.clone());
+    assert_eq!(about.as_deref(), Some("250 bytes free"));
+    // The startup disk has nothing to eject.
+    press(cx, "cmd-e");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_some()));
+    assert!(world.fake.ejected.lock().unwrap().is_empty());
+    press(cx, "down");
+    press(cx, "cmd-e");
+    assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+    assert_eq!(world.fake.ejected.lock().unwrap()[0], backup);
+    // Return shows a drive in the window.
+    *world.fake.volumes.lock().unwrap() =
+        vec![startup(), volume("Backup", &backup, "B", 1000, 250)];
+    world.volumes_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    press(cx, "cmd-k");
+    type_in(cx, "drives");
+    press(cx, "enter down enter");
+    assert_eq!(here(&browser, cx), backup);
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn files_from_the_index_come_after_the_rest_and_stale_answers_drop(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let project = project.canonicalize().unwrap();
+    world.store.opened(&project.join("a.txt")).unwrap();
+    *world.fake.files.lock().unwrap() = vec![
+        found(&project.join("zeta"), Kind::Dir),
+        found(&project.join("a.txt"), Kind::File),
+        found(&project.join("notes.md"), Kind::File),
+    ];
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    assert!(sections(&view, cx).iter().all(|(name, _)| name != "Files"));
+    type_in(cx, "a");
+    let shown = sections(&view, cx);
+    let files = shown.last().unwrap();
+    // After everything else, without the recent that's already above it.
+    assert_eq!(files.0, "Files");
+    assert_eq!(files.1, ["zeta", "notes.md"]);
+    // An answer to what was typed before is dropped, and today's stays.
+    view.update(cx, |view, cx| {
+        view.land_files(
+            "something else",
+            vec![found(&project.join("old"), Kind::File)],
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(sections(&view, cx).last().unwrap().1, ["zeta", "notes.md"]);
+    // A folder shows in the window; the search never started the index.
+    let zeta = titles(&view, cx).iter().position(|t| t == "zeta").unwrap();
+    view.update(cx, |view, cx| {
+        view.active = Some(zeta);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    press(cx, "enter");
+    assert_eq!(here(&browser, cx), project.join("zeta"));
+    assert!(browser.read_with(cx, |b, _| b.index.get().is_none()));
+    // Without an index the section just isn't there.
+    world.fake.files.lock().unwrap().clear();
+    press(cx, "cmd-k");
+    let view = palette(&browser, cx);
+    type_in(cx, "a");
+    assert!(sections(&view, cx).iter().all(|(name, _)| name != "Files"));
 }

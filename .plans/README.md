@@ -57,8 +57,7 @@ Saved browsing workspaces were dropped.
 
 ## Next up, in order
 
-1. A command palette on ⌘K, built on it, modeled on T3 Code's: a search field, section labels, rows with an icon, a title, an optional subtitle and a right-aligned shortcut, a chevron on rows that open a sub-page, and a key-hint footer. ⇧⌘P stays as a second shortcut. It searches commands, places and recent files, then indexed files once something is typed. Sub-pages include Remote locations, Cloud storage and Drives. Connect to Server moves from ⌘K to ⇧⌘K and is also in the palette.
-2. Then plans 08 to 19, 21 and 22 with the picks above, following DESIGN.md. The palette's Remote locations and Cloud storage pages grow as plans 14 and 18 land.
+1. Plans 08 to 19, 21 and 22 with the picks above, following DESIGN.md. The palette (⌘K) is on main; its Remote locations and Cloud storage pages grow as plans 14 and 18 land. Choosing an SFTP server only says browsing isn't available yet, and every server reads "Not connected", until plan 14's UI connects from the window.
 
 ## Current state
 

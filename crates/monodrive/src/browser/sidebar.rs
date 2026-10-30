@@ -15,12 +15,15 @@ use gpui::{
     MouseButton, MouseDownEvent, Pixels, Point, Render, Role, Stateful, Task, Window, div,
     prelude::*, px,
 };
+use monodrive_core::cloud::{self, CloudFolder};
+use monodrive_core::entries::Entry;
+use monodrive_core::index::Index;
 use monodrive_core::ops::{self, Origin};
 use monodrive_core::places::{Availability, Place, Store};
 use monodrive_core::servers::{self, Cancel, Prompt};
 use monodrive_core::volumes::{self, Volume};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// What the system does for the sidebar. Views reach it through `Places`, so
 /// their tests list a made-up set of volumes and never mount or eject
@@ -33,6 +36,16 @@ pub trait Drives: Send + Sync {
     fn mount(&self, address: &str, cancel: &Arc<Cancel>) -> Result<PathBuf, String>;
     /// Opens a file in its app.
     fn open(&self, path: &Path, cx: &App);
+    /// The cloud folders on this Mac.
+    fn cloud(&self) -> Vec<CloudFolder>;
+    /// What the index finds for `query`, once it has started. Nothing starts
+    /// it here. Call it off the UI thread.
+    fn find_files(
+        &self,
+        index: &OnceLock<Result<Index, String>>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Entry>, String>;
 }
 
 /// The real thing.
@@ -53,6 +66,22 @@ impl Drives for System {
 
     fn open(&self, path: &Path, cx: &App) {
         cx.open_with_system(path);
+    }
+
+    fn cloud(&self) -> Vec<CloudFolder> {
+        cloud::folders(&home())
+    }
+
+    fn find_files(
+        &self,
+        index: &OnceLock<Result<Index, String>>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Entry>, String> {
+        match index.get() {
+            Some(Ok(index)) => index.find(query, limit),
+            _ => Ok(Vec::new()),
+        }
     }
 }
 
@@ -117,7 +146,7 @@ impl Render for DraggedFavorite {
 const ROW_HEIGHT: f32 = theme::SIDEBAR_ROW_HEIGHT;
 const DRIVE_HEIGHT: f32 = 40.;
 
-fn label_of(path: &Path) -> String {
+pub(crate) fn label_of(path: &Path) -> String {
     if path == home() {
         return "Home".into();
     }
@@ -127,7 +156,7 @@ fn label_of(path: &Path) -> String {
     )
 }
 
-fn glyph_of(path: &Path) -> &'static str {
+pub(crate) fn glyph_of(path: &Path) -> &'static str {
     if path == home().join("Downloads") {
         "arrow-down-circle"
     } else if path == Path::new("/Applications") {
@@ -880,7 +909,26 @@ impl Browser {
             )
     }
 
-    /// ⌘K: the Connect to Server card, with the saved servers as last read.
+    /// The Connect to Server card on `address`, connecting at once, as a
+    /// saved server chosen in the palette does.
+    pub(super) fn connect_to(
+        &mut self,
+        address: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_connect(window, cx);
+        if let Some(Sheet::Connect(view)) = &self.sheet {
+            view.update(cx, |view, cx| {
+                let end = address.len();
+                view.field
+                    .update(cx, |field, cx| field.set_text(address, end..end, cx));
+                view.connect(cx);
+            });
+        }
+    }
+
+    /// ⇧⌘K: the Connect to Server card, with the saved servers as last read.
     pub(super) fn open_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Sheet::Connect(view)) = &self.sheet {
             window.focus(&view.focus_handle(cx), cx);

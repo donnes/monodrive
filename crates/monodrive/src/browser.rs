@@ -8,6 +8,8 @@ mod trash;
 mod places_tests;
 
 pub use sidebar::{Drives, Places, System};
+pub(crate) use sidebar::{glyph_of, label_of};
+pub(crate) use trash::recent_entries;
 
 use crate::background::{Backdrop, Look};
 use crate::commands::{self, OpenPalette, Scope};
@@ -17,7 +19,7 @@ use crate::file_icons;
 use crate::goto::{GotoEvent, GotoView};
 use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
-use crate::palette::{PaletteEvent, PaletteView};
+use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, View, WorkspaceStyle};
 use crate::quick_look::{self, Preview};
@@ -219,6 +221,8 @@ pub struct Browser {
     /// What had focus when Settings opened, to return to.
     /// What had focus when a sheet (Settings or the palette) opened.
     focus_before_sheet: Option<FocusHandle>,
+    /// What waits for the first frame drawn without the sheet.
+    after_sheet: Option<AfterSheet>,
     /// The folder just left, to select once its parent lists.
     reselect: Option<PathBuf>,
     search: Entity<TextField>,
@@ -394,6 +398,7 @@ impl Browser {
             settings_focus: cx.focus_handle().tab_stop(true),
             sidebar_cursor: 0,
             focus_before_sheet: None,
+            after_sheet: None,
             reselect: None,
             search,
             index: Arc::default(),
@@ -1891,39 +1896,68 @@ impl Browser {
         self.focus_list(window, cx);
     }
 
+    /// Opens the palette on what would run now, which is read off the frame
+    /// drawn last. Another sheet closes first, and the palette waits for it.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Sheet::Palette(view)) = &self.sheet {
             window.focus(&view.focus_handle(cx), cx);
             return;
         }
+        if self.sheet_open() {
+            self.close_sheet(window, cx);
+            self.after_sheet = Some(AfterSheet::OpenPalette);
+            return;
+        }
         self.remember_focus(window, cx);
-        let view = {
-            let view = cx.new(PaletteView::new);
-            cx.subscribe_in(
-                &view,
-                window,
-                |this, _, event: &PaletteEvent, window, cx| {
-                    let run = match event {
-                        PaletteEvent::Run(action) => Some(action.boxed_clone()),
-                        PaletteEvent::Dismissed => None,
-                    };
-                    this.close_sheet(window, cx);
-                    if let Some(action) = run {
-                        // The browser's commands come back once a frame without
-                        // the sheet is drawn; dispatch reads the drawn frame.
-                        window.on_next_frame(move |window, _| {
-                            window.on_next_frame(move |window, cx| {
-                                window.dispatch_action(action, cx)
-                            });
-                        });
-                    }
-                },
-            )
-            .detach();
-            view
+        let origin = self
+            .focus_before_sheet
+            .clone()
+            .unwrap_or_else(|| self.list_focus.clone());
+        // Quit and the like listen on the app, where only this list finds them.
+        let anywhere = window.available_actions(cx);
+        let available = commands::all()
+            .iter()
+            .map(|command| (command.action)())
+            .filter(|action| {
+                window.is_action_available_in(&**action, &origin)
+                    || anywhere.iter().any(|a| a.name() == action.name())
+            })
+            .map(|action| action.name())
+            .collect();
+        let now = Now {
+            available,
+            scopes: self.scopes(),
+            favorites: self.sidebar.places.clone(),
+            volumes: self.sidebar.volumes.clone(),
+            servers: self.sidebar.servers.clone(),
+            index: self.index.clone(),
         };
+        let view = cx.new(|cx| PaletteView::new(now, cx));
+        cx.subscribe_in(&view, window, Self::palette_event).detach();
         window.focus(&view.focus_handle(cx), cx);
         self.set_sheet(Some(Sheet::Palette(view)), cx);
+    }
+
+    /// What the palette asked for, once it has closed and focus is back.
+    fn palette_event(
+        &mut self,
+        _: &Entity<PaletteView>,
+        event: &PaletteEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_sheet(window, cx);
+        match event {
+            PaletteEvent::Dismissed => {}
+            PaletteEvent::Run(action) => {
+                self.after_sheet = Some(AfterSheet::Run(action.boxed_clone()));
+            }
+            PaletteEvent::Go(folder) => self.go_to(folder.clone(), None, window, cx),
+            PaletteEvent::Open(file) => self.open_file(file, cx),
+            PaletteEvent::Eject(mount) => self.eject(mount.clone(), window, cx),
+            PaletteEvent::Connect(address) => self.connect_to(address, window, cx),
+            PaletteEvent::Say(text) => self.toast(text.clone(), false, None, cx),
+        }
     }
 
     /// Runs `work` with the operation owner off the UI thread, then `done`
@@ -3121,6 +3155,12 @@ impl Render for Browser {
                 this.open_menu(request, window, cx)
             });
         }
+        if let Some(next) = self.after_sheet.take() {
+            cx.defer_in(window, move |this, window, cx| match next {
+                AfterSheet::Run(action) => window.dispatch_action(action, cx),
+                AfterSheet::OpenPalette => this.open_palette(window, cx),
+            });
+        }
         // A sheet the person opened meanwhile stays; the ring shows the job.
         if std::mem::take(&mut self.jobs_wanted) && !self.sheet_open() {
             cx.defer_in(window, |this, window, cx| {
@@ -3675,6 +3715,13 @@ enum Sheet {
     Connect(Entity<ConnectView>),
 }
 
+/// What needs the browser's commands back. A frame with a sheet holds them
+/// off, and running a command or checking what would run reads the drawn frame.
+enum AfterSheet {
+    Run(Box<dyn gpui::Action>),
+    OpenPalette,
+}
+
 /// A place in the history: a folder, or Recents in front of one.
 struct Stop {
     folder: PathBuf,
@@ -3994,7 +4041,7 @@ fn tree_step(depths: &[usize], ix: usize, arrow: Arrow, open: Option<bool>) -> T
     }
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| "/".into())

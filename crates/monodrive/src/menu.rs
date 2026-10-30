@@ -273,7 +273,7 @@ fn check(checked: bool, active: bool) -> gpui::Div {
     })
 }
 
-fn shortcut(keys: String, ink: gpui::Hsla) -> gpui::Div {
+pub(crate) fn shortcut(keys: String, ink: gpui::Hsla) -> gpui::Div {
     div()
         .flex_shrink_0()
         .text_size(px(theme::TEXT_CAPTION))

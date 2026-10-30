@@ -29,13 +29,19 @@ The header of a sheet with a query (palette, Go to Folder, Connect) is a bare fi
 - Every text button is 24 pt high, with 12 pt side padding, or 8 pt with no fill.
 - Every icon button is a 24 pt circle with a 14 pt icon. Inside a row it's a 20 pt circle with a 12 pt icon.
 - Every outlined text field is 28 pt high. The exception is rename, which fits inside the row it edits.
-- Rows in menus, pickers and popovers are 28 pt. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt.
+- Rows in menus, pickers and popovers are 28 pt, or 40 pt with a muted subtitle on a second line. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt.
 - Rows in a stacked list of highlightable rows have a 2 pt gap (`ROW_GAP`), so highlights never touch. The gap belongs to the row above it: `row_slot` holds the role and the handlers, the row inside holds the highlight, so a hover, click or drop in the gap lands on that row. Two lists differ. The file list is virtualized, its rows touch as in Finder, and a change to its row height touches `uniform_list`, marquee math and the scrolling budget. Settings' page list keeps a plain gap, because each page is a Tab stop whose focus ring has to fit the row.
 - The top bar, a sheet's header, the Trash bar and the sidebar's foot are 40 pt. The path bar and the column titles are 28 pt. A toast is 36 pt. A Settings row is at least 44 pt.
 
 ### Pane bars
 
 Every bar at a pane's top or bottom (the Trash header, the column titles, the path bar) comes from `pane_bar`: its text and controls sit `PANE_INSET`, 16 pt, from the pane's edges and are vertically centered. The left text edge of each bar lines up with the others and with the list's rows. A crumb's own padding counts toward the inset, so its text sits on the line and not its hover pill. The 14 pt corners never reach text at that inset. The grid's cells center in their columns, so only their first column comes near the line.
+
+### Sheets with pages
+
+A row that opens a page in the same sheet ends in a 12 pt chevron. → or ↩ opens the page, and the query starts empty with its own filter. The page's name is a button in the header, with a chevron pointing back. Esc goes back, and so does ← with nothing typed, to what was typed before and the row that opened it. A secondary action on a page's row has a row icon button and a key, and the footer names the key.
+
+A sheet with keys of its own has a 32 pt footer under a hairline, with its text 16 pt from the edges: each key in a fully rounded 16 pt cap at 0.08, then what it does, in `TEXT_CAPTION` at 0.65. It lists the arrows, ↩, Esc and what's special to this page, nothing else. Show what would run and dim what wouldn't: the keys skip a dimmed row, and it says why in its subtitle when that isn't obvious.
 
 ### Top bar and path bar
 

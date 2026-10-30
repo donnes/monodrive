@@ -129,6 +129,11 @@ impl TextField {
         &self.content
     }
 
+    pub fn set_placeholder(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = text.into();
+        cx.notify();
+    }
+
     /// Sets the text with `selected` selected, as an edit starts.
     pub fn set_text(&mut self, text: &str, selected: Range<usize>, cx: &mut Context<Self>) {
         self.content = SharedString::from(text.to_owned());
