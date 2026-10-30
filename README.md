@@ -17,6 +17,8 @@ A fast file manager for macOS heavily inspired by [Monocode](https://github.com/
 > [!NOTE]
 > **[Monodrive](https://github.com/donnes/monodrive/releases)** is still experimental and supports only macOS for now.
 
+Focused fixes are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR, and report vulnerabilities through [SECURITY.md](SECURITY.md).
+
 ## Run
 
 ```sh

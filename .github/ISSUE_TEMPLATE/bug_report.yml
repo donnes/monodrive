@@ -1,0 +1,59 @@
+name: Bug report
+description: Report something broken in the window or the MCP server.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues first, and keep the report to one problem.
+  - type: input
+    id: version
+    attributes:
+      label: Monodrive version
+      description: The output of `monodrive --version`, or the commit you built.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it happens
+      options:
+        - The window
+        - The MCP server
+        - Both
+    validations:
+      required: true
+  - type: dropdown
+    id: full-disk-access
+    attributes:
+      label: Full Disk Access
+      description: Without it, Monodrive skips consent-gated folders.
+      options:
+        - Granted
+        - Not granted
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Press ...
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead? Add screenshots or logs if they help.
+    validations:
+      required: true
