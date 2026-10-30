@@ -37,7 +37,8 @@ actions!(
         ShowAll,
         Minimize,
         CloseWindow,
-        OpenPalette
+        OpenPalette,
+        NewWindow
     ]
 );
 
@@ -193,6 +194,7 @@ pub fn all() -> Vec<Command> {
         separated(command("Quit Monodrive", App, &["cmd-q"], None, || {
             Box::new(Quit)
         })),
+        command("New Window", File, &["cmd-n"], None, || Box::new(NewWindow)),
         command("New Tab", File, &["cmd-t"], BROWSER, || Box::new(NewTab)),
         separated(command("Close Tab", File, &["cmd-w"], BROWSER, || {
             Box::new(CloseTab)

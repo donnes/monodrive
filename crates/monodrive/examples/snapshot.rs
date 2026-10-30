@@ -27,7 +27,8 @@
 //!
 //! `tabs-one.png`, `tabs-three.png` and `tabs-many.png` show the top bar, and
 //! `split.png` and `split-boxy.png` two panes with the keys on the right one.
-//! `sidebar-closed.png` and `sidebar-closed-split.png` have no sidebar.
+//! `sidebar-closed.png` and `sidebar-closed-split.png` have no sidebar, and
+//! `unavailable.png` is a restored tab whose drive is gone.
 //!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
@@ -42,11 +43,12 @@ use monodrive::browser::{
 };
 use monodrive::connect;
 use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
+use monodrive::session::{PaneState, StopState, TabState, WindowState};
 use monodrive_core::cloud::{Availability, CloudFolder};
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::index::Index;
 use monodrive_core::ops::{self, Conflict, Origin, Request};
-use monodrive_core::places::Store;
+use monodrive_core::places::{Favorite, Pinned, Store};
 use monodrive_core::servers::Cancel;
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::path::{Path, PathBuf};
@@ -408,6 +410,37 @@ fn shoot_tabs(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpu
         dispatch(cx, window, action)?;
     }
     save(cx, window, out, "sidebar-closed-split")?;
+    cx.update(|cx| cx.set_global(base.clone()));
+    let place = Favorite {
+        path: "/Volumes/Backup/Photos".into(),
+        volume: Some(Pinned {
+            id: VolumeId::Uuid("gone".into()),
+            name: "Backup".into(),
+            mount: "/Volumes/Backup".into(),
+        }),
+    };
+    let state = WindowState {
+        tabs: vec![TabState {
+            panes: vec![PaneState {
+                history: vec![StopState {
+                    place,
+                    recents: false,
+                }],
+                at: 0,
+                view: View::List,
+                sort: Default::default(),
+            }],
+            second_focused: false,
+            ratio: 0.5,
+        }],
+        active: 0,
+        frame: None,
+    };
+    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+        cx.new(|cx| Browser::restored(state, cx))
+    })?;
+    cx.run_until_parked();
+    save(cx, window, out, "unavailable")?;
     Ok(())
 }
 
@@ -496,6 +529,10 @@ impl Drives for MadeUp {
     }
 
     fn open(&self, _: &Path, _: &gpui::App) {}
+
+    fn needs_consent(&self, _: &Path) -> bool {
+        false
+    }
 
     fn cloud(&self) -> Vec<CloudFolder> {
         let root = Path::new("/Users/you/Library");

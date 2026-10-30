@@ -15,7 +15,7 @@ use gpui::{
     App, Context, ElementId, EventEmitter, Hsla, KeyBinding, PathBuilder, Role, Task, actions,
     canvas, div, point, prelude::*, px,
 };
-use monodrive_core::ops::{Conflict, Done, Job, Origin, Request, State, Watch};
+use monodrive_core::ops::{Conflict, Done, Job, Origin, Request, State};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
@@ -77,16 +77,9 @@ impl Jobs {
         }
     }
 
-    /// Checks the jobs each time `changes` says the owner's journal
-    /// changed, for as long as `watch` is kept.
-    pub fn hear(
-        &mut self,
-        watch: Watch,
-        changes: async_channel::Receiver<()>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Checks the jobs each time `changes` says the owner's journal changed.
+    pub fn hear(&mut self, changes: async_channel::Receiver<()>, cx: &mut Context<Self>) {
         self._heard = Some(cx.spawn(async move |this, cx| {
-            let _watch = watch;
             while changes.recv().await.is_ok() {
                 if this.update(cx, |this, cx| this.poke(cx)).is_err() {
                     return;

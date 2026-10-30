@@ -165,6 +165,7 @@ impl Browser {
         self.pane()
             .update(cx, |pane, cx| pane.focus_list(window, cx));
         self.mirror_pane(cx);
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -252,6 +253,7 @@ impl Browser {
                         cx.stop_propagation();
                         if event.click_count == 2 {
                             this.tabs[this.active].ratio = 0.5;
+                            this.save_session(cx);
                         } else {
                             this.split_drag = Some(SplitDrag {
                                 grab: left - event.position.x.as_f32(),
@@ -297,6 +299,7 @@ impl Browser {
                     if phase == DispatchPhase::Bubble {
                         let _ = released.update(cx, |this, cx| {
                             this.split_drag = None;
+                            this.save_session(cx);
                             cx.notify();
                         });
                     }
@@ -352,6 +355,7 @@ impl Browser {
         self.pane()
             .update(cx, |pane, cx| pane.focus_list(window, cx));
         self.mirror_pane(cx);
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -385,6 +389,7 @@ impl Browser {
         } else if at < self.active {
             self.active -= 1;
         }
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -401,6 +406,7 @@ impl Browser {
             .iter()
             .position(|tab| tab.pane == shown)
             .unwrap_or(0);
+        self.save_session(cx);
         cx.notify();
     }
 

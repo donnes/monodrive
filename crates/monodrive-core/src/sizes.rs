@@ -127,6 +127,12 @@ fn paths(gated: Vec<Vec<u8>>) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether opening `path` could show a privacy prompt, which blocks until
+/// someone answers it. Reads the disk.
+pub fn needs_consent(path: &Path) -> bool {
+    guarded(path, &gated()).is_some()
+}
+
 /// Why a walk didn't open `path`, if it's at or under one of `gated`:
 /// without Full Disk Access, opening a consent-gated folder shows a privacy
 /// prompt and blocks until it's answered, which no deadline interrupts.

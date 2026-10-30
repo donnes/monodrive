@@ -31,6 +31,15 @@ pub fn opening(
     .unwrap_or_else(|| share(screen, part, most))
 }
 
+/// How far each open window pushes a new one, so it doesn't land exactly on top.
+const CASCADE: f32 = 24.;
+
+/// `bounds` moved along for a window that opens with `open` others showing.
+pub fn cascaded(bounds: Bounds<Pixels>, open: usize) -> Bounds<Pixels> {
+    let step = px(CASCADE * open as f32);
+    Bounds::new(bounds.origin + point(step, step), bounds.size)
+}
+
 /// Tinycast's Reasonable Size: 60% of the screen, at most 1025 × 900.
 const REASONABLE: (f32, Size<Pixels>) = (0.6, gpui::size(px(1025.), px(900.)));
 

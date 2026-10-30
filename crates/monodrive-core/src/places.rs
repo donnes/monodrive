@@ -103,6 +103,22 @@ struct Saved {
 }
 
 impl Favorite {
+    /// The folder at `path` as it's on `volumes` now.
+    pub fn of(path: &Path, volumes: &[Volume]) -> Self {
+        Self {
+            volume: volumes::holding(volumes, path)
+                .filter(|volume| !volume.startup)
+                .and_then(|volume| {
+                    Some(Pinned {
+                        id: volume.id.clone()?,
+                        name: volume.name.clone(),
+                        mount: volume.mount.clone(),
+                    })
+                }),
+            path: path.into(),
+        }
+    }
+
     pub fn resolve(&self, volumes: &[Volume]) -> Availability {
         let path = match &self.volume {
             None => self.path.clone(),
@@ -197,18 +213,7 @@ impl Store {
             let favorite = match favorites.iter().position(|f| f.is_at(&path, volumes)) {
                 Some(_) if at.is_none() => return Ok(path),
                 Some(ix) => favorites.remove(ix),
-                None => Favorite {
-                    volume: volumes::holding(volumes, &path)
-                        .filter(|volume| !volume.startup)
-                        .and_then(|volume| {
-                            Some(Pinned {
-                                id: volume.id.clone()?,
-                                name: volume.name.clone(),
-                                mount: volume.mount.clone(),
-                            })
-                        }),
-                    path: path.clone(),
-                },
+                None => Favorite::of(&path, volumes),
             };
             let at = at.unwrap_or(favorites.len()).min(favorites.len());
             favorites.insert(at, favorite);

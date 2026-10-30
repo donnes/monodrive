@@ -25,6 +25,7 @@ use crate::menu::{ContextMenu, MenuEvent};
 use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
 use crate::quick_look::{self, Preview};
+use crate::session::{self, TabState, WindowState};
 use crate::settings::{self, SettingsView};
 use crate::text_field;
 use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
@@ -139,6 +140,11 @@ actions!(
 /// nothing.
 pub struct Operations(pub Arc<Mutex<ops::Client>>);
 impl Global for Operations {}
+
+/// The one index all of the app's windows share. `run` sets it; without it, as
+/// in tests and benchmarks, a window has its own that nothing starts.
+pub struct SharedIndex(pub Arc<OnceLock<Result<Index, String>>>);
+impl Global for SharedIndex {}
 
 pub fn bind(cx: &mut App) {
     let context = Some("Browser");
@@ -260,10 +266,103 @@ pub struct Browser {
     quick_look: Option<quick_look::Panel>,
     /// What the sidebar lists.
     sidebar: sidebar::Sidebar,
+    /// The window's frame, as last settled.
+    frame: Option<preferences::Frame>,
+    /// This window's state in the saved session, if it's saved.
+    session_key: Option<u64>,
 }
 
 impl Browser {
     pub fn new(folder: PathBuf, cx: &mut Context<Self>) -> Self {
+        let mut browser = Self::empty(cx);
+        let (view, sort) = {
+            let prefs = cx.global::<Preferences>();
+            (prefs.view, prefs.sort)
+        };
+        let pane = browser.add_pane(Opening::at(Stop::folder(folder), view, sort), cx);
+        pane.update(cx, |pane, cx| {
+            pane.set_shown(true);
+            pane.reload(cx);
+        });
+        browser.tabs.push(Tab::new(pane));
+        browser.load_volumes(cx);
+        browser
+    }
+
+    /// A window with what `state` had open. Only the tab on screen lists; the
+    /// others do when they're shown.
+    pub fn restored(state: WindowState, cx: &mut Context<Self>) -> Self {
+        let mut browser = Self::empty(cx);
+        browser.frame = state.frame;
+        browser.active = state.active;
+        for (ix, tab) in state.tabs.into_iter().enumerate() {
+            let shown = ix == state.active;
+            let mut panes = tab.panes.into_iter().map(|pane| {
+                let pane = browser.add_pane(Opening::restored(pane), cx);
+                if shown {
+                    pane.update(cx, |pane, cx| {
+                        pane.set_shown(true);
+                        pane.reload(cx);
+                    });
+                }
+                pane
+            });
+            let Some(first) = panes.next() else { continue };
+            let second = panes.next();
+            drop(panes);
+            let second_focused = tab.second_focused && second.is_some();
+            browser.tabs.push(Tab {
+                pane: first,
+                second,
+                second_focused,
+                ratio: tab.ratio,
+            });
+        }
+        browser.mirror_pane(cx);
+        browser.load_volumes(cx);
+        browser
+    }
+
+    /// What should come back on the next launch.
+    pub(crate) fn state(&self, cx: &mut Context<Self>) -> WindowState {
+        let volumes = &self.sidebar.volumes;
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| TabState {
+                panes: tab
+                    .panes()
+                    .map(|pane| pane.update(cx, |pane, _| pane.state(volumes)))
+                    .collect(),
+                second_focused: tab.second_focused,
+                ratio: tab.ratio,
+            })
+            .collect();
+        WindowState {
+            tabs,
+            active: self.active,
+            frame: self.frame,
+        }
+    }
+
+    /// Keeps this window's state under `key` from now on.
+    pub fn keep_session(&mut self, key: u64, cx: &mut Context<Self>) {
+        self.session_key = Some(key);
+        self.save_session(cx);
+    }
+
+    /// Says what's open, once the volumes are known: a place saved before then
+    /// wouldn't remember which drive it was on.
+    pub(super) fn save_session(&self, cx: &mut Context<Self>) {
+        let Some(key) = self.session_key else { return };
+        if self.sidebar.volumes.is_empty() {
+            return;
+        }
+        let state = self.state(cx);
+        session::update(key, state, cx);
+    }
+
+    fn empty(cx: &mut Context<Self>) -> Self {
         let jobs = cx.new(|_| Jobs::new());
         cx.subscribe(&jobs, |this, _, event: &JobsEvent, cx| match event {
             JobsEvent::Finished(job) => this.job_finished(job.clone(), cx),
@@ -290,8 +389,10 @@ impl Browser {
             }
         })
         .detach();
-        let index: Arc<OnceLock<Result<Index, String>>> = Arc::default();
-        let mut browser = Self {
+        let index = cx
+            .try_global::<SharedIndex>()
+            .map_or_else(Arc::default, |shared| shared.0.clone());
+        Self {
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle().tab_stop(true),
             settings_focus: cx.focus_handle().tab_stop(true),
@@ -322,20 +423,14 @@ impl Browser {
             preview: None,
             quick_look: None,
             sidebar: sidebar::Sidebar::default(),
-        };
-        let (view, sort) = {
-            let prefs = cx.global::<Preferences>();
-            (prefs.view, prefs.sort)
-        };
-        let opening = Opening::at(Stop::folder(folder), view, sort);
-        let pane = browser.add_pane(opening, cx);
-        pane.update(cx, |pane, cx| {
-            pane.set_shown(true);
-            pane.reload(cx);
-        });
-        browser.tabs.push(Tab::new(pane));
-        browser.load_volumes(cx);
-        browser
+            frame: None,
+            session_key: None,
+        }
+    }
+
+    /// The menu bar's checkmarks go with the window in front.
+    pub fn window_activated(&self, cx: &mut Context<Self>) {
+        self.mirror_pane(cx);
     }
 
     /// The pane commands act on.
@@ -396,8 +491,7 @@ impl Browser {
     fn chrome_for(&self, pane: &Entity<Pane>, width: f32, cx: &App) -> Chrome {
         let focused = pane == self.pane();
         let pane = pane.read(cx);
-        let volume = pane
-            .showing_folder()
+        let volume = (pane.showing_folder() && pane.unavailable.is_none())
             .then(|| monodrive_core::volumes::holding(&self.sidebar.volumes, pane.folder()))
             .flatten();
         Chrome {
@@ -429,6 +523,7 @@ impl Browser {
                 self.request_menu(scopes.clone(), *at, origin, cx);
             }
             PaneEvent::Eject(mount) => self.eject(mount.clone(), cx),
+            PaneEvent::Moved => self.save_session(cx),
         }
     }
 
@@ -720,9 +815,13 @@ impl Browser {
                 height: bounds.size.height.as_f32(),
             };
             let settle = cx.background_executor().timer(FRAME_SETTLE);
-            this.frame_save = cx.spawn(async move |_, cx| {
+            this.frame_save = cx.spawn(async move |this, cx| {
                 settle.await;
                 cx.update(|cx| preferences::update(cx, |p| p.window_frame = Some(frame)));
+                let _ = this.update(cx, |this, cx| {
+                    this.frame = Some(frame);
+                    this.save_session(cx);
+                });
             });
         })
         .detach();
@@ -843,15 +942,9 @@ impl Browser {
     }
 
     /// Checks the jobs each time `changes` says the owner's journal changed,
-    /// which may be an agent's new job. The app starts this at launch.
-    pub fn hear_jobs(
-        &mut self,
-        watch: ops::Watch,
-        changes: async_channel::Receiver<()>,
-        cx: &mut Context<Self>,
-    ) {
-        self.jobs
-            .update(cx, |jobs, cx| jobs.hear(watch, changes, cx));
+    /// which may be an agent's new job. The app starts this with each window.
+    pub fn hear_jobs(&mut self, changes: async_channel::Receiver<()>, cx: &mut Context<Self>) {
+        self.jobs.update(cx, |jobs, cx| jobs.hear(changes, cx));
     }
 
     fn open_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -860,7 +953,13 @@ impl Browser {
             return;
         }
         self.remember_focus(window, cx);
-        let folder = self.pane().read(cx).folder().to_path_buf();
+        // Not from a location that's unavailable: its path may be another's now.
+        let pane = self.pane().read(cx);
+        let folder = if pane.unavailable.is_some() {
+            home()
+        } else {
+            pane.folder().to_path_buf()
+        };
         let view = cx.new(|cx| GotoView::new(folder, cx));
         cx.subscribe_in(&view, window, |this, _, event: &GotoEvent, window, cx| {
             let destination = match event {
@@ -1267,10 +1366,10 @@ impl Render for Browser {
                 !pane.selection.is_empty(),
             )
         });
-        let other_takes = self.tabs[self.active].other().is_some_and(|other| {
-            let other = other.read(cx);
-            other.showing_folder() && !other.in_trash(cx)
-        }) && selected
+        let other_takes = self.tabs[self.active]
+            .other()
+            .is_some_and(|other| other.read(cx).takes_files(cx))
+            && selected
             && !renaming;
         let root = div()
             // A sheet or the context menu takes the keys while it's open:

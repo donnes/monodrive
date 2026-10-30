@@ -91,10 +91,9 @@ impl Pane {
         if !self.showing_recents() {
             self.collapse_all();
             self.history.truncate(self.at + 1);
-            self.history.push(Stop {
-                folder: self.folder().to_path_buf(),
-                recents: true,
-            });
+            let mut stop = Stop::folder(self.folder().to_path_buf());
+            stop.recents = true;
+            self.history.push(stop);
             self.at = self.history.len() - 1;
         }
         self.show_folder(cx);

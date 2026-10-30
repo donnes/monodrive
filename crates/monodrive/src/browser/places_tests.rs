@@ -2,20 +2,26 @@
 //! driven through the real `Browser` over temp folders. `Fake` stands in for the system, so
 //! nothing here mounts or ejects anything, and `Store` is a temp folder's.
 
+use super::pane::Unavailable;
 use super::tests::*;
 use super::*;
 use crate::palette::{Page, PaletteView};
+use crate::preferences::View;
+use crate::session::{self, PaneState, Session, StopState};
 use gpui::{Action, Keystroke, TestAppContext, VisualTestContext, point};
 use monodrive_core::cloud::CloudFolder;
+use monodrive_core::entries::Sort;
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::ops::Origin;
-use monodrive_core::places::Store;
+use monodrive_core::places::{Favorite, Pinned, Store};
 use monodrive_core::servers::Cancel;
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::collections::HashSet;
 
 #[derive(Default)]
 struct Fake {
+    /// Folders that would raise a privacy prompt.
+    gated: Mutex<Vec<PathBuf>>,
     volumes: Mutex<Vec<Volume>>,
     /// Why the next eject is refused.
     refusal: Mutex<Option<String>>,
@@ -48,6 +54,14 @@ impl Drives for Fake {
 
     fn open(&self, path: &Path, _: &App) {
         self.opened.lock().unwrap().push(path.into());
+    }
+
+    fn needs_consent(&self, path: &Path) -> bool {
+        self.gated
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|g| path.starts_with(g))
     }
 
     fn cloud(&self) -> Vec<CloudFolder> {
@@ -1356,4 +1370,213 @@ fn the_trash_and_applications_never_show_hidden_files_and_other_folders_do(
     std::os::unix::fs::symlink(&applications, &link).unwrap();
     go(link, cx);
     assert_eq!(shown(&browser, cx).0, ["app.app"]);
+}
+
+/// A pane in a saved session, on these places, the last on screen.
+fn saved_pane(places: Vec<Favorite>) -> PaneState {
+    PaneState {
+        at: places.len() - 1,
+        history: places
+            .into_iter()
+            .map(|place| StopState {
+                place,
+                recents: false,
+            })
+            .collect(),
+        view: View::List,
+        sort: Sort::default(),
+    }
+}
+
+fn plain(path: &Path) -> Favorite {
+    Favorite {
+        path: path.into(),
+        volume: None,
+    }
+}
+
+/// A window on a saved `pane`, hearing `world`'s watches.
+fn reopen<'a>(
+    world: &World,
+    pane: PaneState,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Browser>, &'a mut VisualTestContext) {
+    let state = WindowState {
+        tabs: vec![TabState {
+            panes: vec![pane],
+            second_focused: false,
+            ratio: 0.5,
+        }],
+        active: 0,
+        frame: None,
+    };
+    open_state(world, state, cx)
+}
+
+fn open_state<'a>(
+    world: &World,
+    state: WindowState,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Browser>, &'a mut VisualTestContext) {
+    cx.update(|cx| {
+        cx.set_global(Preferences::default());
+        commands::apply(cx);
+    });
+    let (browser, cx) = cx.add_window_view(|_, cx| Browser::restored(state, cx));
+    cx.update(|window, cx| {
+        window.activate_window();
+        let list = browser.read(cx).focus_handle(cx);
+        window.focus(&list, cx);
+    });
+    browser.update(cx, |browser, cx| {
+        browser.hear_places(
+            (),
+            world.volume_changes.clone(),
+            world.list_changes.clone(),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    (browser, cx)
+}
+
+#[gpui::test]
+fn tabs_and_panes_come_back_as_they_were(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    // The first tab went into docs; the second is on the project, in the grid,
+    // split, with its right pane up a level and the keys there.
+    press(cx, "down cmd-down cmd-t cmd-up cmd-2 cmd-alt-s cmd-up");
+    let state = browser.update(cx, |b, cx| b.state(cx));
+    let bytes = serde_json::to_vec(&Session::of(vec![state])).unwrap();
+    let state = session::decode(&bytes).unwrap().windows.remove(0);
+    assert_eq!((state.tabs.len(), state.active), (2, 1));
+
+    let cx: &mut TestAppContext = cx;
+    let (browser, cx) = open_state(&world, state, cx);
+    let parent = project.parent().unwrap().to_path_buf();
+    assert_eq!(here(&browser, cx), parent);
+    assert_eq!(in_pane(&browser, cx, |pane, _| pane.view), View::Grid);
+    assert_eq!(in_pane(&browser, cx, |pane, _| pane.history.len()), 2);
+    let left = browser.read_with(cx, |b, _| b.tabs[1].pane.clone());
+    assert_eq!(
+        left.read_with(cx, |pane, _| pane.folder().to_path_buf()),
+        project
+    );
+    assert!(left.read_with(cx, |pane, _| !pane.entries.is_empty()));
+    // The hidden tab knows where it was and has read nothing yet.
+    let hidden = browser.read_with(cx, |b, _| b.tabs[0].pane.clone());
+    let read = |cx: &mut VisualTestContext| {
+        hidden.read_with(cx, |pane, _| (pane.entries.len(), pane.listing))
+    };
+    assert_eq!(read(cx), (0, false));
+    press(cx, "ctrl-tab");
+    assert_eq!(read(cx), (1, false));
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    press(cx, "cmd-[");
+    assert_eq!(here(&browser, cx), project);
+}
+
+#[gpui::test]
+fn a_missing_drive_is_unavailable_and_never_another_drive_at_its_path(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let drive = tempfile::tempdir().unwrap();
+    let mount = drive.path().canonicalize().unwrap();
+    std::fs::create_dir(mount.join("work")).unwrap();
+    std::fs::write(mount.join("work/theirs.txt"), "").unwrap();
+    // Another drive is mounted where Backup was.
+    let world = world(
+        vec![startup(), volume("Impostor", &mount, "I", 1000, 500)],
+        cx,
+    );
+    let pinned = Favorite {
+        path: mount.join("work"),
+        volume: Some(Pinned {
+            id: VolumeId::Uuid("B".into()),
+            name: "Backup".into(),
+            mount: mount.clone(),
+        }),
+    };
+    let (browser, cx) = reopen(&world, saved_pane(vec![plain(&project), pinned]), cx);
+    let why = in_pane(&browser, cx, |pane, _| pane.unavailable.clone());
+    assert_eq!(
+        why,
+        Some(Unavailable::Gone("Backup isn't connected.".into()))
+    );
+    assert!(shown(&browser, cx).0.is_empty());
+    assert!(on_screen(cx, "unavailable"));
+    // Nothing can land there, and Go to Folder doesn't start from it.
+    let makes = cx.update(|window, cx| window.is_action_available(&NewFolder, cx));
+    assert!(!makes);
+    // Back leaves, and Forward finds it still unavailable.
+    press(cx, "cmd-[");
+    assert_eq!(here(&browser, cx), project);
+    assert_eq!(
+        in_pane(&browser, cx, |pane, _| pane.unavailable.clone()),
+        None
+    );
+    press(cx, "cmd-]");
+    assert!(in_pane(&browser, cx, |pane, _| pane.unavailable.is_some()));
+    // Backup comes back mounted somewhere else, and that's where it opens.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let elsewhere = elsewhere.path().canonicalize().unwrap();
+    std::fs::create_dir(elsewhere.join("work")).unwrap();
+    std::fs::write(elsewhere.join("work/ours.txt"), "").unwrap();
+    *world.fake.volumes.lock().unwrap() =
+        vec![startup(), volume("Backup", &elsewhere, "B", 1000, 500)];
+    world.volumes_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        in_pane(&browser, cx, |pane, _| pane.unavailable.clone()),
+        None
+    );
+    assert_eq!(shown(&browser, cx).0, ["ours.txt"]);
+    assert_eq!(here(&browser, cx), elsewhere.join("work"));
+}
+
+#[gpui::test]
+fn a_restored_folder_that_would_ask_for_permission_waits_for_a_person(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let docs = project.join("docs");
+    let world = world(vec![startup()], cx);
+    world.fake.gated.lock().unwrap().push(docs.clone());
+    let (browser, cx) = reopen(&world, saved_pane(vec![plain(&docs)]), cx);
+    let why = in_pane(&browser, cx, |pane, _| pane.unavailable.clone());
+    assert_eq!(why, Some(Unavailable::NeedsConsent));
+    assert!(shown(&browser, cx).0.is_empty());
+    click(cx, "unavailable-open");
+    assert_eq!(shown(&browser, cx).0, ["inner.md"]);
+    assert!(on_screen(cx, "path-bar"));
+}
+
+#[gpui::test]
+fn a_folder_gone_from_the_startup_disk_says_so(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let gone = project.join("gone");
+    let (browser, cx) = reopen(&world, saved_pane(vec![plain(&gone)]), cx);
+    let why = in_pane(&browser, cx, |pane, _| pane.unavailable.clone());
+    assert_eq!(
+        why,
+        Some(Unavailable::Gone(format!(
+            "{} no longer exists.",
+            gone.display()
+        )))
+    );
+    click(cx, "unavailable-choose");
+    assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Goto(_)))));
+}
+
+#[gpui::test]
+fn windows_share_one_index(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let shared: Arc<OnceLock<Result<Index, String>>> = Arc::default();
+    cx.update(|cx| cx.set_global(SharedIndex(shared.clone())));
+    let (first, cx) = browse(&project, cx);
+    let cx: &mut TestAppContext = cx;
+    let (second, cx) = browse(&project, cx);
+    for browser in [&first, &second] {
+        assert!(browser.read_with(cx, |b, _| Arc::ptr_eq(&b.index, &shared)));
+    }
 }

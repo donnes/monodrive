@@ -38,6 +38,9 @@ pub trait Drives: Send + Sync {
     fn mount(&self, address: &str, cancel: &Arc<Cancel>) -> Result<PathBuf, String>;
     /// Opens a file in its app.
     fn open(&self, path: &Path, cx: &App);
+    /// Whether opening this folder could show a privacy prompt. Call it off
+    /// the UI thread.
+    fn needs_consent(&self, path: &Path) -> bool;
     /// The cloud folders on this Mac.
     fn cloud(&self) -> Vec<CloudFolder>;
     /// What the index finds for `query`, once it has started. Nothing starts
@@ -68,6 +71,10 @@ impl Drives for System {
 
     fn open(&self, path: &Path, cx: &App) {
         cx.open_with_system(path);
+    }
+
+    fn needs_consent(&self, path: &Path) -> bool {
+        monodrive_core::sizes::needs_consent(path)
     }
 
     fn cloud(&self) -> Vec<CloudFolder> {
@@ -287,6 +294,10 @@ impl Browser {
                     .cloned()
                     .collect();
                 for pane in panes {
+                    // A restored place hasn't opened, so its drive leaving changes nothing.
+                    if pane.read(cx).unchecked() {
+                        continue;
+                    }
                     let here = pane.read(cx).folder().to_path_buf();
                     let Some(volume) = gone.iter().find(|old| here.starts_with(&old.mount)) else {
                         continue;
@@ -299,6 +310,15 @@ impl Browser {
                 }
                 this.sidebar.volumes = volumes;
                 this.load_lists(cx);
+                this.save_session(cx);
+                // A drive that's back may be what a restored pane waits for.
+                for pane in this.shown_panes() {
+                    pane.update(cx, |pane, cx| {
+                        if pane.waits_for_a_drive() {
+                            pane.reload(cx);
+                        }
+                    });
+                }
                 cx.notify();
             });
         }));
@@ -503,7 +523,7 @@ impl Browser {
     fn open_place_in_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let stop = match self.row_at(self.sidebar_cursor) {
             Some(Row::Recents) => {
-                let mut stop = self.pane().read(cx).stop().clone();
+                let mut stop = Stop::folder(self.pane().read(cx).folder().to_path_buf());
                 stop.recents = true;
                 stop
             }

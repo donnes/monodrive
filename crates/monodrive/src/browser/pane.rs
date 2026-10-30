@@ -7,11 +7,12 @@ use super::{
     Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, Eject,
     EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
     FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
-    GoRecents, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection,
-    OpenInTerminal, OpenSelected, PageDown, PageUp, Places, PutBack, Redo, Rename, RevealInFinder,
-    ReverseSort, ScrollToBottom, ScrollToTop, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-    ShowContextMenu, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, Undo,
-    ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
+    GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder,
+    NewFolderWithSelection, OpenInTerminal, OpenSelected, PageDown, PageUp, Places, PutBack, Redo,
+    Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SelectFirst, SelectLast,
+    SelectNext, SelectPrevious, ShowContextMenu, ShowPackageContents, SortByKind, SortByModified,
+    SortByName, SortBySize, Undo, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash,
+    with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -20,8 +21,9 @@ use crate::jobs;
 use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, View, WorkspaceStyle};
 use crate::selection::Selection;
+use crate::session::{PaneState, StopState};
 use crate::text_field::{self, TextField};
-use crate::theme::{self, accent, content, danger, icon, on_accent};
+use crate::theme::{self, ButtonLook, accent, content, danger, icon, on_accent, text_button};
 use crate::thumbnails::{self, Thumb};
 use crate::workspace;
 use chrono::{DateTime, Local};
@@ -35,6 +37,8 @@ use gpui::{
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::Index;
 use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
+use monodrive_core::places::{Availability, Favorite};
+use monodrive_core::volumes::Volume;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -74,6 +78,29 @@ pub(super) enum PaneEvent {
         at: Point<Pixels>,
     },
     Eject(PathBuf),
+    /// What should be there on the next launch changed.
+    Moved,
+}
+
+/// Why a restored pane shows no files.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Unavailable {
+    /// Its folder or drive is gone, in the words of `Favorite::resolve`.
+    Gone(String),
+    /// Opening it could show a privacy prompt, so a person has to ask.
+    NeedsConsent,
+}
+
+/// Why a listing has no rows.
+enum Failed {
+    Error(String),
+    Unavailable(Unavailable),
+}
+
+impl From<String> for Failed {
+    fn from(why: String) -> Self {
+        Self::Error(why)
+    }
 }
 
 /// What the window tells a pane each frame, before the pane draws.
@@ -102,6 +129,15 @@ pub(super) struct Opening {
 }
 
 impl Opening {
+    pub(super) fn restored(state: PaneState) -> Self {
+        Self {
+            history: state.history.into_iter().map(Stop::restored).collect(),
+            at: state.at,
+            view: state.view,
+            sort: state.sort,
+        }
+    }
+
     pub(super) fn at(stop: Stop, view: View, sort: Sort) -> Self {
         Self {
             history: vec![stop],
@@ -167,6 +203,10 @@ pub struct Pane {
     /// into it, so a folder that never stops changing still refreshes.
     refresh: Option<Task<()>>,
     error: Option<String>,
+    /// A restored location that can't be opened as it is, and why.
+    pub(super) unavailable: Option<Unavailable>,
+    /// A person asked to open the folder that needs consent.
+    consented: bool,
     /// The name being edited in place.
     pub(super) renaming: Option<Renaming>,
     /// What a change made, to select once the listing that has it lands.
@@ -257,6 +297,8 @@ impl Pane {
             held: Vec::new(),
             refresh: None,
             error: None,
+            unavailable: None,
+            consented: false,
             renaming: None,
             select_after: Vec::new(),
             query: String::new(),
@@ -293,6 +335,42 @@ impl Pane {
         &self.history[self.at]
     }
 
+    /// New files can land here: it's a real folder, listed.
+    pub(super) fn takes_files(&self, cx: &App) -> bool {
+        self.showing_folder() && !self.in_trash(cx) && self.unavailable.is_none()
+    }
+
+    /// What's on screen came from a saved session and hasn't been checked.
+    pub(super) fn unchecked(&self) -> bool {
+        self.stop().unverified
+    }
+
+    pub(super) fn waits_for_a_drive(&self) -> bool {
+        matches!(self.unavailable, Some(Unavailable::Gone(_)))
+    }
+
+    /// What should come back on the next launch. Each place is kept with the
+    /// volume it was first saved on, and `volumes` must be as they are now.
+    pub(super) fn state(&mut self, volumes: &[Volume]) -> PaneState {
+        let history = self
+            .history
+            .iter_mut()
+            .map(|stop| StopState {
+                place: stop
+                    .place
+                    .get_or_insert_with(|| Favorite::of(&stop.folder, volumes))
+                    .clone(),
+                recents: stop.recents,
+            })
+            .collect();
+        PaneState {
+            history,
+            at: self.at,
+            view: self.view,
+            sort: self.sort,
+        }
+    }
+
     /// Preferences changed: lists again if the hidden files did. With `adopt`,
     /// Settings chose them for this pane, so it takes their view and sort.
     pub(super) fn preferences_changed(&mut self, adopt: bool, cx: &mut Context<Self>) {
@@ -303,6 +381,7 @@ impl Pane {
         if adopt {
             self.sort = sort;
             self.set_view(view);
+            cx.emit(PaneEvent::Moved);
         }
         if (sorted || show_hidden != self.show_hidden) && self.query.is_empty() {
             self.reload(cx);
@@ -324,6 +403,7 @@ impl Pane {
     fn choose_view(&mut self, view: View, cx: &mut Context<Self>) {
         self.set_view(view);
         preferences::update(cx, |p| p.view = view);
+        cx.emit(PaneEvent::Moved);
         cx.notify();
     }
 
@@ -333,6 +413,7 @@ impl Pane {
         if sort != self.sort {
             self.sort = sort;
             preferences::update(cx, |p| p.sort = sort);
+            cx.emit(PaneEvent::Moved);
             if self.query.is_empty() {
                 self.reload(cx);
             }
@@ -390,10 +471,7 @@ impl Pane {
         self.reselect = Some(self.folder().to_path_buf());
         self.collapse_all();
         self.history.truncate(self.at + 1);
-        self.history.push(Stop {
-            folder,
-            recents: false,
-        });
+        self.history.push(Stop::folder(folder));
         self.at = self.history.len() - 1;
         self.show_folder(cx);
     }
@@ -414,6 +492,7 @@ impl Pane {
 
     /// Leaves search, if any, and lists the current folder.
     pub(super) fn show_folder(&mut self, cx: &mut Context<Self>) {
+        cx.emit(PaneEvent::Moved);
         self.query.clear();
         self.search.update(cx, |field, cx| field.clear(cx));
         self.reload(cx);
@@ -438,15 +517,25 @@ impl Pane {
     /// `reload`, but `quiet` keeps the view where it is: a refresh after the
     /// disk changed mustn't scroll.
     pub(super) fn list(&mut self, quiet: bool, cx: &mut Context<Self>) {
-        let folder = self.folder().to_path_buf();
+        if !self.shown {
+            return;
+        }
+        let mut folder = self.folder().to_path_buf();
         let query = self.query.clone();
         let index = self.index.clone();
         let recents = self
             .showing_recents()
             .then(|| cx.try_global::<Places>().map(|places| places.store.clone()));
-        if !self.shown {
-            return;
-        }
+        // A restored place is checked once, before anything opens it.
+        let check = self
+            .stop()
+            .place
+            .clone()
+            .filter(|_| self.stop().unverified && !self.showing_recents() && query.is_empty());
+        let drives = cx
+            .try_global::<Places>()
+            .map(|places| places.drives.clone());
+        let consented = std::mem::take(&mut self.consented);
         let show_hidden = cx.global::<Preferences>().show_hidden;
         self.show_hidden = show_hidden;
         let sort = self.sort;
@@ -466,11 +555,31 @@ impl Pane {
                     Ok(index) => index.find(&query, SEARCH_LIMIT),
                     Err(e) => Err(e.clone()),
                 };
-                return hits.map(|hits| (hits, HashMap::new(), Watch::default(), HashSet::new()));
+                return hits
+                    .map(|hits| (hits, HashMap::new(), Watch::default(), HashSet::new(), None))
+                    .map_err(Failed::Error);
             }
             if let Some(store) = recents {
                 let (rows, missing) = trash::recent_entries(trash::read_recents(store.as_ref())?);
-                return Ok((rows, HashMap::new(), Watch::default(), missing));
+                return Ok((rows, HashMap::new(), Watch::default(), missing, None));
+            }
+            let mut verified = None;
+            if let Some(place) = check {
+                let volumes = match (&place.volume, &drives) {
+                    (Some(_), Some(drives)) => drives.list(),
+                    _ => Vec::new(),
+                };
+                match place.resolve(&volumes) {
+                    Availability::Unavailable(why) => {
+                        return Err(Failed::Unavailable(Unavailable::Gone(why)));
+                    }
+                    Availability::Available(there) => folder = there,
+                }
+                let gated = drives.as_ref().is_some_and(|d| d.needs_consent(&folder));
+                if gated && !consented {
+                    return Err(Failed::Unavailable(Unavailable::NeedsConsent));
+                }
+                verified = Some(folder.clone());
             }
             let hidden = |dir: &Path| peek || sidebar::lists_hidden(dir, show_hidden, &tidy);
             let root = entries::list_dir(&folder, hidden(&folder), sort)
@@ -490,25 +599,41 @@ impl Pane {
                     (dir, list)
                 })
                 .collect();
-            Ok((root, children, watch, HashSet::new()))
+            Ok((root, children, watch, HashSet::new(), verified))
         });
         self.loading = cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.listing = false;
                 match result {
-                    Ok((root, children, watch, missing)) => {
+                    Ok((root, children, watch, missing, verified)) => {
                         this.root = root;
                         this.children = children;
                         this.watch = watch;
                         this.missing = missing;
                         this.error = None;
+                        this.unavailable = None;
+                        if let Some(there) = verified {
+                            let stop = &mut this.history[this.at];
+                            stop.folder = there;
+                            stop.unverified = false;
+                        }
                     }
-                    Err(e) => {
+                    Err(failed) => {
                         this.root.clear();
                         this.children.clear();
                         this.missing.clear();
-                        this.error = Some(e);
+                        this.watch = Watch::default();
+                        match failed {
+                            Failed::Error(why) => {
+                                this.error = Some(why);
+                                this.unavailable = None;
+                            }
+                            Failed::Unavailable(why) => {
+                                this.error = None;
+                                this.unavailable = Some(why);
+                            }
+                        }
                     }
                 }
                 this.relayout(!quiet);
@@ -1928,7 +2053,7 @@ impl Pane {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
-        if !cx.global::<Preferences>().show_path_bar {
+        if !cx.global::<Preferences>().show_path_bar || self.unavailable.is_some() {
             return None;
         }
         // As Finder's status bar: what's selected and the size of its files.
@@ -2246,6 +2371,11 @@ pub(super) struct Renaming {
 pub(super) struct Stop {
     pub(super) folder: PathBuf,
     pub(super) recents: bool,
+    /// How it's saved, from the first save on.
+    place: Option<Favorite>,
+    /// It came from a saved session and hasn't been checked since: its drive
+    /// may be gone, or another may have taken its path.
+    unverified: bool,
 }
 
 impl Stop {
@@ -2253,6 +2383,17 @@ impl Stop {
         Self {
             folder,
             recents: false,
+            place: None,
+            unverified: false,
+        }
+    }
+
+    pub(super) fn restored(state: StopState) -> Self {
+        Self {
+            folder: state.place.path.clone(),
+            recents: state.recents,
+            place: Some(state.place),
+            unverified: true,
         }
     }
 }
@@ -2650,7 +2791,7 @@ impl Pane {
     pub(super) fn commands(&mut self, root: Div, sheet: bool, cx: &mut Context<Self>) -> Div {
         let package = self.package().is_some();
         // Nothing new goes in search results, Recents or the Trash.
-        let can_make_here = self.showing_folder() && !self.in_trash(cx);
+        let can_make_here = self.takes_files(cx);
         let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
         let selected = !self.selection.is_empty();
         let renaming = self.renaming.is_some();
@@ -2763,6 +2904,83 @@ impl Pane {
         })
     }
 
+    /// A restored location that can't open: why, and the ways out.
+    fn unavailable_view(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let name = level_name(self.folder());
+        let (title, about) = match &self.unavailable {
+            Some(Unavailable::Gone(why)) => (format!("{name} is unavailable"), why.clone()),
+            _ => (
+                format!("Open {name}?"),
+                "macOS may ask for permission, so it waits until you open it.".to_string(),
+            ),
+        };
+        let consent = self.unavailable == Some(Unavailable::NeedsConsent);
+        div()
+            .debug_selector(|| "unavailable".into())
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_6()
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_TITLE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_BODY))
+                    .text_color(content(0.65))
+                    .child(about),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        text_button(
+                            "unavailable-back",
+                            "Back",
+                            if self.at > 0 {
+                                ButtonLook::Secondary
+                            } else {
+                                ButtonLook::Disabled
+                            },
+                        )
+                        .when(self.at > 0, |d| {
+                            d.on_click(cx.listener(|this, _, _, cx| this.step_history(-1, cx)))
+                        }),
+                    )
+                    .child(
+                        text_button(
+                            "unavailable-choose",
+                            "Go to Folder…",
+                            if consent {
+                                ButtonLook::Secondary
+                            } else {
+                                ButtonLook::Primary
+                            },
+                        )
+                        .debug_selector(|| "unavailable-choose".into())
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(GoToFolder), cx)),
+                    )
+                    .when(consent, |d| {
+                        d.child(
+                            text_button("unavailable-open", "Open", ButtonLook::Primary)
+                                .debug_selector(|| "unavailable-open".into())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.consented = true;
+                                    this.reload(cx);
+                                })),
+                        )
+                    }),
+            )
+    }
+
     /// The list or grid, with its keys, its menus and its marquee.
     fn file_list(
         &mut self,
@@ -2774,6 +2992,7 @@ impl Pane {
             self.take_pending_reveal();
         }
         let list = match &self.error {
+            _ if self.unavailable.is_some() => self.unavailable_view(cx).into_any_element(),
             Some(error) => div()
                 .flex_1()
                 .flex()
@@ -2846,7 +3065,7 @@ impl Pane {
             let image = self.thumbs.remove(&thumb).flatten();
             thumbnails::release(&thumb, image, window, cx);
         }
-        let can_make_here = self.showing_folder() && !self.in_trash(cx);
+        let can_make_here = self.takes_files(cx);
         div()
             .id("file-list")
             .key_context("FileList")
@@ -3023,7 +3242,7 @@ impl Render for Pane {
             .child(self.backdrop.clone())
             .children(self.trash_bar(cx))
             // The grid sorts from the View menu and Settings.
-            .when(self.view == View::List, |d| {
+            .when(self.view == View::List && self.unavailable.is_none(), |d| {
                 d.child(
                     theme::pane_bar(theme::ROW_HEIGHT)
                         .gap_3()

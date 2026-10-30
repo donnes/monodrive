@@ -63,6 +63,10 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 Split View (⌥⌘S) puts two panes side by side, equal to begin with, each with its own column titles, files and path bar. In Rounded each is its own card with an 8 pt gap, and that gap is the divider; in Boxy they touch. Each pane has a 1 pt border: `accent()` on the one commands act on, 0.06 on the other, so turning it on moves nothing else. The divider drags, stops 240 pt from either side, and a double-click makes them equal again. A narrow list drops columns rather than the name, which keeps 160 pt: Kind goes first, then Date Modified, then Size.
 
+### A location that can't open
+
+A restored tab whose drive or folder is gone, or that would raise a privacy prompt, shows what's wrong in the middle of the pane: its name in `TEXT_TITLE`, one line of why, then Back and Go to Folder, and Open when a person has to ask. No file shows and nothing can land there, and the path bar hides, so nothing reaches for a path another drive may have taken. It opens by itself when its drive comes back.
+
 ### Type
 
 The system font. Menlo only for code, paths in code boxes and tool names.
