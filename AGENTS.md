@@ -93,4 +93,4 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 
 ## Documentation
 
-Most changes need no documentation. Agents can read the code. Add a doc only for a decision or constraint that spans components and that the code can't show, and rewrite it when the decision changes instead of appending to it. Don't commit plans, research notes or agent scratch files.
+Most changes need no documentation. Agents can read the code. Add a doc only for a decision or constraint that spans components and that the code can't show, and rewrite it when the decision changes instead of appending to it. Plans live in `.plans/`. Don't commit research notes or agent scratch files.
