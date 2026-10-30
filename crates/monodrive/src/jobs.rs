@@ -41,11 +41,17 @@ pub struct Jobs {
     /// The owner's jobs, newest first, as it last said.
     jobs: Vec<Job>,
     error: Option<String>,
-    /// Seen going while the window was open. A finished job shows only if
-    /// it was, so last week's failures don't.
-    seen: HashSet<u64>,
-    /// Finished jobs on their way out of the list, each with its timer.
-    leaving: HashMap<u64, Task<()>>,
+    /// When the window opened, in seconds since 1970. A failed or finished
+    /// job shows only if its latest run started since, so last week's
+    /// failures don't.
+    since: u64,
+    /// Runs (a job's id and when the run started) that failed and were
+    /// dismissed.
+    dismissed: HashSet<(u64, u64)>,
+    /// Finished runs on their way out of the list, each with its timer.
+    leaving: HashMap<(u64, u64), Task<()>>,
+    /// Finished runs that have left it.
+    gone: HashSet<(u64, u64)>,
     /// The window's own copies and moves, followed until they end.
     followed: HashSet<u64>,
     open: bool,
@@ -59,6 +65,16 @@ pub struct Jobs {
 impl EventEmitter<JobsEvent> for Jobs {}
 
 impl Jobs {
+    pub fn new() -> Self {
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        Self {
+            since,
+            ..Self::default()
+        }
+    }
+
     /// Checks the jobs each time `changes` says the owner's journal
     /// changed, for as long as `watch` is kept.
     pub fn hear(
@@ -135,8 +151,6 @@ impl Jobs {
         for job in &jobs {
             let id = job.id;
             if job.state.active() {
-                self.seen.insert(id);
-                self.leaving.remove(&id);
                 continue;
             }
             if self.followed.remove(&id) {
@@ -148,17 +162,22 @@ impl Jobs {
                     _ => {}
                 }
             }
+            let run = (id, job.started);
             let finished = matches!(job.state, State::Completed | State::Cancelled);
-            if finished && self.seen.contains(&id) && !self.leaving.contains_key(&id) {
+            if finished
+                && self.new_run(job)
+                && !self.gone.contains(&run)
+                && !self.leaving.contains_key(&run)
+            {
                 let leave = cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(LINGER).await;
                     let _ = this.update(cx, |this, cx| {
-                        this.seen.remove(&id);
-                        this.leaving.remove(&id);
+                        this.leaving.remove(&run);
+                        this.gone.insert(run);
                         cx.notify();
                     });
                 });
-                self.leaving.insert(id, leave);
+                self.leaving.insert(run, leave);
             }
         }
         if (&jobs, &error) != (&self.jobs, &self.error) {
@@ -168,12 +187,23 @@ impl Jobs {
         }
     }
 
+    /// Whether the job's latest run started while the window was open,
+    /// whether or not a check saw it going.
+    fn new_run(&self, job: &Job) -> bool {
+        job.started >= self.since
+    }
+
     /// The jobs the ring and the popover show, newest first.
     fn shown(&self) -> impl Iterator<Item = &Job> {
-        self.jobs.iter().filter(|job| match job.state {
-            State::Queued | State::Running | State::Waiting => true,
-            State::Failed | State::Interrupted => self.seen.contains(&job.id),
-            State::Completed | State::Cancelled => self.leaving.contains_key(&job.id),
+        self.jobs.iter().filter(|job| {
+            let run = (job.id, job.started);
+            match job.state {
+                State::Queued | State::Running | State::Waiting => true,
+                State::Failed | State::Interrupted => {
+                    self.new_run(job) && !self.dismissed.contains(&run)
+                }
+                State::Completed | State::Cancelled => self.leaving.contains_key(&run),
+            }
         })
     }
 
@@ -243,7 +273,7 @@ impl Jobs {
     }
 
     fn row(&self, job: &Job, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let id = job.id;
+        let (id, started) = (job.id, job.started);
         let ours = job.origin == Origin::Window;
         let answer = |conflict| Request::Retry { job: id, conflict };
         let buttons: Vec<(&'static str, Request)> = match job.state {
@@ -334,7 +364,7 @@ impl Jobs {
                                 if label == "Cancel" {
                                     this.ask(Request::Cancel { job: id }, false, cx);
                                 } else {
-                                    this.seen.remove(&id);
+                                    this.dismissed.insert((id, started));
                                     cx.notify();
                                 }
                             }))
@@ -527,11 +557,11 @@ mod tests {
     use gpui::TestAppContext;
     use monodrive_core::ops::Task as Item;
 
-    fn job(id: u64, state: State, origin: Origin) -> Job {
+    fn job(id: u64, state: State, started: u64) -> Job {
         Job {
             id,
             title: "Copy".into(),
-            origin,
+            origin: Origin::Agent { client: None },
             into: "/Users/me/Inbox".into(),
             state,
             tasks: vec![Item {
@@ -540,30 +570,34 @@ mod tests {
             }],
             bytes: 0,
             total_bytes: 0,
+            started,
+            run: None,
         }
     }
 
     #[gpui::test]
-    fn the_ring_shows_while_a_job_goes_and_leaves_once_it_has_finished(cx: &mut TestAppContext) {
-        let jobs = cx.new(|_| Jobs::default());
+    fn the_ring_shows_new_jobs_until_they_have_finished(cx: &mut TestAppContext) {
+        let jobs = cx.new(|_| Jobs {
+            since: 100,
+            ..Jobs::default()
+        });
         let shown = |cx: &mut TestAppContext| jobs.read_with(cx, |jobs, _| jobs.ring().is_some());
         let take = |list: Vec<Job>, cx: &mut TestAppContext| {
             jobs.update(cx, |jobs, cx| jobs.take(Ok(list), cx));
         };
         // A failure from before the window opened isn't news.
-        take(vec![job(1, State::Failed, Origin::Window)], cx);
+        take(vec![job(1, State::Failed, 50)], cx);
         assert!(!shown(cx));
-        take(vec![job(2, State::Running, Origin::Window)], cx);
+        take(vec![job(2, State::Running, 150)], cx);
         assert!(shown(cx));
-        take(vec![job(2, State::Completed, Origin::Window)], cx);
+        // One that failed before any check saw it going stays, as does one
+        // that finished: until it's dismissed, and for a few seconds.
+        take(vec![job(3, State::Failed, 150)], cx);
+        cx.executor().advance_clock(LINGER);
+        assert!(shown(cx));
+        take(vec![job(4, State::Completed, 150)], cx);
         assert!(shown(cx));
         cx.executor().advance_clock(LINGER);
         assert!(!shown(cx));
-        // A failure seen happening stays until it's dismissed or continued.
-        let agent = || Origin::Agent { client: None };
-        take(vec![job(3, State::Running, agent())], cx);
-        take(vec![job(3, State::Failed, agent())], cx);
-        cx.executor().advance_clock(LINGER);
-        assert!(shown(cx));
     }
 }

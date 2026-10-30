@@ -4,15 +4,15 @@
 //!
 //! `cargo run -p monodrive --example snapshot -- [folder]` writes
 //! `target/snapshots/list.png`, `grid.png`, `rename.png`, `menu.png`,
-//! `menu-grid.png`, `menu-folder.png`, `ring.png`, `ring-waiting.png`,
-//! `jobs.png`, `rename-error.png`, `toast.png` and `empty-trash.png`.
+//! `menu-grid.png`, `menu-folder.png`, `jobs.png`, `ring-waiting.png`,
+//! `rename-error.png`, `toast.png` and `empty-trash.png`.
 //! Without a folder it draws a made-up one, so the pictures show nobody's
 //! files. Rename edits the fifth name in place. The menus are the context
 //! menu on the second entry, in the list and the grid, and on the folder.
-//! The ring and its popover show a running copy and an agent's move waiting
-//! at a name that's taken. The last three use an operation owner on a temp
-//! folder: renaming the last entry to a name that's taken, then to a free
-//! one, which is undone after the picture, and a Trash of 12 items.
+//! The rest use an operation owner on a temp folder. The popover and the
+//! ring show an agent's move there, waiting at a name that's taken. Then the
+//! last entry is renamed to a name that's taken, then to a free one, which
+//! is undone after the picture, and Empty Trash counts a Trash of 12 items.
 
 use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
@@ -21,7 +21,7 @@ use monodrive::browser::{
     ShowContextMenu, ShowCopiesAndMoves, Undo,
 };
 use monodrive::preferences::{Preferences, View};
-use monodrive_core::ops::{self, Done, Job, Origin, State, Task};
+use monodrive_core::ops::{self, Conflict, Origin, Request};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -110,23 +110,6 @@ fn main() -> gpui::Result<()> {
         cx.capture_screenshot(window.into())?.save(&path)?;
         println!("{}", path.display());
     }
-    // A running copy, then an agent's move waiting at a name that's taken.
-    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
-        cx.new(|cx| Browser::new(folder.clone(), cx))
-    })?;
-    cx.run_until_parked();
-    let (running, waiting) = jobs(&folder);
-    for (name, shown) in [
-        ("ring", vec![running.clone()]),
-        ("ring-waiting", vec![waiting, running]),
-    ] {
-        window.update(&mut cx, |browser, _, cx| browser.show_jobs(shown, cx))?;
-        cx.run_until_parked();
-        save(&mut cx, window, &out, name)?;
-    }
-    dispatch(&mut cx, window, &ShowCopiesAndMoves)?;
-    save(&mut cx, window, &out, "jobs")?;
-
     let scratch = tempfile::tempdir_in(&out)?;
     let paths = ops::Paths {
         state: scratch.path().join("state"),
@@ -137,10 +120,46 @@ fn main() -> gpui::Result<()> {
     for ix in 1..=12 {
         std::fs::write(paths.trash.join(format!("old {ix}.txt")), "")?;
     }
-    let owner = ops::Owner::bind(paths.clone()).map_err(std::io::Error::other)?;
-    std::thread::spawn(move || owner.serve());
+    // An agent's move waiting at a name that's taken. Its owner exits once
+    // the job has stopped and the agent has gone; the next one has it.
+    let (drafts, invoices) = (
+        scratch.path().join("Drafts"),
+        scratch.path().join("Invoices"),
+    );
+    for folder in [&drafts, &invoices] {
+        std::fs::create_dir_all(folder)?;
+        std::fs::write(folder.join("notes.md"), "notes")?;
+    }
+    let serve = || -> gpui::Result<std::thread::JoinHandle<std::io::Result<()>>> {
+        let owner = ops::Owner::bind(paths.clone()).map_err(std::io::Error::other)?;
+        Ok(std::thread::spawn(move || owner.serve()))
+    };
+    let serving = serve()?;
+    let agent = Origin::Agent {
+        client: Some("claude-code".into()),
+    };
+    let request = Request::Move {
+        paths: vec![drafts.join("notes.md")],
+        into: invoices,
+        conflict: Conflict::Stop,
+    };
+    ops::Client::new(paths.clone(), None)
+        .submit(agent, request)
+        .map_err(std::io::Error::other)?;
+    let _ = serving.join();
+    serve()?;
     let client = ops::Client::new(paths, None);
     cx.update(|cx| cx.set_global(Operations(Arc::new(Mutex::new(client)))));
+    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+        cx.new(|cx| Browser::new(folder.clone(), cx))
+    })?;
+    cx.run_until_parked();
+    // The popover asks the owner; closed, the ring stays with its dot.
+    dispatch(&mut cx, window, &ShowCopiesAndMoves)?;
+    save(&mut cx, window, &out, "jobs")?;
+    dispatch(&mut cx, window, &ShowCopiesAndMoves)?;
+    save(&mut cx, window, &out, "ring-waiting")?;
+
     let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
         cx.new(|cx| Browser::new(folder.clone(), cx))
     })?;
@@ -206,49 +225,6 @@ fn names(folder: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
-}
-
-/// A copy of three files into `folder`'s Invoices, two thirds of the way,
-/// and an agent's move of notes.md waiting at the name there.
-fn jobs(folder: &Path) -> (Job, Job) {
-    let into = folder.join("Invoices");
-    let task = |name: &str, done: Option<Done>| Task {
-        source: folder.join(name),
-        done,
-    };
-    let running = Job {
-        id: 2,
-        title: "Copy".into(),
-        origin: Origin::Window,
-        into: into.clone(),
-        state: State::Running,
-        tasks: vec![
-            task("Brief.pdf", Some(Done::To(into.join("Brief.pdf")))),
-            task("budget.xlsx", None),
-            task("photo.jpg", None),
-        ],
-        bytes: 160_000_000,
-        total_bytes: 240_000_000,
-    };
-    let waiting = Job {
-        id: 3,
-        title: "Move".into(),
-        origin: Origin::Agent {
-            client: Some("claude-code".into()),
-        },
-        into: into.clone(),
-        state: State::Waiting,
-        tasks: vec![task(
-            "notes.md",
-            Some(Done::Failed(format!(
-                "{} already exists. Continue the job with keep_both, replace or skip.",
-                into.join("notes.md").display()
-            ))),
-        )],
-        bytes: 0,
-        total_bytes: 3_000,
-    };
-    (running, waiting)
 }
 
 /// Sends `action` to the browser in `window` as a key would, and draws.

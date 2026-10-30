@@ -965,3 +965,72 @@ fn a_job_retried_as_a_new_one_by_an_older_owner_no_longer_waits() {
         .collect();
     assert_eq!(left, [(2, State::Completed)]);
 }
+
+#[test]
+fn undoing_one_operation_is_refused_once_another_came_after_it() {
+    let (_dir, files, mut engine) = engine();
+    let (a, c) = (files.join("a"), files.join("c"));
+    std::fs::write(&a, "").unwrap();
+    std::fs::write(&c, "").unwrap();
+    let mine = run(&mut engine, rename(&a, "b")).unwrap().op;
+    let agent = Origin::Agent { client: None };
+    engine.submit(submission(agent, rename(&c, "d"))).unwrap();
+    let refused = run(&mut engine, Request::UndoOf { op: mine }).unwrap_err();
+    assert_eq!(refused, "Can't undo: something else changed files since.");
+    assert!(files.join("b").exists() && files.join("d").exists());
+    // Once the agent's rename is undone, the window's is next again.
+    run(&mut engine, Request::Undo).unwrap();
+    assert_eq!(
+        moved(run(&mut engine, Request::UndoOf { op: mine })),
+        vec![a]
+    );
+}
+
+#[test]
+fn trimming_keeps_an_old_job_that_was_continued_lately() {
+    let (dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let waiting = job(&shared, copy(&[&src.join("a.txt")], &dest, Conflict::Stop));
+    drop(shared);
+    // Enough finished requests since that once the job is continued, the
+    // next opening trims the journal past the job's own records.
+    let journal = paths(dir.path()).state.join(JOURNAL);
+    let mut lines = std::fs::read_to_string(&journal).unwrap();
+    for op in 2..TRIM_AT as u64 + 1 {
+        let submission = submission(Origin::Window, Request::Undo);
+        let begin = Record::Begin {
+            op,
+            submission,
+            target: None,
+            steps: Vec::new(),
+            creates: Vec::new(),
+        };
+        let outcome = Outcome {
+            op,
+            title: "Undo".into(),
+            items: Vec::new(),
+            interrupted: false,
+        };
+        let end = Record::End {
+            op,
+            outcome,
+            steps: Vec::new(),
+        };
+        for record in [begin, end] {
+            lines.push_str(&serde_json::to_string(&record).unwrap());
+            lines.push('\n');
+        }
+    }
+    std::fs::write(&journal, lines).unwrap();
+    let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
+    let done = continued(&shared, waiting.id, Some(Conflict::KeepBoth));
+    assert_eq!(done.tasks[0].done, Some(Done::To(dest.join("a 2.txt"))));
+    drop(shared);
+
+    let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
+    assert_eq!(status(&shared, waiting.id).state, State::Completed);
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    untrash(&undone.items[0].result.clone().unwrap(), &files);
+    assert!(!dest.join("a 2.txt").exists());
+}

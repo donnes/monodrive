@@ -79,6 +79,13 @@ pub struct Job {
     /// Copied so far, of the bytes in the items' files.
     pub bytes: u64,
     pub total_bytes: u64,
+    /// When its latest run was queued, in seconds since 1970.
+    #[serde(default)]
+    pub started: u64,
+    /// The operation undo knows its latest run as, if that run changed
+    /// anything.
+    #[serde(default)]
+    pub run: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,13 +164,15 @@ pub(super) struct Entry {
     pub(super) run: u64,
     /// Which items this run works on; the rest finished in an earlier one.
     fresh: Vec<bool>,
+    /// When this run was queued, in seconds since 1970.
+    started: u64,
     cancel: Arc<AtomicBool>,
     /// The running item's bytes copied so far.
     copied: Arc<AtomicU64>,
 }
 
 impl Entry {
-    pub(super) fn new(id: u64, origin: Origin, spec: Spec) -> Self {
+    pub(super) fn new(id: u64, origin: Origin, spec: Spec, started: u64) -> Self {
         let work: Vec<Work> = spec
             .sources
             .iter()
@@ -182,6 +191,7 @@ impl Entry {
             work,
             state: State::Queued,
             run: id,
+            started,
             cancel: Arc::default(),
             copied: Arc::default(),
         }
@@ -189,8 +199,9 @@ impl Entry {
 
     /// Queues the job again as run `run`, keeping what's finished: an item
     /// done, or one that stopped partway, stays as it is.
-    pub(super) fn resume(&mut self, run: u64, conflict: Conflict) {
+    pub(super) fn resume(&mut self, run: u64, conflict: Conflict, started: u64) {
         self.run = run;
+        self.started = started;
         self.spec.conflict = conflict;
         self.state = State::Queued;
         self.cancel = Arc::default();
@@ -253,6 +264,8 @@ impl Entry {
                 .collect(),
             bytes: finished + live,
             total_bytes: self.work.iter().map(|work| work.bytes).sum(),
+            started: self.started,
+            run: (!self.state.active() && !self.run_steps().is_empty()).then_some(self.run),
         }
     }
 }
@@ -671,6 +684,12 @@ impl Item<'_> {
     }
 }
 
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
 /// `path` as "name 2.ext", "name 3.ext" and on: the first that's free.
 pub(super) fn numbered(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
@@ -727,6 +746,7 @@ impl Engine {
                     op,
                     submission: submission.clone(),
                     spec,
+                    at: now(),
                 }
             }
             Request::Retry { job, conflict } => {
@@ -742,6 +762,7 @@ impl Engine {
                     submission: submission.clone(),
                     job: *job,
                     conflict: conflict.unwrap_or(old.spec.conflict),
+                    at: now(),
                 }
             }
             _ => unreachable!("only jobs are queued"),

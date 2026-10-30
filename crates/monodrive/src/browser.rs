@@ -320,7 +320,7 @@ impl Browser {
             cx.notify();
         })
         .detach();
-        let jobs = cx.new(|_| Jobs::default());
+        let jobs = cx.new(|_| Jobs::new());
         cx.subscribe(&jobs, |this, _, event: &JobsEvent, cx| match event {
             JobsEvent::Finished(job) => this.job_finished(job.clone(), cx),
             JobsEvent::NeedsYou => {
@@ -1008,7 +1008,7 @@ impl Browser {
             folders.push(self.folder().to_path_buf());
         }
         if let Err(e) = workspace::open_in_terminal(&folders) {
-            self.toast(e, true, false, cx);
+            self.toast(e, true, None, cx);
         }
     }
 
@@ -1698,13 +1698,6 @@ impl Browser {
             .update(cx, |jobs, cx| jobs.hear(watch, changes, cx));
     }
 
-    /// Shows `jobs` in the title bar as if the owner had just reported
-    /// them. The snapshot example draws a running job this way, since a real
-    /// one finishes before it can be drawn.
-    pub fn show_jobs(&mut self, jobs: Vec<Job>, cx: &mut Context<Self>) {
-        self.jobs.update(cx, |list, cx| list.take(Ok(jobs), cx));
-    }
-
     fn open_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Sheet::Goto(view)) = &self.sheet {
             window.focus(&view.focus_handle(cx), cx);
@@ -1847,6 +1840,7 @@ impl Browser {
                 | Request::NewFile { .. }
                 | Request::Duplicate { .. }
                 | Request::Undo
+                | Request::UndoOf { .. }
                 | Request::Redo
         );
         self.with_owner(
@@ -1873,13 +1867,16 @@ impl Browser {
     ) {
         let (request, outcome) = match done {
             Ok(done) => done,
-            Err(e) => return self.toast(e, true, false, cx),
+            Err(e) => return self.toast(e, true, None, cx),
         };
         if let Some(why) = outcome.failures().next() {
             let why = short_reason(why, [self.folder()]);
-            self.toast(why, true, false, cx);
+            self.toast(why, true, None, cx);
         } else if let Some(said) = said(&request, &outcome) {
-            let undo = !matches!(request, Request::EmptyTrash { .. });
+            // Undo from the toast undoes this change or nothing.
+            let changed = !outcome.items.is_empty();
+            let undo =
+                (changed && !matches!(request, Request::EmptyTrash { .. })).then_some(outcome.op);
             self.toast(said, false, undo, cx);
         } else {
             // An undo leaves the last toast's Undo stale.
@@ -1947,7 +1944,7 @@ impl Browser {
             .any(|path| path.parent() != Some(here.as_path()))
         {
             let why = "A new folder can only take items from one folder.".to_string();
-            return self.toast(why, true, false, cx);
+            return self.toast(why, true, None, cx);
         }
         self.with_owner(
             window,
@@ -2033,7 +2030,7 @@ impl Browser {
             move |owner| owner.submit(Origin::Window, request),
             |this, outcome, _, cx| match outcome {
                 Ok(outcome) => this.jobs.update(cx, |jobs, cx| jobs.follow(outcome.op, cx)),
-                Err(e) => this.toast(e, true, false, cx),
+                Err(e) => this.toast(e, true, None, cx),
             },
         );
     }
@@ -2041,7 +2038,7 @@ impl Browser {
     /// A paste or Move Here finished: what it made is selected, if it's
     /// here, and a toast offers Undo.
     fn job_finished(&mut self, job: Job, cx: &mut Context<Self>) {
-        self.toast(jobs::title(&job), false, true, cx);
+        self.toast(jobs::title(&job), false, job.run, cx);
         if self.query.is_empty() && job.into == self.folder() {
             self.select_after = job
                 .tasks
@@ -2064,10 +2061,10 @@ impl Browser {
             |owner| owner.trash_items(),
             |this, items, window, cx| match items {
                 Ok(items) if items.is_empty() => {
-                    this.toast("The Trash is empty.".into(), false, false, cx)
+                    this.toast("The Trash is empty.".into(), false, None, cx)
                 }
                 Ok(items) => this.ask_empty_trash(items, window, cx),
-                Err(e) => this.toast(e, true, false, cx),
+                Err(e) => this.toast(e, true, None, cx),
             },
         );
     }
@@ -2190,7 +2187,7 @@ impl Browser {
                         renaming.error = Some(why);
                         window.focus(&renaming.field.focus_handle(cx), cx);
                     }
-                    (Some(why), None) => this.toast(why, true, false, cx),
+                    (Some(why), None) => this.toast(why, true, None, cx),
                     (None, still) => {
                         if still.is_some() {
                             this.end_rename(window, cx);
@@ -2676,7 +2673,7 @@ impl Browser {
                                 .text_color(ink)
                                 .child(toast.text.clone()),
                         )
-                        .when(toast.undo, |d| {
+                        .when_some(toast.undo, |d, op| {
                             d.child(
                                 div()
                                     .id("toast-undo")
@@ -2696,20 +2693,21 @@ impl Browser {
                                     .cursor_pointer()
                                     .hover(|s| s.bg(content(0.1)))
                                     .child("Undo")
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         this.toast = None;
-                                        this.submit(Request::Undo, window, cx)
+                                        this.submit(Request::UndoOf { op }, window, cx)
                                     })),
                             )
                         })
-                        .when(!toast.undo, |d| d.pr_3()),
+                        .when(toast.undo.is_none(), |d| d.pr_3()),
                 ),
         )
     }
 
     /// Says `text` at the bottom of the files for `TOAST_FOR`, in red if
-    /// it's a failure, with Undo if `undo`. It replaces the last one.
-    fn toast(&mut self, text: String, failed: bool, undo: bool, cx: &mut Context<Self>) {
+    /// it's a failure, with Undo of operation `undo` if given. It replaces
+    /// the last one.
+    fn toast(&mut self, text: String, failed: bool, undo: Option<u64>, cx: &mut Context<Self>) {
         let expire = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
             let _ = this.update(cx, |this, cx| {
@@ -3482,8 +3480,9 @@ struct MenuRequest {
 struct Toast {
     text: String,
     failed: bool,
-    /// Offers Undo, which reverses the newest change, whoever made it.
-    undo: bool,
+    /// Offers Undo of this operation, which the owner refuses once
+    /// anything else has changed files since.
+    undo: Option<u64>,
     _expire: Task<()>,
 }
 
@@ -4520,7 +4519,7 @@ mod tests {
     ) -> Option<(String, bool, bool)> {
         browser.read_with(cx, |browser, _| {
             let toast = browser.toast.as_ref()?;
-            Some((toast.text.clone(), toast.failed, toast.undo))
+            Some((toast.text.clone(), toast.failed, toast.undo.is_some()))
         })
     }
 

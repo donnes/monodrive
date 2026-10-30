@@ -102,6 +102,11 @@ pub enum Request {
         job: u64,
     },
     Undo,
+    /// Undoes operation `op`, refusing if anything was done since: a
+    /// message offering to undo one change mustn't undo another.
+    UndoOf {
+        op: u64,
+    },
     Redo,
     /// Erases these items in the Trash for good, with no undo. Only the
     /// window asks, once a person has confirmed it.
@@ -132,7 +137,7 @@ impl Request {
             Request::Move { .. } => "Move",
             Request::Retry { .. } => "Retry",
             Request::Cancel { .. } => "Cancel",
-            Request::Undo => "Undo",
+            Request::Undo | Request::UndoOf { .. } => "Undo",
             Request::Redo => "Redo",
             Request::EmptyTrash { .. } => "Empty Trash",
         }
@@ -341,6 +346,9 @@ enum Record {
         op: u64,
         submission: Submission,
         spec: jobs::Spec,
+        /// When, in seconds since 1970; 0 in journals from before.
+        #[serde(default)]
+        at: u64,
     },
     /// A stopped job queued again under its own id. Its next changes join
     /// the history as operation `op`.
@@ -349,6 +357,8 @@ enum Record {
         submission: Submission,
         job: u64,
         conflict: Conflict,
+        #[serde(default)]
+        at: u64,
     },
     /// One of a job's items as it stands: written before each change it
     /// makes and after.
@@ -436,7 +446,16 @@ impl Engine {
                 .collect();
             ends.sort_unstable();
             let first = ends[ends.len().saturating_sub(KEEP)];
-            records.retain(|r| r.op() >= first);
+            // A job continued lately needs its own records too, which carry
+            // its older id.
+            let continued: std::collections::HashSet<u64> = records
+                .iter()
+                .filter_map(|r| match r {
+                    Record::Continue { op, job, .. } if *op >= first => Some(*job),
+                    _ => None,
+                })
+                .collect();
+            records.retain(|r| r.op() >= first || continued.contains(&r.op()));
             let tmp = at.with_extension("jsonl.tmp");
             let mut file = File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
             for record in &records {
@@ -504,7 +523,7 @@ impl Engine {
                     .target
                     .and_then(|target| self.history.iter().position(|u| u.op == target));
                 match (&request, target) {
-                    (Request::Undo, Some(at)) => {
+                    (Request::Undo | Request::UndoOf { .. }, Some(at)) => {
                         self.history[at].steps = steps;
                         self.undone = self.history.len() - at;
                     }
@@ -512,7 +531,7 @@ impl Engine {
                         self.history[at].steps = steps;
                         self.undone = self.history.len() - at - 1;
                     }
-                    (Request::Undo | Request::Redo, None) => {}
+                    (Request::Undo | Request::UndoOf { .. } | Request::Redo, None) => {}
                     _ if steps.is_empty() => {}
                     _ => {
                         // A new operation ends the redo trail.
@@ -532,6 +551,7 @@ impl Engine {
                 op,
                 submission,
                 spec,
+                at,
             } => {
                 self.next = self.next.max(op + 1);
                 let accepted = Outcome {
@@ -551,13 +571,14 @@ impl Engine {
                     self.jobs.retain(|old| old.id != job);
                 }
                 self.jobs
-                    .push(jobs::Entry::new(op, submission.origin, spec));
+                    .push(jobs::Entry::new(op, submission.origin, spec, at));
             }
             Record::Continue {
                 op,
                 submission,
                 job,
                 conflict,
+                at,
             } => {
                 self.next = self.next.max(op + 1);
                 let accepted = Outcome {
@@ -569,7 +590,7 @@ impl Engine {
                 self.finished
                     .insert(submission.id, (submission.request, accepted));
                 if let Some(entry) = self.job_mut(job) {
-                    entry.resume(op, conflict);
+                    entry.resume(op, conflict, at);
                 }
             }
             Record::Work { op, index, work } => {
@@ -682,8 +703,9 @@ impl Engine {
             return Err("Only a person can empty the Trash, from Monodrive's window.".into());
         }
         match submission.request {
-            Request::Undo => self.reverse(submission, false),
-            Request::Redo => self.reverse(submission, true),
+            Request::Undo => self.reverse(submission, false, None),
+            Request::UndoOf { op } => self.reverse(submission, false, Some(op)),
+            Request::Redo => self.reverse(submission, true, None),
             Request::Copy { .. } | Request::Move { .. } | Request::Retry { .. } => {
                 self.queue(submission)
             }
@@ -844,7 +866,14 @@ impl Engine {
         }
     }
 
-    fn reverse(&mut self, submission: Submission, redo: bool) -> Result<Outcome, String> {
+    /// Undoes or redoes the next operation in line, which must be
+    /// `expected` when that's given.
+    fn reverse(
+        &mut self,
+        submission: Submission,
+        redo: bool,
+        expected: Option<u64>,
+    ) -> Result<Outcome, String> {
         let verb = if redo { "redo" } else { "undo" };
         let at = if redo {
             (self.undone > 0).then(|| self.history.len() - self.undone)
@@ -853,6 +882,9 @@ impl Engine {
         };
         let at = at.ok_or_else(|| format!("Nothing to {verb}."))?;
         let target = &self.history[at];
+        if expected.is_some_and(|op| op != target.op) {
+            return Err(format!("Can't {verb}: something else changed files since."));
+        }
         let (of, target_op) = (target.title, target.op);
         // Undo moves back what the operation moved, last change first; redo
         // what undo did, in the order it first happened.
