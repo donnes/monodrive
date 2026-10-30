@@ -677,7 +677,7 @@ impl Engine {
             match plan {
                 Ok(Plan::Move(step)) => steps.push(step.clone()),
                 Ok(Plan::Create(_)) => creates.push(path.clone()),
-                Ok(Plan::Erase) | Err(_) => {}
+                Ok(Plan::Erase(_)) | Err(_) => {}
             }
         }
         let op = self.begin(&submission, None, steps, creates)?;
@@ -703,7 +703,15 @@ impl Engine {
                     });
                     Ok(made)
                 }
-                Plan::Erase => erase(&path).map(|()| path.clone()),
+                // Checked again just before: erasing an earlier, larger item
+                // gives Finder time to change the Trash.
+                Plan::Erase(id) => self
+                    .plan_erase(&TrashItem {
+                        path: path.clone(),
+                        id,
+                    })
+                    .and_then(|_| erase(&path))
+                    .map(|()| path.clone()),
             });
             items.push(Item { path, result });
         }
@@ -796,7 +804,7 @@ impl Engine {
             return Err(format!("{}: not in the Trash.", path.display()));
         }
         match disk::id(path) {
-            Some(id) if id == item.id => Ok(Plan::Erase),
+            Some(id) if id == item.id => Ok(Plan::Erase(id)),
             Some(_) => Err(format!(
                 "{}: skipped, since it isn't the item that was counted.",
                 path.display()
@@ -926,8 +934,8 @@ enum Plan {
     Move(Step),
     /// Creates or copies the item's path.
     Create(Make),
-    /// Erases the item's path for good: Empty Trash.
-    Erase,
+    /// Erases the item's path for good, if it's still this item: Empty Trash.
+    Erase(FileId),
 }
 
 fn absolute(path: &Path) -> Result<(), String> {
