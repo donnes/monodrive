@@ -7,7 +7,7 @@ use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, Caps, GrepMode, Index, Status};
 use crate::info::{self, Info};
-use crate::ops::{self, Conflict, Done, Job, Origin, Request};
+use crate::ops::{self, Conflict, Done, Job, Origin, Request, rename};
 use crate::places::{self, Availability, Place, SavedSearch};
 use crate::search::{Query, Scope};
 use crate::sizes::{self, FolderSize};
@@ -27,8 +27,9 @@ const INSTRUCTIONS: &str = "Monodrive: an always-current index of this Mac's fil
 much faster than Spotlight or walking folders with find. Use find_files to locate files \
 by name, grep to search inside files, and list_dir to see one folder. index_status says \
 whether the index is ready. stat describes items, and folder_size adds up a folder. \
-trash, put_back, rename, create_folder, create_folder_with, create_file, duplicate, undo \
-and redo change files through the same undo history as the Monodrive window. \
+trash, put_back, rename, rename_many, create_folder, create_folder_with, create_file, duplicate, \
+undo and redo change files through the same undo history as the Monodrive window; rename_preview \
+shows what rename_many would do. \
 list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches.";
 
@@ -115,6 +116,16 @@ enum ToolCall {
     Rename {
         path: String,
         name: String,
+    },
+    RenamePreview {
+        paths: Vec<String>,
+        rule: rename::Rule,
+    },
+    RenameMany {
+        paths: Vec<String>,
+        rule: rename::Rule,
+        #[serde(default)]
+        skip_problems: bool,
     },
     CreateFolder {
         path: String,
@@ -341,6 +352,19 @@ impl Server {
             ToolCall::Rename { path, name } => self.change(Request::Rename {
                 path: expand_home(&path),
                 name,
+            }),
+            ToolCall::RenamePreview { paths, rule } => {
+                Ok(rename_table(&rename::Plan::new(&expand(&paths), &rule)))
+            }
+            ToolCall::RenameMany {
+                paths,
+                rule,
+                skip_problems,
+            } => self.change(Request::RenameMany {
+                paths: expand(&paths),
+                rule,
+                preview: None,
+                skip_problems,
             }),
             ToolCall::CreateFolder { path } => self.change(Request::NewFolder {
                 path: expand_home(&path),
@@ -719,6 +743,20 @@ fn describe(job: &Job) -> String {
     out
 }
 
+/// `old path → new name` a line, with the status unless it's ok.
+fn rename_table(plan: &rename::Plan) -> String {
+    plan.rows.iter().fold(String::new(), |mut out, row| {
+        let status = match &row.status {
+            rename::Status::Ok => String::new(),
+            rename::Status::Unchanged => " (unchanged)".into(),
+            rename::Status::Invalid(why) => format!(" (invalid: {why})"),
+            rename::Status::Collision(why) => format!(" (collision: {why})"),
+        };
+        let _ = writeln!(out, "{} → {}{status}", row.path.display(), row.name);
+        out
+    })
+}
+
 fn expand(paths: &[String]) -> Vec<PathBuf> {
     paths.iter().map(|path| expand_home(path)).collect()
 }
@@ -747,7 +785,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 28] = [
+pub const TOOLS: [Tool; 30] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -857,6 +895,21 @@ pub const TOOLS: [Tool; 28] = [
                 "required": ["path", "name"]
             })
         },
+    },
+    Tool {
+        name: "rename_preview",
+        description: "Show how rename_many would rename items, changing nothing. A replace rule swaps \
+    text before the extension (in it too with extension: true); a format rule names items name plus a \
+    number in the order given, such as \"Trip 001.jpg\". Prints old path → new name, then any of \
+    (unchanged), (invalid: why) or (collision: why).",
+        input_schema: || rename_schema(false),
+    },
+    Tool {
+        name: "rename_many",
+        description: "Rename items where they are, as rename_preview shows, as one change undo reverses. \
+    Refuses if any item is invalid or collides, unless skip_problems renames only the rest. Never \
+    replaces an existing item. Prints each new path.",
+        input_schema: || rename_schema(true),
     },
     Tool {
         name: "create_folder",
@@ -1064,6 +1117,48 @@ fn transfer_schema() -> Value {
         },
         "required": ["paths", "into"]
     })
+}
+
+fn rename_schema(skip: bool) -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "properties": {
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "In the order to number them. Absolute; ~ is your home."
+            },
+            "rule": {"oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": {"const": "replace"},
+                        "find": {"type": "string"},
+                        "with": {"type": "string", "default": ""},
+                        "case_sensitive": {"type": "boolean", "default": false},
+                        "extension": {"type": "boolean", "default": false}
+                    },
+                    "required": ["type", "find"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": {"const": "format"},
+                        "name": {"type": "string"},
+                        "start": {"type": "integer", "minimum": 0, "default": 1},
+                        "digits": {"type": "integer", "minimum": 0, "default": 0, "description": "Pads the number with zeros."},
+                        "place": {"type": "string", "enum": ["after", "before"], "default": "after"}
+                    },
+                    "required": ["type"]
+                }
+            ]}
+        },
+        "required": ["paths", "rule"]
+    });
+    if skip {
+        schema["properties"]["skip_problems"] = json!({"type": "boolean", "default": false});
+    }
+    schema
 }
 
 fn job_schema() -> Value {
@@ -1352,6 +1447,74 @@ mod tests {
             json!({"name": "eject", "arguments": {"path": "/"}}),
         );
         assert!(text(&reply).starts_with("Agents can't eject"), "{reply}");
+        drop(server);
+        serving.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn rename_preview_prints_the_table_and_rename_many_runs_only_what_it_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ops::Paths {
+            state: dir.path().join("state"),
+            settings: dir.path().join("settings.json"),
+            trash: dir.path().join("Trash"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let mut server = Server::new(ops::Client::new(paths, None), places(dir.path()));
+        let files = dir.path().join("files");
+        std::fs::create_dir(&files).unwrap();
+        for name in ["IMG_1.jpg", "IMG_2.jpg", "Trip 2.jpg", "x"] {
+            std::fs::write(files.join(name), "").unwrap();
+        }
+        let batch = ["IMG_1.jpg", "IMG_2.jpg", "x"].map(|name| files.join(name));
+        let rule = json!({"type": "format", "name": "Trip"});
+        let reply = call(
+            &mut server,
+            json!({"name": "rename_preview", "arguments": {"paths": batch, "rule": rule}}),
+        );
+        let shown = |name: &str| files.join(name).display().to_string();
+        assert_eq!(
+            text(&reply),
+            format!(
+                "{} → Trip 1.jpg\n{} → Trip 2.jpg (collision: Trip 2.jpg already exists.)\n{} → Trip 3\n",
+                shown("IMG_1.jpg"),
+                shown("IMG_2.jpg"),
+                shown("x"),
+            )
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "rename_many", "arguments": {"paths": batch, "rule": rule}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(
+            text(&reply).starts_with("Nothing was renamed:\n"),
+            "{reply}"
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "rename_many", "arguments": {"paths": batch, "rule": rule, "skip_problems": true}}),
+        );
+        assert_eq!(
+            text(&reply),
+            format!("{}\n{}\n", shown("Trip 1.jpg"), shown("Trip 3"))
+        );
+        let reply = call(&mut server, json!({"name": "undo"}));
+        assert!(text(&reply).starts_with("Undo Batch Rename\n"), "{reply}");
+        assert!(batch.iter().all(|path| path.exists()));
+
+        for bad in [
+            json!({"type": "regex", "find": "x"}),
+            json!({"type": "replace"}),
+            json!("Trip"),
+        ] {
+            let reply = call(
+                &mut server,
+                json!({"name": "rename_preview", "arguments": {"paths": batch, "rule": bad}}),
+            );
+            assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        }
         drop(server);
         serving.join().unwrap().unwrap();
     }

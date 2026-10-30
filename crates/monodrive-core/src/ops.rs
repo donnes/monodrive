@@ -1,12 +1,13 @@
-//! File operations: move to Trash, put back, rename, new folder and file,
-//! duplicate, copy and move jobs, undo and redo. One owner process runs them
-//! for the window and every `monodrive mcp` server, so they share one
-//! journal, one list of jobs and one undo history. docs/operations.md
-//! records why.
+//! File operations: move to Trash, put back, rename, batch rename, new
+//! folder and file, duplicate, copy and move jobs, undo and redo. One owner
+//! process runs them for the window and every `monodrive mcp` server, so
+//! they share one journal, one list of jobs and one undo history.
+//! docs/operations.md records why.
 
 mod disk;
 mod jobs;
 mod owner;
+pub mod rename;
 
 pub use disk::FileId;
 pub use jobs::{Conflict, Done, Job, State, Task};
@@ -114,6 +115,17 @@ pub enum Request {
     EmptyTrash {
         items: Vec<TrashItem>,
     },
+    /// Renames each item where it is by `rule`, as one operation; numbers
+    /// count in the order of `paths`. Refused whole if the plan differs from
+    /// `preview`, or has problems that aren't skipped.
+    RenameMany {
+        paths: Vec<PathBuf>,
+        rule: rename::Rule,
+        #[serde(default)]
+        preview: Option<rename::Fingerprint>,
+        #[serde(default)]
+        skip_problems: bool,
+    },
 }
 
 /// An item in the Trash as Empty Trash counted it. Only that same item is
@@ -141,6 +153,7 @@ impl Request {
             Request::Undo | Request::UndoOf { .. } => "Undo",
             Request::Redo => "Redo",
             Request::EmptyTrash { .. } => "Empty Trash",
+            Request::RenameMany { .. } => "Batch Rename",
         }
     }
 }
@@ -256,13 +269,18 @@ impl Step {
     /// Moves the item to its `done` (or `undone`) spot, checking first.
     fn shift(&mut self, done: bool) -> Result<PathBuf, String> {
         let from = self.ready(done, &[])?;
+        self.place(&from, done)
+    }
+
+    /// Moves the item from `from` to its `done` (or `undone`) spot, unchecked.
+    fn place(&mut self, from: &Path, done: bool) -> Result<PathBuf, String> {
         let to = match self.spot(done) {
             Spot::Path(to) => {
-                disk::rename_new(&from, to).map_err(|e| format!("{}: {e}", from.display()))?;
+                disk::rename_new(from, to).map_err(|e| format!("{}: {e}", from.display()))?;
                 to.clone()
             }
             Spot::Trash(_) => {
-                let landed = disk::trash(&from)?;
+                let landed = disk::trash(from)?;
                 *(if done {
                     &mut self.done
                 } else {
@@ -321,19 +339,30 @@ impl Step {
     }
 }
 
+/// A hidden name an operation parks one of its items at while another
+/// takes the item's place.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Temp {
+    step: usize,
+    path: PathBuf,
+}
+
 /// One line of the journal.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "record", rename_all = "snake_case")]
 enum Record {
     /// Written and synced before anything on disk changes. `steps` are the
-    /// items about to move (for undo and redo, all of `target`'s), and
-    /// `creates` the paths about to be created or copied.
+    /// items about to move (for undo and redo, all of `target`'s),
+    /// `creates` the paths about to be created or copied, and `temps` where
+    /// steps may wait on the way.
     Begin {
         op: u64,
         submission: Submission,
         target: Option<u64>,
         steps: Vec<Step>,
         creates: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        temps: Vec<Temp>,
     },
     /// How it ended: the items it moved, or for undo and redo all of the
     /// target's items as they are now.
@@ -390,6 +419,7 @@ struct Begun {
     target: Option<u64>,
     steps: Vec<Step>,
     creates: Vec<PathBuf>,
+    temps: Vec<Temp>,
 }
 
 /// An operation undo can reach.
@@ -503,6 +533,7 @@ impl Engine {
                 target,
                 steps,
                 creates,
+                temps,
             } => {
                 self.next = self.next.max(op + 1);
                 self.begun.insert(
@@ -512,6 +543,7 @@ impl Engine {
                         target,
                         steps,
                         creates,
+                        temps,
                     },
                 );
             }
@@ -624,7 +656,11 @@ impl Engine {
     fn settle(&self, op: u64) -> Record {
         let begun = &self.begun[&op];
         let reversal = begun.target.is_some();
-        let mut items = Vec::new();
+        let mut items: Vec<Item> = begun
+            .temps
+            .iter()
+            .filter_map(|temp| unpark(begun.steps.get(temp.step)?, &temp.path))
+            .collect();
         let mut steps = Vec::new();
         for step in &begun.steps {
             let mut step = step.clone();
@@ -711,6 +747,7 @@ impl Engine {
                 self.queue(submission)
             }
             Request::Cancel { job } => self.cancel(job),
+            Request::RenameMany { .. } => self.rename_many(submission),
             _ => self.run(submission),
         }
     }
@@ -734,7 +771,7 @@ impl Engine {
                 Ok(Plan::Erase(_)) | Err(_) => {}
             }
         }
-        let op = self.begin(&submission, None, steps, creates)?;
+        let op = self.begin(&submission, None, steps, creates, Vec::new())?;
         let mut items = Vec::new();
         let mut steps = Vec::new();
         for (path, plan) in plans {
@@ -905,17 +942,17 @@ impl Engine {
             return Err(format!("Can't {verb} {of}: {}", refused.join(" ")));
         }
         let mut steps = target.steps.clone();
-        let op = self.begin(&submission, Some(target_op), steps.clone(), Vec::new())?;
-        let items = moving
+        let (order, temps) = route(&steps, &moving, redo, self.next);
+        let op = self.begin(
+            &submission,
+            Some(target_op),
+            steps.clone(),
+            Vec::new(),
+            temps.clone(),
+        )?;
+        let items = shift_all(&mut steps, &order, &temps, redo)
             .into_iter()
-            .map(|i| {
-                let from = steps[i].here().map(Path::to_path_buf).unwrap_or_default();
-                let result = steps[i].shift(redo);
-                if let Ok(to) = &result {
-                    restamp_holders(&mut steps, &[&from, to]);
-                }
-                Item { path: from, result }
-            })
+            .map(|(_, item)| item)
             .collect();
         let title = format!("{} {of}", submission.request.title());
         Ok(self.end(op, title, items, steps))
@@ -928,6 +965,7 @@ impl Engine {
         target: Option<u64>,
         steps: Vec<Step>,
         creates: Vec<PathBuf>,
+        temps: Vec<Temp>,
     ) -> Result<u64, String> {
         let op = self.next;
         let record = Record::Begin {
@@ -936,6 +974,7 @@ impl Engine {
             target,
             steps,
             creates,
+            temps,
         };
         self.write(&record)?;
         self.fold(&record);
@@ -1035,9 +1074,7 @@ fn plan_trash(path: &Path) -> Result<Plan, String> {
 
 fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
     let (id, stamp) = existing(path)?;
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
-        return Err(format!("{name:?} can't be a name."));
-    }
+    check_name(name)?;
     let to = path.with_file_name(name);
     if to == path {
         return Err(format!("{} already has that name.", path.display()));
@@ -1048,6 +1085,138 @@ fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
         done: Spot::Path(to),
         applied: false,
         stamp,
+    })
+}
+
+/// Why `name` can't name an item, if it can't. APFS and HFS+ both take 255
+/// UTF-16 units.
+fn check_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+        return Err(format!("{name:?} can't be a name."));
+    }
+    if name.encode_utf16().count() > 255 {
+        return Err("Names can be at most 255 characters.".into());
+    }
+    Ok(())
+}
+
+/// The order to move `moving` in, so each item leaves before another takes
+/// its place, and where items wait to break cycles: the first of each
+/// parks at a hidden name of operation `op`'s own until its place is free.
+/// An item whose name only changes case is a cycle of one, since a volume
+/// that ignores case may not rename it in place.
+fn route(steps: &[Step], moving: &[usize], done: bool, op: u64) -> (Vec<usize>, Vec<Temp>) {
+    let by_id: HashMap<FileId, usize> = moving.iter().map(|&i| (steps[i].id, i)).collect();
+    let blocker: HashMap<usize, usize> = moving
+        .iter()
+        .filter_map(|&i| match steps[i].spot(done) {
+            Spot::Path(to) => Some((i, *by_id.get(&disk::id(to)?)?)),
+            Spot::Trash(_) => None,
+        })
+        .collect();
+    // Each item has at most one blocker, so following them from any item
+    // ends in a cycle or an item with none.
+    let mut walked: HashMap<usize, usize> = HashMap::new();
+    let mut temps = Vec::new();
+    for (walk, &first) in moving.iter().enumerate() {
+        let mut at = Some(first);
+        while let Some(i) = at.filter(|i| !walked.contains_key(i)) {
+            walked.insert(i, walk);
+            at = blocker.get(&i).copied();
+        }
+        if let Some(head) = at.filter(|i| walked[i] == walk)
+            && let Some(here) = steps[head].here()
+        {
+            temps.push(Temp {
+                step: head,
+                path: here.with_file_name(format!(".monodrive-{op}-{head}")),
+            });
+        }
+    }
+    let parked: Vec<usize> = temps.iter().map(|temp| temp.step).collect();
+    let mut waiting: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut ready = Vec::new();
+    for &i in moving {
+        match blocker.get(&i) {
+            Some(&j) if !parked.contains(&j) => waiting.entry(j).or_default().push(i),
+            _ => ready.push(i),
+        }
+    }
+    let mut order = Vec::with_capacity(moving.len());
+    for i in ready {
+        let mut next = vec![i];
+        while let Some(i) = next.pop() {
+            order.push(i);
+            next.extend(waiting.remove(&i).unwrap_or_default().into_iter().rev());
+        }
+    }
+    (order, temps)
+}
+
+/// Moves the steps `order` names to their `done` (or `undone`) spots,
+/// parking the items `temps` names first. Each result comes with its step.
+fn shift_all(
+    steps: &mut [Step],
+    order: &[usize],
+    temps: &[Temp],
+    done: bool,
+) -> Vec<(usize, Item)> {
+    let leaving: Vec<FileId> = order.iter().map(|&i| steps[i].id).collect();
+    let mut parked: HashMap<usize, Result<&Path, String>> = temps
+        .iter()
+        .map(|temp| {
+            let parked = steps[temp.step].ready(done, &leaving).and_then(|from| {
+                disk::rename_new(&from, &temp.path)
+                    .map(|()| temp.path.as_path())
+                    .map_err(|e| format!("{}: {e}", from.display()))
+            });
+            (temp.step, parked)
+        })
+        .collect();
+    order
+        .iter()
+        .map(|&i| {
+            let from = steps[i].here().map(Path::to_path_buf).unwrap_or_default();
+            let result = match parked.remove(&i) {
+                Some(Ok(temp)) => steps[i].place(temp, done).map_err(|e| {
+                    let back = disk::rename_new(temp, &from).is_ok();
+                    if back {
+                        e
+                    } else {
+                        format!("{e} It's at {} for now.", temp.display())
+                    }
+                }),
+                Some(Err(e)) => Err(e),
+                None => steps[i].shift(done),
+            };
+            if let Ok(to) = &result {
+                restamp_holders(steps, &[&from, to]);
+            }
+            (i, Item { path: from, result })
+        })
+        .collect()
+}
+
+/// After a crash: moves an item off the hidden name its operation parked it
+/// at, back where it was or else on where it was going. One that can't
+/// move stays there, reported.
+fn unpark(step: &Step, temp: &Path) -> Option<Item> {
+    if disk::id(temp) != Some(step.id) {
+        return None;
+    }
+    for spot in [step.spot(step.applied), step.spot(!step.applied)] {
+        if let Spot::Path(to) = spot
+            && disk::rename_new(temp, to).is_ok()
+        {
+            return None;
+        }
+    }
+    Some(Item {
+        path: temp.to_path_buf(),
+        result: Err(format!(
+            "{}: Monodrive stopped partway and left this here, since both its names are taken.",
+            temp.display()
+        )),
     })
 }
 

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Which item a path holds. Renames, including into the Trash, keep it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileId {
     dev: u64,
     ino: u64,
@@ -245,6 +245,16 @@ pub fn tally(path: &Path) -> io::Result<(u64, u64)> {
 /// The volume `path` is on.
 pub fn volume(path: &Path) -> io::Result<u64> {
     std::fs::symlink_metadata(path).map(|meta| meta.dev())
+}
+
+/// Whether names in `folder` match whatever their case, as on APFS by
+/// default. A volume that won't say is taken to.
+pub fn ignores_case(folder: &Path) -> bool {
+    let Ok(folder) = c_path(folder) else {
+        return true;
+    };
+    // SAFETY: a NUL-terminated path that outlives the call.
+    unsafe { libc::pathconf(folder.as_ptr(), libc::_PC_CASE_SENSITIVE) != 1 }
 }
 
 /// Looks through the Trash of the volume `original` was on for the item

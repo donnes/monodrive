@@ -263,7 +263,7 @@ fn opening_settles_what_a_crash_left_unfinished_from_the_disk() {
             stamp,
         };
         engine
-            .begin(submission, None, vec![step], Vec::new())
+            .begin(submission, None, vec![step], Vec::new(), Vec::new())
             .unwrap();
     }
     disk::rename_new(&a, &b).unwrap();
@@ -1005,6 +1005,7 @@ fn trimming_keeps_an_old_job_that_was_continued_lately() {
             target: None,
             steps: Vec::new(),
             creates: Vec::new(),
+            temps: Vec::new(),
         };
         let outcome = Outcome {
             op,
@@ -1033,4 +1034,322 @@ fn trimming_keeps_an_old_job_that_was_continued_lately() {
     let undone = run(&mut shared.lock(), Request::Undo).unwrap();
     untrash(&undone.items[0].result.clone().unwrap(), &files);
     assert!(!dest.join("a 2.txt").exists());
+}
+
+fn rename_many(paths: &[&Path], rule: rename::Rule) -> Request {
+    Request::RenameMany {
+        paths: paths.iter().map(|path| path.to_path_buf()).collect(),
+        rule,
+        preview: None,
+        skip_problems: false,
+    }
+}
+
+fn numbered(name: &str, digits: usize) -> rename::Rule {
+    rename::Rule::Format {
+        name: name.into(),
+        start: 1,
+        digits,
+        place: rename::Place::After,
+    }
+}
+
+fn replacing(find: &str, with: &str, extension: bool) -> rename::Rule {
+    rename::Rule::Replace {
+        find: find.into(),
+        with: with.into(),
+        case_sensitive: false,
+        extension,
+    }
+}
+
+/// What's in `folder`, by name, as the disk spells them.
+fn names(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|item| item.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn touch(folder: &Path, names: &[&str]) -> Vec<PathBuf> {
+    names
+        .iter()
+        .map(|name| {
+            let path = folder.join(name);
+            std::fs::write(&path, name).unwrap();
+            path
+        })
+        .collect()
+}
+
+#[test]
+fn a_batch_rename_numbers_in_the_order_given_keeps_extensions_and_undoes_whole() {
+    let (_dir, files, mut engine) = engine();
+    let [c, a, b, notes] = touch(&files, &["c.jpg", "a.png", "b.jpg", "txt notes.txt"])
+        .try_into()
+        .unwrap();
+    let folder = files.join("v1.2");
+    std::fs::create_dir(&folder).unwrap();
+    let batch = [c.as_path(), &a, &folder, &b];
+    let plan = rename::Plan::new(&batch.map(Path::to_path_buf), &numbered("Trip", 3));
+    let shown: Vec<&str> = plan.rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(
+        shown,
+        ["Trip 001.jpg", "Trip 002.png", "Trip 003", "Trip 004.jpg"]
+    );
+    assert!(plan.rows.iter().all(|row| row.status == rename::Status::Ok));
+    assert!(c.exists(), "a preview changes nothing");
+    let renamed = moved(run(&mut engine, rename_many(&batch, numbered("Trip", 3))));
+    assert_eq!(renamed[0], files.join("Trip 001.jpg"));
+    assert_eq!(read(&files.join("Trip 002.png")), "a.png");
+
+    let only_stem = replacing("TXT", "md", false);
+    assert_eq!(
+        moved(run(&mut engine, rename_many(&[&notes], only_stem))),
+        [files.join("md notes.txt")]
+    );
+    let whole = replacing("txt", "md", true);
+    let plan = rename::Plan::new(&[files.join("md notes.txt")], &whole);
+    assert_eq!(plan.rows[0].name, "md notes.md");
+
+    moved(run(&mut engine, Request::Undo));
+    let undone = moved(run(&mut engine, Request::Undo));
+    assert_eq!(undone.len(), 4);
+    assert_eq!(
+        names(&files),
+        ["a.png", "b.jpg", "c.jpg", "txt notes.txt", "v1.2"]
+    );
+}
+
+#[test]
+fn a_batch_rename_shows_invalid_names_and_collisions_and_runs_only_when_asked_to_skip() {
+    let (_dir, files, mut engine) = engine();
+    let paths = touch(
+        &files,
+        &[
+            "x.txt",
+            "taken.txt",
+            "x-1.txt",
+            "x1-.txt",
+            "ab-.txt",
+            "a-B.txt",
+            "k-.txt",
+            "k.txt",
+        ],
+    );
+    let plan = rename::Plan::new(&paths, &replacing("-", "", false));
+    let status = |name: &str| {
+        let row = plan.rows.iter().find(|row| row.path == files.join(name));
+        row.unwrap().status.clone()
+    };
+    let collision = |why: &str| rename::Status::Collision(why.into());
+    assert_eq!(status("x.txt"), rename::Status::Unchanged);
+    assert_eq!(status("x-1.txt"), rename::Status::Ok);
+    let first = files.join("x-1.txt").display().to_string();
+    assert_eq!(
+        status("x1-.txt"),
+        collision(&format!("x1.txt is also the new name of {first}."))
+    );
+    // aB.txt and ab.txt are one name on a volume that ignores case.
+    assert_eq!(status("ab-.txt"), rename::Status::Ok);
+    assert!(matches!(status("a-B.txt"), rename::Status::Collision(_)));
+    // k.txt is in the batch but keeps its name, so k-.txt can't take it.
+    assert_eq!(status("k-.txt"), collision("k.txt already exists."));
+    let outside = rename::Plan::new(&paths[..1], &replacing("x", "taken", false));
+    assert_eq!(
+        outside.rows[0].status,
+        collision("taken.txt already exists.")
+    );
+
+    let invalid = |rule: rename::Rule, path: &Path| {
+        let plan = rename::Plan::new(&[path.to_path_buf()], &rule);
+        match &plan.rows[0].status {
+            rename::Status::Invalid(why) => why.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let x = files.join("x.txt");
+    assert!(invalid(replacing("x", "a/b", false), &x).contains("can't be a name"));
+    assert!(invalid(replacing("x.txt", "", true), &x).contains("can't be a name"));
+    assert!(invalid(numbered("x", 300), &x).contains("at most 255"));
+    assert!(invalid(numbered("x", 1), &files.join("gone")).contains("No such file"));
+
+    let refused = run(
+        &mut engine,
+        rename_many(&[&paths[2], &paths[3]], replacing("-", "", false)),
+    );
+    assert!(refused.unwrap_err().starts_with("Nothing was renamed:\n"));
+    assert!(files.join("x-1.txt").exists());
+    let skipping = Request::RenameMany {
+        paths: paths.clone(),
+        rule: replacing("-", "", false),
+        preview: None,
+        skip_problems: true,
+    };
+    assert_eq!(
+        moved(run(&mut engine, skipping)),
+        [files.join("x1.txt"), files.join("ab.txt")]
+    );
+    assert!(files.join("x1-.txt").exists() && files.join("k-.txt").exists());
+}
+
+#[test]
+fn a_batch_rename_untangles_cycles_and_case_changes_through_hidden_names() {
+    let (_dir, files, mut engine) = engine();
+    let [one, two] = touch(&files, &["1.txt", "2.txt"]).try_into().unwrap();
+    let three = files.join("three");
+    std::fs::create_dir(&three).unwrap();
+    let [t1, t2, t3] = touch(&three, &["1", "2", "3"]).try_into().unwrap();
+    let photo = touch(&files, &["photo.JPG"]).remove(0);
+    let swap = || rename_many(&[&two, &one], numbered("", 0));
+    let rotate = || rename_many(&[&t3, &t1, &t2], numbered("", 0));
+    let case = || rename_many(&[&photo], replacing("jpg", "jpg", true));
+    for request in [swap(), rotate(), case()] {
+        moved(run(&mut engine, request));
+    }
+    assert_eq!((read(&one), read(&two)), ("2.txt".into(), "1.txt".into()));
+    assert_eq!(
+        [&t1, &t2, &t3].map(|path| read(path)),
+        ["3", "1", "2"].map(String::from)
+    );
+    assert_eq!(names(&files), ["1.txt", "2.txt", "photo.jpg", "three"]);
+    assert_eq!(names(&three), ["1", "2", "3"]);
+
+    for _ in 0..3 {
+        moved(run(&mut engine, Request::Undo));
+    }
+    assert_eq!((read(&one), read(&two)), ("1.txt".into(), "2.txt".into()));
+    assert_eq!(
+        [&t1, &t2, &t3].map(|path| read(path)),
+        ["1", "2", "3"].map(String::from)
+    );
+    assert_eq!(names(&files), ["1.txt", "2.txt", "photo.JPG", "three"]);
+    moved(run(&mut engine, Request::Redo));
+    assert_eq!(read(&one), "2.txt");
+    assert_eq!(names(&files), ["1.txt", "2.txt", "photo.JPG", "three"]);
+}
+
+#[test]
+fn a_batch_rename_refuses_once_its_preview_is_out_of_date() {
+    let (_dir, files, mut engine) = engine();
+    let paths = touch(&files, &["a.txt", "b.txt"]);
+    let rule = numbered("n", 0);
+    let previewed = |paths: &[PathBuf], skip_problems: bool| Request::RenameMany {
+        paths: paths.to_vec(),
+        rule: rule.clone(),
+        preview: Some(rename::Plan::new(paths, &rule).fingerprint()),
+        skip_problems,
+    };
+    let edited = previewed(&paths, false);
+    std::fs::write(&paths[0], "edited").unwrap();
+    let refused = run(&mut engine, edited).unwrap_err();
+    assert!(
+        refused.contains("a.txt: changed since the preview"),
+        "{refused}"
+    );
+
+    let collided = previewed(&paths, true);
+    std::fs::write(files.join("n 2.txt"), "").unwrap();
+    let refused = run(&mut engine, collided).unwrap_err();
+    assert!(
+        refused.contains("b.txt: n 2.txt already exists."),
+        "{refused}"
+    );
+
+    let mut reordered = previewed(&paths, true);
+    if let Request::RenameMany { paths, .. } = &mut reordered {
+        paths.reverse();
+    }
+    let refused = run(&mut engine, reordered).unwrap_err();
+    assert!(refused.contains("aren't the items previewed"), "{refused}");
+    assert_eq!(names(&files), ["a.txt", "b.txt", "n 2.txt"]);
+
+    assert_eq!(
+        moved(run(&mut engine, previewed(&paths[..1], false))),
+        [files.join("n 1.txt")]
+    );
+}
+
+#[test]
+fn a_batch_rename_reports_each_item_and_undoes_only_those_it_renamed() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, files, mut engine) = engine();
+    let locked = files.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let free = touch(&files, &["a-1.txt"]).remove(0);
+    let stuck = touch(&locked, &["b-1.txt"]).remove(0);
+    let mode = |mode| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+    let outcome = run(
+        &mut engine,
+        rename_many(&[&free, &stuck], replacing("-1", "-2", false)),
+    );
+    mode(0o755).unwrap();
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.items[0].result, Ok(files.join("a-2.txt")));
+    let why = outcome.items[1].result.as_ref().unwrap_err();
+    assert!(
+        why.contains("b-1.txt") && why.contains("ermission"),
+        "{why}"
+    );
+    assert_eq!(
+        moved(run(&mut engine, Request::Undo)),
+        [files.join("a-1.txt")]
+    );
+    assert!(free.exists() && stuck.exists());
+}
+
+#[test]
+fn a_batch_cut_short_by_a_crash_leaves_no_hidden_names_and_undoes() {
+    // How far it got: parked the first of the cycle, then also moved the
+    // second into its place.
+    for far in [1, 2] {
+        let (dir, files, mut engine) = engine();
+        let [one, two, c] = touch(&files, &["1.txt", "2.txt", "c.txt"])
+            .try_into()
+            .unwrap();
+        let request = rename_many(&[&two, &one, &c], numbered("", 0));
+        let step = |from: &Path, to: &str| {
+            let (id, stamp) = disk::stamp(from).unwrap();
+            Step {
+                id,
+                undone: Spot::Path(from.to_path_buf()),
+                done: Spot::Path(files.join(to)),
+                applied: false,
+                stamp,
+            }
+        };
+        let steps = vec![step(&two, "1.txt"), step(&one, "2.txt"), step(&c, "3.txt")];
+        let (order, temps) = route(&steps, &[0, 1, 2], true, engine.next);
+        assert_eq!(order, [1, 0, 2]);
+        let [temp] = temps.try_into().unwrap();
+        let submitted = submission(Origin::Window, request);
+        engine
+            .begin(&submitted, None, steps, Vec::new(), vec![temp.clone()])
+            .unwrap();
+        disk::rename_new(&two, &temp.path).unwrap();
+        if far == 2 {
+            disk::rename_new(&one, &two).unwrap();
+        }
+        drop(engine);
+
+        let mut engine = Engine::open(paths(dir.path())).unwrap();
+        let settled = engine.submit(submitted).unwrap();
+        assert!(settled.interrupted);
+        assert_eq!(names(&files), ["1.txt", "2.txt", "c.txt"]);
+        assert!(settled.items[2].result.is_err());
+        if far == 1 {
+            assert_eq!(read(&two), "2.txt");
+            assert!(run(&mut engine, Request::Undo).is_err());
+        } else {
+            assert_eq!(settled.items[0].result, Ok(one.clone()));
+            assert_eq!(settled.items[1].result, Ok(two.clone()));
+            assert_eq!((read(&one), read(&two)), ("2.txt".into(), "1.txt".into()));
+            moved(run(&mut engine, Request::Undo));
+            assert_eq!((read(&one), read(&two)), ("1.txt".into(), "2.txt".into()));
+            assert_eq!(names(&files), ["1.txt", "2.txt", "c.txt"]);
+        }
+    }
 }
