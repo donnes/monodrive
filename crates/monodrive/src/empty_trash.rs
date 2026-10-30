@@ -2,8 +2,8 @@
 //! erased for good. Esc, Cancel or a click outside keeps them; ↩ empties, as
 //! Finder's default button does.
 
-use crate::palette::{self, Look};
-use crate::theme::content;
+use crate::palette;
+use crate::theme::{self, ButtonLook, content, text_button};
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Window, actions,
     div, prelude::*, px,
@@ -66,8 +66,8 @@ impl Render for EmptyTrashView {
             .gap_3()
             .child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(content(0.7))
+                    .text_size(px(theme::TEXT_BODY))
+                    .text_color(content(0.65))
                     .child(format!("{count} will be erased for good.")),
             )
             .child(
@@ -76,12 +76,18 @@ impl Render for EmptyTrashView {
                     .justify_end()
                     .gap_2()
                     .child(
-                        palette::button("empty-trash-cancel", "Cancel", Look::Plain)
+                        text_button("empty-trash-cancel", "Cancel", ButtonLook::Secondary)
+                            .debug_selector(|| "empty-trash-cancel".into())
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(Answer::Cancel))),
                     )
                     .child(
-                        palette::button("empty-trash-confirm", "Empty Trash", Look::Danger)
-                            .on_click(cx.listener(|this, _, _, cx| this.empty(cx))),
+                        text_button(
+                            "empty-trash-confirm",
+                            "Empty Trash",
+                            ButtonLook::Destructive,
+                        )
+                        .debug_selector(|| "empty-trash-confirm".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.empty(cx))),
                     ),
             );
         palette::overlay("empty-trash-overlay")

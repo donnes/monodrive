@@ -24,7 +24,9 @@ use crate::quick_look::{self, Preview};
 use crate::selection::Selection;
 use crate::settings::{self, SettingsView};
 use crate::text_field::{self, TextField};
-use crate::theme::{self, accent, content, danger, icon, icon_button, on_accent};
+use crate::theme::{
+    self, ButtonLook, Elevation, accent, content, danger, icon, icon_button, on_accent,
+};
 use crate::thumbnails::{self, Thumb};
 use crate::{traffic_lights, workspace};
 use chrono::{DateTime, Local};
@@ -822,7 +824,7 @@ impl Browser {
                 d.cursor_pointer()
                     .child(
                         icon("chevron-right", 12.)
-                            .text_color(content(0.5))
+                            .text_color(content(0.65))
                             .when(open, |i| {
                                 i.with_transformation(gpui::Transformation::rotate(
                                     gpui::percentage(0.25),
@@ -1263,7 +1265,6 @@ impl Browser {
                 .top(corner.y)
                 .w(size.x.abs())
                 .h(size.y.abs())
-                .rounded(px(2.))
                 .bg(accent().opacity(0.15))
                 .border_1()
                 .border_color(accent().opacity(0.6)),
@@ -1455,9 +1456,9 @@ impl Browser {
                             .flex()
                             .flex_col()
                             .items_end()
-                            .text_size(px(11.))
+                            .text_size(px(theme::TEXT_CAPTION))
                             .line_height(px(14.))
-                            .text_color(content(0.6))
+                            .text_color(content(0.65))
                             .child(
                                 div()
                                     .max_w_full()
@@ -1469,25 +1470,16 @@ impl Browser {
                                     div()
                                         .max_w_full()
                                         .truncate()
-                                        .text_color(content(0.4))
+                                        .text_color(content(0.65))
                                         .child("No Full Disk Access"),
                                 )
                             }),
                     )
                 } else {
                     d.child(
-                        div()
+                        theme::progress_track()
                             .w(px(72.))
-                            .h(px(4.))
-                            .rounded_full()
-                            .bg(content(0.12))
-                            .children(status.fraction().map(|fraction| {
-                                div()
-                                    .h_full()
-                                    .w(gpui::relative(fraction))
-                                    .rounded_full()
-                                    .bg(accent())
-                            })),
+                            .children(status.fraction().map(theme::progress_fill)),
                     )
                 }
             });
@@ -2347,33 +2339,28 @@ impl Browser {
         let mut fill = theme::pane_fill();
         fill.a = 1.;
         Some(
-            div()
-                .key_context("Rename")
-                .on_action(
-                    cx.listener(|this, _: &CommitRename, window, cx| {
-                        this.commit_rename(window, cx)
-                    }),
-                )
-                .on_action(
-                    cx.listener(|this, _: &CancelRename, window, cx| this.end_rename(window, cx)),
-                )
-                // A click in the name places the caret; it isn't a click on
-                // the row or the list.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .w(px(width))
-                .flex_shrink_0()
-                .px(px(4.))
-                .rounded(px(4.))
-                .border_1()
-                .border_color(if renaming.error.is_some() {
-                    danger()
-                } else {
-                    accent()
-                })
-                .bg(fill)
-                .text_color(content(1.))
-                .child(renaming.field.clone()),
+            theme::field(if renaming.error.is_some() {
+                danger()
+            } else {
+                accent()
+            })
+            .key_context("Rename")
+            .on_action(
+                cx.listener(|this, _: &CommitRename, window, cx| this.commit_rename(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CancelRename, window, cx| this.end_rename(window, cx)),
+            )
+            // A click in the name places the caret; it isn't a click on
+            // the row or the list.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .w(px(width))
+            .flex_shrink_0()
+            .px(px(6.))
+            .bg(fill)
+            .text_color(content(1.))
+            .child(renaming.field.clone()),
         )
     }
 
@@ -2404,7 +2391,7 @@ impl Browser {
             .flex()
             .items_center()
             .gap(px(2.))
-            .text_size(px(13.))
+            .text_size(px(theme::TEXT_BODY))
             .overflow_hidden()
             .children(steps.into_iter().rev().enumerate().map(|(ix, path)| {
                 let name = path.file_name().map_or_else(
@@ -2425,21 +2412,22 @@ impl Browser {
                     // The folder you're in keeps its name; ancestors give way.
                     .when(here, |d| d.flex_shrink_0())
                     .when(ix > 0, |d| {
-                        d.child(icon("chevron-right", 10.).text_color(content(0.3)))
+                        d.child(icon("chevron-right", 12.).text_color(content(0.3)))
                     })
                     .child(
                         div()
                             .id(("path-step", ix))
                             .role(gpui::Role::Link)
                             .aria_label(name.clone())
-                            .px(px(4.))
-                            .rounded(px(5.))
+                            .px(px(6.))
+                            .rounded_full()
+                            .line_height(px(theme::BUTTON_HEIGHT))
                             .truncate()
                             .map(|d| {
                                 if here {
                                     d.font_weight(FontWeight::SEMIBOLD)
                                 } else {
-                                    d.text_color(content(0.55))
+                                    d.text_color(content(0.65))
                                         .cursor_pointer()
                                         .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
                                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -2534,7 +2522,7 @@ impl Browser {
                     d.child(
                         div()
                             .ml_1()
-                            .text_size(px(13.))
+                            .text_size(px(theme::TEXT_BODY))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(if self.query.is_empty() {
                                 "Recents"
@@ -2555,7 +2543,7 @@ impl Browser {
                             .flex_shrink_0()
                             .max_w(px(360.))
                             .truncate()
-                            .text_size(px(12.))
+                            .text_size(px(theme::TEXT_SMALL))
                             .text_color(danger())
                             .child(why)
                     }),
@@ -2563,16 +2551,16 @@ impl Browser {
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(12.))
-                    .text_color(content(0.4))
+                    .text_size(px(theme::TEXT_SMALL))
+                    .text_color(content(0.65))
                     .child(count),
             )
             .children(self.space_here().map(|space| {
                 div()
                     .flex_shrink_0()
                     .ml_2()
-                    .text_size(px(12.))
-                    .text_color(content(0.4))
+                    .text_size(px(theme::TEXT_SMALL))
+                    .text_color(content(0.65))
                     .child(space)
             }))
             .children(self.jobs.read(cx).ring().map(|ring| {
@@ -2598,81 +2586,52 @@ impl Browser {
     /// The toast at the bottom of the files, with its Undo.
     fn toast_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let toast = self.toast.as_ref()?;
-        let ink = if toast.failed { danger() } else { content(0.9) };
+        let ink = if toast.failed { danger() } else { content(1.) };
         Some(
             div()
                 .absolute()
-                .bottom(px(14.))
+                .bottom(px(16.))
                 .left_0()
                 .right_0()
                 .flex()
                 .justify_center()
                 .child(
-                    div()
+                    theme::floating(Elevation::Popover)
                         .id("toast")
                         .occlude()
-                        .relative()
                         .max_w(px(520.))
                         .mx_4()
-                        .h(px(34.))
+                        .h(px(36.))
                         .pl_3()
                         .pr(px(6.))
-                        .rounded(px(10.))
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(6.), theme::black(0.25))
-                                .blur_radius(px(18.))
-                                .spread_radius(px(-4.)),
-                        ])
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(theme::floating_surface(10.))
                         .when(toast.failed, |d| {
                             d.child(
                                 div()
                                     .absolute()
                                     .inset_0()
-                                    .rounded(px(10.))
+                                    .rounded(px(theme::RADIUS_CARD - 1.))
                                     .bg(danger().opacity(0.12)),
                             )
                         })
                         .child(
                             div()
-                                .absolute()
-                                .inset_0()
-                                .rounded(px(10.))
-                                .border_1()
-                                .border_color(content(0.12)),
-                        )
-                        .child(
-                            div()
                                 .relative()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(13.))
+                                .text_size(px(theme::TEXT_BODY))
                                 .text_color(ink)
                                 .child(toast.text.clone()),
                         )
                         .when_some(toast.undo, |d, op| {
                             d.child(
-                                div()
-                                    .id("toast-undo")
+                                theme::text_button("toast-undo", "Undo", ButtonLook::Ghost)
                                     .debug_selector(|| "toast-undo".into())
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Undo")
                                     .relative()
-                                    .flex_shrink_0()
-                                    .h(px(24.))
-                                    .px_2()
-                                    .rounded(px(6.))
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(13.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(accent())
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(content(0.1)))
-                                    .child("Undo")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.toast = None;
                                         this.submit(Request::UndoOf { op }, window, cx)
@@ -2746,7 +2705,7 @@ impl Browser {
                                 .size(px(side))
                                 .aspect_square()
                                 .object_fit(gpui::ObjectFit::Contain)
-                                .rounded(px(4.))
+                                .rounded(px(theme::RADIUS_THUMB))
                                 .into_any_element(),
                             None => file_icons::icon(entry, side, window, cx),
                         };
@@ -2763,22 +2722,22 @@ impl Browser {
                             .pt(px(8.))
                             .child(
                                 div()
-                                    .p(px(4.))
-                                    .rounded(px(8.))
-                                    .when(selected, |d| d.bg(content(0.1)))
+                                    .p_1()
+                                    .rounded(px(theme::RADIUS_ROW))
+                                    .when(selected, |d| d.bg(content(0.14)))
                                     .child(art),
                             )
                             .child(match self.rename_field(&entry.path, cell - 8., cx) {
                                 Some(field) => field.text_size(px(label)).into_any_element(),
                                 None => div()
                                     .max_w(px(cell - 8.))
-                                    .px(px(5.))
-                                    .rounded(px(5.))
+                                    .px(px(6.))
+                                    .rounded(px(theme::RADIUS_ROW))
                                     .text_size(px(label))
                                     .text_center()
                                     .map(|d| {
                                         if selected {
-                                            d.bg(if active { accent() } else { content(0.15) })
+                                            d.bg(if active { accent() } else { content(0.14) })
                                                 .text_color(if active {
                                                     on_accent()
                                                 } else {
@@ -2834,7 +2793,7 @@ impl Browser {
                 let muted = if selected {
                     selected_ink.opacity(0.8)
                 } else {
-                    content(0.5)
+                    content(0.65)
                 };
                 Some(
                     div()
@@ -2842,14 +2801,14 @@ impl Browser {
                         .w_full()
                         .h(px(row_height))
                         .px_3()
-                        .rounded_md()
+                        .rounded(px(theme::RADIUS_ROW))
                         .flex()
                         .items_center()
                         .gap_3()
                         .text_size(px(text_size))
                         .map(|d| {
                             if selected {
-                                d.bg(if active { accent() } else { content(0.15) })
+                                d.bg(if active { accent() } else { content(0.14) })
                                     .text_color(selected_ink)
                             } else if ix % 2 == 1 {
                                 d.bg(content(0.03))
@@ -2867,7 +2826,8 @@ impl Browser {
                                 .when(tree, |d| d.child(self.disclosure(ix, depth, open, cx)))
                                 .child(file_icons::icon(entry, icon_size, window, cx))
                                 .child(match self.rename_field(&entry.path, 260., cx) {
-                                    Some(field) => field.into_any_element(),
+                                    // The name stays put; its outline grows around it.
+                                    Some(field) => field.ml(px(-7.)).into_any_element(),
                                     None => div()
                                         .flex_shrink_0()
                                         .max_w(px(360.))
@@ -2945,7 +2905,7 @@ impl Render for Browser {
             empty,
             preview: false,
             // The card's corners inside its border.
-            radius: if boxy { 0. } else { 7. },
+            radius: if boxy { 0. } else { theme::RADIUS_CARD - 1. },
         });
         self.backdrop
             .update(cx, |backdrop, cx| backdrop.set(look, cx));
@@ -2960,8 +2920,8 @@ impl Render for Browser {
                 .items_center()
                 .justify_center()
                 .px_6()
-                .text_size(px(13.))
-                .text_color(content(0.5))
+                .text_size(px(theme::TEXT_BODY))
+                .text_color(content(0.65))
                 .child(error.clone())
                 .into_any_element(),
             None if self.view == View::Grid => {
@@ -3420,7 +3380,7 @@ impl Render for Browser {
                                 } else {
                                     d.mr_2()
                                         .mb_2()
-                                        .rounded_lg()
+                                        .rounded(px(theme::RADIUS_CARD))
                                         .border_1()
                                         .bg(theme::pane_fill())
                                 }
@@ -3442,9 +3402,9 @@ impl Render for Browser {
                                         .gap_3()
                                         .border_b_1()
                                         .border_color(content(0.06))
-                                        .text_size(px(12.))
+                                        .text_size(px(theme::TEXT_SMALL))
                                         .font_weight(FontWeight::MEDIUM)
-                                        .text_color(content(0.5))
+                                        .text_color(content(0.65))
                                         .child(
                                             sort_header(SortBy::Name, "Name", sort_shown).flex_1(),
                                         )
@@ -3697,19 +3657,19 @@ fn sort_header(by: SortBy, title: &'static str, sort: Option<Sort>) -> gpui::Sta
         .flex()
         .items_center()
         .gap_1()
-        .when(active.is_some(), |d| d.text_color(content(0.9)))
+        .when(active.is_some(), |d| d.text_color(content(1.)))
         // During a search the order is relevance, so the titles don't sort.
         .when(sort.is_some(), |d| {
             d.cursor_pointer()
-                .hover(|s| s.text_color(content(0.9)))
+                .hover(|s| s.text_color(content(1.)))
                 .on_click(move |_, _, cx| {
                     preferences::update(cx, |p| p.sort = sorted_by(p.sort, by))
                 })
         })
         .child(div().truncate().child(title))
         .children(active.map(|sort| {
-            icon("chevron-down-hi", 10.)
-                .text_color(content(0.6))
+            icon("chevron-down-hi", 12.)
+                .text_color(content(0.65))
                 .when(!sort.descending, |i| {
                     i.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))
                 })
@@ -3735,7 +3695,7 @@ fn column(width: f32, right: bool) -> gpui::Div {
         .w(px(width))
         .flex_shrink_0()
         .truncate()
-        .text_color(content(0.5))
+        .text_color(content(0.65))
         .when(right, |d| d.text_right())
 }
 

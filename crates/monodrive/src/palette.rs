@@ -4,7 +4,7 @@
 use crate::commands::{self, Command};
 use crate::preferences::Preferences;
 use crate::text_field::{self, TextField};
-use crate::theme::{self, accent, black, content, on_accent};
+use crate::theme::{self, Elevation, content};
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
     MouseButton, Role, ScrollStrategy, UniformListScrollHandle, Window, actions, div, prelude::*,
@@ -29,7 +29,8 @@ pub enum PaletteEvent {
     Run(Box<dyn Action>),
 }
 
-const ROW: f32 = 32.;
+/// A row and the gap under it, which `uniform_list` measures as one.
+const ROW: f32 = theme::ROW_HEIGHT + theme::ROW_GAP;
 
 pub struct PaletteView {
     query: Entity<TextField>,
@@ -121,52 +122,33 @@ impl PaletteView {
                     .map(|keys| commands::label(keys));
                 Some(
                     div()
-                        .id(row)
-                        .role(Role::ListBoxOption)
-                        .aria_label(command.title)
-                        .aria_selected(selected)
-                        .h(px(ROW))
-                        .px_3()
-                        .rounded(px(8.))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .map(|d| {
-                            if selected {
-                                d.bg(accent()).text_color(on_accent())
-                            } else {
-                                d.text_color(content(1.))
-                            }
-                        })
+                        .pb(px(theme::ROW_GAP))
                         .child(
-                            div()
-                                .text_color(if selected {
-                                    on_accent().opacity(0.7)
-                                } else {
-                                    content(0.45)
-                                })
-                                .child(command.group.label()),
+                            theme::row(selected)
+                                .id(row)
+                                .role(Role::ListBoxOption)
+                                .aria_label(command.title)
+                                .aria_selected(selected)
+                                .child(
+                                    div()
+                                        .text_color(theme::row_muted(selected))
+                                        .child(command.group.label()),
+                                )
+                                .child(div().flex_1().truncate().child(command.title))
+                                .children(keys.map(|keys| {
+                                    div()
+                                        .text_size(px(theme::TEXT_SMALL))
+                                        .text_color(theme::row_muted(selected))
+                                        .child(keys)
+                                }))
+                                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                                    if this.selected != row {
+                                        this.selected = row;
+                                        cx.notify();
+                                    }
+                                }))
+                                .on_click(cx.listener(move |this, _, _, cx| this.run(row, cx))),
                         )
-                        .child(div().flex_1().truncate().child(command.title))
-                        .children(keys.map(|keys| {
-                            div()
-                                .text_size(px(12.))
-                                .text_color(if selected {
-                                    on_accent().opacity(0.8)
-                                } else {
-                                    content(0.5)
-                                })
-                                .child(keys)
-                        }))
-                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.selected != row {
-                                this.selected = row;
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| this.run(row, cx)))
                         .into_any_element(),
                 )
             })
@@ -182,8 +164,8 @@ impl Render for PaletteView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(13.))
-                .text_color(content(0.5))
+                .text_size(px(theme::TEXT_BODY))
+                .text_color(content(0.65))
                 .child("No matching command")
                 .into_any_element()
         } else {
@@ -219,7 +201,7 @@ pub fn overlay(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .items_center()
         .pt(gpui::relative(0.16))
         .px_6()
-        .bg(black(if theme::is_light() { 0.12 } else { 0.25 }))
+        .bg(theme::scrim(1.))
 }
 
 /// A quick sheet's card: its text field, or a title, on top, `body` below.
@@ -229,24 +211,13 @@ pub fn card(
     header: impl IntoElement,
     body: impl IntoElement,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    theme::floating(Elevation::Sheet)
         .id(id)
         .role(Role::Dialog)
         .aria_label(label)
-        .relative()
         .w(px(560.))
         .max_w_full()
-        .rounded(px(14.))
-        .border_1()
-        .border_color(content(0.1))
-        .shadow(vec![
-            gpui::BoxShadow::new(px(0.), px(16.), black(0.3))
-                .blur_radius(px(40.))
-                .spread_radius(px(-8.)),
-        ])
-        .text_color(content(1.))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(theme::floating_surface(13.))
         .child(
             div()
                 .relative()
@@ -254,59 +225,18 @@ pub fn card(
                 .flex_col()
                 .child(
                     div()
-                        .h(px(44.))
+                        .h(px(theme::TITLE_BAR_HEIGHT))
                         .px_4()
                         .flex()
                         .items_center()
                         .border_b_1()
                         .border_color(content(0.08))
-                        .text_size(px(15.))
+                        .text_size(px(theme::TEXT_TITLE))
                         .font_weight(FontWeight::MEDIUM)
                         .child(header),
                 )
-                .child(div().p(px(6.)).child(body)),
+                .child(div().p_2().child(body)),
         )
-}
-
-/// What a card's button looks like.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Look {
-    Plain,
-    /// What ↩ does.
-    Default,
-    /// What ↩ does, and it can't be undone.
-    Danger,
-    /// It still says what it would do.
-    Disabled,
-}
-
-pub fn button(id: &'static str, label: &'static str, look: Look) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .debug_selector(move || id.into())
-        .role(Role::Button)
-        .aria_label(label)
-        .h(px(28.))
-        .px_3()
-        .flex_shrink_0()
-        .rounded(px(7.))
-        .flex()
-        .items_center()
-        .text_size(px(13.))
-        .when(look != Look::Disabled, |d| d.cursor_pointer())
-        .map(|d| match look {
-            Look::Plain => d.bg(content(0.08)).hover(|s| s.bg(content(0.14))),
-            Look::Default => d
-                .bg(accent())
-                .text_color(on_accent())
-                .hover(|s| s.opacity(0.9)),
-            Look::Danger => d
-                .bg(theme::danger())
-                .text_color(gpui::white())
-                .hover(|s| s.opacity(0.9)),
-            Look::Disabled => d.bg(content(0.08)).text_color(content(0.3)),
-        })
-        .child(label)
 }
 
 /// What a command is found by: "Go: Back".

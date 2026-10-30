@@ -11,7 +11,10 @@ use crate::preferences::{
     self, GRID_ICON_SIZES, Preferences, RowSize, Theme, UI_SCALE_PERCENTS, View, WindowSize,
     WorkspaceStyle,
 };
-use crate::theme::{self, accent, black, content, icon, icon_button, on_accent};
+use crate::theme::{
+    self, ButtonLook, Elevation, accent, content, focus_ring, icon, icon_button, knob, knob_shadow,
+    on_accent, text_button,
+};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity,
     EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton,
@@ -51,7 +54,6 @@ const FIXED_CONTROLS: [&str; 7] = [
 /// Asks the owner to close the sheet.
 pub struct Dismissed;
 
-const RADIUS: f32 = 20.;
 const NAV_WIDTH: f32 = 200.;
 const KNOB: f32 = 16.;
 
@@ -461,28 +463,14 @@ impl SettingsView {
         let added = self.added.contains(&harness);
         let id = "agent-action";
         let keyboard = self.handle(id, cx).is_focused(window) && window.last_input_was_keyboard();
-        let error = if theme::is_light() {
-            0xdc2626
-        } else {
-            0xf87171
+        let frame = |look| {
+            theme::button(id, look)
+                .min_w(px(112.))
+                .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                    this.over_action = *over;
+                    cx.notify();
+                }))
         };
-        let button = div()
-            .id(id)
-            .role(Role::Button)
-            .h(px(28.))
-            .min_w(px(112.))
-            .px(px(14.))
-            .flex_shrink_0()
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(6.))
-            .text_size(px(12.5))
-            .on_hover(cx.listener(|this, over: &bool, _, cx| {
-                this.over_action = *over;
-                cx.notify();
-            }));
         let (button, next) = match job {
             Some(Job {
                 action,
@@ -493,49 +481,35 @@ impl SettingsView {
                     Action::Add => "Adding…",
                     Action::Remove => "Removing…",
                 };
-                let button = button
-                    .aria_label(label)
-                    .bg(content(0.08))
-                    .text_color(content(0.6))
-                    .child(label);
-                (button, None)
+                (
+                    frame(ButtonLook::Disabled).aria_label(label).child(label),
+                    None,
+                )
             }
             Some(Job {
                 action,
                 failed: Some(_),
                 ..
             }) => {
-                let button = button
-                    .aria_label("Try again")
-                    .bg(rgb(error).opacity(0.14))
-                    .text_color(rgb(error))
-                    .font_weight(FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(error).opacity(0.22)))
-                    .child("Try again");
+                let button = frame(ButtonLook::Caution)
+                    .aria_label("Try Again")
+                    .child("Try Again");
                 (button, Some(*action))
             }
             None if added => {
                 let remove = self.over_action || keyboard;
                 let label = if remove { "Remove" } else { "Added" };
-                let button = button
+                let button = frame(ButtonLook::Secondary)
                     .aria_label(format!("Remove from {}", harness.name()))
-                    .bg(content(if remove { 0.14 } else { 0.08 }))
-                    .cursor_pointer()
                     .when(!remove, |d| {
-                        d.child(icon("check-hi", 12.).text_color(rgb(0x10b981)))
+                        d.child(icon("check-hi", 12.).text_color(theme::success()))
                     })
                     .child(label);
                 (button, remove.then_some(Action::Remove))
             }
             None => {
-                let button = button
+                let button = frame(ButtonLook::Primary)
                     .aria_label(format!("Add to {}", harness.name()))
-                    .bg(accent())
-                    .text_color(on_accent())
-                    .font_weight(FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.9))
                     .child(format!("Add to {}", harness.name()));
                 (button, Some(Action::Add))
             }
@@ -560,25 +534,13 @@ impl SettingsView {
     fn code_box(&self, id: &'static str, text: String, cx: &mut Context<Self>) -> AnyElement {
         let copied = self.copied == Some(id);
         let copy = text.clone();
-        let button = div()
-            .id(id)
-            .role(Role::Button)
-            .aria_label(if copied { "Copied" } else { "Copy" })
-            .h(px(22.))
-            .px(px(8.))
-            .flex_shrink_0()
-            .rounded(px(6.))
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .text_size(px(11.))
-            .bg(content(0.08))
-            .cursor_pointer()
-            .hover(|s| s.bg(content(0.14)))
+        let label = if copied { "Copied" } else { "Copy" };
+        let button = theme::button(id, ButtonLook::Secondary)
+            .aria_label(label)
             .when(copied, |d| {
-                d.child(icon("check-hi", 12.).text_color(content(0.8)))
+                d.child(icon("check-hi", 12.).text_color(content(0.65)))
             })
-            .child(if copied { "Copied" } else { "Copy" })
+            .child(label)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
                 this.copied = Some(id);
@@ -587,13 +549,13 @@ impl SettingsView {
         div()
             .w_full()
             .min_h(px(36.))
-            .py(px(7.))
-            .pl(px(12.))
-            .pr(px(7.))
-            .rounded(px(8.))
-            .bg(black(if theme::is_light() { 0.04 } else { 0.2 }))
+            .py(px(6.))
+            .pl_3()
+            .pr(px(6.))
+            .rounded(px(theme::RADIUS_CARD))
+            .bg(theme::well())
             .border_1()
-            .border_color(content(0.08))
+            .border_color(content(0.06))
             .flex()
             .items_start()
             .gap_3()
@@ -601,11 +563,10 @@ impl SettingsView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .pt(px(3.))
+                    .pt(px(4.))
                     .font_family(theme::MONO_FONT)
-                    .text_size(px(11.))
+                    .text_size(px(theme::TEXT_CAPTION))
                     .line_height(px(16.))
-                    .text_color(content(0.85))
                     .child(text),
             )
             .child(self.focusable(id, true, button, cx))
@@ -679,7 +640,7 @@ impl SettingsView {
             .h_full()
             .flex()
             .flex_col()
-            .gap_px()
+            .gap(px(theme::ROW_GAP))
             .p_2()
             .pt_3()
             .border_r_1()
@@ -705,26 +666,26 @@ impl SettingsView {
                     .role(Role::Tab)
                     .aria_label(page.label())
                     .aria_selected(active)
-                    .h(px(28.))
+                    .h(px(theme::ROW_HEIGHT))
                     .px_2()
-                    .rounded(px(7.))
+                    .rounded(px(theme::RADIUS_ROW))
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(13.))
+                    .text_size(px(theme::TEXT_BODY))
                     .cursor_pointer()
                     .map(|d| {
                         if active {
-                            d.bg(content(0.1)).text_color(content(1.))
+                            d.bg(content(0.14)).text_color(content(1.))
                         } else {
-                            d.text_color(content(0.7))
-                                .hover(|s| s.bg(content(0.05)).text_color(content(1.)))
+                            d.text_color(content(0.65))
+                                .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
                         }
                     })
-                    .child(icon(page.icon(), 15.).text_color(content(if active {
-                        0.9
+                    .child(icon(page.icon(), 16.).text_color(content(if active {
+                        1.
                     } else {
-                        0.5
+                        0.55
                     })))
                     .child(page.label())
                     .on_click(cx.listener(move |this, _, _, cx| this.show(page, cx)));
@@ -735,7 +696,7 @@ impl SettingsView {
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let page = self.page;
         div()
-            .h(px(48.))
+            .h(px(theme::TITLE_BAR_HEIGHT))
             .flex_shrink_0()
             .px_4()
             .flex()
@@ -743,8 +704,8 @@ impl SettingsView {
             .gap_2()
             .border_b_1()
             .border_color(content(0.06))
-            .text_size(px(13.))
-            .child(div().pl_1().text_color(content(0.5)).child("Settings"))
+            .text_size(px(theme::TEXT_BODY))
+            .child(div().pl_1().text_color(content(0.65)).child("Settings"))
             .child(div().text_color(content(0.3)).child("/"))
             .child(
                 div()
@@ -756,24 +717,12 @@ impl SettingsView {
                 self.focusable(
                     "restore-defaults",
                     true,
-                    div()
-                        .id("restore-defaults")
-                        .role(Role::Button)
+                    theme::button("restore-defaults", ButtonLook::Ghost)
                         .aria_label("Restore defaults")
                         .group("restore-defaults")
-                        .h(px(24.))
-                        .px_2()
-                        .rounded_md()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(12.))
-                        .text_color(content(0.6))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
                         .child(
-                            icon("rotate-ccw", 13.)
-                                .text_color(content(0.6))
+                            icon("rotate-ccw", 12.)
+                                .text_color(content(0.55))
                                 .group_hover("restore-defaults", |s| s.text_color(content(1.))),
                         )
                         .child("Restore Defaults")
@@ -1000,7 +949,7 @@ impl SettingsView {
             Setup::Config { file, json } => (format!("Add to {file}"), json),
         };
         let server = div()
-            .py(px(14.))
+            .py(px(12.))
             .flex()
             .flex_col()
             .gap_3()
@@ -1013,12 +962,12 @@ impl SettingsView {
                         div()
                             .size(px(32.))
                             .flex_shrink_0()
-                            .rounded(px(8.))
+                            .rounded_full()
                             .bg(content(0.08))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon("bot", 18.).text_color(content(0.8))),
+                            .child(icon("bot", 16.).text_color(content(1.))),
                     )
                     .child(
                         div()
@@ -1027,12 +976,16 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(div().text_size(px(13.)).child("Local MCP server"))
                             .child(
                                 div()
-                                    .text_size(px(11.))
-                                    .line_height(px(15.))
-                                    .text_color(content(0.5))
+                                    .text_size(px(theme::TEXT_BODY))
+                                    .child("Local MCP server"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme::TEXT_CAPTION))
+                                    .line_height(px(16.))
+                                    .text_color(content(0.65))
                                     .child(
                                         "Works with any agent that runs MCP servers over stdio. \
                                          Each agent session starts its own.",
@@ -1059,7 +1012,7 @@ impl SettingsView {
                     cx.stop_propagation();
                 }
             }))
-            .rounded(px(8.))
+            .rounded(px(theme::RADIUS_ROW))
             .flex()
             .flex_wrap()
             .gap(px(6.))
@@ -1070,30 +1023,30 @@ impl SettingsView {
                     .role(Role::RadioButton)
                     .aria_label(each.name())
                     .aria_selected(selected)
-                    .h(px(26.))
-                    .px(px(10.))
+                    .h(px(theme::BUTTON_HEIGHT))
+                    .px_3()
                     .rounded_full()
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .text_size(px(12.))
+                    .text_size(px(theme::TEXT_SMALL))
                     .border_1()
                     .map(|d| {
                         if selected {
-                            d.bg(content(0.12))
+                            d.bg(content(0.14))
                                 .border_color(content(0.14))
                                 .font_weight(FontWeight::MEDIUM)
                         } else {
                             d.border_color(content(0.06))
-                                .text_color(content(0.7))
+                                .text_color(content(0.65))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(content(0.05)).text_color(content(1.)))
+                                .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
                         }
                     })
-                    .child(icon(each.icon(), 13.).text_color(content(if selected {
-                        0.95
+                    .child(icon(each.icon(), 14.).text_color(content(if selected {
+                        1.
                     } else {
-                        0.6
+                        0.55
                     })))
                     .child(each.name())
                     .when(self.added.contains(&each), |d| d.child(added_dot()))
@@ -1105,17 +1058,11 @@ impl SettingsView {
             .filter(|job| job.harness == harness)
             .and_then(|job| job.failed.clone());
         let about = match &failed {
-            Some(error) => div()
-                .text_color(rgb(if theme::is_light() {
-                    0xdc2626
-                } else {
-                    0xf87171
-                }))
-                .child(error.clone()),
+            Some(error) => div().text_color(theme::danger()).child(error.clone()),
             None if self.added.contains(&harness) => {
-                div().text_color(content(0.5)).child(harness.then())
+                div().text_color(content(0.65)).child(harness.then())
             }
-            None => div().text_color(content(0.5)).child(harness.adds()),
+            None => div().text_color(content(0.65)).child(harness.adds()),
         };
         let by_hand = self.by_hand;
         let disclosure = div()
@@ -1124,14 +1071,14 @@ impl SettingsView {
             .aria_label("Do it yourself")
             .aria_expanded(by_hand)
             .self_start()
-            .rounded(px(4.))
+            .rounded_full()
             .flex()
             .items_center()
-            .gap(px(4.))
-            .text_size(px(11.))
-            .text_color(content(0.5))
+            .gap_1()
+            .text_size(px(theme::TEXT_CAPTION))
+            .text_color(content(0.65))
             .cursor_pointer()
-            .hover(|s| s.text_color(content(0.8)))
+            .hover(|s| s.text_color(content(1.)))
             .child(
                 icon(
                     if by_hand {
@@ -1139,9 +1086,9 @@ impl SettingsView {
                     } else {
                         "chevron-right"
                     },
-                    10.,
+                    12.,
                 )
-                .text_color(content(0.5)),
+                .text_color(content(0.55)),
             )
             .child("Do it yourself")
             .on_click(cx.listener(|this, _, _, cx| {
@@ -1149,7 +1096,7 @@ impl SettingsView {
                 cx.notify();
             }));
         let setup = div()
-            .py(px(14.))
+            .py(px(12.))
             .flex()
             .flex_col()
             .gap_4()
@@ -1166,8 +1113,12 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(div().text_size(px(13.)).child(harness.name()))
-                            .child(about.text_size(px(11.)).line_height(px(15.))),
+                            .child(div().text_size(px(theme::TEXT_BODY)).child(harness.name()))
+                            .child(
+                                about
+                                    .text_size(px(theme::TEXT_CAPTION))
+                                    .line_height(px(16.)),
+                            ),
                     )
                     .child(self.action_button(window, cx)),
             )
@@ -1184,21 +1135,21 @@ impl SettingsView {
             .iter()
             .map(|tool| {
                 div()
-                    .py(px(10.))
+                    .py(px(8.))
                     .flex()
                     .flex_col()
-                    .gap(px(3.))
+                    .gap(px(2.))
                     .child(
                         div()
                             .font_family(theme::MONO_FONT)
-                            .text_size(px(12.))
+                            .text_size(px(theme::TEXT_SMALL))
                             .child(tool.name),
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .line_height(px(15.))
-                            .text_color(content(0.5))
+                            .text_size(px(theme::TEXT_CAPTION))
+                            .line_height(px(16.))
+                            .text_color(content(0.65))
                             .child(tool.description),
                     )
                     .into_any_element()
@@ -1249,8 +1200,8 @@ impl SettingsView {
             page.push(
                 div()
                     .px_1()
-                    .text_size(px(12.))
-                    .text_color(accent())
+                    .text_size(px(theme::TEXT_SMALL))
+                    .text_color(theme::danger())
                     .child(error.clone())
                     .into_any_element(),
             );
@@ -1275,36 +1226,19 @@ impl SettingsView {
                             .collect::<Vec<_>>()
                             .join("  ")
                     };
-                    let button = div()
-                        .id(id)
-                        .role(Role::Button)
+                    let button = theme::button(id, ButtonLook::Secondary)
                         .aria_label(format!("{}: {shown}", command.title))
-                        .h(px(24.))
                         .min_w(px(96.))
-                        .px(px(10.))
-                        .rounded(px(6.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.))
-                        .bg(if recording {
-                            accent().opacity(0.2)
-                        } else {
-                            content(0.08)
-                        })
                         .border_1()
                         .border_color(if recording {
                             accent()
                         } else {
                             gpui::transparent_black()
                         })
-                        .text_color(content(if keys.is_empty() && !recording {
-                            0.4
-                        } else {
-                            1.
-                        }))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(content(0.12)))
+                        .when(recording, |d| d.bg(accent().opacity(0.2)))
+                        .when(keys.is_empty() && !recording, |d| {
+                            d.text_color(content(0.65))
+                        })
                         .child(shown)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.start_recording(id, context, window, cx)
@@ -1318,21 +1252,15 @@ impl SettingsView {
                             .gap_2()
                             .when(changed, |d| {
                                 d.child(
-                                    div()
-                                        .id(SharedString::from(format!("reset-{id}")))
-                                        .role(Role::Button)
-                                        .aria_label("Use the default")
-                                        .size(px(20.))
-                                        .rounded_md()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(content(0.08)))
-                                        .child(icon("rotate-ccw", 12.))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.reset_shortcut(id, context, cx)
-                                        })),
+                                    theme::row_icon_button(
+                                        SharedString::from(format!("reset-{id}")),
+                                        "Use the default",
+                                        "rotate-ccw",
+                                        content(0.55),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.reset_shortcut(id, context, cx),
+                                    )),
                                 )
                             })
                             .child(self.focusable(id, true, button, cx)),
@@ -1630,9 +1558,10 @@ impl SettingsView {
                     self.focusable(
                         "choose-background",
                         true,
-                        push_button("choose-background", "Choose…").on_click(
-                            cx.listener(|this, _, window, cx| this.choose_background(window, cx)),
-                        ),
+                        text_button("choose-background", "Choose…", ButtonLook::Secondary)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_background(window, cx)
+                            })),
                         cx,
                     ),
                 )],
@@ -1647,7 +1576,7 @@ impl SettingsView {
                     opacity: empty as f32 / 100.,
                     empty: true,
                     preview: true,
-                    radius: 10.,
+                    radius: theme::RADIUS_CARD - 1.,
                 }),
                 cx,
             )
@@ -1656,23 +1585,23 @@ impl SettingsView {
             .py(px(12.))
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(8.))
             .child(
                 div()
                     .relative()
                     .h(px(132.))
                     .w_full()
-                    .rounded(px(10.))
+                    .rounded(px(theme::RADIUS_CARD))
                     .border_1()
-                    .border_color(content(0.1))
+                    .border_color(content(0.12))
                     .child(self.preview.clone())
                     .child(
                         div()
                             .absolute()
                             .bottom_2()
                             .left_3()
-                            .text_size(px(11.))
-                            .text_color(content(0.5))
+                            .text_size(px(theme::TEXT_CAPTION))
+                            .text_color(content(0.65))
                             .child(format!("Empty folder preview at {empty}%")),
                     ),
             )
@@ -1681,24 +1610,27 @@ impl SettingsView {
                     .flex()
                     .justify_end()
                     .gap_2()
-                    .child(self.focusable(
-                        "change-background",
-                        true,
-                        push_button("change-background", "Change…").on_click(
-                            cx.listener(|this, _, window, cx| this.choose_background(window, cx)),
+                    .child(
+                        self.focusable(
+                            "change-background",
+                            true,
+                            text_button("change-background", "Change…", ButtonLook::Secondary)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_background(window, cx)
+                                })),
+                            cx,
                         ),
-                        cx,
-                    ))
+                    )
                     .child(self.focusable(
                         "remove-background",
                         true,
-                        push_button("remove-background", "Remove").on_click(cx.listener(
-                            |this, _, window, cx| {
+                        text_button("remove-background", "Remove", ButtonLook::Secondary).on_click(
+                            cx.listener(|this, _, window, cx| {
                                 preferences::update(cx, |p| p.background = None);
                                 // Remove goes away with the image; Choose… takes its place.
                                 window.focus(&this.handle("choose-background", cx), cx);
-                            },
-                        )),
+                            }),
+                        ),
                         cx,
                     )),
             )
@@ -1796,26 +1728,14 @@ impl SettingsView {
                     selected,
                     choose,
                 } = item;
-                div()
+                theme::row(ix == active)
                     .id((id, ix))
                     .role(Role::MenuItemRadio)
                     .aria_label(label.clone())
                     .aria_selected(selected)
-                    .h(px(24.))
                     .pl(px(6.))
-                    .pr(px(12.))
-                    .rounded(px(6.))
-                    .flex()
-                    .items_center()
+                    .pr_3()
                     .gap(px(6.))
-                    .text_size(px(13.))
-                    .map(|d| {
-                        if ix == active {
-                            d.bg(accent()).text_color(on_accent())
-                        } else {
-                            d.text_color(content(1.))
-                        }
-                    })
                     .child(div().w(px(14.)).flex_shrink_0().when(selected, |d| {
                         d.child(icon("check-hi", 12.).text_color(if ix == active {
                             on_accent()
@@ -1867,7 +1787,7 @@ impl SettingsView {
                                 .offset(point(px(0.), px(4.)))
                                 .snap_to_window_with_margin(px(8.))
                                 .child(
-                                    div()
+                                    theme::floating(Elevation::Popover)
                                         .id("menu")
                                         .role(Role::Menu)
                                         .aria_label(label)
@@ -1899,18 +1819,9 @@ impl SettingsView {
                                             },
                                         ))
                                         .occlude()
-                                        .relative()
                                         .min_w(px(width.max(120.)))
                                         .max_h(px(360.))
-                                        .p(px(5.))
-                                        .rounded(px(10.))
-                                        .border_1()
-                                        .border_color(content(0.1))
-                                        .shadow(vec![
-                                            gpui::BoxShadow::new(px(0.), px(8.), black(0.3))
-                                                .blur_radius(px(24.)),
-                                        ])
-                                        .child(theme::floating_surface(9.))
+                                        .p_1()
                                         .child(
                                             div()
                                                 .id("menu-items")
@@ -1919,6 +1830,7 @@ impl SettingsView {
                                                 .overflow_y_scroll()
                                                 .flex()
                                                 .flex_col()
+                                                .gap(px(theme::ROW_GAP))
                                                 .children(rows),
                                         ),
                                 ),
@@ -1933,26 +1845,17 @@ impl SettingsView {
                 self.focusable(
                     id,
                     true,
-                    div()
-                        .id(id)
+                    theme::button(id, ButtonLook::Secondary)
                         .role(Role::ComboBox)
                         .aria_label(format!("{label}: {current}"))
                         .aria_expanded(open)
-                        .h(px(24.))
                         .min_w(px(width))
                         .pl(px(if trigger_icon.is_some() { 8. } else { 12. }))
                         .pr(px(6.))
-                        .rounded_full()
-                        .bg(content(0.1))
-                        .hover(|s| s.bg(content(0.15)))
-                        .flex()
-                        .items_center()
                         .gap(px(6.))
-                        .text_size(px(12.))
-                        .cursor_pointer()
                         .children(trigger_icon)
                         .child(div().flex_1().child(current))
-                        .child(icon("chevron-down-hi", 12.).text_color(content(0.6)))
+                        .child(icon("chevron-down-hi", 12.).text_color(content(0.55)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if this.menu == Some(id) {
                                 this.close_menu(id, window, cx);
@@ -2029,7 +1932,7 @@ impl SettingsView {
                             .absolute()
                             .size_full(),
                         )
-                        .child(div().w_full().h(px(4.)).rounded_full().bg(content(0.15)))
+                        .child(theme::progress_track().w_full())
                         .child(
                             div()
                                 .absolute()
@@ -2049,7 +1952,7 @@ impl SettingsView {
                                 .ml(px(-KNOB * fraction))
                                 .size(px(KNOB))
                                 .rounded_full()
-                                .bg(gpui::white())
+                                .bg(knob())
                                 .shadow(knob_shadow()),
                         )
                         .when(!disabled, |d| {
@@ -2070,8 +1973,8 @@ impl SettingsView {
                     .w(px(36.))
                     .flex_shrink_0()
                     .text_right()
-                    .text_size(px(12.))
-                    .text_color(content(0.7))
+                    .text_size(px(theme::TEXT_SMALL))
+                    .text_color(content(0.65))
                     .child(kind.display(value)),
             )
             .into_any_element()
@@ -2100,25 +2003,14 @@ impl Render for SettingsView {
             Page::Keyboard => self.keyboard(&prefs, cx),
             Page::Agents => self.agents(&prefs, window, cx),
         };
-        let card = div()
+        let card = theme::floating(Elevation::Sheet)
             .id("settings")
             .role(Role::Dialog)
             .aria_label("Settings")
-            .relative()
             .size_full()
             .max_w(px(880.))
             .max_h(px(640.))
-            .rounded(px(RADIUS))
-            .border_1()
-            .border_color(content(0.1))
-            .shadow(vec![
-                gpui::BoxShadow::new(px(0.), px(24.), black(0.3))
-                    .blur_radius(px(48.))
-                    .spread_radius(px(-12.)),
-            ])
-            .text_color(content(1.))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(theme::floating_surface(RADIUS - 1.))
             .child(
                 div()
                     .relative()
@@ -2210,7 +2102,7 @@ impl Render for SettingsView {
             .with_animation(
                 "settings-scrim",
                 Animation::new(Duration::from_millis(200)).with_easing(ease_out),
-                |scrim, t| scrim.bg(black(if theme::is_light() { 0.18 } else { 0.35 } * t)),
+                |scrim, t| scrim.bg(theme::scrim(t)),
             )
     }
 }
@@ -2225,13 +2117,6 @@ fn slider_value((min, max): (u32, u32), offset: f32, width: f32) -> u32 {
     let travel = (width - KNOB).max(1.);
     let fraction = ((offset - KNOB / 2.) / travel).clamp(0., 1.);
     min + ((max - min) as f32 * fraction).round() as u32
-}
-
-fn knob_shadow() -> Vec<gpui::BoxShadow> {
-    vec![
-        gpui::BoxShadow::new(px(0.), px(1.), black(0.3)).blur_radius(px(3.)),
-        gpui::BoxShadow::new(px(0.), px(0.), black(0.1)).spread_radius(px(0.5)),
-    ]
 }
 
 /// A titled section of rows on a rounded plate, as System Settings groups them.
@@ -2252,21 +2137,21 @@ fn group(
                 .gap(px(2.))
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(px(theme::TEXT_BODY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(title),
                 )
                 .children(description.map(|text| {
                     div()
-                        .text_size(px(12.))
-                        .text_color(content(0.5))
+                        .text_size(px(theme::TEXT_SMALL))
+                        .text_color(content(0.65))
                         .child(text)
                 })),
         )
         .child(
             div()
-                .rounded(px(12.))
-                .bg(content(0.04))
+                .rounded(px(theme::RADIUS_CARD))
+                .bg(content(0.03))
                 .border_1()
                 .border_color(content(0.06))
                 .flex()
@@ -2274,7 +2159,7 @@ fn group(
                 .children(rows.into_iter().enumerate().map(|(ix, row)| {
                     div()
                         .mx(px(14.))
-                        .when(ix > 0, |d| d.border_t_1().border_color(content(0.07)))
+                        .when(ix > 0, |d| d.border_t_1().border_color(content(0.06)))
                         .child(row)
                 })),
         )
@@ -2300,12 +2185,12 @@ fn row(
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .child(div().text_size(px(13.)).child(label))
+                .child(div().text_size(px(theme::TEXT_BODY)).child(label))
                 .children(description.map(|text| {
                     div()
-                        .text_size(px(11.))
-                        .line_height(px(15.))
-                        .text_color(content(0.5))
+                        .text_size(px(theme::TEXT_CAPTION))
+                        .line_height(px(16.))
+                        .text_color(content(0.65))
                         .child(text)
                 })),
         )
@@ -2328,7 +2213,7 @@ fn toggle(
         .w(px(34.))
         .h(px(20.))
         .rounded_full()
-        .bg(if on { accent() } else { content(0.18) })
+        .bg(if on { accent() } else { content(0.2) })
         .cursor_pointer()
         .child(
             div()
@@ -2337,7 +2222,7 @@ fn toggle(
                 .left(px(if on { 16. } else { 2. }))
                 .size(px(16.))
                 .rounded_full()
-                .bg(gpui::white())
+                .bg(knob())
                 .shadow(knob_shadow()),
         )
         .on_click(move |_, _, cx| preferences::update(cx, |p| set(p, !on)))
@@ -2380,25 +2265,19 @@ fn segmented<T: Copy + PartialEq + 'static>(
                 .role(Role::RadioButton)
                 .aria_label(text)
                 .aria_selected(selected)
-                .h(px(22.))
-                .px(px(12.))
+                .h(px(theme::BUTTON_HEIGHT - 4.))
+                .px_3()
                 .rounded_full()
                 .flex()
                 .items_center()
-                .text_size(px(12.))
+                .text_size(px(theme::TEXT_SMALL))
                 .map(|d| {
                     if selected {
-                        d.bg(if theme::is_light() {
-                            gpui::white()
-                        } else {
-                            content(0.2)
-                        })
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(1.), black(0.15)).blur_radius(px(2.)),
-                        ])
-                        .font_weight(FontWeight::MEDIUM)
+                        d.bg(theme::raised())
+                            .shadow(theme::raised_shadow())
+                            .font_weight(FontWeight::MEDIUM)
                     } else {
-                        d.text_color(content(0.7))
+                        d.text_color(content(0.65))
                             .cursor_pointer()
                             .hover(|s| s.text_color(content(1.)))
                     }
@@ -2452,15 +2331,16 @@ fn accent_picker(p: &Preferences, light: bool) -> Stateful<Div> {
                         .aria_selected(selected)
                         .size(px(18.))
                         .rounded_full()
+                        // design: a swatch shows the color it offers.
                         .bg(rgb(color))
                         .border_1()
-                        .border_color(black(0.2))
+                        .border_color(content(0.2))
                         .flex()
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
                         .when(selected, |d| {
-                            d.child(div().size(px(6.)).rounded_full().bg(gpui::white()))
+                            d.child(div().size(px(6.)).rounded_full().bg(knob()))
                         })
                         .on_click(move |_, _, cx| preferences::update(cx, |p| p.accent = value))
                 }),
@@ -2476,23 +2356,20 @@ fn arrow(key: &str) -> Option<isize> {
     }
 }
 
-/// The keyboard focus ring: the accent, just outside the control.
-fn focus_ring() -> Vec<gpui::BoxShadow> {
-    vec![gpui::BoxShadow::new(px(0.), px(0.), accent().opacity(0.8)).spread_radius(px(2.5))]
-}
-
 /// A preset's surface with its accent dot, at a menu icon's size.
 fn swatch(surface: u32, accent: u32) -> impl IntoElement {
     div()
         .size(px(14.))
         .flex_shrink_0()
-        .rounded(px(4.))
+        .rounded(px(theme::RADIUS_THUMB))
         .border_1()
         .border_color(content(0.2))
+        // design: a swatch shows the preset's own colors.
         .bg(rgb(surface))
         .flex()
         .items_center()
         .justify_center()
+        // design: a swatch shows the preset's own colors.
         .child(div().size(px(6.)).rounded_full().bg(rgb(accent)))
 }
 
@@ -2511,8 +2388,8 @@ fn step_row(number: u32, text: String, below: Option<AnyElement>) -> impl IntoEl
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(10.))
-                .text_color(content(0.7))
+                .text_size(px(theme::TEXT_CAPTION))
+                .text_color(content(0.65))
                 .child(number.to_string()),
         )
         .child(
@@ -2525,7 +2402,7 @@ fn step_row(number: u32, text: String, below: Option<AnyElement>) -> impl IntoEl
                 .child(
                     div()
                         .pt(px(1.))
-                        .text_size(px(12.))
+                        .text_size(px(theme::TEXT_SMALL))
                         .line_height(px(16.))
                         .child(text),
                 )
@@ -2539,25 +2416,7 @@ fn added_dot() -> impl IntoElement {
         .size(px(6.))
         .flex_shrink_0()
         .rounded_full()
-        .bg(rgb(0x10b981))
-}
-
-/// A capsule push button.
-fn push_button(id: &'static str, label: &'static str) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label)
-        .h(px(24.))
-        .px(px(12.))
-        .rounded_full()
-        .flex()
-        .items_center()
-        .text_size(px(12.))
-        .bg(content(0.1))
-        .cursor_pointer()
-        .hover(|s| s.bg(content(0.15)))
-        .child(label)
+        .bg(theme::success())
 }
 
 #[cfg(test)]

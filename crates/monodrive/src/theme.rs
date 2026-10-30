@@ -5,15 +5,31 @@
 use crate::palettes;
 use crate::preferences::{Preferences, Theme};
 use gpui::{
-    Div, FontWeight, Hsla, Role, Stateful, Svg, WindowBackgroundAppearance, canvas, div,
-    prelude::*, px, rgb, svg,
+    BoxShadow, Div, ElementId, FontWeight, Hsla, Role, SharedString, Stateful, Svg,
+    WindowBackgroundAppearance, canvas, div, prelude::*, px, rgb, svg,
 };
 use std::cell::Cell;
 
 pub const UI_FONT: &str = ".SystemUIFont";
 pub const MONO_FONT: &str = "Menlo";
+
+// The scales DESIGN.md describes; scripts/check-design holds views to them.
+pub const RADIUS_THUMB: f32 = 4.;
+pub const RADIUS_ROW: f32 = 8.;
+pub const RADIUS_CARD: f32 = 14.;
+
+pub const TEXT_CAPTION: f32 = 11.;
+pub const TEXT_SMALL: f32 = 12.;
+pub const TEXT_BODY: f32 = 13.;
+pub const TEXT_TITLE: f32 = 14.;
+
 pub const TITLE_BAR_HEIGHT: f32 = 40.;
 pub const ROW_HEIGHT: f32 = 28.;
+pub const SIDEBAR_ROW_HEIGHT: f32 = 32.;
+/// Between stacked rows, so highlights never touch.
+pub const ROW_GAP: f32 = 2.;
+pub const BUTTON_HEIGHT: f32 = 24.;
+pub const FIELD_HEIGHT: f32 = 28.;
 
 #[derive(Clone, Copy, PartialEq)]
 struct Tokens {
@@ -100,9 +116,14 @@ pub fn accent() -> Hsla {
     tokens().accent
 }
 
-/// macOS's system red, for what failed or can't be undone.
+/// Red ink for what failed or can't be undone, at 4.5:1 on the theme's panes.
 pub fn danger() -> Hsla {
-    rgb(if is_light() { 0xff3b30 } else { 0xff453a }).into()
+    rgb(if is_light() { 0xdc2626 } else { 0xff453a }).into()
+}
+
+/// Green ink for what's done.
+pub fn success() -> Hsla {
+    rgb(if is_light() { 0x059669 } else { 0x10b981 }).into()
 }
 
 /// Black or white, whichever reads on the accent.
@@ -133,14 +154,81 @@ pub fn pane_fill() -> Hsla {
     tokens().pane
 }
 
-pub fn black(alpha: f32) -> Hsla {
+fn black(alpha: f32) -> Hsla {
     gpui::hsla(0., 0., 0., alpha)
 }
 
-/// A frosted fill for floating surfaces such as the settings sheet and menus,
-/// or an opaque one in light themes. Place it first in a `relative()` parent
-/// with the same corners.
-pub fn floating_surface(radius: f32) -> impl IntoElement {
+/// What dims the window behind a sheet, at `strength` of its full depth while
+/// it fades in.
+pub fn scrim(strength: f32) -> Hsla {
+    black(if is_light() { 0.15 } else { 0.3 } * strength)
+}
+
+/// The sunken fill behind code.
+pub fn well() -> Hsla {
+    black(if is_light() { 0.04 } else { 0.2 })
+}
+
+/// A switch's or a slider's knob, white in every theme.
+pub fn knob() -> Hsla {
+    gpui::white()
+}
+
+/// A selected segment's fill, raised off its track.
+pub fn raised() -> Hsla {
+    if is_light() { knob() } else { content(0.2) }
+}
+
+/// The keyboard focus ring: the accent, just outside the control's shape.
+pub fn focus_ring() -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(0.), accent().opacity(0.8)).spread_radius(px(2.5))]
+}
+
+pub fn knob_shadow() -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(1.), black(0.3)).blur_radius(px(3.)),
+        BoxShadow::new(px(0.), px(0.), black(0.1)).spread_radius(px(0.5)),
+    ]
+}
+
+pub fn raised_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(1.), black(0.15)).blur_radius(px(2.))]
+}
+
+/// How far a floating surface sits above the window.
+#[derive(Clone, Copy)]
+pub enum Elevation {
+    /// Menus, popovers and toasts, near what opened them.
+    Popover,
+    /// Sheets over a scrim.
+    Sheet,
+}
+
+/// A floating surface: the card radius, a hairline, a shadow and the frosted
+/// fill. Its contents need `relative()` to draw over the fill.
+pub fn floating(elevation: Elevation) -> Div {
+    let shadow = match elevation {
+        Elevation::Popover => BoxShadow::new(px(0.), px(8.), black(0.25))
+            .blur_radius(px(24.))
+            .spread_radius(px(-4.)),
+        Elevation::Sheet => BoxShadow::new(px(0.), px(16.), black(0.3))
+            .blur_radius(px(40.))
+            .spread_radius(px(-8.)),
+    };
+    div()
+        .relative()
+        .rounded(px(RADIUS_CARD))
+        .border_1()
+        .border_color(content(0.12))
+        .shadow(vec![shadow])
+        .text_color(content(1.))
+        .child(floating_surface())
+}
+
+/// A frosted fill, or an opaque one in light themes.
+fn floating_surface() -> impl IntoElement {
+    // Inside the surface's border.
+    let radius = RADIUS_CARD - 1.;
     let Tokens {
         light, shell, pane, ..
     } = tokens();
@@ -171,9 +259,9 @@ pub fn section_label(label: &'static str) -> Div {
         .mt_2()
         .flex()
         .items_center()
-        .text_size(px(12.))
+        .text_size(px(TEXT_SMALL))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(content(0.5))
+        .text_color(content(0.65))
         .child(label)
 }
 
@@ -185,6 +273,95 @@ pub fn icon(path: &'static str, side: f32) -> Svg {
         .flex_shrink_0()
 }
 
+/// What a text button looks like.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ButtonLook {
+    Secondary,
+    /// What ↩ does.
+    Primary,
+    /// What ↩ does, and it can't be undone.
+    Destructive,
+    /// Leads to something that can't be undone, or recovers from a failure.
+    Caution,
+    /// No fill until hovered, for a button among text.
+    Ghost,
+    /// It still says what it would do.
+    Disabled,
+}
+
+/// A text button's frame without its label: a 24 pt pill in `look`. For a
+/// button with an icon or a changing label; else use [`text_button`].
+pub fn button(id: impl Into<ElementId>, look: ButtonLook) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Button)
+        .h(px(BUTTON_HEIGHT))
+        .px(px(if look == ButtonLook::Ghost { 8. } else { 12. }))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .text_size(px(TEXT_SMALL))
+        .font_weight(match look {
+            ButtonLook::Primary | ButtonLook::Destructive => FontWeight::MEDIUM,
+            _ => FontWeight::NORMAL,
+        })
+        .when(look != ButtonLook::Disabled, |d| d.cursor_pointer())
+        .map(|d| match look {
+            ButtonLook::Secondary => d
+                .bg(content(0.08))
+                .text_color(content(1.))
+                .hover(|s| s.bg(content(0.14)))
+                .active(|s| s.bg(content(0.2))),
+            ButtonLook::Primary => d
+                .bg(accent())
+                .text_color(on_accent())
+                .hover(|s| s.opacity(0.9))
+                .active(|s| s.opacity(0.8)),
+            // A fixed red: white on the dark theme's `danger` is under 4.5:1.
+            ButtonLook::Destructive => d
+                .bg(rgb(0xdc2626))
+                .text_color(gpui::white())
+                .hover(|s| s.opacity(0.9))
+                .active(|s| s.opacity(0.8)),
+            ButtonLook::Caution => d
+                .bg(danger().opacity(0.14))
+                .text_color(danger())
+                .hover(|s| s.bg(danger().opacity(0.22)))
+                .active(|s| s.bg(danger().opacity(0.3))),
+            ButtonLook::Ghost => d
+                .text_color(content(0.65))
+                .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
+                .active(|s| s.bg(content(0.14))),
+            ButtonLook::Disabled => d.bg(content(0.08)).text_color(content(0.3)),
+        })
+}
+
+pub fn text_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    look: ButtonLook,
+) -> Stateful<Div> {
+    let label = label.into();
+    button(id, look).aria_label(label.clone()).child(label)
+}
+
+/// An icon button's frame without its icon: a circle `side` across.
+pub fn circle_button(id: impl Into<ElementId>, label: &'static str, side: f32) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .size(px(side))
+        .rounded_full()
+}
+
 /// A 24 pt chrome button whose icon brightens on hover.
 pub fn icon_button(
     id: &'static str,
@@ -192,22 +369,85 @@ pub fn icon_button(
     path: &'static str,
     enabled: bool,
 ) -> Stateful<Div> {
-    let ink = content(if enabled { 0.5 } else { 0.25 });
-    div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label)
+    let ink = content(if enabled { 0.55 } else { 0.3 });
+    circle_button(id, label, BUTTON_HEIGHT)
         .group(id)
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .justify_center()
-        .size(px(24.))
-        .rounded_md()
         .when(enabled, |d| {
-            d.cursor_pointer().hover(|s| s.bg(content(0.1)))
+            d.cursor_pointer()
+                .hover(|s| s.bg(content(0.08)))
+                .active(|s| s.bg(content(0.14)))
         })
         .child(icon(path, 14.).text_color(ink).when(enabled, |i| {
             i.group_hover(id, |s| s.text_color(content(1.)))
         }))
+}
+
+/// A 20 pt button inside a row. `ink` is its icon's color, which a selected
+/// row decides.
+pub fn row_icon_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    path: &'static str,
+    ink: Hsla,
+) -> Stateful<Div> {
+    circle_button(id, label, 20.)
+        .cursor_pointer()
+        .hover(|s| s.bg(content(0.14)))
+        .active(|s| s.bg(content(0.2)))
+        .child(icon(path, 12.).text_color(ink))
+}
+
+/// A text field's outline: a pill with a 1 pt `border`. The accent when it has
+/// the keys, `danger` when what's typed can't be used, else `content(0.12)`.
+pub fn field(border: Hsla) -> Div {
+    div()
+        .rounded_full()
+        .border_1()
+        .border_color(border)
+        .flex()
+        .items_center()
+}
+
+/// A row in a menu, a picker or a popover. `active` is the row the keys or
+/// the pointer are on: the accent with its ink.
+pub fn row(active: bool) -> Div {
+    div()
+        .h(px(ROW_HEIGHT))
+        .px_2()
+        .rounded(px(RADIUS_ROW))
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(TEXT_BODY))
+        .cursor_pointer()
+        .map(|d| {
+            if active {
+                d.bg(accent()).text_color(on_accent())
+            } else {
+                d.text_color(content(1.))
+            }
+        })
+}
+
+/// Secondary ink in a [`row`].
+pub fn row_muted(active: bool) -> Hsla {
+    if active {
+        on_accent().opacity(0.8)
+    } else {
+        content(0.65)
+    }
+}
+
+/// A progress bar's 4 pt track. `h_full` fills belong inside it.
+pub fn progress_track() -> Div {
+    div().h(px(4.)).rounded_full().bg(content(0.14))
+}
+
+/// What's filled of a [`progress_track`], from 0 to 1, in the accent.
+pub fn progress_fill(fraction: f32) -> Div {
+    div()
+        .h_full()
+        .w(gpui::relative(fraction))
+        .rounded_full()
+        .bg(accent())
 }

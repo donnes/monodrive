@@ -7,7 +7,10 @@
 
 use crate::browser::{Operations, format_bytes, lock, short_reason};
 use crate::menu;
-use crate::theme::{accent, content, danger};
+use crate::theme::{
+    self, ButtonLook, accent, circle_button, content, danger, progress_fill, progress_track,
+    row_icon_button, text_button,
+};
 use gpui::{
     App, Context, ElementId, EventEmitter, Hsla, KeyBinding, PathBuilder, Role, Task, actions,
     canvas, div, point, prelude::*, px,
@@ -219,26 +222,17 @@ impl Jobs {
         let waiting = shown.iter().any(|job| job.state == State::Waiting);
         let badge = (failed || waiting).then(|| if failed { danger() } else { accent() });
         Some(
-            div()
-                .id("jobs-ring")
-                .role(Role::Button)
-                .aria_label("Copies and Moves")
+            circle_button("jobs-ring", "Copies and Moves", theme::BUTTON_HEIGHT)
                 .relative()
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .size(px(24.))
-                .rounded_md()
                 .cursor_pointer()
-                .hover(|s| s.bg(content(0.1)))
+                .hover(|s| s.bg(content(0.08)))
                 .child(arc(progress(&shown)))
                 .children(badge.map(|color| {
                     div()
                         .absolute()
-                        .top(px(3.))
-                        .right(px(3.))
-                        .size(px(7.))
+                        .top(px(2.))
+                        .right(px(2.))
+                        .size(px(6.))
                         .rounded_full()
                         .bg(color)
                 })),
@@ -301,7 +295,7 @@ impl Jobs {
                         quoted(&task.source),
                         folder_name(&job.into)
                     );
-                    (taken, content(0.6))
+                    (taken, content(0.65))
                 }),
             State::Failed | State::Interrupted => job
                 .tasks
@@ -337,62 +331,47 @@ impl Jobs {
             .py(px(6.))
             .flex()
             .flex_col()
-            .gap(px(4.))
+            .gap_1()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(13.))
+                    .text_size(px(theme::TEXT_BODY))
                     .child(div().flex_1().min_w_0().truncate().child(title(job)))
                     .children(close.map(|label| {
-                        div()
-                            .id(ElementId::NamedInteger("job-close".into(), id))
-                            .role(Role::Button)
-                            .aria_label(label)
-                            .flex_shrink_0()
-                            .size(px(18.))
-                            .rounded(px(5.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(content(0.1)))
-                            .child(crate::theme::icon("cancel-01", 11.))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if label == "Cancel" {
-                                    this.ask(Request::Cancel { job: id }, false, cx);
-                                } else {
-                                    this.dismissed.insert(run);
-                                    cx.notify();
-                                }
-                            }))
+                        row_icon_button(
+                            ElementId::NamedInteger("job-close".into(), id),
+                            label,
+                            "cancel-01",
+                            content(0.55),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if label == "Cancel" {
+                                this.ask(Request::Cancel { job: id }, false, cx);
+                            } else {
+                                this.dismissed.insert(run);
+                                cx.notify();
+                            }
+                        }))
                     })),
             )
             .when(!caption.is_empty(), |d| {
                 d.child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(content(0.5))
+                        .text_size(px(theme::TEXT_CAPTION))
+                        .text_color(content(0.65))
                         .truncate()
                         .child(caption.join(" · ")),
                 )
             })
             .when(bar, |d| {
                 let fraction = progress(&[job]);
-                d.child(
-                    div().h(px(4.)).rounded_full().bg(content(0.12)).child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(fraction))
-                            .rounded_full()
-                            .bg(accent()),
-                    ),
-                )
+                d.child(progress_track().child(progress_fill(fraction)))
             })
             .children(detail.map(|(text, color)| {
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(theme::TEXT_SMALL))
                     .text_color(color)
                     .truncate()
                     .child(text)
@@ -400,24 +379,15 @@ impl Jobs {
             .when(!buttons.is_empty(), |d| {
                 d.child(div().flex().gap_1().children(buttons.into_iter().map(
                     |(label, request)| {
-                        div()
-                            .id(ElementId::NamedInteger(label.into(), id))
-                            .debug_selector(move || format!("job-{label}"))
-                            .role(Role::Button)
-                            .aria_label(label)
-                            .h(px(22.))
-                            .px_2()
-                            .rounded(px(6.))
-                            .flex()
-                            .items_center()
-                            .text_size(px(12.))
-                            .bg(content(0.08))
-                            .hover(|s| s.bg(content(0.14)))
-                            .cursor_pointer()
-                            .child(label)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.ask(request.clone(), ours, cx)
-                            }))
+                        text_button(
+                            ElementId::NamedInteger(label.into(), id),
+                            label,
+                            ButtonLook::Secondary,
+                        )
+                        .debug_selector(move || format!("job-{label}"))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.ask(request.clone(), ours, cx)),
+                        )
                     },
                 )))
             })
@@ -430,7 +400,7 @@ impl Render for Jobs {
         let shown: Vec<Job> = self.shown().cloned().collect();
         let note = match (&self.error, shown.is_empty()) {
             (Some(error), _) => Some((error.clone(), danger())),
-            (None, true) => Some(("No copies or moves right now.".to_string(), content(0.5))),
+            (None, true) => Some(("No copies or moves right now.".to_string(), content(0.65))),
             (None, false) => None,
         };
         let rows: Vec<_> = shown.iter().map(|job| self.row(job, cx)).collect();
@@ -438,12 +408,12 @@ impl Render for Jobs {
             div()
                 .px_2()
                 .py(px(6.))
-                .text_size(px(12.))
+                .text_size(px(theme::TEXT_SMALL))
                 .text_color(color)
                 .child(text)
                 .into_any_element()
         });
-        let height = window.viewport_size().height - px(crate::theme::TITLE_BAR_HEIGHT + 16.);
+        let height = window.viewport_size().height - px(theme::TITLE_BAR_HEIGHT + 16.);
         menu::card(
             WIDTH,
             height,
@@ -515,7 +485,7 @@ fn progress(jobs: &[&Job]) -> f32 {
 /// A circle's track with `fraction` of it drawn from the top, clockwise.
 /// It's painted once per frame drawn, which happens only when jobs change.
 fn arc(fraction: f32) -> impl IntoElement {
-    let (track, ink) = (content(0.18), accent());
+    let (track, ink) = (content(0.2), accent());
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {

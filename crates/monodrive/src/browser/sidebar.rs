@@ -9,7 +9,7 @@ use super::{
 };
 use crate::commands::{self, Scope};
 use crate::preferences::Preferences;
-use crate::theme::{self, accent, content, icon, icon_button, section_label};
+use crate::theme::{self, ButtonLook, accent, content, icon, icon_button, section_label};
 use gpui::{
     Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, KeyDownEvent,
     MouseButton, MouseDownEvent, Pixels, Point, Render, Role, Stateful, Task, Window, div,
@@ -102,19 +102,19 @@ struct DraggedFavorite {
 impl Render for DraggedFavorite {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .h(px(28.))
+            .h(px(theme::ROW_HEIGHT))
             .px_3()
-            .rounded_md()
+            .rounded(px(theme::RADIUS_ROW))
             .flex()
             .items_center()
-            .text_size(px(13.))
-            .text_color(content(0.9))
+            .text_size(px(theme::TEXT_BODY))
+            .text_color(content(1.))
             .bg(content(0.14))
             .child(self.label.clone())
     }
 }
 
-const ROW_HEIGHT: f32 = 32.;
+const ROW_HEIGHT: f32 = theme::SIDEBAR_ROW_HEIGHT;
 const DRIVE_HEIGHT: f32 = 40.;
 
 fn label_of(path: &Path) -> String {
@@ -143,6 +143,12 @@ fn fullness(volume: &Volume) -> Option<f32> {
         .then(|| (volume.total.saturating_sub(volume.free) as f64 / volume.total as f64) as f32)
 }
 
+/// A row and the gap under it. The gap belongs to the row, so a drop or a
+/// click there isn't lost between two rows.
+fn stacked() -> gpui::Div {
+    div().flex_shrink_0().pb(px(theme::ROW_GAP))
+}
+
 /// A small button in a sidebar row. It takes the press from the row under it.
 fn row_button(
     id: impl Into<ElementId>,
@@ -150,20 +156,7 @@ fn row_button(
     label: &'static str,
     glyph: &'static str,
 ) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .debug_selector(move || selector.clone())
-        .role(Role::Button)
-        .aria_label(label)
-        .size(px(20.))
-        .flex_shrink_0()
-        .rounded_md()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .hover(|s| s.bg(content(0.12)))
-        .child(icon(glyph, 12.).text_color(content(0.55)))
+    theme::row_icon_button(id, label, glyph, content(0.55)).debug_selector(move || selector.clone())
 }
 
 impl Browser {
@@ -467,11 +460,11 @@ impl Browser {
             .aria_selected(selected)
             .flex_shrink_0()
             .px_2()
-            .rounded_md()
-            .text_size(px(14.))
+            .rounded(px(theme::RADIUS_ROW))
+            .text_size(px(theme::TEXT_TITLE))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(content(if selected { 1. } else { 0.5 }))
-            .when(selected, |d| d.bg(content(0.1)))
+            .text_color(content(if selected { 1. } else { 0.65 }))
+            .when(selected, |d| d.bg(content(0.14)))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -487,7 +480,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
         row.cursor_pointer()
-            .hover(|s| s.bg(content(0.1)).text_color(content(1.)))
+            .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.sidebar_cursor = ix;
                 this.open_place(window, cx);
@@ -500,14 +493,16 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let selected = self.query.is_empty() && self.showing_recents();
-        Self::clickable(self.row(0, selected, cursor, cx), 0, cx)
-            .aria_label("Recents")
-            .h(px(ROW_HEIGHT))
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(icon("clock", 16.).text_color(content(if selected { 0.7 } else { 0.35 })))
-            .child(div().flex_1().truncate().child("Recents"))
+        stacked().child(
+            Self::clickable(self.row(0, selected, cursor, cx), 0, cx)
+                .aria_label("Recents")
+                .h(px(ROW_HEIGHT))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(icon("clock", 16.).text_color(content(if selected { 1. } else { 0.55 })))
+                .child(div().flex_1().truncate().child("Recents")),
+        )
     }
 
     fn favorite_row(
@@ -536,64 +531,69 @@ impl Browser {
             .gap_2()
             .when(unavailable, |d| d.text_color(content(0.3)));
         let row = if editing {
-            row.on_drop(cx.listener(move |this, dragged: &DraggedFavorite, _, cx| {
-                this.move_favorite(dragged.ix, fav, cx);
-            }))
-            .drag_over::<DraggedFavorite>(|s, _, _, _| s.bg(content(0.14)))
-            .child(
-                div()
-                    .id(("favorite-handle", fav))
-                    .debug_selector(move || format!("favorite-handle-{fav}"))
-                    .role(Role::Button)
-                    .aria_label("Drag to reorder")
-                    .flex_shrink_0()
-                    .cursor(CursorStyle::OpenHand)
-                    .child(icon("grip-vertical", 14.).text_color(content(0.4)))
-                    .on_drag(
-                        DraggedFavorite {
-                            ix: fav,
-                            label: label.clone(),
-                        },
-                        |dragged, _, _, cx| cx.new(|_| dragged.clone()),
-                    ),
-            )
+            row.drag_over::<DraggedFavorite>(|s, _, _, _| s.bg(content(0.14)))
+                .child(
+                    div()
+                        .id(("favorite-handle", fav))
+                        .debug_selector(move || format!("favorite-handle-{fav}"))
+                        .role(Role::Button)
+                        .aria_label("Drag to reorder")
+                        .flex_shrink_0()
+                        .cursor(CursorStyle::OpenHand)
+                        .child(icon("grip-vertical", 14.).text_color(content(0.55)))
+                        .on_drag(
+                            DraggedFavorite {
+                                ix: fav,
+                                label: label.clone(),
+                            },
+                            |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+                        ),
+                )
         } else {
             Self::clickable(row, ix, cx)
         };
-        row.child(icon(glyph, 16.).text_color(content(if unavailable {
-            0.2
-        } else if selected {
-            0.7
-        } else {
-            0.35
-        })))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(div().truncate().line_height(px(16.)).child(label))
-                .children(reason.map(|why| {
-                    div()
-                        .truncate()
-                        .line_height(px(13.))
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::NORMAL)
-                        .child(why)
-                })),
-        )
-        .when(editing, |d| {
-            d.child(
-                row_button(
-                    ("favorite-remove", fav),
-                    format!("favorite-remove-{fav}"),
-                    "Remove from Sidebar",
-                    "cancel-01",
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.remove_favorite(fav, cx))),
+        let row = row
+            .child(icon(glyph, 16.).text_color(content(if unavailable {
+                0.3
+            } else if selected {
+                1.
+            } else {
+                0.55
+            })))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().line_height(px(16.)).child(label))
+                    .children(reason.map(|why| {
+                        div()
+                            .truncate()
+                            .line_height(px(13.))
+                            .text_size(px(theme::TEXT_CAPTION))
+                            .font_weight(FontWeight::NORMAL)
+                            .child(why)
+                    })),
             )
-        })
+            .when(editing, |d| {
+                d.child(
+                    row_button(
+                        ("favorite-remove", fav),
+                        format!("favorite-remove-{fav}"),
+                        "Remove from Sidebar",
+                        "cancel-01",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_favorite(fav, cx))),
+                )
+            });
+        stacked()
+            .when(editing, |d| {
+                d.on_drop(cx.listener(move |this, dragged: &DraggedFavorite, _, cx| {
+                    this.move_favorite(dragged.ix, fav, cx);
+                }))
+            })
+            .child(row)
     }
 
     fn volume_row(
@@ -611,7 +611,7 @@ impl Browser {
         } else {
             "hard-drive"
         };
-        Self::clickable(self.row(ix, selected, cursor, cx), ix, cx)
+        let row = Self::clickable(self.row(ix, selected, cursor, cx), ix, cx)
             .aria_label(volume.name.clone())
             .h(px(DRIVE_HEIGHT))
             .flex()
@@ -623,7 +623,7 @@ impl Browser {
                     .items_center()
                     .gap_2()
                     .h(px(24.))
-                    .child(icon(glyph, 16.).text_color(content(if selected { 0.7 } else { 0.35 })))
+                    .child(icon(glyph, 16.).text_color(content(if selected { 1. } else { 0.55 })))
                     .child(
                         div()
                             .flex_1()
@@ -636,9 +636,9 @@ impl Browser {
                             div()
                                 .debug_selector(move || format!("read-only-{vol}"))
                                 .flex_shrink_0()
-                                .text_size(px(11.))
+                                .text_size(px(theme::TEXT_CAPTION))
                                 .font_weight(FontWeight::NORMAL)
-                                .text_color(content(0.4))
+                                .text_color(content(0.65))
                                 .child("Read-only"),
                         )
                     })
@@ -660,22 +660,17 @@ impl Browser {
                     }),
             )
             .children(fullness(volume).map(|fullness| {
-                div()
+                theme::progress_track()
                     .debug_selector(move || format!("volume-bar-{vol}"))
                     .ml(px(24.))
-                    .h(px(3.))
                     .flex_shrink_0()
-                    .rounded_full()
-                    .bg(content(0.14))
                     .child(
-                        div()
+                        theme::progress_fill(fullness)
                             .debug_selector(move || format!("volume-used-{vol}"))
-                            .h_full()
-                            .w(gpui::relative(fullness))
-                            .rounded_full()
                             .bg(content(0.55)),
                     )
-            }))
+            }));
+        stacked().child(row)
     }
 
     fn favorites_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -685,17 +680,9 @@ impl Browser {
             .flex_shrink_0()
             .justify_between()
             .child(
-                div()
-                    .id("favorites-edit")
+                theme::text_button("favorites-edit", label, ButtonLook::Ghost)
                     .debug_selector(|| "favorites-edit".into())
-                    .role(Role::Button)
-                    .aria_label(label)
-                    .px_1()
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .text_color(if editing { accent() } else { content(0.4) })
-                    .hover(|s| s.bg(content(0.1)))
-                    .child(label)
+                    .when(editing, |d| d.text_color(accent()))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_editing(cx))),
             )
     }
@@ -714,14 +701,14 @@ impl Browser {
             .child(
                 icon_button("trash", "Trash", "trash", true)
                     .debug_selector(|| "open-trash".into())
-                    .when(in_trash, |d| d.bg(content(0.1)))
+                    .when(in_trash, |d| d.bg(content(0.14)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_trash(window, cx))),
             )
             .children(self.index_bar(cx))
             .child(
                 icon_button("settings", "Settings", "settings", true)
                     .track_focus(&self.settings_focus)
-                    .focus_visible(|s| s.bg(content(0.1)).border_1().border_color(accent()))
+                    .focus_visible(|s| s.shadow(theme::focus_ring()))
                     .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
             )
     }
@@ -745,19 +732,14 @@ impl Browser {
             .px_2()
             .child(drag_area().h(px(theme::TITLE_BAR_HEIGHT)).w_full())
             .child(
-                div()
+                theme::field(if focused { accent() } else { content(0.12) })
                     .key_context("Search")
                     .flex_shrink_0()
-                    .h(px(32.))
-                    .mb(px(2.))
-                    .px(px(6.))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(content(if focused { 0.2 } else { 0.08 }))
-                    .flex()
-                    .items_center()
+                    .h(px(theme::FIELD_HEIGHT))
+                    .mb_1()
+                    .px_2()
                     .gap_2()
-                    .child(icon("search", 16.).text_color(content(0.35)))
+                    .child(icon("search", 14.).text_color(content(0.55)))
                     .child(div().flex_1().min_w_0().child(self.search.clone()))
                     .when_some(
                         (!focused)
@@ -766,8 +748,8 @@ impl Browser {
                         |d, keys| {
                             d.child(
                                 div()
-                                    .text_size(px(11.))
-                                    .text_color(content(0.4))
+                                    .text_size(px(theme::TEXT_CAPTION))
+                                    .text_color(content(0.65))
                                     .child(keys),
                             )
                         },
@@ -861,7 +843,7 @@ impl Browser {
                     .children(self.sidebar.error.clone().map(|why| {
                         div()
                             .px_2()
-                            .text_size(px(11.))
+                            .text_size(px(theme::TEXT_CAPTION))
                             .text_color(theme::danger())
                             .child(why)
                     }))

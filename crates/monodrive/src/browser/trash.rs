@@ -4,8 +4,7 @@
 
 use super::sidebar::Places;
 use super::{Browser, Operations, Stop, lock};
-use crate::palette::{self, Look};
-use crate::theme::{self, content, danger};
+use crate::theme::{self, ButtonLook, content, text_button};
 use gpui::{Context, FontWeight, Task, Window, div, prelude::*, px};
 use monodrive_core::cloud::Availability;
 use monodrive_core::entries::{self, Entry, Kind};
@@ -247,10 +246,9 @@ impl Browser {
         };
         let (known, why) = self.put_back();
         let can_empty = self.trash_header.count.is_some_and(|count| count > 0);
-        let enabled = |on: bool| if on { Look::Plain } else { Look::Disabled };
         Some(
             div()
-                .h(px(theme::ROW_HEIGHT + 8.))
+                .h(px(theme::TITLE_BAR_HEIGHT))
                 .flex_shrink_0()
                 .px_4()
                 .flex()
@@ -261,7 +259,7 @@ impl Browser {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(13.))
+                        .text_size(px(theme::TEXT_BODY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(title),
                 )
@@ -275,32 +273,42 @@ impl Browser {
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(12.))
-                                .text_color(content(0.45))
+                                .text_size(px(theme::TEXT_SMALL))
+                                .text_color(content(0.65))
                                 .child(why)
                         })),
                 )
                 .child(
-                    palette::button("put-back", "Put Back", enabled(!known.is_empty())).when(
-                        !known.is_empty(),
-                        |d| {
-                            d.on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.put_back_selected(window, cx)
-                                }),
-                            )
+                    text_button(
+                        "put-back",
+                        "Put Back",
+                        if known.is_empty() {
+                            ButtonLook::Disabled
+                        } else {
+                            ButtonLook::Secondary
                         },
-                    ),
+                    )
+                    .debug_selector(|| "put-back".into())
+                    .when(!known.is_empty(), |d| {
+                        d.on_click(
+                            cx.listener(|this, _, window, cx| this.put_back_selected(window, cx)),
+                        )
+                    }),
                 )
                 .child(
-                    palette::button("empty-trash", "Empty Trash", enabled(can_empty)).when(
-                        can_empty,
-                        |d| {
-                            d.text_color(danger()).on_click(
-                                cx.listener(|this, _, window, cx| this.empty_trash(window, cx)),
-                            )
+                    text_button(
+                        "empty-trash",
+                        "Empty Trash",
+                        if can_empty {
+                            ButtonLook::Caution
+                        } else {
+                            ButtonLook::Disabled
                         },
-                    ),
+                    )
+                    .debug_selector(|| "empty-trash".into())
+                    .when(can_empty, |d| {
+                        d.on_click(cx.listener(|this, _, window, cx| this.empty_trash(window, cx)))
+                    }),
                 ),
         )
     }

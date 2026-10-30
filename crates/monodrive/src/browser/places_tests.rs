@@ -304,6 +304,19 @@ fn edit_mode_shows_handles_and_removes_and_reorders_for_good(cx: &mut TestAppCon
     assert_eq!(saved(&world.store)[0], two);
     assert_eq!(favorites(&browser, cx)[2], one);
 
+    // A drop in the gap under a row counts as a drop on that row.
+    let from = center(cx, "favorite-handle-2");
+    let row = cx.debug_bounds("place-1").unwrap();
+    let to = point(row.center().x, row.bottom() + px(1.));
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert_eq!(saved(&world.store)[0], one);
+    browser.update(cx, |b, cx| b.move_favorite(0, 2, cx));
+    cx.run_until_parked();
+
     // The ✕ forgets only the bookmark.
     press_on(cx, "favorite-remove-2");
     assert!(!saved(&world.store).contains(&one));

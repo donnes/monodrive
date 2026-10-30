@@ -5,7 +5,7 @@
 use crate::palette;
 use crate::preferences::Preferences;
 use crate::text_field::{self, TextField};
-use crate::theme::{accent, content, on_accent};
+use crate::theme::{self, content, danger};
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Role,
     Task, Window, actions, div, prelude::*, px,
@@ -32,7 +32,6 @@ pub enum GotoEvent {
 }
 
 const LIMIT: usize = 8;
-const ROW: f32 = 28.;
 
 pub struct GotoView {
     field: Entity<TextField>,
@@ -157,24 +156,11 @@ impl Render for GotoView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.completions.iter().enumerate().map(|(ix, path)| {
             let selected = self.selected == Some(ix);
-            div()
+            theme::row(selected)
                 .id(ix)
                 .role(Role::ListBoxOption)
                 .aria_selected(selected)
-                .h(px(ROW))
-                .px_3()
-                .rounded(px(7.))
-                .flex()
-                .items_center()
-                .text_size(px(13.))
-                .cursor_pointer()
-                .map(|d| {
-                    if selected {
-                        d.bg(accent()).text_color(on_accent())
-                    } else {
-                        d.text_color(content(0.85))
-                    }
-                })
+                .when(!selected, |d| d.hover(|s| s.bg(content(0.08))))
                 .child(div().truncate().child(paths::abbreviate(path)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected = Some(ix);
@@ -184,26 +170,27 @@ impl Render for GotoView {
         let body = div()
             .flex()
             .flex_col()
+            .gap(px(theme::ROW_GAP))
             .children(self.error.clone().map(|error| {
                 div()
-                    .h(px(ROW))
-                    .px_3()
+                    .h(px(theme::ROW_HEIGHT))
+                    .px_2()
                     .flex()
                     .items_center()
-                    .text_size(px(12.))
-                    .text_color(accent())
+                    .text_size(px(theme::TEXT_SMALL))
+                    .text_color(danger())
                     .child(error)
             }))
             .children(rows)
             .when(self.completions.is_empty() && self.error.is_none(), |d| {
                 d.child(
                     div()
-                        .h(px(ROW))
-                        .px_3()
+                        .h(px(theme::ROW_HEIGHT))
+                        .px_2()
                         .flex()
                         .items_center()
-                        .text_size(px(12.))
-                        .text_color(content(0.5))
+                        .text_size(px(theme::TEXT_SMALL))
+                        .text_color(content(0.65))
                         .child("Return opens it. A file opens its folder with it selected."),
                 )
             });

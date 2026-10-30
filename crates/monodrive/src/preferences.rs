@@ -234,6 +234,7 @@ impl Preferences {
 
     /// Picks a preset and moves the color sliders to its surface tint.
     pub fn apply_palette(&mut self, id: &str) {
+        // design: reads the preset's own color, not one the UI paints.
         let surface: gpui::Hsla = gpui::rgb(crate::palettes::palette(id, false).surface).into();
         self.hue = (surface.h * 360.).round() as u32;
         self.saturation = (surface.s * 100.).round() as u32;

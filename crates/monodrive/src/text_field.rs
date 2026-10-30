@@ -597,7 +597,7 @@ impl Element for FieldElement {
         let run = TextRun {
             len: text.len(),
             font: style.font(),
-            color: if empty { content(0.4) } else { style.color },
+            color: if empty { content(0.65) } else { style.color },
             background_color: None,
             underline: None,
             strikethrough: None,

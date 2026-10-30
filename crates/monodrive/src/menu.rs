@@ -5,11 +5,11 @@
 //! Esc or a press outside closes it.
 
 use crate::commands::MenuRow;
-use crate::theme::{self, content, icon};
+use crate::theme::{self, Elevation, content, icon};
 use gpui::{
-    Action, App, BoxShadow, Context, EventEmitter, FocusHandle, Focusable, KeyBinding,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Role, Size, Window, actions, div,
-    point, prelude::*, px, rgba,
+    Action, App, Context, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Point, Role, Size, Window, actions, div, point,
+    prelude::*, px,
 };
 
 actions!(context_menu, [Up, Down, Run, Dismiss]);
@@ -30,11 +30,9 @@ pub enum MenuEvent {
 }
 
 const WIDTH: f32 = 240.;
-const ROW: f32 = 28.;
 const PADDING: f32 = 4.;
 /// A separator's line and the space around it.
 const SEPARATOR: f32 = 9.;
-const RADIUS: f32 = 12.;
 /// Kept clear of the window's edges.
 const MARGIN: f32 = 8.;
 
@@ -118,8 +116,11 @@ impl ContextMenu {
 
     fn size(&self) -> Size<Pixels> {
         let separators = self.rows.iter().filter(|row| row.separated).count();
-        let height =
-            2. * (PADDING + 1.) + ROW * self.rows.len() as f32 + SEPARATOR * separators as f32;
+        let rows = self.rows.len() as f32;
+        let height = 2. * (PADDING + 1.)
+            + theme::ROW_HEIGHT * rows
+            + theme::ROW_GAP * (rows - 1.).max(0.)
+            + SEPARATOR * separators as f32;
         Size::new(px(WIDTH), px(height))
     }
 }
@@ -173,15 +174,15 @@ impl Render for ContextMenu {
                     d.child(separator().id(("separator", ix)).role(Role::Splitter))
                 })
                 .child(
-                    item(active)
+                    theme::row(active)
                         .id(ix)
                         .role(Role::MenuItem)
                         .aria_label(row.title)
                         .aria_selected(active)
                         .when_some(row.keys.clone(), |d, keys| d.aria_keyshortcuts(keys))
-                        .when(checks, |d| d.child(check(row.checked)))
+                        .when(checks, |d| d.child(check(row.checked, active)))
                         .child(div().flex_1().min_w_0().truncate().child(row.title))
-                        .children(row.keys.clone().map(shortcut))
+                        .children(row.keys.clone().map(|keys| shortcut(keys, active)))
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
                             if this.active != Some(ix) {
                                 this.active = Some(ix);
@@ -232,71 +233,39 @@ pub(crate) fn card(
     max_height: Pixels,
     rows: impl IntoIterator<Item = impl IntoElement>,
 ) -> gpui::Div {
-    div()
+    theme::floating(Elevation::Popover)
         .w(px(width))
         .max_h(max_height)
-        .rounded(px(RADIUS))
-        .shadow(vec![
-            BoxShadow::new(px(0.), px(20.), rgba(0x0000001a).into())
-                .blur_radius(px(25.))
-                .spread_radius(px(-5.)),
-            BoxShadow::new(px(0.), px(8.), rgba(0x0000001a).into())
-                .blur_radius(px(10.))
-                .spread_radius(px(-6.)),
-        ])
-        .text_color(content(1.))
-        .child(theme::floating_surface(RADIUS))
         .child(
             div()
                 .id("context-menu-rows")
                 .relative()
-                .m(px(1.))
                 .p(px(PADDING))
                 .max_h(max_height - px(2.))
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
+                .gap(px(theme::ROW_GAP))
                 .children(rows),
-        )
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .rounded(px(RADIUS))
-                .border_1()
-                .border_color(content(0.1)),
         )
 }
 
 fn separator() -> gpui::Div {
-    div().my_1().h(px(SEPARATOR - 8.)).bg(content(0.1))
-}
-
-fn item(active: bool) -> gpui::Div {
-    div()
-        .h(px(ROW))
-        .px_2()
-        .rounded(px(8.))
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_size(px(13.))
-        .cursor_pointer()
-        .when(active, |d| d.bg(content(0.1)))
+    div().my_1().h(px(SEPARATOR - 8.)).bg(content(0.12))
 }
 
 /// The checkmark's column, in menus where a row can be checked.
-fn check(checked: bool) -> gpui::Div {
+fn check(checked: bool, active: bool) -> gpui::Div {
     div().w(px(12.)).flex_shrink_0().when(checked, |d| {
-        d.child(icon("check-hi", 12.).text_color(content(0.8)))
+        d.child(icon("check-hi", 12.).text_color(theme::row_muted(active)))
     })
 }
 
-fn shortcut(keys: String) -> gpui::Div {
+fn shortcut(keys: String, active: bool) -> gpui::Div {
     div()
         .flex_shrink_0()
-        .text_size(px(11.))
-        .text_color(content(0.4))
+        .text_size(px(theme::TEXT_CAPTION))
+        .text_color(theme::row_muted(active))
         .child(keys)
 }
 

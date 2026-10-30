@@ -333,6 +333,7 @@ impl Backdrop {
             |_, _, _| {},
             move |bounds, _, window, _| {
                 window.paint_quad(
+                    // design: the shader replaces this fill with the picture.
                     gpui::fill(bounds, gpui::black())
                         .corner_radii(Corners::all(radius))
                         // The renderer reads the display scale from this border.

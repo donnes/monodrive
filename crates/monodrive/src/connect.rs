@@ -5,9 +5,11 @@
 //! sidebar, and opening it is a separate step.
 
 use crate::browser::Places;
-use crate::palette::{self, Look};
+use crate::palette;
 use crate::text_field::{self, TextField};
-use crate::theme::{accent, content, danger, icon, on_accent};
+use crate::theme::{
+    self, ButtonLook, content, danger, on_accent, row, row_icon_button, text_button,
+};
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Role,
     Task, Window, actions, div, prelude::*, px,
@@ -32,8 +34,6 @@ pub enum ConnectEvent {
     Dismissed,
     Connected { address: String, mount: PathBuf },
 }
-
-const ROW: f32 = 28.;
 
 pub struct ConnectView {
     pub(crate) field: Entity<TextField>,
@@ -176,49 +176,25 @@ impl Render for ConnectView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.saved.iter().enumerate().map(|(ix, address)| {
             let selected = self.selected == Some(ix);
-            div()
+            row(selected)
                 .id(("saved-server", ix))
                 .debug_selector(move || format!("saved-server-{ix}"))
                 .role(Role::ListBoxOption)
                 .aria_label(address.clone())
                 .aria_selected(selected)
-                .h(px(ROW))
-                .pl_3()
                 .pr_1()
-                .rounded(px(7.))
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_size(px(13.))
-                .cursor_pointer()
-                .map(|d| {
-                    if selected {
-                        d.bg(accent()).text_color(on_accent())
-                    } else {
-                        d.text_color(content(0.85)).hover(|s| s.bg(content(0.08)))
-                    }
-                })
+                .when(!selected, |d| d.hover(|s| s.bg(content(0.08))))
                 .child(div().flex_1().min_w_0().truncate().child(address.clone()))
                 .child(
-                    div()
-                        .id(("forget-server", ix))
-                        .debug_selector(move || format!("forget-server-{ix}"))
-                        .role(Role::Button)
-                        .aria_label("Forget this server")
-                        .occlude()
-                        .size(px(20.))
-                        .flex_shrink_0()
-                        .rounded_md()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .hover(|s| s.bg(content(0.12)))
-                        .child(icon("cancel-01", 12.).text_color(if selected {
-                            on_accent()
-                        } else {
-                            content(0.55)
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| this.forget(ix, cx))),
+                    row_icon_button(
+                        ("forget-server", ix),
+                        "Forget this server",
+                        "cancel-01",
+                        if selected { on_accent() } else { content(0.55) },
+                    )
+                    .debug_selector(move || format!("forget-server-{ix}"))
+                    .occlude()
+                    .on_click(cx.listener(move |this, _, _, cx| this.forget(ix, cx))),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.fill(ix, cx)))
         });
@@ -226,13 +202,13 @@ impl Render for ConnectView {
         let body = div()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(theme::ROW_GAP))
             .child(
                 div()
-                    .px_3()
-                    .pt_1()
-                    .text_size(px(12.))
-                    .text_color(content(0.5))
+                    .px_2()
+                    .py_1()
+                    .text_size(px(theme::TEXT_SMALL))
+                    .text_color(content(0.65))
                     .child(if self.saved.is_empty() {
                         "A server you connect to is saved here. macOS asks for any password and keeps it in the Keychain."
                     } else {
@@ -243,34 +219,36 @@ impl Render for ConnectView {
             .children(self.error.clone().map(|why| {
                 div()
                     .debug_selector(|| "connect-error".into())
-                    .px_3()
+                    .px_2()
                     .py_1()
-                    .text_size(px(12.))
+                    .text_size(px(theme::TEXT_SMALL))
                     .text_color(danger())
                     .child(why)
             }))
             .child(
                 div()
-                    .pt_1()
+                    .pt_2()
                     .px_1()
                     .pb_1()
                     .flex()
                     .justify_end()
                     .gap_2()
                     .child(
-                        palette::button("connect-cancel", "Cancel", Look::Plain)
+                        text_button("connect-cancel", "Cancel", ButtonLook::Secondary)
+                            .debug_selector(|| "connect-cancel".into())
                             .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx))),
                     )
                     .child(
-                        palette::button(
+                        text_button(
                             "connect-go",
                             if connecting { "Connecting…" } else { "Connect" },
                             if connecting {
-                                Look::Disabled
+                                ButtonLook::Disabled
                             } else {
-                                Look::Default
+                                ButtonLook::Primary
                             },
                         )
+                        .debug_selector(|| "connect-go".into())
                         .when(!connecting, |d| {
                             d.on_click(cx.listener(|this, _, _, cx| this.connect(cx)))
                         }),
