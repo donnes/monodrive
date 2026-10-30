@@ -195,6 +195,14 @@ const REFRESH_DELAY: Duration = Duration::from_millis(150);
 const INDEX_POLL: Duration = Duration::from_millis(500);
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
+/// What stands for the path levels that don't fit.
+const COLLAPSED: &str = "…";
+/// A crumb's side padding.
+const CRUMB_PADDING: f32 = 12.;
+/// A crumb's chevron and the gaps either side of it.
+const CRUMB_CHEVRON: f32 = 16.;
+/// The title bar's Back, Forward, gaps and right padding, and a point of slack.
+const BAR_CHROME: f32 = 74.;
 
 pub struct Browser {
     /// Keeps the browser's keys working wherever focus is.
@@ -2381,63 +2389,114 @@ impl Browser {
     }
 
     /// The folder's path as clickable steps, from the disk to here.
-    fn path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn path_bar(
+        &self,
+        room: f32,
+        most: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let current = self.folder().to_path_buf();
         let steps: Vec<PathBuf> = current.ancestors().map(Path::to_path_buf).collect();
         let last = steps.len().saturating_sub(1);
+        let step_name = |path: &Path| {
+            path.file_name().map_or_else(
+                || "Macintosh HD".to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        };
+        let widths: Vec<f32> = steps
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(ix, path)| {
+                let weight = if ix == last {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                };
+                let text = text_width(&step_name(path), theme::TEXT_BODY, weight, window);
+                text + CRUMB_PADDING + if ix > 0 { CRUMB_CHEVRON } else { 0. }
+            })
+            .collect();
+        let ellipsis =
+            text_width(COLLAPSED, theme::TEXT_BODY, FontWeight::NORMAL, window) + CRUMB_PADDING;
+        let hidden = hidden_levels(&widths, ellipsis, room);
         div()
             .ml_1()
-            .min_w_0()
+            .flex_shrink_0()
+            .max_w(px(most))
             .flex()
             .items_center()
             .gap(px(2.))
             .text_size(px(theme::TEXT_BODY))
             .overflow_hidden()
-            .children(steps.into_iter().rev().enumerate().map(|(ix, path)| {
-                let name = path.file_name().map_or_else(
-                    || "Macintosh HD".to_string(),
-                    |name| name.to_string_lossy().into_owned(),
-                );
-                let here = ix == last;
-                // Clicking an ancestor selects the folder on the way back down.
-                let child = current
-                    .ancestors()
-                    .find(|step| step.parent() == Some(path.as_path()))
-                    .map(Path::to_path_buf);
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .min_w_0()
-                    // The folder you're in keeps its name; ancestors give way.
-                    .when(here, |d| d.flex_shrink_0())
-                    .when(ix > 0, |d| {
-                        d.child(icon("chevron-right", 12.).text_color(content(0.3)))
-                    })
-                    .child(
+            .when(hidden > 0, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .px(px(6.))
+                        .text_color(content(0.65))
+                        .child(COLLAPSED),
+                )
+            })
+            .children(
+                steps
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .enumerate()
+                    .skip(hidden)
+                    .map(|(ix, path)| {
+                        let name = step_name(&path);
+                        let here = ix == last;
+                        // Clicking an ancestor selects the folder on the way back down.
+                        let child = current
+                            .ancestors()
+                            .find(|step| step.parent() == Some(path.as_path()))
+                            .map(Path::to_path_buf);
                         div()
-                            .id(("path-step", ix))
-                            .role(gpui::Role::Link)
-                            .aria_label(name.clone())
-                            .px(px(6.))
-                            .rounded_full()
-                            .line_height(px(theme::BUTTON_HEIGHT))
-                            .truncate()
-                            .map(|d| {
-                                if here {
-                                    d.font_weight(FontWeight::SEMIBOLD)
-                                } else {
-                                    d.text_color(content(0.65))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.go_to(path.clone(), child.clone(), window, cx)
-                                        }))
-                                }
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .min_w_0()
+                            .when(ix > 0, |d| {
+                                d.child(icon("chevron-right", 12.).text_color(content(0.3)))
                             })
-                            .child(name),
-                    )
-            }))
+                            .child(
+                                div()
+                                    .id(("path-step", ix))
+                                    .role(gpui::Role::Link)
+                                    .aria_label(name.clone())
+                                    .px(px(6.))
+                                    .rounded_full()
+                                    .line_height(px(theme::BUTTON_HEIGHT))
+                                    .truncate()
+                                    .map(|d| {
+                                        if here {
+                                            d.font_weight(FontWeight::SEMIBOLD)
+                                        } else {
+                                            d.text_color(content(0.65))
+                                                .cursor_pointer()
+                                                .hover(|s| {
+                                                    s.bg(content(0.08)).text_color(content(1.))
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.go_to(
+                                                            path.clone(),
+                                                            child.clone(),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    },
+                                                ))
+                                        }
+                                    })
+                                    .child(name),
+                            )
+                    }),
+            )
     }
 
     /// Follows a drag of the sidebar's edge. Element mouse handlers only fire
@@ -2481,7 +2540,7 @@ impl Browser {
         .size_0()
     }
 
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // As Finder's status bar: what's selected and the size of its files.
         let count = match (self.selection.len(), self.entries.len()) {
             (0, 1) => "1 item".to_string(),
@@ -2495,6 +2554,27 @@ impl Browser {
                 ),
             },
         };
+        let space = self.space_here();
+        let error = self
+            .renaming
+            .as_ref()
+            .and_then(|renaming| renaming.error.clone());
+        let ring = self.jobs.read(cx).ring();
+        // The path gets what the status text leaves. Only when the folder's
+        // own name won't fit in that does the status text give way.
+        let sidebar = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
+        let bar = window.viewport_size().width.as_f32() - sidebar;
+        let status_width = |text: &String, most: f32| {
+            let width = text_width(text, theme::TEXT_SMALL, FontWeight::NORMAL, window);
+            width.min(most) + 12.
+        };
+        let status = status_width(&count, f32::MAX)
+            + space
+                .as_ref()
+                .map_or(0., |text| status_width(text, f32::MAX))
+            + error.as_ref().map_or(0., |text| status_width(text, 360.));
+        let most = (bar - BAR_CHROME).max(0.);
+        let room = most - status - if ring.is_some() { 28. } else { 0. };
         div()
             .h(px(theme::TITLE_BAR_HEIGHT))
             .flex_shrink_0()
@@ -2517,7 +2597,7 @@ impl Browser {
             )
             .map(|d| {
                 if self.showing_folder() {
-                    d.child(self.path_bar(cx))
+                    d.child(self.path_bar(room, most, window, cx))
                 } else {
                     d.child(
                         div()
@@ -2533,37 +2613,33 @@ impl Browser {
                 }
             })
             .child(drag_area().flex_1().h_full())
-            .children(
-                self.renaming
-                    .as_ref()
-                    .and_then(|renaming| renaming.error.clone())
-                    .map(|why| {
-                        // The path gives way first, as it does for the count.
-                        div()
-                            .flex_shrink_0()
-                            .max_w(px(360.))
-                            .truncate()
-                            .text_size(px(theme::TEXT_SMALL))
-                            .text_color(danger())
-                            .child(why)
-                    }),
-            )
+            .children(error.map(|why| {
+                div()
+                    .min_w_0()
+                    .max_w(px(360.))
+                    .truncate()
+                    .text_size(px(theme::TEXT_SMALL))
+                    .text_color(danger())
+                    .child(why)
+            }))
             .child(
                 div()
-                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(content(0.65))
                     .child(count),
             )
-            .children(self.space_here().map(|space| {
+            .children(space.map(|space| {
                 div()
-                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
                     .ml_2()
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(content(0.65))
                     .child(space)
             }))
-            .children(self.jobs.read(cx).ring().map(|ring| {
+            .children(ring.map(|ring| {
                 ring.on_click(cx.listener(|this, _, window, cx| this.toggle_jobs(window, cx)))
             }))
     }
@@ -2791,7 +2867,7 @@ impl Browser {
                 // accent with its ink.
                 let selected_ink = if active { on_accent() } else { content(1.) };
                 let muted = if selected {
-                    selected_ink.opacity(0.8)
+                    selected_ink
                 } else {
                     content(0.65)
                 };
@@ -3367,7 +3443,7 @@ impl Render for Browser {
                             .border_l_1()
                             .border_color(content(0.06))
                     })
-                    .child(self.title_bar(cx))
+                    .child(self.title_bar(window, cx))
                     .child(
                         div()
                             .relative()
@@ -3643,6 +3719,46 @@ fn sidebar_width(wanted: f32, window: &Window) -> f32 {
     wanted
         .min(room)
         .clamp(*SIDEBAR_WIDTHS.start(), *SIDEBAR_WIDTHS.end())
+}
+
+fn text_width(text: &str, size: f32, weight: FontWeight, window: &Window) -> f32 {
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: gpui::Font {
+            weight,
+            ..gpui::font(theme::UI_FONT)
+        },
+        color: content(1.),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let text = gpui::SharedString::from(text.to_owned());
+    window
+        .text_system()
+        .shape_line(text, px(size), &[run], None)
+        .width
+        .as_f32()
+}
+
+/// How many of the path's leading levels collapse into one "…" crumb. `widths`
+/// runs from the disk to the current folder, each with its chevron. Levels
+/// are kept from the right at full width while they fit in `room`; the current
+/// folder is always kept.
+fn hidden_levels(widths: &[f32], ellipsis: f32, room: f32) -> usize {
+    if widths.iter().sum::<f32>() <= room {
+        return 0;
+    }
+    let mut used = ellipsis;
+    let mut shown = 0;
+    for width in widths.iter().rev() {
+        if shown > 0 && used + width > room {
+            break;
+        }
+        used += width;
+        shown += 1;
+    }
+    widths.len().saturating_sub(shown.max(1))
 }
 
 /// A column title that sorts by its column; the sorted one shows which way.
@@ -4611,6 +4727,52 @@ mod tests {
             cx.simulate_input(name);
         }
         cx.run_until_parked();
+    }
+
+    #[test]
+    fn the_path_keeps_what_fits_from_the_right_and_collapses_the_rest() {
+        // Disk, Users, me, Projects, here; "…" is 20 wide.
+        let widths = [80., 50., 40., 70., 60.];
+        assert_eq!(hidden_levels(&widths, 20., 300.), 0);
+        assert_eq!(hidden_levels(&widths, 20., 299.), 1);
+        // Only levels that fit whole stay, and the hidden ones are one crumb.
+        assert_eq!(hidden_levels(&widths, 20., 190.), 2);
+        assert_eq!(hidden_levels(&widths, 20., 150.), 3);
+        // The current folder stays, however little room there is.
+        assert_eq!(hidden_levels(&widths, 20., 10.), 4);
+        assert_eq!(hidden_levels(&[60.], 20., 10.), 0);
+    }
+
+    #[gpui::test]
+    fn escape_after_a_failed_rename_closes_the_field_and_its_error(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let _owned = own(cx);
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down down down enter");
+        retype(cx, "zeta");
+        press(cx, "enter");
+        assert!(editing(&browser, cx).unwrap().1.is_some());
+        press(cx, "escape");
+        assert_eq!(editing(&browser, cx), None);
+        assert!(project.join("a.txt").exists());
+        // The keys are back on the list, not in a field that went away.
+        press(cx, "up");
+        assert_eq!(shown(&browser, cx).1, ["zeta"]);
+    }
+
+    #[gpui::test]
+    fn a_click_in_the_gap_under_a_palette_row_runs_that_row(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "shift-cmd-p");
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let row = cx.debug_bounds("palette-row-0").unwrap();
+        cx.simulate_click(point(row.center().x, row.bottom() + px(1.)), with(""));
+        cx.run_until_parked();
+        // Its command runs once the palette has closed, and a press inside the
+        // card can't dismiss it, so a closed palette means the row ran.
+        browser.read_with(cx, |browser, _| assert!(browser.sheet.is_none()));
     }
 
     #[gpui::test]

@@ -1,49 +1,140 @@
-#!/usr/bin/env bash
+#!/usr/bin/env perl
 # Fails on UI values that DESIGN.md says come from theme.rs. A justified
 # exception gets `// design: <reason>` on the line or the line above it.
-set -euo pipefail
-cd "$(dirname "$0")/.."
+#
+# It reads the source as text, whitespace and all, so it stops the slips that
+# ordinary formatting produces; it isn't a Rust parser. Each fixture in
+# check-design-fixtures marks the lines it must flag with `//~`, and runs first.
+use strict;
+use warnings;
+use File::Basename qw(dirname);
+use File::Find qw(find);
+use File::Spec;
 
-find crates/monodrive/src -name '*.rs' ! -name theme.rs ! -name palettes.rs -print0 | sort -z |
-    xargs -0 awk '
-    function complain(what) {
-        printf "%s:%d: %s: %s\n", FILENAME, FNR, what, $0
-        failed = 1
-    }
-    function number_after(prefix, line,    rest) {
-        rest = substr(line, index(line, prefix) + length(prefix))
-        return rest + 0
-    }
-    FNR == 1 { excused = 0 }
-    {
-        code = $0
-        comment = index(code, "//")
-        if (comment > 0) code = substr(code, 1, comment - 1)
-        allowed = excused || $0 ~ /\/\/ design: [^ ]/
-        excused = code ~ /^[ \t]*$/ && $0 ~ /\/\/ design: [^ ]/
-        if (allowed) next
+my $root = dirname(dirname(File::Spec->rel2abs(__FILE__)));
+chdir $root or die "$root: $!";
 
-        if (code ~ /\.rounded\(/ && code !~ /\.rounded\(px\((theme::)?RADIUS_(ROW|CARD|THUMB)[ )]/)
-            complain("radius outside the scale, use RADIUS_ROW, RADIUS_CARD or RADIUS_THUMB")
-        if (code ~ /\.rounded_[a-z0-9_]*\(/ && code !~ /\.rounded_full\(/)
-            complain("radius outside the scale, use RADIUS_ROW, RADIUS_CARD, RADIUS_THUMB or rounded_full")
-        if (code ~ /(^|[^a-zA-Z0-9_.])(rgb|rgba|hsl|hsla)\(/ || code ~ /gpui::(white|black)\(/)
-            complain("raw color, use a token from theme.rs")
-        if (code ~ /\.text_size\(px\([0-9]/ || code ~ /\.text_(xs|sm|base|lg|xl|[0-9]xl)\(\)/)
-            complain("text size outside the scale, use TEXT_CAPTION, TEXT_SMALL, TEXT_BODY or TEXT_TITLE")
-        if (code ~ /BoxShadow::|\.shadow\(vec!/)
-            complain("raw shadow, use floating or a shadow from theme.rs")
-        if (code ~ /[^a-z_]icon\("[^"]*", [0-9]/) {
-            match(code, /[^a-z_]icon\("[^"]*", /)
-            side = substr(code, RSTART + RLENGTH) + 0
-            if (side != 12 && side != 14 && side != 16)
-                complain("icon size outside the scale, use 12, 14 or 16")
+my $RAW_COLOR = qr/rgb|rgba|hsl|hsla|white|black/;
+my %ALPHAS = map { $_ => 1 } (1, 0.65, 0.55, 0.3, 0.2, 0.14, 0.12, 0.08, 0.06, 0.03);
+my %ICONS = map { $_ => 1 } (12, 14, 16);
+my $NUMBER = qr/\d+\.\d*|\.\d+|\d+/;
+
+# Comments and the insides of strings go, keeping every newline, so that a
+# path in a string or a color in a comment isn't code and offsets stay lines.
+sub code_of {
+    my ($text) = @_;
+    $text =~ s{
+        (//[^\n]*)
+        | ("(?:[^"\\]|\\.)*")
+        | ('(?:[^'\\\n]|\\.)')
+    }{
+        my $found = $1 // $2 // $3;
+        defined $1 ? "" : defined $2 ? '"' . ("\n" x ($found =~ tr/\n//)) . '"' : "' '";
+    }gsxe;
+    return $text;
+}
+
+# Every problem in one file's text, as [line, message].
+sub problems_in {
+    my ($text) = @_;
+    my @lines = split /\n/, $text, -1;
+    my %excused;
+    for my $ix (0 .. $#lines) {
+        next unless $lines[$ix] =~ m{//\s*design:\s*\S};
+        $excused{$ix + 1} = 1;
+        $excused{$ix + 2} = 1 if $lines[$ix] =~ m{^\s*//};
+    }
+    my $code = code_of($text);
+    my @found;
+    my $flag = sub {
+        my ($start, $end, $message) = @_;
+        my $first = 1 + (substr($code, 0, $start) =~ tr/\n//);
+        my $last = 1 + (substr($code, 0, $end) =~ tr/\n//);
+        return if grep { $excused{$_} } $first .. $last;
+        push @found, [$first, $message];
+    };
+    my $each = sub {
+        my ($pattern, $message) = @_;
+        while ($code =~ /$pattern/g) {
+            $flag->($-[0], $+[0], $message);
         }
-        if (code ~ /[^a-z_]content\(0?\.?[0-9]/) {
-            alpha = number_after("content(", code)
-            if (alpha != 1 && alpha != 0.65 && alpha != 0.55 && alpha != 0.3 && alpha != 0.2 && alpha != 0.14 && alpha != 0.12 && alpha != 0.08 && alpha != 0.06 && alpha != 0.03)
-                complain("ink alpha outside the scale in DESIGN.md")
+    };
+
+    $each->(qr/\.rounded\s*\(\s*+(?!px\s*\(\s*+(?:theme::)?RADIUS_(?:ROW|CARD|THUMB)\b)/,
+        "radius outside the scale, use RADIUS_ROW, RADIUS_CARD or RADIUS_THUMB");
+    $each->(qr/\.rounded_(?!full\b)\w*\s*\(/,
+        "radius outside the scale, use RADIUS_ROW, RADIUS_CARD, RADIUS_THUMB or rounded_full");
+    $each->(qr/\bgpui\s*::\s*(?:$RAW_COLOR)\b/, "raw color, use a token from theme.rs");
+    $each->(qr/(?<![\w.:])(?:rgb|rgba|hsl|hsla)\s*\(/, "raw color, use a token from theme.rs");
+    $each->(qr/\b(?:Hsla|Rgba)\s*\{\s*[hr]\s*:/, "raw color, use a token from theme.rs");
+    while ($code =~ /\buse\s+gpui\s*::\s*([^;]*);/g) {
+        my ($start, $end, $names) = ($-[0], $+[0], $1);
+        $flag->($start, $end, "imports a raw color, use a token from theme.rs")
+            if $names =~ /(?<![\w:])(?:$RAW_COLOR)\b/ || $names =~ /^\s*\*/;
+    }
+    $each->(qr/\.text_size\s*\(\s*+(?!px\s*\(\s*+[A-Za-z_])/,
+        "text size outside the scale, use TEXT_CAPTION, TEXT_SMALL, TEXT_BODY or TEXT_TITLE");
+    $each->(qr/\.text_(?:xs|sm|base|lg|xl|\dxl)\s*\(\s*\)/,
+        "text size outside the scale, use TEXT_CAPTION, TEXT_SMALL, TEXT_BODY or TEXT_TITLE");
+    $each->(qr/\bBoxShadow\b|\.shadow\s*\(\s*vec!/, "raw shadow, use floating or a shadow from theme.rs");
+
+    my $parens = qr/(\((?:[^()]++|(?-1))*\))/;
+    while ($code =~ /(?<![\w.])content\s*$parens/g) {
+        my ($start, $end, $args) = ($-[0], $+[0], $1);
+        while ($args =~ /(?<![\w.])($NUMBER)(?![\w.])/g) {
+            $flag->($start, $end, "ink alpha $1 outside the scale in DESIGN.md") unless $ALPHAS{$1 + 0};
         }
     }
-    END { exit failed }
-    '
+    while ($code =~ /(?<![\w.])icon\s*\(([^,;]*),\s*($NUMBER)\s*\)/g) {
+        $flag->($-[0], $+[0], "icon size outside the scale, use 12, 14 or 16") unless $ICONS{$2 + 0};
+    }
+    return @found;
+}
+
+sub read_file {
+    my ($path) = @_;
+    open my $file, "<", $path or die "$path: $!";
+    local $/;
+    return scalar <$file>;
+}
+
+# The fixtures say what must be flagged; anything else is the guard's bug.
+my $wrong = 0;
+for my $path (sort glob "scripts/check-design-fixtures/*.rs") {
+    my $text = read_file($path);
+    my @lines = split /\n/, $text, -1;
+    my @wanted = grep { $lines[$_ - 1] =~ m{//~} } 1 .. @lines;
+    my %seen = map { $_->[0] => 1 } problems_in($text);
+    for my $line (@wanted) {
+        next if $seen{$line};
+        print "$path:$line: the check let this through\n";
+        $wrong = 1;
+    }
+    my %marked = map { $_ => 1 } @wanted;
+    for my $line (sort { $a <=> $b } keys %seen) {
+        next if $marked{$line};
+        print "$path:$line: the check flagged this by mistake\n";
+        $wrong = 1;
+    }
+}
+exit 1 if $wrong;
+
+my @files;
+find(
+    sub {
+        push @files, $File::Find::name if /\.rs$/ && $_ ne "theme.rs" && $_ ne "palettes.rs";
+    },
+    "crates/monodrive/src"
+);
+my $failed = 0;
+for my $path (sort @files) {
+    my $text = read_file($path);
+    my @lines = split /\n/, $text, -1;
+    for my $problem (problems_in($text)) {
+        my ($line, $message) = @$problem;
+        (my $shown = $lines[$line - 1]) =~ s/^\s+//;
+        print "$path:$line: $message: $shown\n";
+        $failed = 1;
+    }
+}
+exit $failed;

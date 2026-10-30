@@ -176,33 +176,33 @@ impl Render for ConnectView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.saved.iter().enumerate().map(|(ix, address)| {
             let selected = self.selected == Some(ix);
-            row(selected)
-                .id(("saved-server", ix))
-                .debug_selector(move || format!("saved-server-{ix}"))
+            theme::row_slot(("saved-server", ix))
                 .role(Role::ListBoxOption)
                 .aria_label(address.clone())
                 .aria_selected(selected)
-                .pr_1()
-                .when(!selected, |d| d.hover(|s| s.bg(content(0.08))))
-                .child(div().flex_1().min_w_0().truncate().child(address.clone()))
-                .child(
-                    row_icon_button(
-                        ("forget-server", ix),
-                        "Forget this server",
-                        "cancel-01",
-                        if selected { on_accent() } else { content(0.55) },
-                    )
-                    .debug_selector(move || format!("forget-server-{ix}"))
-                    .occlude()
-                    .on_click(cx.listener(move |this, _, _, cx| this.forget(ix, cx))),
-                )
                 .on_click(cx.listener(move |this, _, _, cx| this.fill(ix, cx)))
+                .child(
+                    row(selected)
+                        .debug_selector(move || format!("saved-server-{ix}"))
+                        .pr_1()
+                        .child(div().flex_1().min_w_0().truncate().child(address.clone()))
+                        .child(
+                            row_icon_button(
+                                ("forget-server", ix),
+                                "Forget this server",
+                                "cancel-01",
+                                if selected { on_accent() } else { content(0.55) },
+                            )
+                            .debug_selector(move || format!("forget-server-{ix}"))
+                            .occlude()
+                            .on_click(cx.listener(move |this, _, _, cx| this.forget(ix, cx))),
+                        ),
+                )
         });
         let connecting = self.connecting.is_some();
         let body = div()
             .flex()
             .flex_col()
-            .gap(px(theme::ROW_GAP))
             .child(
                 div()
                     .px_2()

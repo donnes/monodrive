@@ -26,8 +26,10 @@ pub const TEXT_TITLE: f32 = 14.;
 pub const TITLE_BAR_HEIGHT: f32 = 40.;
 pub const ROW_HEIGHT: f32 = 28.;
 pub const SIDEBAR_ROW_HEIGHT: f32 = 32.;
-/// Between stacked rows, so highlights never touch.
+/// Under each stacked row, so highlights never touch.
 pub const ROW_GAP: f32 = 2.;
+/// The group a [`row_slot`] hovers its row through.
+pub const ROW_GROUP: &str = "row";
 pub const BUTTON_HEIGHT: f32 = 24.;
 pub const FIELD_HEIGHT: f32 = 28.;
 
@@ -408,8 +410,20 @@ pub fn field(border: Hsla) -> Div {
         .items_center()
 }
 
-/// A row in a menu, a picker or a popover. `active` is the row the keys or
-/// the pointer are on: the accent with its ink.
+/// Where a stacked row lives: the row and the gap under it, so a press in the
+/// gap still lands. Handlers, the role and the id go here; the highlight stays
+/// on the row inside.
+pub fn row_slot(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .group(ROW_GROUP)
+        .flex_shrink_0()
+        .pb(px(ROW_GAP))
+        .cursor_pointer()
+}
+
+/// A row in a menu, a picker or a popover, inside a [`row_slot`]. `active` is
+/// the row the keys or the pointer are on: the accent with its ink.
 pub fn row(active: bool) -> Div {
     div()
         .h(px(ROW_HEIGHT))
@@ -419,23 +433,20 @@ pub fn row(active: bool) -> Div {
         .items_center()
         .gap_2()
         .text_size(px(TEXT_BODY))
-        .cursor_pointer()
         .map(|d| {
             if active {
                 d.bg(accent()).text_color(on_accent())
             } else {
                 d.text_color(content(1.))
+                    .group_hover(ROW_GROUP, |s| s.bg(content(0.08)))
             }
         })
 }
 
-/// Secondary ink in a [`row`].
+/// Secondary ink in a [`row`]. On the accent it stays opaque: anything less
+/// falls under 4.5:1 on some presets.
 pub fn row_muted(active: bool) -> Hsla {
-    if active {
-        on_accent().opacity(0.8)
-    } else {
-        content(0.65)
-    }
+    if active { on_accent() } else { content(0.65) }
 }
 
 /// A progress bar's 4 pt track. `h_full` fills belong inside it.
@@ -450,4 +461,48 @@ pub fn progress_fill(fraction: f32) -> Div {
         .w(gpui::relative(fraction))
         .rounded_full()
         .bg(accent())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The contrast of `ink`, blended over the opaque `paper`.
+    fn contrast(ink: Hsla, paper: Hsla) -> f32 {
+        let (ink, paper) = (ink.to_rgb(), paper.to_rgb());
+        let luminance = |rgb: [f32; 3]| {
+            let [r, g, b] = rgb.map(|v| {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            });
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        };
+        let blend = |i: f32, p: f32| i * ink.a + p * (1. - ink.a);
+        let over = [
+            blend(ink.r, paper.r),
+            blend(ink.g, paper.g),
+            blend(ink.b, paper.b),
+        ];
+        let (a, b) = (luminance(over), luminance([paper.r, paper.g, paper.b]));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn secondary_text_on_a_selected_row_reads_on_every_preset() {
+        for row in palettes::PALETTES {
+            for theme in [Theme::Light, Theme::Dark] {
+                let p = Preferences {
+                    palette: row.0.into(),
+                    theme,
+                    ..Preferences::default()
+                };
+                configure(&p, false);
+                let ratio = contrast(row_muted(true), accent());
+                assert!(ratio >= 4.5, "{}: {ratio}", row.0);
+            }
+        }
+    }
 }

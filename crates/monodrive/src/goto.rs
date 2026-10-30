@@ -156,12 +156,10 @@ impl Render for GotoView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.completions.iter().enumerate().map(|(ix, path)| {
             let selected = self.selected == Some(ix);
-            theme::row(selected)
-                .id(ix)
+            theme::row_slot(ix)
                 .role(Role::ListBoxOption)
                 .aria_selected(selected)
-                .when(!selected, |d| d.hover(|s| s.bg(content(0.08))))
-                .child(div().truncate().child(paths::abbreviate(path)))
+                .child(theme::row(selected).child(div().truncate().child(paths::abbreviate(path))))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected = Some(ix);
                     this.go(cx);
@@ -170,7 +168,6 @@ impl Render for GotoView {
         let body = div()
             .flex()
             .flex_col()
-            .gap(px(theme::ROW_GAP))
             .children(self.error.clone().map(|error| {
                 div()
                     .h(px(theme::ROW_HEIGHT))

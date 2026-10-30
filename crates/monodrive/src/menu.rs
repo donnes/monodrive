@@ -116,10 +116,8 @@ impl ContextMenu {
 
     fn size(&self) -> Size<Pixels> {
         let separators = self.rows.iter().filter(|row| row.separated).count();
-        let rows = self.rows.len() as f32;
         let height = 2. * (PADDING + 1.)
-            + theme::ROW_HEIGHT * rows
-            + theme::ROW_GAP * (rows - 1.).max(0.)
+            + (theme::ROW_HEIGHT + theme::ROW_GAP) * self.rows.len() as f32
             + SEPARATOR * separators as f32;
         Size::new(px(WIDTH), px(height))
     }
@@ -174,15 +172,17 @@ impl Render for ContextMenu {
                     d.child(separator().id(("separator", ix)).role(Role::Splitter))
                 })
                 .child(
-                    theme::row(active)
-                        .id(ix)
+                    theme::row_slot(ix)
                         .role(Role::MenuItem)
                         .aria_label(row.title)
                         .aria_selected(active)
                         .when_some(row.keys.clone(), |d, keys| d.aria_keyshortcuts(keys))
-                        .when(checks, |d| d.child(check(row.checked, active)))
-                        .child(div().flex_1().min_w_0().truncate().child(row.title))
-                        .children(row.keys.clone().map(|keys| shortcut(keys, active)))
+                        .child(
+                            theme::row(active)
+                                .when(checks, |d| d.child(check(row.checked, active)))
+                                .child(div().flex_1().min_w_0().truncate().child(row.title))
+                                .children(row.keys.clone().map(|keys| shortcut(keys, active))),
+                        )
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
                             if this.active != Some(ix) {
                                 this.active = Some(ix);
@@ -245,7 +245,6 @@ pub(crate) fn card(
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
-                .gap(px(theme::ROW_GAP))
                 .children(rows),
         )
 }

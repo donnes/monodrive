@@ -397,6 +397,18 @@ fn add_to_sidebar_takes_a_folder_and_remove_forgets_it(cx: &mut TestAppContext) 
     assert_eq!(menu_on(0, cx), ["Open", "Clear Recents"]);
     assert_eq!(menu_on(rows + 1, cx), ["Open"]);
 
+    // The gap under a row answers as the row does.
+    let row = cx.debug_bounds("place-0").unwrap();
+    let gap = point(row.center().x, row.bottom() + px(1.));
+    right_click(cx, gap);
+    cx.run_until_parked();
+    assert_eq!(menu(&browser, cx).unwrap().0, ["Open", "Clear Recents"]);
+    press(cx, "escape");
+    cx.simulate_click(gap, with(""));
+    cx.run_until_parked();
+    assert!(browser.read_with(cx, |b, _| b.showing_recents()));
+    press(cx, "cmd-[");
+
     // Remove from Sidebar through that menu.
     let at = center(cx, &format!("place-{rows}"));
     right_click(cx, at);

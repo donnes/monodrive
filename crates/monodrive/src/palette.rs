@@ -121,14 +121,20 @@ impl PaletteView {
                     .first()
                     .map(|keys| commands::label(keys));
                 Some(
-                    div()
-                        .pb(px(theme::ROW_GAP))
+                    theme::row_slot(row)
+                        .role(Role::ListBoxOption)
+                        .aria_label(command.title)
+                        .aria_selected(selected)
+                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                            if this.selected != row {
+                                this.selected = row;
+                                cx.notify();
+                            }
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| this.run(row, cx)))
                         .child(
                             theme::row(selected)
-                                .id(row)
-                                .role(Role::ListBoxOption)
-                                .aria_label(command.title)
-                                .aria_selected(selected)
+                                .debug_selector(move || format!("palette-row-{row}"))
                                 .child(
                                     div()
                                         .text_color(theme::row_muted(selected))
@@ -140,14 +146,7 @@ impl PaletteView {
                                         .text_size(px(theme::TEXT_SMALL))
                                         .text_color(theme::row_muted(selected))
                                         .child(keys)
-                                }))
-                                .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                                    if this.selected != row {
-                                        this.selected = row;
-                                        cx.notify();
-                                    }
-                                }))
-                                .on_click(cx.listener(move |this, _, _, cx| this.run(row, cx))),
+                                })),
                         )
                         .into_any_element(),
                 )

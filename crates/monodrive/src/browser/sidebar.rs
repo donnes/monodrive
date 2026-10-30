@@ -143,12 +143,6 @@ fn fullness(volume: &Volume) -> Option<f32> {
         .then(|| (volume.total.saturating_sub(volume.free) as f64 / volume.total as f64) as f32)
 }
 
-/// A row and the gap under it. The gap belongs to the row, so a drop or a
-/// click there isn't lost between two rows.
-fn stacked() -> gpui::Div {
-    div().flex_shrink_0().pb(px(theme::ROW_GAP))
-}
-
 /// A small button in a sidebar row. It takes the press from the row under it.
 fn row_button(
     id: impl Into<ElementId>,
@@ -436,17 +430,38 @@ impl Browser {
         })
     }
 
-    /// A row's frame: the keyboard cursor's border, its highlight, its right
-    /// click and its click.
-    fn row(
-        &self,
+    /// Where a row's presses land, the gap under it included. An edited
+    /// favorite goes nowhere when clicked.
+    fn slot(
         ix: usize,
         selected: bool,
-        cursor: Option<usize>,
+        clickable: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
+        theme::row_slot(("place", ix))
+            .role(Role::Button)
+            .aria_selected(selected)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.place_menu(ix, event.position, window, cx)
+                }),
+            )
+            .map(|d| {
+                if clickable {
+                    d.on_click(cx.listener(move |this, _, window, cx| {
+                        this.sidebar_cursor = ix;
+                        this.open_place(window, cx);
+                    }))
+                } else {
+                    d.cursor_default()
+                }
+            })
+    }
+
+    /// A row's frame: the keyboard cursor's border and its highlight.
+    fn row(ix: usize, selected: bool, clickable: bool, cursor: Option<usize>) -> gpui::Div {
         div()
-            .id(("place", ix))
             .debug_selector(move || format!("place-{ix}"))
             // The sidebar's keyboard cursor. The border is always there, so
             // showing it doesn't shift the row.
@@ -456,8 +471,6 @@ impl Browser {
             } else {
                 gpui::transparent_black()
             })
-            .role(Role::Button)
-            .aria_selected(selected)
             .flex_shrink_0()
             .px_2()
             .rounded(px(theme::RADIUS_ROW))
@@ -465,26 +478,11 @@ impl Browser {
             .font_weight(FontWeight::MEDIUM)
             .text_color(content(if selected { 1. } else { 0.65 }))
             .when(selected, |d| d.bg(content(0.14)))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.place_menu(ix, event.position, window, cx)
-                }),
-            )
-    }
-
-    /// What every row but an edited favorite does when clicked.
-    fn clickable(
-        row: Stateful<gpui::Div>,
-        ix: usize,
-        cx: &mut Context<Self>,
-    ) -> Stateful<gpui::Div> {
-        row.cursor_pointer()
-            .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.sidebar_cursor = ix;
-                this.open_place(window, cx);
-            }))
+            .when(clickable && !selected, |d| {
+                d.group_hover(theme::ROW_GROUP, |s| {
+                    s.bg(content(0.08)).text_color(content(1.))
+                })
+            })
     }
 
     fn recents_row(
@@ -493,16 +491,17 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let selected = self.query.is_empty() && self.showing_recents();
-        stacked().child(
-            Self::clickable(self.row(0, selected, cursor, cx), 0, cx)
-                .aria_label("Recents")
-                .h(px(ROW_HEIGHT))
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(icon("clock", 16.).text_color(content(if selected { 1. } else { 0.55 })))
-                .child(div().flex_1().truncate().child("Recents")),
-        )
+        Self::slot(0, selected, true, cx)
+            .aria_label("Recents")
+            .child(
+                Self::row(0, selected, true, cursor)
+                    .h(px(ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon("clock", 16.).text_color(content(if selected { 1. } else { 0.55 })))
+                    .child(div().flex_1().truncate().child("Recents")),
+            )
     }
 
     fn favorite_row(
@@ -522,9 +521,7 @@ impl Browser {
         };
         let unavailable = reason.is_some();
         let editing = self.sidebar.editing;
-        let row = self
-            .row(ix, selected, cursor, cx)
-            .aria_label(label.clone())
+        let row = Self::row(ix, selected, !editing, cursor)
             .h(px(ROW_HEIGHT))
             .flex()
             .items_center()
@@ -550,7 +547,7 @@ impl Browser {
                         ),
                 )
         } else {
-            Self::clickable(row, ix, cx)
+            row
         };
         let row = row
             .child(icon(glyph, 16.).text_color(content(if unavailable {
@@ -566,7 +563,7 @@ impl Browser {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().line_height(px(16.)).child(label))
+                    .child(div().truncate().line_height(px(16.)).child(label.clone()))
                     .children(reason.map(|why| {
                         div()
                             .truncate()
@@ -587,7 +584,8 @@ impl Browser {
                     .on_click(cx.listener(move |this, _, _, cx| this.remove_favorite(fav, cx))),
                 )
             });
-        stacked()
+        Self::slot(ix, selected, !editing, cx)
+            .aria_label(label)
             .when(editing, |d| {
                 d.on_drop(cx.listener(move |this, dragged: &DraggedFavorite, _, cx| {
                     this.move_favorite(dragged.ix, fav, cx);
@@ -611,8 +609,7 @@ impl Browser {
         } else {
             "hard-drive"
         };
-        let row = Self::clickable(self.row(ix, selected, cursor, cx), ix, cx)
-            .aria_label(volume.name.clone())
+        let row = Self::row(ix, selected, true, cursor)
             .h(px(DRIVE_HEIGHT))
             .flex()
             .flex_col()
@@ -670,7 +667,9 @@ impl Browser {
                             .bg(content(0.55)),
                     )
             }));
-        stacked().child(row)
+        Self::slot(ix, selected, true, cx)
+            .aria_label(volume.name.clone())
+            .child(row)
     }
 
     fn favorites_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

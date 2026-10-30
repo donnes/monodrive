@@ -30,8 +30,12 @@ The header of a sheet with a query (palette, Go to Folder, Connect) is a bare fi
 - Every icon button is a 24 pt circle with a 14 pt icon. Inside a row it's a 20 pt circle with a 12 pt icon.
 - Every outlined text field is 28 pt high. The exception is rename, which fits inside the row it edits.
 - Rows in menus, pickers and popovers are 28 pt. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt.
-- Rows in a stacked list of highlightable rows have a 2 pt gap (`ROW_GAP`), so highlights never touch. The gap belongs to the row above it: a drop or click there isn't lost. The file list is the exception: it's virtualized, its rows are contiguous as in Finder, and a change to its row height touches `uniform_list`, marquee math and the scrolling budget.
+- Rows in a stacked list of highlightable rows have a 2 pt gap (`ROW_GAP`), so highlights never touch. The gap belongs to the row above it: `row_slot` holds the role and the handlers, the row inside holds the highlight, so a hover, click or drop in the gap lands on that row. Two lists differ. The file list is virtualized, its rows touch as in Finder, and a change to its row height touches `uniform_list`, marquee math and the scrolling budget. Settings' page list keeps a plain gap, because each page is a Tab stop whose focus ring has to fit the row.
 - The title bar, a sheet's header, the Trash bar and the sidebar's foot are 40 pt. A toast is 36 pt. A Settings row is at least 44 pt.
+
+### Path crumbs
+
+The current folder and as many ancestors as fit, at full width, counted from the right. Everything else collapses into one "…", which is only a marker: Go to Folder reaches the hidden levels. No ancestor is shown cut short. The current folder's name doesn't truncate until the status text beside it has given way.
 
 ### Type
 
@@ -63,7 +67,7 @@ Ink is the theme's content color at a fixed alpha, through `content()`. Nothing 
 | 0.06 | Hairlines between regions and Settings rows |
 | 0.03 | List stripes and Settings plates |
 
-- `accent()` with `on_accent()` is for the selection, the row under the keys, primary buttons, switches and focus.
+- `accent()` with `on_accent()` is for the selection, the row under the keys, primary buttons, switches and focus. Text on the accent stays opaque, secondary text included: at 0.8 it falls to 3.7:1 on some presets.
 - `danger()` is for what failed or can't be undone, and only that. `success()` is for what's done.
 - Over the background image, content keeps the same ink because the image is dimmed under the list. Check `background.png` in the snapshots, where the image runs from bright to dark, when changing either.
 - No raw color in a view. A swatch that shows a color being offered is the one honest exception.
@@ -117,7 +121,7 @@ All in `theme.rs`. Each returns an element the caller extends.
 - `text_button(id, label, look)`: the usual button. `button(id, look)` is its frame, for a label with an icon or one that changes. `ButtonLook` is `Secondary`, `Primary`, `Destructive`, `Caution`, `Ghost` or `Disabled`.
 - `icon_button(id, label, path, enabled)` in chrome, `row_icon_button(id, label, path, ink)` inside a row, `circle_button(id, label, side)` for a circle with other contents, such as the jobs ring.
 - `field(border)`: a text field's outline.
-- `row(active)`: a row in a menu, picker or popover. `row_muted(active)` is its secondary ink.
+- `row_slot(id)`: where a stacked row's role and handlers go, gap included. `row(active)`: the row inside it, in a menu, picker or popover. `row_muted(active)` is its secondary ink.
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.
 - `icon(path, side)`, `section_label(label)`.
@@ -132,12 +136,12 @@ Add a primitive once two views need it. Until then, build from the scales.
 - **Faint text.** `content(0.35)` looks refined on the author's display and fails on a light theme. Text stops at 0.65; only disabled text goes lower.
 - **An error in the accent.** Go to Folder and the shortcut recorder used to do this. Failure is `danger()`.
 - **A local red or green.** Settings had its own for errors and for Added. Use the tokens, which are tuned for both themes.
-- **Touching highlights.** A hovered row against a selected one reads as one block. Stack rows with `ROW_GAP`, and put the gap inside a row's drop target.
+- **Touching highlights.** A hovered row against a selected one reads as one block. Stack rows in `row_slot`, so the gap is there and still answers.
 - **A second shadow.** Each surface once had its own. Use `floating`.
 - **Control heights that vary by screen.** A button in a card is the same height as one in Settings.
 - **Label mismatch.** A button whose visible label changes still needs an `aria_label` that says what it does.
 
 ## How to verify
 
-- `scripts/check-design`, part of `scripts/check`, fails on a raw radius, color, shadow, text size, icon size or ink alpha in a view. A justified exception is a `// design: <reason>` comment on the line or the line above.
+- `scripts/check-design`, part of `scripts/check`, fails on a raw radius, color, shadow, text size, icon size or ink alpha in a view, on any line layout, and on an import of a raw color. A justified exception is a `// design: <reason>` comment on the line or the line above. It reads text and isn't a Rust parser, and `scripts/check-design-fixtures` holds the cases it must catch and leave alone. Add a fixture when something slips past it.
 - `cargo run -p monodrive --example snapshot` draws every surface to `target/snapshots`, dark, and to `target/snapshots/light`. Run it before and after a visual change, and look at both.

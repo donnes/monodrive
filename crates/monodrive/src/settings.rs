@@ -20,7 +20,7 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, PromptLevel, Role, ScrollHandle,
     SharedString, Stateful, Subscription, Toggled, Window, actions, anchored, canvas, deferred,
-    div, point, prelude::*, px, relative, rgb,
+    div, point, prelude::*, px, relative,
 };
 use monodrive_core::entries::SortBy;
 use monodrive_core::mcp::TOOLS;
@@ -1728,23 +1728,25 @@ impl SettingsView {
                     selected,
                     choose,
                 } = item;
-                theme::row(ix == active)
-                    .id((id, ix))
+                theme::row_slot((id, ix))
                     .role(Role::MenuItemRadio)
                     .aria_label(label.clone())
                     .aria_selected(selected)
-                    .pl(px(6.))
-                    .pr_3()
-                    .gap(px(6.))
-                    .child(div().w(px(14.)).flex_shrink_0().when(selected, |d| {
-                        d.child(icon("check-hi", 12.).text_color(if ix == active {
-                            on_accent()
-                        } else {
-                            content(1.)
-                        }))
-                    }))
-                    .children(item_icon)
-                    .child(label)
+                    .child(
+                        theme::row(ix == active)
+                            .pl(px(6.))
+                            .pr_3()
+                            .gap(px(6.))
+                            .child(div().w(px(14.)).flex_shrink_0().when(selected, |d| {
+                                d.child(icon("check-hi", 12.).text_color(if ix == active {
+                                    on_accent()
+                                } else {
+                                    content(1.)
+                                }))
+                            }))
+                            .children(item_icon)
+                            .child(label),
+                    )
                     // The pointer and the arrows share one highlight, as in AppKit menus.
                     .on_mouse_move(cx.listener(move |this, _, _, cx| {
                         if this.menu_active != ix {
@@ -1830,7 +1832,6 @@ impl SettingsView {
                                                 .overflow_y_scroll()
                                                 .flex()
                                                 .flex_col()
-                                                .gap(px(theme::ROW_GAP))
                                                 .children(rows),
                                         ),
                                 ),
@@ -2332,7 +2333,7 @@ fn accent_picker(p: &Preferences, light: bool) -> Stateful<Div> {
                         .size(px(18.))
                         .rounded_full()
                         // design: a swatch shows the color it offers.
-                        .bg(rgb(color))
+                        .bg(gpui::rgb(color))
                         .border_1()
                         .border_color(content(0.2))
                         .flex()
@@ -2365,12 +2366,12 @@ fn swatch(surface: u32, accent: u32) -> impl IntoElement {
         .border_1()
         .border_color(content(0.2))
         // design: a swatch shows the preset's own colors.
-        .bg(rgb(surface))
+        .bg(gpui::rgb(surface))
         .flex()
         .items_center()
         .justify_center()
         // design: a swatch shows the preset's own colors.
-        .child(div().size(px(6.)).rounded_full().bg(rgb(accent)))
+        .child(div().size(px(6.)).rounded_full().bg(gpui::rgb(accent)))
 }
 
 /// A numbered step of a setup, with what it shows below its text.
