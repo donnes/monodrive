@@ -178,10 +178,23 @@ impl Render for ContextMenu {
                         .aria_selected(active)
                         .when_some(row.keys.clone(), |d, keys| d.aria_keyshortcuts(keys))
                         .child(
-                            theme::row(active)
-                                .when(checks, |d| d.child(check(row.checked, active)))
-                                .child(div().flex_1().min_w_0().truncate().child(row.title))
-                                .children(row.keys.clone().map(|keys| shortcut(keys, active))),
+                            if row.destructive {
+                                theme::destructive_row(active)
+                            } else {
+                                theme::row(active)
+                            }
+                            .when(checks, |d| d.child(check(row.checked, active)))
+                            .child(div().flex_1().min_w_0().truncate().child(row.title))
+                            .children(row.keys.clone().map(|keys| {
+                                shortcut(
+                                    keys,
+                                    if row.destructive {
+                                        theme::destructive_ink(active)
+                                    } else {
+                                        theme::row_muted(active)
+                                    },
+                                )
+                            })),
                         )
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
                             if this.active != Some(ix) {
@@ -260,11 +273,11 @@ fn check(checked: bool, active: bool) -> gpui::Div {
     })
 }
 
-fn shortcut(keys: String, active: bool) -> gpui::Div {
+fn shortcut(keys: String, ink: gpui::Hsla) -> gpui::Div {
     div()
         .flex_shrink_0()
         .text_size(px(theme::TEXT_CAPTION))
-        .text_color(theme::row_muted(active))
+        .text_color(ink)
         .child(keys)
 }
 

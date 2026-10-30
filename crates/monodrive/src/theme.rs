@@ -124,6 +124,16 @@ pub fn danger() -> Hsla {
     rgb(if is_light() { 0xdc2626 } else { 0xff453a }).into()
 }
 
+/// What a highlighted destructive row and a Destructive button fill with. The
+/// same red in both themes: white on the dark theme's `danger` is under 4.5:1.
+pub fn danger_fill() -> Hsla {
+    rgb(0xdc2626).into()
+}
+
+pub fn on_danger() -> Hsla {
+    gpui::white()
+}
+
 /// Green ink for what's done.
 pub fn success() -> Hsla {
     rgb(if is_light() { 0x059669 } else { 0x10b981 }).into()
@@ -323,10 +333,9 @@ pub fn button(id: impl Into<ElementId>, look: ButtonLook) -> Stateful<Div> {
                 .text_color(on_accent())
                 .hover(|s| s.opacity(0.9))
                 .active(|s| s.opacity(0.8)),
-            // A fixed red: white on the dark theme's `danger` is under 4.5:1.
             ButtonLook::Destructive => d
-                .bg(rgb(0xdc2626))
-                .text_color(gpui::white())
+                .bg(danger_fill())
+                .text_color(on_danger())
                 .hover(|s| s.opacity(0.9))
                 .active(|s| s.opacity(0.8)),
             ButtonLook::Caution => d
@@ -426,6 +435,16 @@ pub fn row_slot(id: impl Into<ElementId>) -> Stateful<Div> {
 /// A row in a menu, a picker or a popover, inside a [`row_slot`]. `active` is
 /// the row the keys or the pointer are on: the accent with its ink.
 pub fn row(active: bool) -> Div {
+    row_frame(active, accent(), on_accent(), content(1.))
+}
+
+/// A [`row`] for a command that trashes or erases files: the danger color at
+/// rest, and filled with it under the keys.
+pub fn destructive_row(active: bool) -> Div {
+    row_frame(active, danger_fill(), on_danger(), danger())
+}
+
+fn row_frame(active: bool, fill: Hsla, on_fill: Hsla, ink: Hsla) -> Div {
     div()
         .h(px(ROW_HEIGHT))
         .px_2()
@@ -436,9 +455,9 @@ pub fn row(active: bool) -> Div {
         .text_size(px(TEXT_BODY))
         .map(|d| {
             if active {
-                d.bg(accent()).text_color(on_accent())
+                d.bg(fill).text_color(on_fill)
             } else {
-                d.text_color(content(1.))
+                d.text_color(ink)
                     .group_hover(ROW_GROUP, |s| s.bg(content(0.08)))
             }
         })
@@ -448,6 +467,11 @@ pub fn row(active: bool) -> Div {
 /// falls under 4.5:1 on some presets.
 pub fn row_muted(active: bool) -> Hsla {
     if active { on_accent() } else { content(0.65) }
+}
+
+/// Secondary ink in a [`destructive_row`], which stays one color.
+pub fn destructive_ink(active: bool) -> Hsla {
+    if active { on_danger() } else { danger() }
 }
 
 /// A progress bar's 4 pt track. `h_full` fills belong inside it.
@@ -489,6 +513,27 @@ mod tests {
         ];
         let (a, b) = (luminance(over), luminance([paper.r, paper.g, paper.b]));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn a_destructive_row_reads_in_both_themes_at_rest_and_highlighted() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let p = Preferences {
+                theme,
+                ..Preferences::default()
+            };
+            configure(&p, false);
+            let highlighted = contrast(destructive_ink(true), danger_fill());
+            assert!(highlighted >= 4.5, "highlighted: {highlighted}");
+            let at_rest = contrast(
+                destructive_ink(false),
+                Hsla {
+                    a: 1.,
+                    ..pane_fill()
+                },
+            );
+            assert!(at_rest >= 4.5, "at rest: {at_rest}");
+        }
     }
 
     #[test]

@@ -116,6 +116,11 @@ impl PaletteView {
             .filter_map(|row| {
                 let command = all.get(*self.matches.get(row)?)?;
                 let selected = row == self.selected;
+                let secondary = if command.destructive {
+                    theme::destructive_ink(selected)
+                } else {
+                    theme::row_muted(selected)
+                };
                 let keys = command
                     .shortcuts(&overrides)
                     .first()
@@ -133,20 +138,20 @@ impl PaletteView {
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| this.run(row, cx)))
                         .child(
-                            theme::row(selected)
-                                .debug_selector(move || format!("palette-row-{row}"))
-                                .child(
-                                    div()
-                                        .text_color(theme::row_muted(selected))
-                                        .child(command.group.label()),
-                                )
-                                .child(div().flex_1().truncate().child(command.title))
-                                .children(keys.map(|keys| {
-                                    div()
-                                        .text_size(px(theme::TEXT_SMALL))
-                                        .text_color(theme::row_muted(selected))
-                                        .child(keys)
-                                })),
+                            if command.destructive {
+                                theme::destructive_row(selected)
+                            } else {
+                                theme::row(selected)
+                            }
+                            .debug_selector(move || format!("palette-row-{row}"))
+                            .child(div().text_color(secondary).child(command.group.label()))
+                            .child(div().flex_1().truncate().child(command.title))
+                            .children(keys.map(|keys| {
+                                div()
+                                    .text_size(px(theme::TEXT_SMALL))
+                                    .text_color(secondary)
+                                    .child(keys)
+                            })),
                         )
                         .into_any_element(),
                 )

@@ -75,6 +75,7 @@ Ink is the theme's content color at a fixed alpha, through `content()`. Nothing 
 
 - `accent()` with `on_accent()` is for the selection, the row under the keys, primary buttons, switches and focus. Text on the accent stays opaque, secondary text included: at 0.8 it falls to 3.7:1 on some presets.
 - `danger()` is for what failed or can't be undone, and only that. `success()` is for what's done.
+- A command that trashes or erases files is marked `destructive` in `commands.rs`: today Move to Trash and Empty Trash, and not Remove from Sidebar, which only forgets a bookmark. In the context menu and the palette its title and shortcut are `danger()`. Under the keys, its row fills with `danger_fill()` and all its text is `on_danger()`, at 4.5:1 or better in both themes. The native menu bar stays native.
 - Over the background image, content keeps the same ink because the image is dimmed under the list. Check `background.png` in the snapshots, where the image runs from bright to dark, when changing either.
 - No raw color in a view. A swatch that shows a color being offered is the one honest exception.
 
@@ -123,11 +124,11 @@ The SVGs in `crates/monodrive/assets/icons`, one stroke weight, tinted with `.te
 All in `theme.rs`. Each returns an element the caller extends.
 
 - `RADIUS_ROW`, `RADIUS_CARD`, `RADIUS_THUMB`; `TEXT_CAPTION`, `TEXT_SMALL`, `TEXT_BODY`, `TEXT_TITLE`; `TITLE_BAR_HEIGHT`, `PATH_BAR_HEIGHT`, `ROW_HEIGHT`, `SIDEBAR_ROW_HEIGHT`, `ROW_GAP`, `BUTTON_HEIGHT`, `FIELD_HEIGHT`.
-- `content`, `accent`, `on_accent`, `danger`, `success`, `scrim`, `well`, `knob`, `raised`: colors. `focus_ring`, `knob_shadow`, `raised_shadow`: shadows.
+- `content`, `accent`, `on_accent`, `danger`, `danger_fill`, `on_danger`, `success`, `scrim`, `well`, `knob`, `raised`: colors. `focus_ring`, `knob_shadow`, `raised_shadow`: shadows.
 - `text_button(id, label, look)`: the usual button. `button(id, look)` is its frame, for a label with an icon or one that changes. `ButtonLook` is `Secondary`, `Primary`, `Destructive`, `Caution`, `Ghost` or `Disabled`.
 - `icon_button(id, label, path, enabled)` in chrome, `row_icon_button(id, label, path, ink)` inside a row, `circle_button(id, label, side)` for a circle with other contents, such as the jobs ring.
 - `field(border)`: a text field's outline.
-- `row_slot(id)`: where a stacked row's role and handlers go, gap included. `row(active)`: the row inside it, in a menu, picker or popover. `row_muted(active)` is its secondary ink.
+- `row_slot(id)`: where a stacked row's role and handlers go, gap included. `row(active)`: the row inside it, in a menu, picker or popover. `row_muted(active)` is its secondary ink. `destructive_row(active)` and `destructive_ink(active)` are the same for a command marked `destructive`.
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.
 - `icon(path, side)`, `section_label(label)`.

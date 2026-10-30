@@ -4,7 +4,7 @@
 //!
 //! `cargo run -p monodrive --example snapshot -- [folder]` writes
 //! `target/snapshots/list.png`, `grid.png`, `rename.png`, `menu.png`,
-//! `menu-grid.png`, `menu-folder.png`, `jobs.png`, `ring-waiting.png`,
+//! `menu-grid.png`, `menu-folder.png`, `menu-trash.png`, `jobs.png`, `ring-waiting.png`,
 //! `rename-error.png`, `rename-error-grid.png`, `toast.png` and
 //! `empty-trash.png`.
 //! Without a folder it draws a made-up one, so the pictures show nobody's
@@ -137,6 +137,17 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
         cx.capture_screenshot(window.into())?.save(&path)?;
         println!("{}", path.display());
     }
+    // The keys on Move to Trash: a letter jumps to the row starting with it.
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    for action in [&SelectNext as &dyn Action, &SelectNext, &ShowContextMenu] {
+        dispatch(&mut cx, window, action)?;
+    }
+    cx.update_window(window.into(), |_, window, _| window.refresh())?;
+    cx.run_until_parked();
+    type_text(&mut cx, window, "m")?;
+    save(&mut cx, window, out, "menu-trash")?;
+
     let paths = ops::Paths {
         state: scratch.path().join("state"),
         settings: scratch.path().join("settings.json"),

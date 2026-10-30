@@ -104,6 +104,9 @@ pub struct Command {
     pub os_action: Option<OsAction>,
     /// Where context menus offer it.
     pub scopes: &'static [Scope],
+    /// Trashes or erases files. Menus Monodrive draws show it in the danger
+    /// color; the native menu bar doesn't.
+    pub destructive: bool,
 }
 
 impl Command {
@@ -140,6 +143,13 @@ pub fn all() -> Vec<Command> {
             separated: false,
             os_action: None,
             scopes: &[],
+            destructive: false,
+        }
+    }
+    fn destructive(command: Command) -> Command {
+        Command {
+            destructive: true,
+            ..command
         }
     }
     fn separated(command: Command) -> Command {
@@ -165,13 +175,13 @@ pub fn all() -> Vec<Command> {
         command("Settings…", App, &["cmd-,"], None, || {
             Box::new(OpenSettings)
         }),
-        separated(command(
+        destructive(separated(command(
             "Empty Trash…",
             App,
             &["cmd-shift-backspace"],
             BROWSER,
             || Box::new(EmptyTrash),
-        )),
+        ))),
         separated(command("Hide Monodrive", App, &["cmd-h"], None, || {
             Box::new(Hide)
         })),
@@ -282,13 +292,13 @@ pub fn all() -> Vec<Command> {
         ),
         on(
             SELECTION,
-            separated(command(
+            destructive(separated(command(
                 "Move to Trash",
                 File,
                 &["cmd-backspace"],
                 LIST,
                 || Box::new(MoveToTrash),
-            )),
+            ))),
         ),
         on(
             SELECTION,
@@ -582,6 +592,7 @@ pub struct MenuRow {
     pub checked: bool,
     /// Starts a new section.
     pub separated: bool,
+    pub destructive: bool,
     pub action: Box<dyn Action>,
 }
 
@@ -613,6 +624,7 @@ pub fn context_menu(
                 .map(|k| label(k)),
             checked: ticked.contains(&command.id()),
             separated: last.is_some_and(|last| last != section),
+            destructive: command.destructive,
             action,
         });
         last = Some(section);
@@ -757,6 +769,24 @@ fn install_menus(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_what_trashes_or_erases_files_is_destructive() {
+        let marked: Vec<_> = all()
+            .iter()
+            .filter(|command| command.destructive)
+            .map(|command| command.title)
+            .collect();
+        assert_eq!(marked, ["Empty Trash…", "Move to Trash"]);
+        // The context menu's rows carry it.
+        let rows = context_menu(&[Scope::Selection], &Preferences::default(), |_| true);
+        let marked: Vec<_> = rows
+            .iter()
+            .filter(|row| row.destructive)
+            .map(|row| row.title)
+            .collect();
+        assert_eq!(marked, ["Move to Trash"]);
+    }
 
     #[test]
     fn overrides_replace_turn_off_or_fall_back_to_the_defaults() {
