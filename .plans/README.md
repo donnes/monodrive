@@ -13,23 +13,23 @@ Update a plan's row when its work lands on `main`.
 | 03 File operations | Done | f932352, 3876a60, 41570a7, 2cacc36, 091c83c, 7bb3e34 |
 | 04 Editing commands | Done | 62d9772, c8b03d7, a8293ff, 2ff9f13 |
 | 05 Context menu | Done | d6f31e9, 74b996e |
-| 06 Quick Look | Planned | |
-| 07 Places, drives and NAS | Planned | |
-| 08 Tabs and panes | Planned | |
-| 09 Drag and drop | Planned | |
-| 10 Open With and Get Info | Planned | |
-| 11 Search | Planned | |
-| 12 Batch rename | Planned | |
-| 13 Archives | Planned | |
-| 14 Remote locations | Planned | |
-| 15 File and folder comparison | Planned | |
-| 16 Offline catalogs | Planned | |
-| 17 Storage inspection | Planned | |
-| 18 Cloud storage | Planned | |
-| 19 More views | Planned | |
-| 20 Browsing workspaces | Planned | |
-| 21 Extensions | Planned | |
-| 22 Worktree management | Planned | |
+| 06 Quick Look | Built and reviewed locally; waiting for a real-app check | |
+| 07 Places, drives and NAS | Core reviewed locally; SMB and UI waiting for picks | |
+| 08 Tabs and panes | Waiting for UI picks | |
+| 09 Drag and drop | Waiting for UI picks | |
+| 10 Open With and Get Info | Core reviewed locally; UI waiting for picks | |
+| 11 Search | Core reviewed locally; UI waiting for picks | |
+| 12 Batch rename | Core reviewed locally; UI waiting for picks | |
+| 13 Archives | Core reviewed locally; UI waiting for picks | |
+| 14 Remote locations | Core reviewed locally; UI waiting for picks | |
+| 15 File and folder comparison | Core reviewed locally; UI waiting for picks | |
+| 16 Offline catalogs | Core reviewed locally; UI waiting for picks | |
+| 17 Storage inspection | Core reviewed locally; UI waiting for picks | |
+| 18 Cloud storage | Local slice core reviewed locally; UI waiting for picks; direct providers deferred | |
+| 19 More views | Waiting for UI picks | |
+| 20 Browsing workspaces | Waiting for tabs, panes and UI picks | |
+| 21 Extensions | User commands core reviewed locally; UI waiting for picks; runtime deferred | |
+| 22 Worktree management | Inventory reviewed locally; UI waiting for picks; creation needs a design review | |
 | 23 Agent features | Later | |
 
 ## Current state
