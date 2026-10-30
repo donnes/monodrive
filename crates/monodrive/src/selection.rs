@@ -44,6 +44,18 @@ impl Selection {
         self.paths.values().sum::<u64>() + self.swept_only().map(|(_, size)| size).sum::<u64>()
     }
 
+    /// What's selected, if that's one entry.
+    pub fn only(&self) -> Option<&Path> {
+        if self.len() != 1 {
+            return None;
+        }
+        self.paths
+            .keys()
+            .chain(self.swept.keys())
+            .next()
+            .map(PathBuf::as_path)
+    }
+
     pub fn cursor(&self) -> Option<&Path> {
         self.cursor.as_deref()
     }

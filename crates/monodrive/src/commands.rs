@@ -78,6 +78,8 @@ impl Group {
 pub enum Scope {
     /// On what's selected in the listing.
     Selection,
+    /// On two or more selected entries.
+    Several,
     /// On a lone app or other package.
     Package,
     /// On the listing's empty space, so the folder shown.
@@ -185,16 +187,6 @@ pub fn all() -> Vec<Command> {
             }),
         ),
         on(
-            SELECTION,
-            command(
-                "New Folder with Selection",
-                File,
-                &["ctrl-cmd-n"],
-                BROWSER,
-                || Box::new(NewFolderWithSelection),
-            ),
-        ),
-        on(
             FOLDER,
             command("New File", File, &[], BROWSER, || Box::new(NewFile)),
         ),
@@ -226,12 +218,21 @@ pub fn all() -> Vec<Command> {
                 Box::new(OpenInTerminal)
             }),
         ),
+        // Finder offers it on several items only, though ⌃⌘N takes one.
+        on(
+            &[Scope::Several],
+            separated(command(
+                "New Folder with Selection",
+                File,
+                &["ctrl-cmd-n"],
+                BROWSER,
+                || Box::new(NewFolderWithSelection),
+            )),
+        ),
         // Return renames, as in Finder; → and ⌘↓ still go in.
         on(
             SELECTION,
-            separated(command("Rename", File, &["enter"], LIST, || {
-                Box::new(Rename)
-            })),
+            command("Rename", File, &["enter"], LIST, || Box::new(Rename)),
         ),
         on(
             SELECTION,
@@ -750,8 +751,7 @@ mod tests {
         assert_eq!(
             shown(&[Scope::Selection, Scope::Package], &prefs, &all),
             [
-                "New Folder with Selection ⌃⌘N",
-                "| Open ⌘↓",
+                "Open ⌘↓",
                 "Show Package Contents",
                 "Reveal in Finder",
                 "Open in Terminal",
@@ -778,6 +778,12 @@ mod tests {
             ]
         );
         assert_eq!(shown(&[Scope::Sidebar], &prefs, &all), ["Open ⌘↓"]);
+        // New Folder with Selection is for several, after the ways to open.
+        let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
+        assert_eq!(
+            several[3..5],
+            ["| New Folder with Selection ⌃⌘N", "Rename ↩"]
+        );
         // What wouldn't run now is left out, and so is a separator with
         // nothing after it; shortcuts are the ones bound now.
         let mut rebound = Preferences::default();

@@ -4,11 +4,11 @@
 //!
 //! `cargo run -p monodrive --example snapshot -- [folder]` writes
 //! `target/snapshots/list.png`, `grid.png`, `rename.png`, `menu.png`,
-//! `menu-folder.png` and `activity.png`. Without a folder it draws a
-//! made-up one, so the pictures show nobody's files. Rename edits the fifth
-//! name in place. The menus are the context menu on the second entry and on
-//! the folder. Activity shows real jobs, run by an operation owner on a temp
-//! folder.
+//! `menu-grid.png`, `menu-folder.png` and `activity.png`. Without a folder
+//! it draws a made-up one, so the pictures show nobody's files. Rename edits
+//! the fifth name in place. The menus are the context menu on the second
+//! entry, in the list and the grid, and on the folder. Activity shows real
+//! jobs, run by an operation owner on a temp folder.
 
 use gpui::{Action, HeadlessAppContext as Cx};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
@@ -76,7 +76,17 @@ fn main() -> gpui::Result<()> {
     let path = out.join("rename.png");
     cx.capture_screenshot(window.into())?.save(&path)?;
     println!("{}", path.display());
-    for (name, selected) in [("menu", 2), ("menu-folder", 0)] {
+    for (name, view, selected) in [
+        ("menu", View::List, 2),
+        ("menu-grid", View::Grid, 2),
+        ("menu-folder", View::List, 0),
+    ] {
+        cx.update(|cx| {
+            cx.set_global(Preferences {
+                view,
+                ..Preferences::default()
+            })
+        });
         let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
             cx.new(|cx| Browser::new(folder.clone(), cx))
         })?;

@@ -278,6 +278,8 @@ pub struct Browser {
     menu: Option<OpenMenu>,
     /// A context menu asked for, opened once the next frame has drawn.
     menu_request: Option<MenuRequest>,
+    /// Whether this lone selected entry is a package, as last worked out.
+    package: Option<(PathBuf, bool)>,
 }
 
 impl Browser {
@@ -364,6 +366,7 @@ impl Browser {
             list_bounds: Rc::default(),
             menu: None,
             menu_request: None,
+            package: None,
         };
         browser.reload(cx);
         browser
@@ -795,12 +798,11 @@ impl Browser {
         if std::mem::take(&mut self.swept) || self.marquee.as_ref().is_some_and(|m| m.dragging) {
             return;
         }
-        let modifiers = event.modifiers();
-        // ⌃-click opened the context menu as it went down.
-        let Some(entry) = self.entries.get(ix).filter(|_| !modifiers.control) else {
+        let Some(entry) = self.entries.get(ix) else {
             return;
         };
         self.focus_list(window, cx);
+        let modifiers = event.modifiers();
         if modifiers.platform {
             self.selection.toggle(entry);
         } else if modifiers.shift {
@@ -814,7 +816,8 @@ impl Browser {
         cx.notify();
     }
 
-    /// A right-click or ⌃-click on row `ix`, or on no row. An entry outside
+    /// A right-click on row `ix`, or on no row; GPUI delivers ⌃-click as
+    /// one. An entry outside
     /// the selection becomes the selection first, as in Finder, and no row
     /// lets go of it, so the menu is on the folder.
     fn context_click(
@@ -832,22 +835,41 @@ impl Browser {
             Some(_) => {}
             None => self.selection.clear(),
         }
-        self.request_menu(self.scopes(), at, self.list_focus.clone(), cx);
+        let scopes = self.scopes();
+        self.request_menu(scopes, at, self.list_focus.clone(), cx);
     }
 
-    /// What a context menu on the listing is on: the selection, and whether
-    /// that's a lone package, or else the folder.
-    fn scopes(&self) -> Vec<Scope> {
-        match self.selection.in_order(&self.entries).as_slice() {
-            [] => vec![Scope::Folder],
-            [only]
-                if matches!(only.kind, Kind::Dir | Kind::Link)
-                    && workspace::is_package(&only.path) =>
-            {
-                vec![Scope::Selection, Scope::Package]
-            }
-            _ => vec![Scope::Selection],
+    /// What a context menu on the listing is on: the selection, how many,
+    /// and whether it's a lone package, or else the folder.
+    fn scopes(&mut self) -> Vec<Scope> {
+        let mut scopes = match self.selection.len() {
+            0 => return vec![Scope::Folder],
+            1 => vec![Scope::Selection],
+            _ => vec![Scope::Selection, Scope::Several],
+        };
+        if self.package().is_some() {
+            scopes.push(Scope::Package);
         }
+        scopes
+    }
+
+    /// The lone selected entry, if it's a folder or link named as an app or
+    /// another package: what Show Package Contents goes into. Each frame
+    /// asks, so the answer is kept for the entry it was worked out for.
+    fn package(&mut self) -> Option<PathBuf> {
+        let only = self.selection.only()?;
+        if self.package.as_ref().is_none_or(|(path, _)| path != only) {
+            let is = workspace::is_package(only)
+                && self
+                    .entries
+                    .iter()
+                    .any(|e| e.path == only && matches!(e.kind, Kind::Dir | Kind::Link));
+            self.package = Some((only.to_path_buf(), is));
+        }
+        self.package
+            .as_ref()
+            .filter(|(_, is)| *is)
+            .map(|(path, _)| path.clone())
     }
 
     /// Asks for a context menu at `at` in the window, whose commands run as
@@ -916,27 +938,17 @@ impl Browser {
         if bounds.contains(&at) { at } else { corner }
     }
 
-    /// Right-click and ⌃-click on `element` open the context menu on row
-    /// `ix`.
+    /// A right-click on `element` opens the context menu on row `ix`.
     fn context_target<E: InteractiveElement>(element: E, ix: usize, cx: &mut Context<Self>) -> E {
-        element
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.context_click(Some(ix), event.position, window, cx)
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if event.modifiers.control {
-                        this.context_click(Some(ix), event.position, window, cx)
-                    }
-                }),
-            )
+        element.on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.context_click(Some(ix), event.position, window, cx)
+            }),
+        )
     }
 
-    /// A right-click or ⌃-click on the sidebar's place `ix`.
+    /// A right-click on the sidebar's place `ix`.
     fn place_menu(
         &mut self,
         ix: usize,
@@ -979,18 +991,34 @@ impl Browser {
         }
     }
 
-    /// Show Package Contents: goes inside the lone selected folder or link,
-    /// which ↩ on a package will one day launch instead.
+    /// Show Package Contents: goes inside the selected package, which ↩
+    /// will one day launch instead. A link goes in only if it leads to a
+    /// folder, which is on the disk, maybe a slow volume.
     fn show_package_contents(&mut self, cx: &mut Context<Self>) {
-        let chosen = self.selection.in_order(&self.entries);
-        let [only] = chosen.as_slice() else {
+        let Some(package) = self.package() else {
             return;
         };
-        if matches!(only.kind, Kind::Dir | Kind::Link)
-            && let Some(ix) = self.entries.iter().position(|e| e.path == only.path)
-        {
-            self.open(ix, cx);
-        }
+        let target = package.clone();
+        let is_dir = cx
+            .background_executor()
+            .spawn(async move { target.is_dir() });
+        cx.spawn(async move |this, cx| {
+            if is_dir.await {
+                let _ = this.update(cx, |this, cx| this.navigate(package, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Whether the keys go to the list, the search over it, or a context
+    /// menu opened on it, which leaves the selection looking as it was.
+    fn list_active(&self, window: &Window, cx: &App) -> bool {
+        self.list_focus.contains_focused(window, cx)
+            || self.search.focus_handle(cx).is_focused(window)
+            || self
+                .menu
+                .as_ref()
+                .is_some_and(|menu| menu.origin == self.list_focus)
     }
 
     /// A point in the window as a point in the listing, measured from the
@@ -2495,19 +2523,9 @@ impl Browser {
                     this.place_menu(ix, event.position, window, cx)
                 }),
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if event.modifiers.control {
-                        this.place_menu(ix, event.position, window, cx)
-                    }
-                }),
-            )
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if !event.modifiers().control {
-                    this.sidebar_cursor = ix;
-                    this.go(path.clone(), window, cx);
-                }
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.sidebar_cursor = ix;
+                this.go(path.clone(), window, cx);
             }))
     }
 
@@ -2588,8 +2606,7 @@ impl Browser {
         let label = prefs.grid_label.metrics().2;
         let (cell, height) = (self.cell_width, grid_cell(prefs.grid_icon).1);
         let across = self.across;
-        let active = self.list_focus.contains_focused(window, cx)
-            || self.search.focus_handle(cx).is_focused(window);
+        let active = self.list_active(window, cx);
         // Sharp on Retina screens.
         let pixels = (side * window.scale_factor()).ceil() as u32;
         range
@@ -2690,8 +2707,7 @@ impl Browser {
         let today = Local::now().date_naive();
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
         // Finder greys the selection when the list isn't where keys go.
-        let active = self.list_focus.contains_focused(window, cx)
-            || self.search.focus_handle(cx).is_focused(window);
+        let active = self.list_active(window, cx);
         range
             .filter_map(|ix| {
                 let entry = self.entries.get(ix)?;
@@ -2921,6 +2937,7 @@ impl Render for Browser {
                 this.open_menu(request, window, cx)
             });
         }
+        let package = self.package().is_some();
         // Only the sheet's controls take Tab while it's open.
         let sheet = self.sheet_open();
         let regions = !sheet;
@@ -2984,7 +3001,8 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &ShowContextMenu, _, cx| {
                 if this.renaming.is_none() {
                     let at = this.menu_point(cx);
-                    this.request_menu(this.scopes(), at, this.list_focus.clone(), cx);
+                    let scopes = this.scopes();
+                    this.request_menu(scopes, at, this.list_focus.clone(), cx);
                 }
             }))
             .on_mouse_down(
@@ -2996,9 +3014,6 @@ impl Render for Browser {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if event.modifiers.control {
-                        return this.context_click(None, event.position, window, cx);
-                    }
                     this.focus_list(window, cx);
                     this.swept = false;
                     let at = this.listing_point(event.position);
@@ -3030,8 +3045,9 @@ impl Render for Browser {
             .children(self.marquee_overlay())
             .when(self.marquee.is_some(), |d| d.child(self.marquee_drag(cx)));
         div()
-            // The sheet takes the keys while it is open.
-            .when(!sheet, |d| d.key_context("Browser"))
+            // A sheet or the context menu takes the keys while it's open:
+            // the menu's commands act on what it was opened on.
+            .when(!sheet && self.menu.is_none(), |d| d.key_context("Browser"))
             .track_focus(&self.focus)
             // While a sheet is open, its commands (from the menu bar too) wait.
             .when(!sheet, |d| {
@@ -3175,7 +3191,7 @@ impl Render for Browser {
                         workspace::reveal(&this.chosen())
                     }))
                 })
-                .when(self.selection.len() == 1, |d| {
+                .when(package, |d| {
                     d.on_action(cx.listener(|this, _: &ShowPackageContents, _, cx| {
                         this.show_package_contents(cx)
                     }))
@@ -4490,13 +4506,15 @@ mod tests {
         })
     }
 
+    /// As a pointer does it: it arrives, then presses.
     fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.simulate_mouse_move(at, None, with(""));
         cx.simulate_mouse_down(at, MouseButton::Right, with(""));
+        cx.simulate_mouse_move(at, MouseButton::Right, with(""));
         cx.simulate_mouse_up(at, MouseButton::Right, with(""));
     }
 
-    const ON_A_FILE: [&str; 9] = [
-        "New Folder with Selection",
+    const ON_A_FILE: [&str; 8] = [
         "Open",
         "Reveal in Finder",
         "Open in Terminal",
@@ -4517,21 +4535,24 @@ mod tests {
         right_click(cx, rows[2]);
         assert_eq!(shown(&browser, cx).1, ["c.txt"]);
         assert_eq!(menu(&browser, cx), Some((ON_A_FILE.to_vec(), None)));
+        // While it's open, the window's keys can't move what it acts on.
+        press(cx, "alt-up cmd-[ cmd-alt-a");
+        assert_eq!(shown(&browser, cx).1, ["c.txt"]);
+        assert!(menu(&browser, cx).is_some());
         // Esc closes it, and leaves the selection as it was.
         press(cx, "escape");
         assert_eq!(menu(&browser, cx), None);
         assert_eq!(shown(&browser, cx).1, ["c.txt"]);
-        // ⌃-click inside the selection keeps it, and the menu has only what
-        // runs on several: no Rename.
+        // Inside the selection it keeps it, and the menu has what runs on
+        // several: New Folder with Selection, and no Rename.
         cx.simulate_click(rows[1], with("cmd"));
-        let control = Modifiers {
-            control: true,
-            ..Modifiers::default()
-        };
-        cx.simulate_click(rows[1], control);
+        right_click(cx, rows[1]);
         assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
         let (titles, _) = menu(&browser, cx).unwrap();
-        assert!(!titles.contains(&"Rename") && titles.contains(&"Duplicate"));
+        assert_eq!(
+            titles[2..5],
+            ["Open in Terminal", "New Folder with Selection", "Duplicate"]
+        );
         // A press outside closes it and reaches nothing behind it. The menu
         // opened rightward from the pointer, so this is left of it.
         let outside = rows[3] - gpui::point(px(50.), px(0.));
@@ -4558,6 +4579,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn in_the_grid_a_right_click_opens_an_items_menu(cx: &mut TestAppContext) {
+        let (_dir, folder) = sized();
+        let (browser, cx) = browse(&folder, cx);
+        press(cx, "cmd-2");
+        let cell = |ix: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            browser.read_with(cx, |browser, _| {
+                let height = grid_cell(browser.grid_icon).1;
+                browser.list_bounds.get().origin
+                    + gpui::point(
+                        px(8. + browser.cell_width * (ix as f32 + 0.5)),
+                        px(4. + height * 0.5),
+                    )
+            })
+        };
+        let at = cell(2, cx);
+        right_click(cx, at);
+        assert_eq!(shown(&browser, cx).1, ["c.txt"]);
+        assert_eq!(menu(&browser, cx), Some((ON_A_FILE.to_vec(), None)));
+        press(cx, "escape");
+    }
+
+    #[gpui::test]
     fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut TestAppContext) {
         let (_dir, project) = folder();
         let owned = own(cx);
@@ -4567,19 +4612,29 @@ mod tests {
         // ↑ and ↓ come round from the ends.
         press(cx, "up");
         assert_eq!(menu(&browser, cx).unwrap().1, Some("Copy Path"));
-        press(cx, "down down down down down down");
+        press(cx, "down down down down down");
         assert_eq!(menu(&browser, cx).unwrap().1, Some("Duplicate"));
         press(cx, "enter");
         assert_eq!(menu(&browser, cx), None);
         assert!(project.join("a copy.txt").exists());
         assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
-        // A package's menu has Show Package Contents, which goes inside.
+        // Only a package has Show Package Contents, in the menu bar too, and
+        // it goes inside.
         std::fs::create_dir(project.join("Kit.app")).unwrap();
         browser.update(cx, |browser, cx| browser.list(true, cx));
         cx.run_until_parked();
-        press(cx, "alt-up down shift-f10");
+        let offered = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.is_action_available(&ShowPackageContents, cx))
+        };
+        for (keys, name) in [("alt-up", "docs"), ("alt-down", "a.txt")] {
+            press(cx, keys);
+            assert_eq!(shown(&browser, cx).1, [name]);
+            assert!(!offered(cx), "{name}");
+        }
+        press(cx, "alt-up down");
         assert_eq!(shown(&browser, cx).1, ["Kit.app"]);
-        press(cx, "down down down");
+        assert!(offered(cx));
+        press(cx, "shift-f10 down down");
         assert_eq!(menu(&browser, cx).unwrap().1, Some("Show Package Contents"));
         press(cx, "enter");
         let inside = browser.read_with(cx, |browser, _| browser.folder().to_path_buf());
