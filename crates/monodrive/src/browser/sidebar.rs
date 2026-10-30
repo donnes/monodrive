@@ -25,6 +25,7 @@ use monodrive_core::ops::{self, Origin};
 use monodrive_core::places::{Availability, Place, Store};
 use monodrive_core::servers::{self, Cancel, Prompt};
 use monodrive_core::volumes::{self, Volume};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -42,6 +43,11 @@ pub trait Drives: Send + Sync {
     /// Whether opening this folder could show a privacy prompt. Call it off
     /// the UI thread.
     fn needs_consent(&self, path: &Path) -> bool;
+    /// Which volume holds where `path` leads, by the device its folder is on.
+    /// Call it off the UI thread.
+    fn device(&self, path: &Path) -> Option<u64> {
+        std::fs::metadata(path).ok().map(|meta| meta.dev())
+    }
     /// The cloud folders on this Mac.
     fn cloud(&self) -> Vec<CloudFolder>;
     /// What the index finds for `query`, once it has started. Nothing starts

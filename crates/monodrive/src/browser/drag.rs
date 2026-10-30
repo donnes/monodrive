@@ -10,6 +10,7 @@
 
 use super::Browser;
 use super::pane::{Pane, text_width};
+use super::sidebar::{Drives, Places};
 use crate::file_icons;
 use crate::theme::{self, Elevation, content};
 use gpui::{
@@ -18,12 +19,13 @@ use gpui::{
     Point, Render, Stateful, Window, div, prelude::*, px,
 };
 use monodrive_core::entries::{Entry, Kind};
-use monodrive_core::volumes::{self, Volume};
 use objc2_app_kit::{NSEvent, NSEventModifierFlags};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// The drag image's icon.
 const IMAGE_SIDE: f32 = 32.;
@@ -82,12 +84,13 @@ pub(super) enum Decision {
 
 /// Finder's rule: within a volume a drag moves and across volumes it copies; ⌥
 /// forces a copy and ⌘ a move. What's already in the folder stays out of it,
-/// and a folder can't go inside itself.
+/// and a folder can't go inside itself. `same_volume` is false too for a volume
+/// not known yet, since a copy can't surprise anyone.
 pub(super) fn decide(
     sources: &[PathBuf],
     target: &Target,
     keys: Modifiers,
-    same_volume: impl Fn(&Path, &Path) -> bool,
+    same_volume: bool,
 ) -> Decision {
     let (into, name) = match target {
         Target::Pin(at) => {
@@ -110,15 +113,7 @@ pub(super) fn decide(
     if paths.is_empty() {
         return Decision::Nothing(format!("Already in {name}"));
     }
-    let moving = !keys.alt
-        && (keys.platform || {
-            // Rows of one folder come together, and share a volume.
-            let mut last = None;
-            paths.iter().all(|path| {
-                let parent = path.parent();
-                std::mem::replace(&mut last, parent) == parent || same_volume(path, into)
-            })
-        });
+    let moving = !keys.alt && (keys.platform || same_volume);
     Decision::Send {
         paths,
         into: into.clone(),
@@ -169,12 +164,30 @@ fn outermost(entries: Vec<&Entry>) -> Vec<&Entry> {
     entries.iter().copied().filter(|e| !inside(e)).collect()
 }
 
-/// Whether two paths are on one volume, as `decide` asks, from the table the
-/// sidebar keeps, so a hover never touches the disk. A folder reached through
-/// a link counts by its path.
-fn same_volume(volumes: &[Volume], a: &Path, b: &Path) -> bool {
-    let mount = |path| volumes::holding(volumes, path).map(|volume| &volume.mount);
-    mount(a) == mount(b)
+/// The device holding where `path` leads, reading the disk: never a place that
+/// could raise a privacy prompt, which then simply stays unknown.
+fn device_of(drives: Option<&Arc<dyn Drives>>, path: &Path) -> Option<u64> {
+    match drives {
+        Some(drives) if drives.needs_consent(path) => None,
+        Some(drives) => drives.device(path),
+        None => std::fs::metadata(path).ok().map(|meta| meta.dev()),
+    }
+}
+
+/// The devices holding `sources`, if all can be told. A link is where its
+/// parent is, whatever it leads to, since only the link would move.
+fn devices_of(drives: Option<&Arc<dyn Drives>>, sources: &[PathBuf]) -> Option<HashSet<u64>> {
+    sources
+        .iter()
+        .map(|source| {
+            let holder = if source.is_symlink() {
+                source.parent()?
+            } else {
+                source.as_path()
+            };
+            device_of(drives, holder)
+        })
+        .collect()
 }
 
 /// The modifiers held now. During a drag AppKit runs, from another app or back
@@ -192,15 +205,34 @@ fn held_keys(window: &Window) -> Modifiers {
     }
 }
 
+impl Session {
+    /// Whether all of it is known to be on `target`'s volume.
+    fn same_volume(&self, target: &Target) -> bool {
+        let Target::Folder { path, .. } = target else {
+            return false;
+        };
+        match (&self.source_devices, self.target_devices.get(path)) {
+            (Some(sources), Some(Some(device))) => sources.iter().all(|d| d == device),
+            _ => false,
+        }
+    }
+}
+
 struct Session {
     sources: Vec<PathBuf>,
     /// All of it is folders, as pinning asks.
     folders: bool,
     /// What the pointer is over now, as this move finds it.
     target: Option<Target>,
-    /// What the frame shows, worked out once per target and keys, since
-    /// a selection can run to thousands.
-    decided: Option<(Target, (bool, bool), Decision)>,
+    /// The devices holding the sources, once read. Asked for once.
+    source_devices: Option<HashSet<u64>>,
+    sources_asked: bool,
+    /// The device of each target met in this drag, `None` until it's read or
+    /// if it can't be. Being in here means it's been asked for.
+    target_devices: HashMap<PathBuf, Option<u64>>,
+    /// What the frame shows, worked out once per target, keys and answer about
+    /// its volume, since a selection can run to thousands.
+    decided: Option<(Target, (bool, bool, bool), Decision)>,
     /// The next frame comes from something that doesn't move what's under the
     /// pointer: a move has just looked, or only the keys changed.
     settled: bool,
@@ -231,6 +263,9 @@ impl Drag {
             sources,
             folders,
             target: None,
+            source_devices: None,
+            sources_asked: false,
+            target_devices: HashMap::new(),
             decided: None,
             settled: false,
         });
@@ -289,7 +324,7 @@ impl Drag {
     /// Before a frame: ends with GPUI's drag, and works out what it would do.
     /// Says whether what's under the pointer may have changed without a move,
     /// as a scroll or a closed tab changes it.
-    fn settle(&self, dragging: bool, keys: Modifiers, volumes: &[Volume]) -> bool {
+    fn settle(&self, dragging: bool, keys: Modifiers) -> bool {
         let mut state = self.0.borrow_mut();
         if !dragging {
             state.session = None;
@@ -302,15 +337,14 @@ impl Drag {
             session.decided = None;
             return moved_under;
         };
-        let pressed = (keys.alt, keys.platform);
+        let same_volume = session.same_volume(&target);
+        let pressed = (keys.alt, keys.platform, same_volume);
         if !session
             .decided
             .as_ref()
             .is_some_and(|(was, held, _)| *was == target && *held == pressed)
         {
-            let decision = decide(&session.sources, &target, keys, |a, b| {
-                same_volume(volumes, a, b)
-            });
+            let decision = decide(&session.sources, &target, keys, same_volume);
             session.decided = Some((target, pressed, decision));
         }
         moved_under
@@ -339,6 +373,47 @@ impl Drag {
             _ => None,
         })
         .flatten()
+    }
+
+    /// The sources, the first time they're asked for.
+    fn sources_to_read(&self) -> Option<Vec<PathBuf>> {
+        let mut state = self.0.borrow_mut();
+        let session = state.session.as_mut()?;
+        (!std::mem::replace(&mut session.sources_asked, true)).then(|| session.sources.clone())
+    }
+
+    /// The target's folder, the first time this drag meets it.
+    fn target_to_read(&self) -> Option<PathBuf> {
+        let mut state = self.0.borrow_mut();
+        let session = state.session.as_mut()?;
+        let Some(Target::Folder { path, .. }) = &session.target else {
+            return None;
+        };
+        let path = path.clone();
+        let new = !session.target_devices.contains_key(&path);
+        new.then(|| {
+            session.target_devices.insert(path.clone(), None);
+            path
+        })
+    }
+
+    /// An answer that isn't for this drag's sources is an old one.
+    fn sources_read(&self, sources: &[PathBuf], devices: Option<HashSet<u64>>) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut()
+            && session.sources == sources
+        {
+            session.source_devices = devices;
+            session.settled = true;
+        }
+    }
+
+    fn target_read(&self, folder: &Path, device: Option<u64>) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut()
+            && let Some(known) = session.target_devices.get_mut(folder)
+        {
+            *known = device;
+            session.settled = true;
+        }
     }
 
     /// The button came up, and what's under it has just offered itself: what
@@ -571,15 +646,14 @@ impl Browser {
         .detach();
     }
 
-    /// Before a frame: the drag's state for what's held and mounted now. A
-    /// frame that may have moved things under a resting pointer looks again
-    /// once it's drawn, with a move at the same place, so that frame's listeners
-    /// answer. That move's own frame doesn't look again, so nothing repeats.
-    pub(super) fn settle_drag(&self, window: &Window, cx: &App) {
-        let keys = held_keys(window);
-        let moved_under = self
-            .drag
-            .settle(cx.has_active_drag(), keys, &self.sidebar.volumes);
+    /// Before a frame: the drag's state for what's held now, and what's still
+    /// to be read about its volumes, off the UI thread. A frame that may have
+    /// moved things under a resting pointer looks again once it's drawn, with
+    /// a move at the same place, so that frame's listeners answer. That move's
+    /// own frame doesn't look again, so nothing repeats.
+    pub(super) fn settle_drag(&self, window: &Window, cx: &mut Context<Self>) {
+        let moved_under = self.drag.settle(cx.has_active_drag(), held_keys(window));
+        self.read_volumes(cx);
         if moved_under {
             window.on_next_frame(|window, cx| {
                 if cx.has_active_drag() {
@@ -591,6 +665,46 @@ impl Browser {
                     window.dispatch_event(PlatformInput::MouseMove(event), cx);
                 }
             });
+        }
+    }
+
+    /// Starts what this drag doesn't know yet about its volumes. Each answer
+    /// draws a frame, and until then `decide` hears "not the same".
+    fn read_volumes(&self, cx: &mut Context<Self>) {
+        let drives = || {
+            cx.try_global::<Places>()
+                .map(|places| places.drives.clone())
+        };
+        let sources = self
+            .drag
+            .sources_to_read()
+            .map(|sources| (drives(), sources));
+        let target = self.drag.target_to_read().map(|folder| (drives(), folder));
+        if let Some((drives, sources)) = sources {
+            let drag = self.drag.clone();
+            let read = cx.background_executor().spawn(async move {
+                let devices = devices_of(drives.as_ref(), &sources);
+                (sources, devices)
+            });
+            cx.spawn(async move |this, cx| {
+                let (sources, devices) = read.await;
+                drag.sources_read(&sources, devices);
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        if let Some((drives, folder)) = target {
+            let drag = self.drag.clone();
+            let read = cx.background_executor().spawn(async move {
+                let device = device_of(drives.as_ref(), &folder);
+                (folder, device)
+            });
+            cx.spawn(async move |this, cx| {
+                let (folder, device) = read.await;
+                drag.target_read(&folder, device);
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
         }
     }
 
@@ -684,36 +798,74 @@ mod tests {
         }
     }
 
-    /// `/ext` is a volume of its own, and everything else is on another.
-    fn same(a: &Path, b: &Path) -> bool {
-        a.starts_with("/ext") == b.starts_with("/ext")
-    }
-
     #[test]
     fn a_drag_moves_within_a_volume_copies_across_and_the_keys_force_either() {
-        let moving = |sources: &[&str], into: &str, keys: Modifiers| {
-            let target = folder(into, "x");
-            match decide(&paths(sources), &target, keys, same) {
+        let moving = |same_volume: bool, keys: Modifiers| {
+            let target = folder("/b", "x");
+            match decide(&paths(&["/a/f"]), &target, keys, same_volume) {
                 Decision::Send { moving, .. } => moving,
                 other => panic!("{other:?}"),
             }
         };
         let plain = Modifiers::default();
-        assert!(moving(&["/a/f"], "/b", plain));
-        assert!(!moving(&["/a/f"], "/ext/b", plain));
+        assert!(moving(true, plain));
+        assert!(!moving(false, plain));
         // ⌥ forces a copy, ⌘ a move, and ⌥ wins with both, since it's the safe one.
-        assert!(!moving(&["/a/f"], "/b", keys(true, false)));
-        assert!(moving(&["/a/f"], "/ext/b", keys(false, true)));
-        assert!(!moving(&["/a/f"], "/ext/b", keys(true, true)));
-        // Rows from several volumes, as search shows: one off it makes a copy.
-        assert!(!moving(&["/a/f", "/ext/g"], "/b", plain));
-        assert!(moving(&["/a/f", "/a/g", "/c/h"], "/b", plain));
+        assert!(!moving(true, keys(true, false)));
+        assert!(moving(false, keys(false, true)));
+        assert!(!moving(false, keys(true, true)));
+    }
+
+    #[test]
+    fn a_target_not_read_yet_is_a_copy_until_its_volume_comes() {
+        let drag = Drag::default();
+        drag.begin(paths(&["/a/f"]), false);
+        let target = folder("/b", "b");
+        let settle_and_say = |drag: &Drag| {
+            drag.offer(target.clone());
+            drag.settle(true, Modifiers::default());
+            drag.decision(|_, d| d.says()).unwrap()
+        };
+        assert_eq!(settle_and_say(&drag), "Copy f to b");
+        assert_eq!(drag.sources_to_read(), Some(paths(&["/a/f"])));
+        assert_eq!(drag.sources_to_read(), None);
+        assert_eq!(drag.target_to_read(), Some("/b".into()));
+        assert_eq!(drag.target_to_read(), None);
+        // The target alone says nothing, and neither do the sources alone.
+        drag.target_read(Path::new("/b"), Some(1));
+        assert_eq!(settle_and_say(&drag), "Copy f to b");
+        drag.sources_read(&paths(&["/a/f"]), Some(HashSet::from([1])));
+        assert_eq!(settle_and_say(&drag), "Move f to b");
+        // Another target starts from a copy again, and its own volume decides.
+        drag.next_move();
+        let other = folder("/ext", "ext");
+        drag.offer(other);
+        drag.settle(true, Modifiers::default());
+        assert_eq!(drag.decision(|_, d| d.says()).unwrap(), "Copy f to ext");
+        assert_eq!(drag.target_to_read(), Some("/ext".into()));
+        drag.target_read(Path::new("/ext"), Some(2));
+        drag.settle(true, Modifiers::default());
+        assert_eq!(drag.decision(|_, d| d.says()).unwrap(), "Copy f to ext");
+    }
+
+    #[test]
+    fn sources_on_two_volumes_are_a_copy() {
+        let drag = Drag::default();
+        drag.begin(paths(&["/a/f", "/ext/g"]), false);
+        drag.offer(folder("/b", "b"));
+        drag.settle(true, Modifiers::default());
+        drag.target_to_read();
+        drag.target_read(Path::new("/b"), Some(1));
+        drag.sources_read(&paths(&["/a/f", "/ext/g"]), Some(HashSet::from([1, 2])));
+        drag.offer(folder("/b", "b"));
+        drag.settle(true, Modifiers::default());
+        assert_eq!(drag.decision(|_, d| d.says()).unwrap(), "Copy 2 items to b");
     }
 
     #[test]
     fn the_pill_says_what_a_drop_would_do() {
         let says = |sources: &[&str], target: &Target, keys: Modifiers| {
-            decide(&paths(sources), target, keys, same).says()
+            decide(&paths(sources), target, keys, true).says()
         };
         let inbox = folder("/b/Inbox", "Inbox");
         let plain = Modifiers::default();
@@ -741,23 +893,23 @@ mod tests {
         let nothing = Decision::Nothing("\"docs\" can't go inside itself.".into());
         for into in ["/a/docs", "/a/docs/deep/er"] {
             let target = folder(into, "x");
-            let decided = decide(&paths(&["/a/docs"]), &target, Modifiers::default(), same);
+            let decided = decide(&paths(&["/a/docs"]), &target, Modifiers::default(), true);
             assert_eq!(decided, nothing, "{into}");
         }
         // A name that only starts the same isn't inside it.
         let target = folder("/a/docs2", "docs2");
-        let decided = decide(&paths(&["/a/docs"]), &target, Modifiers::default(), same);
+        let decided = decide(&paths(&["/a/docs"]), &target, Modifiers::default(), true);
         assert!(matches!(decided, Decision::Send { .. }));
         // ⌥ doesn't turn a drop on its own folder into a duplicate.
         let target = folder("/a", "a");
-        let decided = decide(&paths(&["/a/f"]), &target, keys(true, false), same);
+        let decided = decide(&paths(&["/a/f"]), &target, keys(true, false), true);
         assert_eq!(decided, Decision::Nothing("Already in a".into()));
         // Search rows, where only one is in the folder already: the other goes.
         let decided = decide(
             &paths(&["/a/f", "/c/g"]),
             &target,
             Modifiers::default(),
-            same,
+            true,
         );
         assert_eq!(decided.says(), "Move g to a");
     }
@@ -777,7 +929,7 @@ mod tests {
         // GPUI handing it to AppKit ends what the window knows of it, and it
         // comes back the same drag.
         browser.read_with(cx, |b, _| {
-            b.drag.settle(false, Modifiers::default(), &[]);
+            b.drag.settle(false, Modifiers::default());
         });
         hover(docs, "", cx);
         hover(docs, "", cx);
@@ -804,36 +956,5 @@ mod tests {
             .map(|entry| entry.path.as_path())
             .collect();
         assert_eq!(left, [Path::new("/a/docs"), Path::new("/a/docs2")]);
-    }
-
-    #[test]
-    fn volumes_are_told_apart_by_the_mount_holding_each_path() {
-        let volume = |mount: &str| Volume {
-            name: mount.into(),
-            mount: mount.into(),
-            disk: None,
-            id: None,
-            total: 0,
-            free: 0,
-            read_only: false,
-            network: false,
-            ejectable: false,
-            removable: false,
-            startup: mount == "/",
-        };
-        let table = [volume("/"), volume("/Volumes/Ext")];
-        assert!(same_volume(
-            &table,
-            "/Users/me/a".as_ref(),
-            "/tmp/b".as_ref()
-        ));
-        assert!(!same_volume(
-            &table,
-            "/Users/me/a".as_ref(),
-            "/Volumes/Ext/b".as_ref()
-        ));
-        // Before the sidebar has read them, all are one: a move, which is
-        // what the owner sorts out per item anyway.
-        assert!(same_volume(&[], "/a".as_ref(), "/Volumes/Ext/b".as_ref()));
     }
 }

@@ -34,6 +34,8 @@ struct Fake {
     cloud: Mutex<Vec<CloudFolder>>,
     /// What the index finds, whatever's asked.
     files: Mutex<Vec<Entry>>,
+    /// The paths whose device was asked for, in order.
+    devices_asked: Mutex<Vec<PathBuf>>,
 }
 
 impl Drives for Fake {
@@ -60,6 +62,16 @@ impl Drives for Fake {
 
     fn needs_consent(&self, path: &Path) -> bool {
         monodrive_core::sizes::leads_into(path, &self.gated.lock().unwrap())
+    }
+
+    /// Which made-up volume holds where `path` really leads.
+    fn device(&self, path: &Path) -> Option<u64> {
+        self.devices_asked.lock().unwrap().push(path.into());
+        let real = path.canonicalize().ok()?;
+        let volumes = self.volumes.lock().unwrap();
+        let holder = monodrive_core::volumes::holding(&volumes, &real)?;
+        let ix = volumes.iter().position(|v| v.mount == holder.mount)?;
+        Some(ix as u64)
     }
 
     fn cloud(&self) -> Vec<CloudFolder> {
@@ -1771,19 +1783,7 @@ fn a_restored_place_on_a_drive_is_checked_for_consent_before_it_is_touched(
     assert_eq!(here(&browser, cx), mount.join("link"));
 }
 
-/// Presses on what's at `from`, starts a drag and carries it to `to`.
-fn carry(from: Point<Pixels>, to: Point<Pixels>, keys: &str, cx: &mut VisualTestContext) {
-    cx.simulate_mouse_down(from, MouseButton::Left, with(keys));
-    for at in [from + point(px(8.), px(0.)), to] {
-        cx.simulate_mouse_move(at, MouseButton::Left, with(keys));
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-    }
-}
-
-fn says(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
-    browser.read_with(cx, |b, _| b.drag.decision(|_, d| d.says()))
-}
+use super::drag_tests::{carry, hover, says};
 
 #[gpui::test]
 fn a_favorite_takes_files_and_the_edges_between_favorites_pin_folders(cx: &mut TestAppContext) {
@@ -1928,4 +1928,90 @@ fn pinning_folders_already_in_favorites_lands_where_the_line_showed(cx: &mut Tes
     cx.simulate_mouse_up(edge, MouseButton::Left, with(""));
     cx.run_until_parked();
     assert_eq!(saved(&world.store)[..4], [two, one, three, fourth]);
+}
+
+#[gpui::test]
+fn a_folder_through_a_link_counts_as_the_volume_it_leads_to(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let ext = tempfile::tempdir().unwrap();
+    let drive = ext.path().canonicalize().unwrap();
+    std::fs::create_dir(drive.join("sub")).unwrap();
+    std::fs::write(drive.join("sub/there.txt"), "").unwrap();
+    let outside = project.join("outside");
+    std::os::unix::fs::symlink(drive.join("sub"), &outside).unwrap();
+    let world = world(vec![startup(), volume("Ext", &drive, "ext", 100, 10)], cx);
+    let (one, _) = two_favorites(&world);
+    let (browser, cx) = open(&world, &outside, cx);
+    // Its path is on the startup disk, and the file is really on the drive.
+    let middle = center(cx, "place-1");
+    let file = row(&browser, 0, cx);
+    carry(file, middle, "", cx);
+    let name = one.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        says(&browser, cx).unwrap(),
+        format!("Copy there.txt to {name}")
+    );
+    press(cx, "escape");
+    cx.simulate_mouse_up(middle, MouseButton::Left, with(""));
+    // Across a link the other way: the pane showing it is on the drive too.
+    press(cx, "cmd-alt-s");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let right = browser.read_with(cx, |b, _| b.tabs[b.active].focused().clone());
+    right.update_in(cx, |pane, window, cx| pane.go(project.clone(), window, cx));
+    cx.run_until_parked();
+    press(cx, "shift-tab");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let file_right = right.read_with(cx, |pane, cx| {
+        let height = cx.global::<Preferences>().row_size.metrics().0;
+        let ix = pane.entries.iter().position(|e| e.name == "a.txt").unwrap();
+        pane.list_bounds.get().origin + point(px(60.), px(4. + height * (ix as f32 + 0.5)))
+    });
+    let space_left = {
+        let bounds =
+            browser.read_with(cx, |b, cx| b.tabs[b.active].pane.read(cx).list_bounds.get());
+        bounds.origin + point(px(60.), px(300.))
+    };
+    carry(file_right, space_left, "", cx);
+    assert_eq!(says(&browser, cx).unwrap(), "Copy a.txt to outside");
+    press(cx, "escape");
+    cx.simulate_mouse_up(space_left, MouseButton::Left, with(""));
+}
+
+#[gpui::test]
+fn a_target_is_read_once_per_drag_and_one_that_cant_be_stays_a_copy(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (one, two) = two_favorites(&world);
+    let (browser, cx) = open(&world, &project, cx);
+    let (first, second) = (center(cx, "place-1"), center(cx, "place-2"));
+    let file = row(&browser, 2, cx);
+    // On one volume: a move, however long it stays over the same place.
+    carry(file, first, "", cx);
+    let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        says(&browser, cx).unwrap(),
+        format!("Move a.txt to {}", name(&one))
+    );
+    for at in [second, first, second, first] {
+        hover(at, "", cx);
+    }
+    let asked = |path: &Path| {
+        let asked = world.fake.devices_asked.lock().unwrap();
+        asked.iter().filter(|p| *p == path).count()
+    };
+    assert_eq!((asked(&one), asked(&two)), (1, 1));
+    press(cx, "escape");
+    cx.simulate_mouse_up(first, MouseButton::Left, with(""));
+    // A place that could raise a privacy prompt is never read, so it's a copy.
+    world.fake.gated.lock().unwrap().push(two.clone());
+    carry(file, second, "", cx);
+    assert_eq!(
+        says(&browser, cx).unwrap(),
+        format!("Copy a.txt to {}", name(&two))
+    );
+    assert_eq!(asked(&two), 1);
+    press(cx, "escape");
+    cx.simulate_mouse_up(second, MouseButton::Left, with(""));
 }
