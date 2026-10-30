@@ -5,12 +5,14 @@
 //!
 //! Entry names come from whoever made the archive. They're shown as stored
 //! and checked before anything is written: no absolute paths, no `..`, no
-//! link pointing out of the destination, and no writing through a link,
-//! whether the archive made it or it was already there.
+//! two entries at one path, no link leading out of what it's extracted
+//! with, and no writing through a link, whether the archive made it or it
+//! was already there.
 
 use crate::entries::Kind;
 use flate2::bufread::DeflateDecoder;
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -20,6 +22,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use unicode_normalization::UnicodeNormalization;
 use zip::write::FullFileOptions;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
@@ -190,7 +193,7 @@ impl Archive {
         }
         let mut items: Vec<Vec<&str>> = Vec::new();
         if selected.is_empty() {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = HashSet::new();
             for entry in &self.entries {
                 if let Ok(parts) = parts(&entry.name)
                     && seen.insert(parts[0])
@@ -286,19 +289,53 @@ impl Archive {
     }
 
     /// Extracts `item`, an entry or a folder of them, to the new path
-    /// `to`, never through a link. The destination's free space and the
-    /// entries' problems were checked when the extraction was planned; the
-    /// rest is checked here. Each entry writes no more than the archive
-    /// says it holds, and must match its checksum. `done` counts the bytes
-    /// written; `cancel` stops partway, leaving what's at `to` unfinished.
+    /// `to`, never through a link, on a volume that `ignores_case` or not.
+    /// The destination's free space and the entries' problems were checked
+    /// when the extraction was planned; the rest is checked here. Two
+    /// entries at one path refuse it before anything is written. Each entry
+    /// writes no more than the archive says it holds, and must match its
+    /// checksum. `done` counts the bytes written; `cancel` stops partway,
+    /// leaving what's at `to` unfinished.
     pub(crate) fn extract(
         &self,
         item: &str,
         to: &Path,
+        ignores_case: bool,
         cancel: &AtomicBool,
         done: &AtomicU64,
     ) -> Result<(), String> {
         let taken: Vec<(&Entry, Vec<&str>)> = self.taking(item).collect();
+        let keys: Vec<Vec<String>> = taken
+            .iter()
+            .map(|(_, rest)| key(rest, ignores_case))
+            .collect();
+        let mut first: HashMap<&[String], &str> = HashMap::new();
+        let twice: Vec<String> = taken
+            .iter()
+            .zip(&keys)
+            .filter_map(|((entry, _), key)| {
+                let earlier = first.insert(key, &entry.name)?;
+                Some(format!(
+                    "{} and {}",
+                    printable(earlier),
+                    printable(&entry.name)
+                ))
+            })
+            .take(5)
+            .collect();
+        if !twice.is_empty() {
+            return Err(format!(
+                "{} are the same path once extracted, so nothing of {} was.",
+                twice.join(", "),
+                printable(item)
+            ));
+        }
+        let links: HashSet<Vec<String>> = taken
+            .iter()
+            .zip(&keys)
+            .filter(|((entry, _), _)| entry.kind == Kind::Link)
+            .map(|(_, key)| key.clone())
+            .collect();
         let own = taken
             .iter()
             .find(|(_, rest)| rest.is_empty())
@@ -312,6 +349,8 @@ impl Archive {
         let base = CString::new(base.as_bytes()).map_err(|e| e.to_string())?;
         let mut writer = Writer {
             archive: self,
+            links,
+            ignores_case,
             file: File::open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?,
             buffer: vec![0; CHUNK],
             cancel,
@@ -325,7 +364,7 @@ impl Archive {
                     make_dir(folder.as_fd(), &base, true).map_err(|e| format!("{shown}: {e}"))?;
                 return finish(dir.as_fd(), entry).map_err(|e| format!("{shown}: {e}"));
             }
-            return writer.write(entry, folder.as_fd(), &base, 0);
+            return writer.write(entry, folder.as_fd(), &base, &[]);
         }
         if own.is_some_and(|entry| entry.kind != Kind::Dir) {
             return Err(format!(
@@ -351,7 +390,7 @@ impl Archive {
                     .map_err(|e| format!("{} {}", printable(&entry.name), blocked(&e)))?;
                 folders.push((rest, *entry));
             } else {
-                writer.write(entry, here.1.as_fd(), &name, rest.len())?;
+                writer.write(entry, here.1.as_fd(), &name, rest)?;
             }
         }
         // Folders last, deepest first: writing inside one changes its time,
@@ -567,9 +606,24 @@ fn to_dos(seconds: i64) -> DateTime {
     .unwrap_or_default()
 }
 
+/// A path's parts as a volume compares names: whatever their Unicode
+/// normalization, and whatever their case where it `ignores_case`.
+fn key(parts: &[&str], ignores_case: bool) -> Vec<String> {
+    parts
+        .iter()
+        .map(|part| match ignores_case {
+            true => part.to_lowercase().nfd().collect(),
+            false => part.nfd().collect(),
+        })
+        .collect()
+}
+
 /// Writes an archive's files and links where `extract` puts them.
 struct Writer<'a> {
     archive: &'a Archive,
+    /// The item's links, keyed as its volume compares names.
+    links: HashSet<Vec<String>>,
+    ignores_case: bool,
     file: File,
     buffer: Vec<u8>,
     cancel: &'a AtomicBool,
@@ -577,15 +631,14 @@ struct Writer<'a> {
 }
 
 impl Writer<'_> {
-    /// Writes the file or link `entry` as `name` in `dir`, which is `depth`
-    /// folders below the destination, never replacing or following
-    /// anything there.
+    /// Writes the file or link `entry` as `name` in `dir`, at the parts `at`
+    /// inside the item, never replacing or following anything there.
     fn write(
         &mut self,
         entry: &Entry,
         dir: BorrowedFd,
         name: &CStr,
-        depth: usize,
+        at: &[&str],
     ) -> Result<(), String> {
         let shown = printable(&entry.name);
         if let Some(why) = entry.problem() {
@@ -599,9 +652,10 @@ impl Writer<'_> {
             }
             let mut target = Vec::new();
             self.pour(entry, &mut target)?;
-            if target.contains(&0) || escapes(&target, depth) {
+            if !self.stays(&target, at) {
                 return Err(format!(
-                    "{shown} is a link that leads out of the destination, so it wasn't extracted."
+                    "{shown} is a link that leads out of what's extracted with it, or through \
+                     another link, so it wasn't extracted."
                 ));
             }
             let target = CString::new(target).map_err(|e| e.to_string())?;
@@ -698,23 +752,36 @@ impl Writer<'_> {
         }
         Ok(())
     }
-}
 
-/// Whether the link `target`, in a folder `depth` below the destination,
-/// leads out of it.
-fn escapes(target: &[u8], mut depth: usize) -> bool {
-    if target.starts_with(b"/") {
-        return true;
-    }
-    for part in target.split(|b| *b == b'/') {
-        match part {
-            b"" | b"." => {}
-            b".." if depth == 0 => return true,
-            b".." => depth -= 1,
-            _ => depth += 1,
+    /// Whether a link at `at` inside the item, to `target`, leads somewhere
+    /// inside the item. A relative target may climb with `..` as long as it
+    /// stays inside, but it can't pass through one of the item's links,
+    /// whose own target would move it: what `..` means after one isn't what
+    /// it reads as. A link at the top of the item would lead among the
+    /// destination's own items, which the archive doesn't decide.
+    fn stays(&self, target: &[u8], at: &[&str]) -> bool {
+        let (Ok(target), Some((_, folder))) = (std::str::from_utf8(target), at.split_last()) else {
+            return false;
+        };
+        if target.starts_with('/') || target.contains('\0') {
+            return false;
         }
+        let parts: Vec<&str> = split(target);
+        let mut here = key(folder, self.ignores_case);
+        for (i, part) in parts.iter().enumerate() {
+            if *part == ".." {
+                if here.pop().is_none() {
+                    return false;
+                }
+                continue;
+            }
+            here.extend(key(&[part], self.ignores_case));
+            if i + 1 < parts.len() && self.links.contains(&here) {
+                return false;
+            }
+        }
+        true
     }
-    false
 }
 
 /// What stopped an entry being written: a link or file in the way.
@@ -1073,7 +1140,7 @@ pub(crate) mod tests {
         let (cancel, done) = (AtomicBool::new(true), AtomicU64::new(0));
         let to = dir.path().join("out");
         assert_eq!(
-            archive.extract("a", &to, &cancel, &done),
+            archive.extract("a", &to, true, &cancel, &done),
             Err("Cancelled.".into())
         );
         assert!(to.is_dir() && !to.join("x").exists());

@@ -1711,12 +1711,26 @@ fn extracting_refuses_paths_out_of_the_destination_and_never_writes_through_a_li
     let Some(Done::Failed(why)) = &failed.tasks[0].done else {
         panic!("{failed:?}")
     };
-    assert!(
-        why.contains("item/sub/l/evil.txt goes through a link"),
-        "{why}"
-    );
+    assert!(why.contains("item/sub/l is a link that leads out"), "{why}");
     untrash_unfinished(why, &files);
     assert_eq!(names(&outside), Vec::<String>::new());
+    assert_eq!(names(&dest), ["x"]);
+    // A link that stays inside is made, but nothing is written through it.
+    let inside = files.join("inside.zip");
+    zip(
+        &inside,
+        &[
+            ("item/sub/", Item::Dir),
+            ("item/l", Item::Link("sub")),
+            ("item/l/evil.txt", Item::File(b"evil")),
+        ],
+    );
+    let failed = job(&shared, extract(&inside, &[], &dest, Conflict::Stop));
+    let Some(Done::Failed(why)) = &failed.tasks[0].done else {
+        panic!("{failed:?}")
+    };
+    assert!(why.contains("item/l/evil.txt goes through a link"), "{why}");
+    untrash_unfinished(why, &files);
     assert_eq!(names(&dest), ["x"]);
 
     let away = files.join("away.zip");
@@ -1882,4 +1896,129 @@ fn an_extraction_cut_short_by_a_crash_trashes_what_it_left_unfinished() {
     let done = continued(&shared, op, None);
     assert_eq!(done.tasks[0].done, Some(Done::To(dest.join("proj"))));
     assert_eq!(names(&dest.join("proj")), ["a.txt", "b.txt"]);
+}
+
+#[test]
+fn replace_never_trashes_a_folder_holding_the_source_through_an_alias_or_a_change_of_case() {
+    use crate::archives::tests::{Item, zip};
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let real = files.join("real");
+    std::fs::create_dir_all(real.join("sub")).unwrap();
+    std::fs::create_dir_all(real.join("a")).unwrap();
+    let archive = real.join("sub/input.zip");
+    zip(
+        &archive,
+        &[("sub/", Item::Dir), ("sub/x.txt", Item::File(b"x"))],
+    );
+    let source = real.join("a/a");
+    std::fs::write(&source, "a").unwrap();
+    std::os::unix::fs::symlink(&real, files.join("alias")).unwrap();
+    // An alias of real, and real spelled in another case on a volume that
+    // ignores case: sub there holds the archive, and a holds a/a.
+    for into in [files.join("alias"), files.join("REAL")] {
+        for request in [
+            extract(&archive, &["sub"], &into, Conflict::Replace),
+            copy(&[&source], &into, Conflict::Replace),
+            transfer(&[&source], &into, Conflict::Replace),
+        ] {
+            let refused = job(&shared, request);
+            assert!(
+                matches!(&refused.tasks[0].done, Some(Done::Failed(why)) if why.contains("can't be replaced")),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(read(&source), "a");
+        assert!(crate::archives::Archive::open(&archive).is_ok());
+    }
+}
+
+#[test]
+fn an_extracted_link_never_leads_out_through_another_link() {
+    use crate::archives::tests::{Item, zip};
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let dest = files.join("dest");
+    std::fs::create_dir(&dest).unwrap();
+    for (links, refused) in [
+        // root/b goes through root/a, which leads to dest.
+        (&[("root/a", ".."), ("root/b", "a/..")][..], "root/a"),
+        (
+            &[("root/sub/a", ".."), ("root/sub/b", "a/../..")][..],
+            "root/sub/b",
+        ),
+        (
+            &[("root/sub/A", ".."), ("root/sub/b", "a/../..")][..],
+            "root/sub/b",
+        ),
+        (&[("root/c", "sub/a/x"), ("root/sub/a", "..")][..], "root/c"),
+        // Beside dest's other items, where the archive doesn't decide what's there.
+        (&[("top", "x")][..], "top"),
+    ] {
+        let archive = files.join("links.zip");
+        let items: Vec<(&str, Item)> = links
+            .iter()
+            .map(|(name, to)| (*name, Item::Link(to)))
+            .collect();
+        zip(&archive, &items);
+        let failed = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
+        let Some(Done::Failed(why)) = &failed.tasks[0].done else {
+            panic!("{links:?}: {failed:?}")
+        };
+        assert!(
+            why.contains(&format!("{refused} is a link that leads out")),
+            "{why}"
+        );
+        if why.contains("went to the Trash") {
+            untrash_unfinished(why, &files);
+        }
+        assert_eq!(names(&dest), Vec::<String>::new());
+    }
+    // Climbing within what's extracted is fine.
+    let archive = files.join("fine.zip");
+    zip(
+        &archive,
+        &[
+            ("root/f.txt", Item::File(b"f")),
+            ("root/sub/l", Item::Link("../f.txt")),
+            ("root/sub/up", Item::Link("..")),
+        ],
+    );
+    let done = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
+    assert_eq!(done.state, State::Completed, "{done:?}");
+    assert_eq!(read(&dest.join("root/sub/l")), "f");
+    assert_eq!(read(&dest.join("root/sub/up/f.txt")), "f");
+}
+
+#[test]
+fn entries_that_are_one_path_once_extracted_refuse_the_item_before_anything_is_written() {
+    use crate::archives::tests::{Item, zip};
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let dest = files.join("dest");
+    std::fs::create_dir(&dest).unwrap();
+    for (entries, named) in [
+        (&[("a", "one"), ("./a", "two")][..], "a and ./a"),
+        (
+            &[("d/B.txt", "one"), ("d//b.txt", "two")][..],
+            "d/B.txt and d//b.txt",
+        ),
+    ] {
+        let archive = files.join("twice.zip");
+        let items: Vec<(&str, Item)> = entries
+            .iter()
+            .map(|(name, text)| (*name, Item::File(text.as_bytes())))
+            .collect();
+        zip(&archive, &items);
+        let failed = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
+        let Some(Done::Failed(why)) = &failed.tasks[0].done else {
+            panic!("{entries:?}: {failed:?}")
+        };
+        if why.contains("went to the Trash") {
+            untrash_unfinished(why, &files);
+        }
+        assert!(why.contains(named), "{why}");
+        assert!(!why.contains("Trash"), "nothing was written: {why}");
+        assert_eq!(names(&dest), Vec::<String>::new());
+    }
 }

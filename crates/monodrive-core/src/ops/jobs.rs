@@ -606,6 +606,16 @@ fn opened(shared: &Shared, op: u64, spec: &Spec) -> Result<Arc<Archive>, String>
     Ok(open)
 }
 
+/// The item at `path` and every folder holding it, by identity, so neither
+/// a link to one nor its name in another case hides it. `None` when they
+/// can't be found.
+fn holders(path: &Path) -> Option<Vec<FileId>> {
+    let folder = path.parent()?.canonicalize().ok()?;
+    let mut held = vec![disk::id(path)?];
+    held.extend(folder.ancestors().filter_map(disk::id));
+    Some(held)
+}
+
 /// "{path}: a different item...", for a source replaced since the job was
 /// queued.
 fn replaced(path: &Path) -> String {
@@ -658,7 +668,7 @@ impl Item<'_> {
                 into.display()
             ));
         }
-        let (to, replacing) = match self.claim(to, &source, &source, id) {
+        let (to, replacing) = match self.claim(to, &source, &source) {
             Ok(claimed) => claimed,
             Err(next) => return next,
         };
@@ -679,14 +689,13 @@ impl Item<'_> {
     }
 
     /// Where an item meant for `to` goes under the job's conflict choice,
-    /// and what it replaces. It comes from `source`, read from the item
-    /// `id` at `read`, which is never replaced, nor anything holding it.
+    /// and what it replaces. It comes from `source`, read from the item at
+    /// `read`, which is never replaced, nor any folder holding it.
     fn claim(
         &self,
         mut to: PathBuf,
         source: &Path,
         read: &Path,
-        id: FileId,
     ) -> Result<(PathBuf, Option<Step>), Next> {
         let Ok((there, there_stamp)) = disk::stamp(&to) else {
             return Ok((to, None));
@@ -711,7 +720,7 @@ impl Item<'_> {
                 to = free;
                 Ok((to, None))
             }
-            Conflict::Replace if there == id || read.starts_with(&to) => {
+            Conflict::Replace if holders(read).is_none_or(|held| held.contains(&there)) => {
                 Err(Next::Done(Done::Failed(format!(
                     "{}: can't be replaced by {}, which it is or holds.",
                     to.display(),
@@ -802,7 +811,7 @@ impl Item<'_> {
                 path.display()
             ));
         };
-        let (to, replacing) = match self.claim(spec.into.join(name), &source, path, id) {
+        let (to, replacing) = match self.claim(spec.into.join(name), &source, path) {
             Ok(claimed) => claimed,
             Err(next) => return next,
         };
@@ -819,7 +828,7 @@ impl Item<'_> {
         }
         let made = self.make_here(&to, replacing, cancel, |temp| {
             archive
-                .extract(entry, temp, cancel, copied)
+                .extract(entry, temp, disk::ignores_case(&spec.into), cancel, copied)
                 .map_err(|why| format!("{}: {why}", path.display()))
         });
         Next::Done(match made {
