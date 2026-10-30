@@ -10,7 +10,7 @@ use super::{
     GoRecents, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection,
     OpenInTerminal, OpenSelected, PageDown, PageUp, Places, PutBack, Redo, Rename, RevealInFinder,
     ScrollToBottom, ScrollToTop, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-    ShowContextMenu, ShowPackageContents, Undo, home, short_reason, trash, with_owner,
+    ShowContextMenu, ShowPackageContents, Undo, home, short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -270,6 +270,11 @@ impl Pane {
         pane
     }
 
+    fn tidy_folders(&self, cx: &App) -> Vec<PathBuf> {
+        cx.try_global::<Places>()
+            .map_or_else(Vec::new, Places::tidy_folders)
+    }
+
     /// What's selected once the next listing lands, if it shows any of it.
     pub(super) fn select_on_listing(&mut self, made: Vec<PathBuf>) {
         self.select_after = made;
@@ -367,7 +372,8 @@ impl Pane {
         };
         self.show_hidden = show_hidden;
         self.sort = sort;
-        let show_hidden = show_hidden || self.peek_hidden;
+        let tidy = self.tidy_folders(cx);
+        let peek = self.peek_hidden;
         // This listing covers the expanded folders too.
         self.expanding.clear();
         self.listing = true;
@@ -388,7 +394,8 @@ impl Pane {
                 let (rows, missing) = trash::recent_entries(trash::read_recents(store.as_ref())?);
                 return Ok((rows, HashMap::new(), Watch::default(), missing));
             }
-            let root = entries::list_dir(&folder, show_hidden, sort)
+            let hidden = |dir: &Path| peek || sidebar::lists_hidden(dir, show_hidden, &tidy);
+            let root = entries::list_dir(&folder, hidden(&folder), sort)
                 .map_err(|e| format!("{}: {e}", folder.display()))?;
             let real_folder = real(&folder);
             let watch = Watch {
@@ -401,7 +408,7 @@ impl Pane {
             let children = open
                 .into_iter()
                 .map(|dir| {
-                    let list = entries::list_dir(&dir, show_hidden, sort).unwrap_or_default();
+                    let list = entries::list_dir(&dir, hidden(&dir), sort).unwrap_or_default();
                     (dir, list)
                 })
                 .collect();
@@ -563,10 +570,12 @@ impl Pane {
         }
         self.expanded.insert(path.clone());
         let key = path.clone();
-        let (show_hidden, sort) = (self.show_hidden || self.peek_hidden, self.sort);
+        let (show_hidden, peek, sort) = (self.show_hidden, self.peek_hidden, self.sort);
+        let tidy = self.tidy_folders(cx);
         let dir = path.clone();
         let list = cx.background_executor().spawn(async move {
-            let list = entries::list_dir(&dir, show_hidden, sort).unwrap_or_default();
+            let hidden = peek || sidebar::lists_hidden(&dir, show_hidden, &tidy);
+            let list = entries::list_dir(&dir, hidden, sort).unwrap_or_default();
             (list, real(&dir))
         });
         let task = cx.spawn(async move |this, cx| {

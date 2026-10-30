@@ -521,6 +521,7 @@ fn made_up_places(dir: &Path, trash: &Path) -> gpui::Result<Places> {
     Ok(Places {
         store,
         trash: trash.into(),
+        applications: Vec::new(),
         drives: Arc::new(MadeUp),
     })
 }

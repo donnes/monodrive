@@ -20,6 +20,13 @@ pub fn bind(cx: &mut App) {
     ]);
 }
 
+/// Whether the Trash's list leaves `item` out.
+pub(crate) fn is_hidden(item: &TrashItem) -> bool {
+    item.path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+}
+
 pub enum Answer {
     Cancel,
     /// Erase these, the items counted.
@@ -47,6 +54,19 @@ impl EmptyTrashView {
         }
     }
 
+    /// How many items go, every one of them, so it says when that's more than
+    /// the Trash's list shows.
+    pub(crate) fn message(&self) -> String {
+        let count = match self.items.len() {
+            1 => "1 item".to_string(),
+            n => format!("{n} items"),
+        };
+        match self.items.iter().filter(|item| is_hidden(item)).count() {
+            0 => format!("{count} will be erased for good."),
+            hidden => format!("{count}, including {hidden} hidden, will be erased for good."),
+        }
+    }
+
     fn empty(&mut self, cx: &mut Context<Self>) {
         cx.emit(Answer::Empty(std::mem::take(&mut self.items)));
     }
@@ -54,10 +74,6 @@ impl EmptyTrashView {
 
 impl Render for EmptyTrashView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = match self.items.len() {
-            1 => "1 item".to_string(),
-            n => format!("{n} items"),
-        };
         let body = div()
             .px_2()
             .py_1()
@@ -68,7 +84,7 @@ impl Render for EmptyTrashView {
                 div()
                     .text_size(px(theme::TEXT_BODY))
                     .text_color(content(0.65))
-                    .child(format!("{count} will be erased for good.")),
+                    .child(self.message()),
             )
             .child(
                 div()

@@ -93,9 +93,30 @@ pub struct Places {
     /// The Trash the window shows and Empty Trash erases.
     pub trash: PathBuf,
     pub drives: Arc<dyn Drives>,
+    /// The folders of apps, whose dotfiles are macOS's and not the person's.
+    pub applications: Vec<PathBuf>,
 }
 
 impl Global for Places {}
+
+impl Places {
+    /// The folders that never show their hidden files, whatever the setting.
+    pub(super) fn tidy_folders(&self) -> Vec<PathBuf> {
+        std::iter::once(self.trash.clone())
+            .chain(self.applications.iter().cloned())
+            .collect()
+    }
+}
+
+/// Whether listing `dir` includes hidden files when the setting says `wanted`.
+/// The Trash and Applications don't, wherever a link to them is opened from;
+/// their subfolders do. Reads the disk, so call it off the UI thread.
+pub(super) fn lists_hidden(dir: &Path, wanted: bool, tidy: &[PathBuf]) -> bool {
+    wanted && {
+        let dir = super::pane::real(dir);
+        !tidy.iter().any(|folder| super::pane::real(folder) == dir)
+    }
+}
 
 /// What the sidebar lists, as last read.
 #[derive(Default)]

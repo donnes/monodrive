@@ -119,6 +119,7 @@ fn world(volumes: Vec<Volume>, cx: &mut TestAppContext) -> World {
         store: store.clone(),
         trash: trash.clone(),
         drives: fake.clone(),
+        applications: vec![real.join("Applications")],
     };
     cx.update(|cx| cx.set_global(places));
     let (volumes_changed, volume_changes) = async_channel::unbounded();
@@ -1309,4 +1310,44 @@ fn files_from_the_index_come_after_the_rest_and_stale_answers_drop(cx: &mut Test
     let view = palette(&browser, cx);
     type_in(cx, "a");
     assert!(sections(&view, cx).iter().all(|(name, _)| name != "Files"));
+}
+
+/// `.DS_Store` and `app.app` in `folder`, which it makes.
+fn with_a_dotfile(folder: &Path) {
+    std::fs::create_dir_all(folder).unwrap();
+    std::fs::write(folder.join(".DS_Store"), "").unwrap();
+    std::fs::create_dir(folder.join("app.app")).unwrap();
+}
+
+#[gpui::test]
+fn the_trash_and_applications_never_show_hidden_files_and_other_folders_do(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let root = world.dir.path().canonicalize().unwrap();
+    let (trash, applications) = (root.join("Trash"), root.join("Applications"));
+    with_a_dotfile(&trash);
+    with_a_dotfile(&applications);
+    // A subfolder of Applications isn't Applications.
+    std::fs::write(applications.join("app.app/.config"), "").unwrap();
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd->");
+    assert_eq!(shown(&browser, cx).0, ["docs", "zeta", ".env", "a.txt"]);
+    let go = |to: PathBuf, cx: &mut VisualTestContext| {
+        on_pane(&browser, cx, |pane, cx| pane.navigate(to, cx));
+        cx.run_until_parked();
+    };
+    go(applications.clone(), cx);
+    assert_eq!(shown(&browser, cx).0, ["app.app"]);
+    go(applications.join("app.app"), cx);
+    assert_eq!(shown(&browser, cx).0, [".config"]);
+    go(trash, cx);
+    assert_eq!(shown(&browser, cx).0, ["app.app"]);
+    // The Trash's bar counts what's shown; the link leads to the same rule.
+    assert_eq!(in_pane(&browser, cx, |b, _| b.trash_header.count), Some(1));
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&applications, &link).unwrap();
+    go(link, cx);
+    assert_eq!(shown(&browser, cx).0, ["app.app"]);
 }

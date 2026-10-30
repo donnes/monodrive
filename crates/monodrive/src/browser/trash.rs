@@ -5,6 +5,7 @@
 use super::pane::{Pane, Stop};
 use super::sidebar::Places;
 use super::{EmptyTrash, Operations, lock};
+use crate::empty_trash::is_hidden;
 use crate::theme::{self, ButtonLook, content, text_button};
 use gpui::{Context, FontWeight, Task, Window, div, prelude::*, px};
 use monodrive_core::cloud::Availability;
@@ -17,8 +18,11 @@ use std::path::{Path, PathBuf};
 /// What the Trash's header shows, as last read.
 #[derive(Default)]
 pub(super) struct TrashHeader {
-    /// How many items Empty Trash would erase; `None` if it didn't read.
+    /// How many items the list shows, hidden ones not among them; `None` if
+    /// it didn't read.
     pub(super) count: Option<usize>,
+    /// Whether Empty Trash would erase anything, hidden items included.
+    erasable: bool,
     /// The selection the owner was last asked about, and its answer: where
     /// each item came from, if Monodrive knows.
     asked: Vec<PathBuf>,
@@ -154,11 +158,15 @@ impl Pane {
         };
         let counted = cx
             .background_executor()
-            .spawn(async move { ops::trash_items(&trash).map(|items| items.len()) });
+            .spawn(async move { ops::trash_items(&trash) });
         self.trash_header.counting = Some(cx.spawn(async move |this, cx| {
             let counted = counted.await;
             let _ = this.update(cx, |this, cx| {
-                this.trash_header.count = counted.ok();
+                let header = &mut this.trash_header;
+                header.erasable = counted.as_ref().is_ok_and(|items| !items.is_empty());
+                header.count = counted
+                    .ok()
+                    .map(|items| items.iter().filter(|item| !is_hidden(item)).count());
                 cx.notify();
             });
         }));
@@ -247,7 +255,7 @@ impl Pane {
             Some(n) => format!("{n} items"),
         };
         let (known, why) = self.put_back();
-        let can_empty = self.trash_header.count.is_some_and(|count| count > 0);
+        let can_empty = self.trash_header.erasable;
         Some(
             theme::pane_bar(theme::TITLE_BAR_HEIGHT)
                 .gap_2()

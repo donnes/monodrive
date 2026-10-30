@@ -1199,6 +1199,11 @@ fn empty_trash_says_how_many_and_erases_only_once_confirmed(cx: &mut TestAppCont
     // Esc and Cancel keep everything.
     press(cx, "cmd-shift-backspace");
     assert!(asking(cx));
+    let said = browser.read_with(cx, |b, cx| match &b.sheet {
+        Some(Sheet::EmptyTrash(card)) => card.read(cx).message(),
+        _ => String::new(),
+    });
+    assert_eq!(said, "2 items will be erased for good.");
     press(cx, "escape");
     assert!(!asking(cx));
     press(cx, "cmd-shift-backspace");
@@ -1215,5 +1220,28 @@ fn empty_trash_says_how_many_and_erases_only_once_confirmed(cx: &mut TestAppCont
         toast(&browser, cx),
         Some(("The Trash is empty.".into(), false, false))
     );
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn the_empty_trash_card_counts_hidden_items_and_says_so(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let owned = own(cx);
+    let trash = owned.state.path().join("Trash");
+    std::fs::create_dir(&trash).unwrap();
+    for name in ["old.txt", ".hidden", ".DS_Store"] {
+        std::fs::write(trash.join(name), "").unwrap();
+    }
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-shift-backspace");
+    let said = browser.read_with(cx, |b, cx| match &b.sheet {
+        Some(Sheet::EmptyTrash(card)) => card.read(cx).message(),
+        _ => String::new(),
+    });
+    assert_eq!(
+        said,
+        "2 items, including 1 hidden, will be erased for good."
+    );
+    press(cx, "escape");
     release(owned, cx);
 }
