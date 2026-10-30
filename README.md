@@ -1,8 +1,21 @@
-# Monodrive
+<p align="center">
+  <img src="assets/prod/monodrive-universal-1024.png" alt="Monodrive" width="88" />
+</p>
 
-A fast file manager for macOS with the look of Monocode, built with [GPUI](https://www.gpui.rs) and searching the whole disk through [fsearch](https://github.com/noahdunnagan/fsearch). It also runs as an MCP server, so coding agents search your files through the same index instead of Spotlight.
+<h1 align="center">Monodrive</h1>
 
-Early scaffold: the window browses folders and searches by name; the MCP server offers `find_files`, `grep` and `list_dir`.
+<p align="center">
+  <strong>A Rust + GPUI file manager for you and your agents.</strong>
+</p>
+
+<p align="center">
+  <img width="1680" alt="Monodrive open on Applications folder" src="public/monodrive-applications.png" />
+</p>
+
+A fast file manager for macOS heavily inspired by [Monocode](https://github.com/hardbeat920/monocode), built with [GPUI](https://www.gpui.rs) and searching the whole disk through [fsearch](https://github.com/noahdunnagan/fsearch). It also runs as an MCP server, so coding agents search your files through the same index instead of Spotlight.
+
+> [!NOTE]
+> **[Monodrive](https://github.com/donnes/monodrive/releases)** is still experimental and supports only macOS for now.
 
 ## Run
 
@@ -21,7 +34,7 @@ cargo build -p monodrive
 claude mcp add monodrive -- "$PWD/target/debug/monodrive" mcp
 ```
 
-The first search on a Mac without an fsearch index crawls the whole disk in the background, which takes a few minutes. The index lives in `~/Library/Application Support/FSearch` and is shared with the fsearch CLI. Grant Full Disk Access to the binary to index protected folders.
+On a Mac without an fsearch index, opening the window or running the first MCP search crawls the whole disk in the background, which takes a few minutes. The index lives in `~/Library/Application Support/FSearch` and is shared with the fsearch CLI. Grant Full Disk Access to the binary to index protected folders.
 
 ## Develop
 
