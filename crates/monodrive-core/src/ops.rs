@@ -65,6 +65,12 @@ pub enum Request {
     NewFile {
         path: PathBuf,
     },
+    /// Makes the folder `path` and moves `items` into it, all on one
+    /// volume, as one operation: one undo puts them back and removes it.
+    NewFolderWith {
+        path: PathBuf,
+        items: Vec<PathBuf>,
+    },
     /// Copies each item beside itself, named as Finder does.
     Duplicate {
         paths: Vec<PathBuf>,
@@ -110,6 +116,7 @@ impl Request {
             Request::Rename { .. } => "Rename",
             Request::NewFolder { .. } => "New Folder",
             Request::NewFile { .. } => "New File",
+            Request::NewFolderWith { .. } => "New Folder with Selection",
             Request::Duplicate { .. } => "Duplicate",
             Request::Copy { .. } => "Copy",
             Request::Move { .. } => "Move",
@@ -647,7 +654,11 @@ impl Engine {
 
     fn run(&mut self, submission: Submission) -> Result<Outcome, String> {
         let plans = self.plan(&submission.request);
-        if plans.iter().all(|(_, plan)| plan.is_err()) {
+        // A folder made with items is all or nothing.
+        let whole = matches!(submission.request, Request::NewFolderWith { .. });
+        if plans.iter().all(|(_, plan)| plan.is_err())
+            || (whole && plans.iter().any(|(_, plan)| plan.is_err()))
+        {
             let refused: Vec<String> = plans.into_iter().filter_map(|(_, p)| p.err()).collect();
             return Err(refused.join("\n"));
         }
@@ -687,6 +698,13 @@ impl Engine {
             });
             items.push(Item { path, result });
         }
+        let placed: Vec<PathBuf> = steps
+            .iter()
+            .filter_map(|s| s.here())
+            .map(Path::to_path_buf)
+            .collect();
+        let placed: Vec<&Path> = placed.iter().map(PathBuf::as_path).collect();
+        restamp_holders(&mut steps, &placed);
         let title = submission.request.title().to_string();
         Ok(self.end(op, title, items, steps))
     }
@@ -705,6 +723,15 @@ impl Engine {
             Request::Rename { path, name } => vec![(path.clone(), plan_rename(path, name))],
             Request::NewFolder { path } => vec![(path.clone(), plan_new(path, Make::Folder))],
             Request::NewFile { path } => vec![(path.clone(), plan_new(path, Make::File))],
+            Request::NewFolderWith { path, items } => {
+                let mut plans = vec![(path.clone(), plan_new(path, Make::Folder))];
+                plans.extend(
+                    items
+                        .iter()
+                        .map(|item| (item.clone(), plan_into_new(item, path))),
+                );
+                plans
+            }
             Request::Duplicate { paths } => each(paths, &|path| {
                 existing(path).map(|_| Plan::Create(Make::Copy))
             }),
@@ -783,9 +810,13 @@ impl Engine {
         let op = self.begin(&submission, Some(target_op), steps.clone(), Vec::new())?;
         let items = moving
             .into_iter()
-            .map(|i| Item {
-                path: steps[i].here().map(Path::to_path_buf).unwrap_or_default(),
-                result: steps[i].shift(redo),
+            .map(|i| {
+                let from = steps[i].here().map(Path::to_path_buf).unwrap_or_default();
+                let result = steps[i].shift(redo);
+                if let Ok(to) = &result {
+                    restamp_holders(&mut steps, &[&from, to]);
+                }
+                Item { path: from, result }
             })
             .collect();
         let title = format!("{} {of}", submission.request.title());
@@ -926,6 +957,50 @@ fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
 fn movable(step: Step) -> Result<Plan, String> {
     step.ready(true, &[])?;
     Ok(Plan::Move(step))
+}
+
+/// Moving `item` into the folder `folder` is about to make, beside it on
+/// its volume.
+fn plan_into_new(item: &Path, folder: &Path) -> Result<Plan, String> {
+    let (id, stamp) = existing(item)?;
+    let name = item
+        .file_name()
+        .ok_or_else(|| format!("{}: has no name to keep.", item.display()))?;
+    if folder.starts_with(item) {
+        return Err(format!("{} can't go inside itself.", item.display()));
+    }
+    let parent = folder.parent().unwrap_or(folder);
+    if disk::volume(parent).ok() != disk::volume(item).ok() {
+        return Err(format!(
+            "{} is on another volume than {}; a new folder only takes items from its own.",
+            item.display(),
+            parent.display()
+        ));
+    }
+    movable(Step {
+        id,
+        undone: Spot::Path(item.to_path_buf()),
+        done: Spot::Path(folder.join(name)),
+        applied: false,
+        stamp,
+    })
+}
+
+/// Restamps each step whose item is a folder holding one of `paths`: an
+/// operation moving its own items into or out of a folder it made hasn't
+/// edited that folder.
+fn restamp_holders(steps: &mut [Step], paths: &[&Path]) {
+    for step in steps {
+        let Some(here) = step.here().map(Path::to_path_buf) else {
+            continue;
+        };
+        if paths
+            .iter()
+            .any(|path| *path != here && path.starts_with(&here))
+        {
+            step.restamp(&here);
+        }
+    }
 }
 
 fn plan_new(path: &Path, make: Make) -> Result<Plan, String> {

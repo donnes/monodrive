@@ -1624,9 +1624,8 @@ impl Browser {
         );
     }
 
-    /// Makes a folder beside the selection and moves the selection into it
-    /// as one job, then edits the folder's name. The job's undo puts the
-    /// items back; New Folder's own undo is a step of its own.
+    /// Makes a folder beside the selection and moves the selection into it,
+    /// one change to undo, then edits the folder's name.
     fn new_folder_with_selection(&mut self, window: &Window, cx: &mut Context<Self>) {
         let chosen = self.chosen();
         let Some(here) = chosen.first().and_then(|path| path.parent()) else {
@@ -1646,15 +1645,11 @@ impl Browser {
             cx,
             move |owner| {
                 let path = ops::free_name(&here.join("New Folder With Items"));
-                let made =
-                    owner.submit(Origin::Window, Request::NewFolder { path: path.clone() })?;
-                let request = Request::Move {
-                    paths: chosen,
-                    into: path,
-                    conflict: Conflict::Stop,
+                let request = Request::NewFolderWith {
+                    path,
+                    items: chosen,
                 };
-                owner.submit(Origin::Window, request)?;
-                Ok(made)
+                owner.submit(Origin::Window, request)
             },
             |this, outcome, window, cx| this.rename_made(outcome, true, window, cx),
         );
@@ -4049,6 +4044,23 @@ mod tests {
         assert!(project.join("untitled").is_file());
         assert_eq!(editing(&browser, cx), Some(("untitled".into(), None)));
         press(cx, "escape");
+        // With the selection inside, and one undo to take it out again.
+        let (folder, file) = (project.join("New Folder With Items"), project.join("a.txt"));
+        let a = row(&browser, 4, cx);
+        cx.simulate_click(a, with(""));
+        assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+        press(cx, "ctrl-cmd-n");
+        assert!(folder.join("a.txt").exists() && !file.exists());
+        assert_eq!(
+            editing(&browser, cx),
+            Some(("New Folder With Items".into(), None))
+        );
+        press(cx, "escape");
+        // The folder waits in the user's own Trash until redo takes it back.
+        press(cx, "cmd-z");
+        assert!(file.exists() && !folder.exists());
+        press(cx, "cmd-shift-z");
+        assert!(folder.join("a.txt").exists() && !file.exists());
         release(owned, cx);
     }
 

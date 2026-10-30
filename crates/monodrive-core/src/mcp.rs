@@ -18,8 +18,8 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 const INSTRUCTIONS: &str = "Monodrive: an always-current index of this Mac's files, \
 much faster than Spotlight or walking folders with find. Use find_files to locate files \
 by name, grep to search inside files, and list_dir to see one folder. index_status says \
-whether the index is ready. trash, put_back, rename, create_folder, create_file, duplicate, \
-undo and redo change files through the same undo history as the Monodrive window.";
+whether the index is ready. trash, put_back, rename, create_folder, create_folder_with, \
+create_file, duplicate, undo and redo change files through the same undo history as the Monodrive window.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
@@ -92,6 +92,10 @@ enum ToolCall {
     },
     CreateFolder {
         path: String,
+    },
+    CreateFolderWith {
+        path: String,
+        paths: Vec<String>,
     },
     CreateFile {
         path: String,
@@ -253,6 +257,10 @@ impl Server {
             }),
             ToolCall::CreateFolder { path } => self.change(Request::NewFolder {
                 path: expand_home(&path),
+            }),
+            ToolCall::CreateFolderWith { path, paths } => self.change(Request::NewFolderWith {
+                path: expand_home(&path),
+                items: expand(&paths),
             }),
             ToolCall::CreateFile { path } => self.change(Request::NewFile {
                 path: expand_home(&path),
@@ -422,7 +430,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 17] = [
+pub const TOOLS: [Tool; 18] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -511,6 +519,21 @@ pub const TOOLS: [Tool; 17] = [
         name: "create_folder",
         description: "Create an empty folder at path. Its parent must exist.",
         input_schema: path_schema,
+    },
+    Tool {
+        name: "create_folder_with",
+        description: "Create a folder at path and move paths into it, all on one volume, as one \
+    change: one undo moves them back and removes the folder. Prints the folder, then each item's new path.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The new folder. Absolute; ~ is your home."},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "What goes in it. Absolute; ~ is your home."}
+                },
+                "required": ["path", "paths"]
+            })
+        },
     },
     Tool {
         name: "create_file",

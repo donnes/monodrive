@@ -312,6 +312,47 @@ fn the_agents_setting_gates_agents_but_not_the_window() {
 }
 
 #[test]
+fn a_folder_made_with_items_undoes_and_redoes_in_one_step() {
+    let (_dir, files, mut engine) = engine();
+    let (notes, pics) = (files.join("notes.md"), files.join("pics"));
+    std::fs::write(&notes, "notes").unwrap();
+    std::fs::create_dir(&pics).unwrap();
+    std::fs::write(pics.join("a.jpg"), "a").unwrap();
+    let folder = files.join("New Folder With Items");
+    let made = run(
+        &mut engine,
+        Request::NewFolderWith {
+            path: folder.clone(),
+            items: vec![notes.clone(), pics.clone()],
+        },
+    );
+    assert_eq!(
+        moved(made),
+        [folder.clone(), folder.join("notes.md"), folder.join("pics")]
+    );
+    // One undo moves both back out and sends the folder to the Trash.
+    let undone = moved(run(&mut engine, Request::Undo));
+    assert_eq!(undone.len(), 3);
+    assert!(!folder.exists() && undone[2].exists());
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "notes");
+    assert!(pics.join("a.jpg").exists());
+    // Redo brings the folder back from the Trash and fills it again.
+    moved(run(&mut engine, Request::Redo));
+    assert!(folder.join("notes.md").exists() && folder.join("pics/a.jpg").exists());
+    assert!(!notes.exists() && !pics.exists());
+    // An item already gone refuses the whole thing.
+    let refused = run(
+        &mut engine,
+        Request::NewFolderWith {
+            path: files.join("other"),
+            items: vec![folder.join("notes.md"), notes.clone()],
+        },
+    );
+    assert!(refused.is_err() && !files.join("other").exists());
+    assert!(folder.join("notes.md").exists());
+}
+
+#[test]
 fn empty_trash_erases_only_what_was_listed_in_the_trash_and_only_for_the_window() {
     let (dir, files, mut engine) = engine();
     let trash = dir.path().join("Trash");
