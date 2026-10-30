@@ -82,6 +82,7 @@ pub(crate) enum Met<'a> {
     Folder {
         parent: usize,
         path: &'a Path,
+        meta: &'a Metadata,
         placeholder: bool,
     },
     /// An item in folder `at` that isn't a folder. A hard-linked file comes
@@ -224,6 +225,7 @@ pub(crate) fn walk(
                 met(Met::Folder {
                     parent: at,
                     path: &path,
+                    meta: &meta,
                     placeholder,
                 });
                 if !placeholder {

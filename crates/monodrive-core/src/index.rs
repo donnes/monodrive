@@ -150,7 +150,7 @@ fn millions(n: usize) -> String {
     format!("{:.1}M", n as f64 / 1e6)
 }
 
-fn thousands(n: usize) -> String {
+pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -294,7 +294,7 @@ impl Index {
 
 /// `query` as fsearch's own at `now`, in seconds from the epoch: the words
 /// through fsearch's parser, and each filter onto the field fsearch tests.
-fn fsearch_query(
+pub(crate) fn fsearch_query(
     query: &Query,
     scope: &Scope,
     home: &str,
@@ -369,7 +369,7 @@ fn fsearch_query(
     Ok(q)
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| {

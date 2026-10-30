@@ -1,10 +1,11 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
-//! service method; the behavior lives in `archives`, `cloud`, `compare`, `entries`,
-//! `index`, `info`, `ops`, `places`, `search`, `sizes`, `storage` and
-//! `volumes`.
+//! service method; the behavior lives in `archives`, `catalogs`, `cloud`,
+//! `compare`, `entries`, `index`, `info`, `ops`, `places`, `search`, `sizes`,
+//! `storage` and `volumes`.
 
 use crate::archives::{self, Archive};
+use crate::catalogs::{self, Catalog, Found, Resolved};
 use crate::cloud::{self, Asked};
 use crate::compare::{
     self, Action, Block, Comparison, CopyPlan, Ending, LineKind, Newer, TextDiff,
@@ -45,14 +46,19 @@ finds identical files there, and cleanup_duplicates trashes the copies you choos
 list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches. \
 Items iCloud Drive or a cloud app hasn't downloaded show (not downloaded); nothing but download \
-fetches them, and remove_download frees a downloaded copy.";
+fetches them, and remove_download frees a downloaded copy. catalog_create keeps a searchable list \
+of a drive's or folder's names, so catalog_search finds them while it's disconnected; catalog_list, \
+catalog_refresh and catalog_forget manage those catalogs.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
     let places = places::Store::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
+    let catalogs =
+        catalogs::Store::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
     let mut server = Server::new(
         ops::Client::new(paths, std::env::current_exe().ok()),
         places,
+        catalogs,
     );
     let mut stdout = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
@@ -81,6 +87,7 @@ pub struct Server {
     /// The name the agent's MCP client gave, to attribute its changes.
     client: Option<String>,
     places: places::Store,
+    catalogs: catalogs::Store,
     /// What compare_copy and cleanup_duplicates previewed, oldest first,
     /// so a confirm runs only that.
     plans: Vec<Previewed>,
@@ -306,6 +313,25 @@ enum ToolCall {
     RemoveSearch {
         name: String,
     },
+    CatalogCreate {
+        path: String,
+        #[serde(default = "catalog_timeout")]
+        timeout_seconds: u64,
+    },
+    CatalogList {},
+    CatalogRefresh {
+        catalog: String,
+        #[serde(default = "catalog_timeout")]
+        timeout_seconds: u64,
+    },
+    CatalogForget {
+        catalog: String,
+    },
+    CatalogSearch {
+        query: String,
+        #[serde(default = "default_limit")]
+        limit: usize,
+    },
 }
 
 fn folders_first() -> bool {
@@ -356,13 +382,18 @@ fn diff_limit() -> usize {
     500
 }
 
+fn catalog_timeout() -> u64 {
+    300
+}
+
 impl Server {
-    pub fn new(ops: ops::Client, places: places::Store) -> Self {
+    pub fn new(ops: ops::Client, places: places::Store, catalogs: catalogs::Store) -> Self {
         Self {
             index: None,
             ops,
             client: None,
             places,
+            catalogs,
             plans: Vec::new(),
         }
     }
@@ -743,6 +774,50 @@ impl Server {
                 .places
                 .remove_search(&name)
                 .map(|()| format!("Removed the saved search {name}.\n")),
+            ToolCall::CatalogCreate {
+                path,
+                timeout_seconds,
+            } => {
+                let volumes = volumes::all();
+                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
+                self.catalogs
+                    .create(
+                        &expand_home(&path),
+                        &volumes,
+                        &storage::Progress::default(),
+                        deadline,
+                    )
+                    .map(|catalog| catalog_line(&catalog, &volumes, index::now()))
+            }
+            ToolCall::CatalogList {} => self.catalogs.list().map(|catalogs| {
+                if catalogs.is_empty() {
+                    return "No catalogs.\n".into();
+                }
+                let volumes = volumes::all();
+                catalogs
+                    .iter()
+                    .map(|catalog| catalog_line(catalog, &volumes, index::now()))
+                    .collect()
+            }),
+            ToolCall::CatalogRefresh {
+                catalog,
+                timeout_seconds,
+            } => {
+                let volumes = volumes::all();
+                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
+                self.catalogs
+                    .refresh(&catalog, &volumes, &storage::Progress::default(), deadline)
+                    .map(|catalog| catalog_line(&catalog, &volumes, index::now()))
+            }
+            ToolCall::CatalogForget { catalog } => self.catalogs.forget(&catalog).map(|()| {
+                format!("Forgot catalog {catalog}. Only Monodrive's catalog file went; no files changed.\n")
+            }),
+            ToolCall::CatalogSearch { query, limit } => {
+                let volumes = volumes::all();
+                Query::parse(&query)
+                    .and_then(|query| self.catalogs.search(&query, &volumes, limit))
+                    .map(|found| catalog_hits(&found, &volumes, index::now()))
+            }
         };
         match text {
             Ok(text) if text.is_empty() => tool_text("No results.", false),
@@ -1193,6 +1268,100 @@ fn list_places(places: &[Place], volumes: &[Volume]) -> String {
         let _ = writeln!(out, "{} ({})", volume.mount.display(), about.join(", "));
     }
     out
+}
+
+/// A catalog's source where it is now or was last seen, then what's worth
+/// knowing about it in brackets, and a line for anything it's missing.
+fn catalog_line(catalog: &Catalog, volumes: &[Volume], now: i64) -> String {
+    let now = u64::try_from(now).unwrap_or(0);
+    let (path, state) = match catalog.source.locate(volumes) {
+        Availability::Available(path) => (path, "connected"),
+        Availability::Unavailable(_) => (catalog.source.path.clone(), "offline"),
+    };
+    let mut out = format!(
+        "{} (catalog {}, {}, {state}, refreshed {}, {} entries, {} on disk)\n",
+        path.display(),
+        catalog.id,
+        catalog.source.volume.name,
+        ago(catalog.refreshed, now),
+        index::thousands(catalog.entries as usize),
+        small_bytes(catalog.bytes),
+    );
+    if catalog.unreadable > 0 {
+        let _ = writeln!(
+            out,
+            "  incomplete: {} folders couldn't be read, and what's in them is missing",
+            catalog.unreadable
+        );
+    }
+    if catalog.truncated {
+        let _ = writeln!(
+            out,
+            "  incomplete: stopped at {} entries",
+            index::thousands(catalogs::MAX_ENTRIES)
+        );
+    }
+    if let Some(failed) = &catalog.failed {
+        let _ = writeln!(
+            out,
+            "  last refresh failed {}: {} The entries are from the refresh before.",
+            ago(failed.at, now),
+            failed.why
+        );
+    }
+    out
+}
+
+/// Each catalog a line, saying how old it is and whether its source is
+/// connected, then its hits a path a line: as cataloged when it's offline,
+/// and where they are now, checked, when it's connected.
+fn catalog_hits(found: &Found, volumes: &[Volume], now: i64) -> String {
+    let now = u64::try_from(now).unwrap_or(0);
+    let mut out = String::new();
+    for (at, searched) in found.catalogs.iter().enumerate() {
+        let catalog = &searched.catalog;
+        let state = match &searched.source {
+            Availability::Available(path) => format!("connected at {}", path.display()),
+            Availability::Unavailable(why) => format!("offline: {why}"),
+        };
+        let _ = writeln!(
+            out,
+            "{} (catalog {}): cataloged {}, {state}",
+            catalog.source.volume.name,
+            catalog.id,
+            ago(catalog.refreshed, now)
+        );
+        for hit in found.hits.iter().filter(|hit| hit.catalog == at) {
+            let mark = suffix(hit.entry.kind);
+            let _ = match catalog.resolve(hit, volumes) {
+                Resolved::Current(path) => writeln!(out, "{}{mark}", path.display()),
+                Resolved::Changed(path, why) => writeln!(out, "{}{mark} ({why})", path.display()),
+                Resolved::Offline(_) => writeln!(out, "{}{mark}", hit.entry.path.display()),
+            };
+        }
+    }
+    out
+}
+
+/// How long before `now` a moment in seconds from the epoch was.
+fn ago(then: u64, now: u64) -> String {
+    let seconds = now.saturating_sub(then);
+    let (n, unit) = match seconds {
+        0..60 => return "just now".into(),
+        60..3600 => (seconds / 60, "minute"),
+        3600..86_400 => (seconds / 3600, "hour"),
+        _ => (seconds / 86_400, "day"),
+    };
+    let s = if n == 1 { "" } else { "s" };
+    format!("{n} {unit}{s} ago")
+}
+
+/// Finder's decimal units, for files that may be small.
+fn small_bytes(n: u64) -> String {
+    match n {
+        ..1_000_000 => format!("{} KB", n.div_ceil(1000)),
+        _ => format!("{:.1} MB", n as f64 / 1e6),
+    }
 }
 
 /// Finder's decimal units, to a size worth reading for a disk.
@@ -1805,7 +1974,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 41] = [
+pub const TOOLS: [Tool; 46] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2275,6 +2444,73 @@ pub const TOOLS: [Tool; 41] = [
             })
         },
     },
+    Tool {
+        name: "catalog_create",
+        description: "Catalog a volume or a folder on one: walk it once and keep its names, \
+    kinds, sizes and dates in Monodrive, so catalog_search finds them after it's disconnected. \
+    Reads no contents and downloads nothing. Refuses the startup disk. Cataloging a source again \
+    refreshes it. Prints the catalog as catalog_list does.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The volume or folder. Absolute; ~ is your home."},
+                    "timeout_seconds": {"type": "integer", "minimum": 0, "default": 300, "description": "A walk that runs out of time keeps nothing."}
+                },
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "catalog_list",
+        description: "Each catalog a line: its source's path, where it is now when connected, its id, \
+    volume, connected or offline, age, entries and size on disk, then what it's missing and \
+    whether its last refresh failed.",
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "catalog_refresh",
+        description: "Walk a catalog's source again, found by its volume's identity wherever it's \
+    mounted now. A refresh that fails or runs out of time keeps the last good catalog.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "catalog": {"type": "string", "description": "Its id, as catalog_list prints it."},
+                    "timeout_seconds": {"type": "integer", "minimum": 0, "default": 300}
+                },
+                "required": ["catalog"]
+            })
+        },
+    },
+    Tool {
+        name: "catalog_forget",
+        description: "Delete a catalog from Monodrive. Only Monodrive's catalog file goes; the \
+    source's files are untouched.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"catalog": {"type": "string", "description": "Its id, as catalog_list prints it."}},
+                "required": ["catalog"]
+            })
+        },
+    },
+    Tool {
+        name: "catalog_search",
+        description: "Search the catalogs by name, in find_files syntax, connected or not. Prints \
+    each catalog's age and whether its source is offline, then its matches a path a line: as \
+    cataloged while offline, or checked where they are now, marked when they've changed.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "default": 50}
+                },
+                "required": ["query"]
+            })
+        },
+    },
 ];
 
 fn tools() -> Value {
@@ -2419,6 +2655,9 @@ mod tests {
         Server::new(
             ops::Client::new(paths, None),
             places("/nonexistent/monodrive-test".as_ref()),
+            catalogs::Store {
+                dir: "/nonexistent/monodrive-test/catalogs".into(),
+            },
         )
     }
 
@@ -2426,6 +2665,12 @@ mod tests {
         places::Store {
             places: dir.join("places.json"),
             recents: dir.join("recents.json"),
+        }
+    }
+
+    fn catalog_store(dir: &std::path::Path) -> catalogs::Store {
+        catalogs::Store {
+            dir: dir.join("catalogs"),
         }
     }
 
@@ -2687,7 +2932,11 @@ mod tests {
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(ops::Client::new(paths, None), places(dir.path()));
+        let mut server = Server::new(
+            ops::Client::new(paths, None),
+            places(dir.path()),
+            catalog_store(dir.path()),
+        );
         let (made, renamed) = (dir.path().join("made"), dir.path().join("renamed"));
         let shown = |path: &std::path::Path| format!("{}\n", path.display());
         let reply = call(
@@ -2756,7 +3005,11 @@ mod tests {
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(ops::Client::new(paths, None), places(dir.path()));
+        let mut server = Server::new(
+            ops::Client::new(paths, None),
+            places(dir.path()),
+            catalog_store(dir.path()),
+        );
         let files = dir.path().join("files");
         std::fs::create_dir(&files).unwrap();
         for name in ["IMG_1.jpg", "IMG_2.jpg", "Trip 2.jpg", "x"] {
@@ -2829,7 +3082,11 @@ mod tests {
             let serving = std::thread::spawn(move || owner.serve());
             (
                 serving,
-                Server::new(ops::Client::new(paths.clone(), None), places(dir.path())),
+                Server::new(
+                    ops::Client::new(paths.clone(), None),
+                    places(dir.path()),
+                    catalog_store(dir.path()),
+                ),
             )
         };
         let (serving, mut server) = serve();
@@ -2909,7 +3166,11 @@ mod tests {
             let serving = std::thread::spawn(move || owner.serve());
             (
                 serving,
-                Server::new(ops::Client::new(paths.clone(), None), places(dir.path())),
+                Server::new(
+                    ops::Client::new(paths.clone(), None),
+                    places(dir.path()),
+                    catalog_store(dir.path()),
+                ),
             )
         };
         let (proj, out) = (dir.path().join("proj"), dir.path().join("out"));
@@ -3057,7 +3318,11 @@ mod tests {
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(ops::Client::new(paths, None), places(&root));
+        let mut server = Server::new(
+            ops::Client::new(paths, None),
+            places(&root),
+            catalog_store(&root),
+        );
         let (left, right) = (root.join("left"), root.join("right"));
         let then = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         for (path, text, at) in [
@@ -3234,7 +3499,11 @@ mod tests {
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(ops::Client::new(paths, None), places(&root));
+        let mut server = Server::new(
+            ops::Client::new(paths, None),
+            places(&root),
+            catalog_store(&root),
+        );
         let photos = root.join("photos");
         let photo: Vec<u8> = (0..300_000u32).map(|n| (n % 253) as u8).collect();
         let mut other = photo.clone();
@@ -3507,5 +3776,104 @@ mod tests {
             "job 7 Move into /dest: waiting, 2 of 3 items, 10 of 30 bytes, by agent claude-code\n\
              /dest/a\n/dest/b already exists.\n"
         );
+    }
+
+    #[test]
+    fn catalog_tools_search_an_offline_catalog_with_its_age_and_forget_only_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let drive = root.join("Drive");
+        std::fs::create_dir_all(drive.join("Photos")).unwrap();
+        std::fs::write(drive.join("Photos/report.pdf"), "x").unwrap();
+        // No mounted volume has this identity, so it's offline here.
+        let unplugged = Volume {
+            name: "Drive".into(),
+            mount: drive.clone(),
+            disk: None,
+            id: Some(VolumeId::Uuid("MONODRIVE-TEST-DRIVE".into())),
+            total: 0,
+            free: 0,
+            read_only: false,
+            network: false,
+            ejectable: true,
+            removable: true,
+            startup: false,
+        };
+        let store = catalog_store(&root);
+        let made = store
+            .create(&drive, &[unplugged], &storage::Progress::default(), None)
+            .unwrap();
+        let mut server = server();
+        server.catalogs = store.clone();
+        let id = &made.id;
+
+        let reply = call(&mut server, json!({"name": "catalog_list"}));
+        assert_eq!(
+            text(&reply),
+            format!(
+                "{} (catalog {id}, Drive, offline, refreshed just now, 2 entries, 1 KB on disk)\n",
+                drive.display()
+            )
+        );
+        let search = json!({"name": "catalog_search", "arguments": {"query": "report"}});
+        let reply = call(&mut server, search);
+        let report = drive.join("Photos/report.pdf");
+        assert_eq!(
+            text(&reply),
+            format!(
+                "Drive (catalog {id}): cataloged just now, offline: Drive isn't connected.\n{}\n",
+                report.display()
+            )
+        );
+        let found = store
+            .search(&Query::parse("photos").unwrap(), &[], 50)
+            .unwrap();
+        let later = i64::try_from(made.refreshed).unwrap() + 3 * 86_400;
+        assert_eq!(
+            catalog_hits(&found, &[], later),
+            format!(
+                "Drive (catalog {id}): cataloged 3 days ago, offline: Drive isn't connected.\n{}/\n",
+                drive.join("Photos").display()
+            )
+        );
+
+        let refresh = json!({"name": "catalog_refresh", "arguments": {"catalog": id}});
+        let reply = call(&mut server, refresh);
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(
+            text(&reply),
+            "Drive isn't connected. The last good catalog is kept."
+        );
+        let reply = call(&mut server, json!({"name": "catalog_list"}));
+        assert!(
+            text(&reply).ends_with(
+                "\n  last refresh failed just now: Drive isn't connected. The entries are from the refresh before.\n"
+            ),
+            "{}",
+            text(&reply)
+        );
+        // A temporary folder is on the startup disk.
+        let create = json!({"name": "catalog_create", "arguments": {"path": root}});
+        let reply = call(&mut server, create);
+        assert!(text(&reply).contains("is on the startup disk"), "{reply}");
+        for bad in [
+            json!({"name": "catalog_search", "arguments": {}}),
+            json!({"name": "catalog_refresh", "arguments": {"catalog": id, "timeout_seconds": -1}}),
+            json!({"name": "catalog_forget"}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
+
+        let forget = json!({"name": "catalog_forget", "arguments": {"catalog": id}});
+        let reply = call(&mut server, forget.clone());
+        assert_eq!(
+            text(&reply),
+            format!("Forgot catalog {id}. Only Monodrive's catalog file went; no files changed.\n")
+        );
+        assert!(report.is_file());
+        let reply = call(&mut server, json!({"name": "catalog_list"}));
+        assert_eq!(text(&reply), "No catalogs.\n");
+        let reply = call(&mut server, forget);
+        assert_eq!(text(&reply), format!("No catalog {id}."));
     }
 }

@@ -59,6 +59,12 @@ pub fn list() -> Vec<Volume> {
     mounted(false)
 }
 
+/// Every mounted volume, hidden ones too, such as a disk image attached
+/// with `-nobrowse`: what holds a path, whether Finder shows it or not.
+pub fn all() -> Vec<Volume> {
+    mounted(true)
+}
+
 /// Every mounted volume, or with `hidden` false only those Finder shows.
 fn mounted(hidden: bool) -> Vec<Volume> {
     objc2::rc::autoreleasepool(|_| {

@@ -52,7 +52,7 @@ impl Progress {
         }
     }
 
-    fn add(&self, counter: &AtomicU64, n: u64, every: u64) {
+    pub(crate) fn add(&self, counter: &AtomicU64, n: u64, every: u64) {
         let before = counter.fetch_add(n, Ordering::Relaxed);
         if let Some(notify) = &self.notify
             && (before + n) / every != before / every
@@ -61,7 +61,7 @@ impl Progress {
         }
     }
 
-    fn stop(&self, deadline: Option<Instant>) -> Option<Stop> {
+    pub(crate) fn stop(&self, deadline: Option<Instant>) -> Option<Stop> {
         if self.cancel.load(Ordering::Relaxed) {
             Some(Stop::Cancelled)
         } else if deadline.is_some_and(|end| Instant::now() >= end) {
@@ -201,6 +201,7 @@ pub fn scan(
                 parent,
                 path,
                 placeholder,
+                ..
             } => report.folders.push(Folder {
                 path: path.to_path_buf(),
                 parent: Some(parent),
