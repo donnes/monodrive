@@ -659,6 +659,18 @@ fn a_connect_card_that_goes_away_cancels_its_mount_and_saves_nothing(cx: &mut Te
     }
 }
 
+/// Whether the commands that change the selection's files would run now.
+fn changing_files(cx: &mut VisualTestContext) -> [bool; 4] {
+    cx.update(|window, cx| {
+        [
+            window.is_action_available(&MoveToTrash, cx),
+            window.is_action_available(&Duplicate, cx),
+            window.is_action_available(&Rename, cx),
+            window.is_action_available(&NewFolderWithSelection, cx),
+        ]
+    })
+}
+
 #[gpui::test]
 fn command_backspace_in_the_sidebar_never_reaches_the_lists_selection(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
@@ -688,9 +700,9 @@ fn command_backspace_in_the_sidebar_never_reaches_the_lists_selection(cx: &mut T
         let handled = cx.update(|window, cx| window.dispatch_keystroke(stroke, cx));
         cx.run_until_parked();
         assert!(handled, "row {row}");
-        // The menu bar's Move to Trash is off, and sending it does nothing.
-        let on = cx.update(|window, cx| window.is_action_available(&MoveToTrash, cx));
-        assert!(!on, "row {row}");
+        // The menu bar's items that change these files are off, and sending
+        // Move to Trash does nothing.
+        assert_eq!(changing_files(cx), [false; 4], "row {row}");
         cx.dispatch_action(MoveToTrash);
         cx.run_until_parked();
         assert!(file.exists(), "row {row}");
@@ -699,10 +711,9 @@ fn command_backspace_in_the_sidebar_never_reaches_the_lists_selection(cx: &mut T
         browser.read_with(cx, |b, _| b.sidebar.places.len()),
         favorites
     );
-    // With the list's keys back, it's the list's command again.
+    // With the list's keys back, they're the list's commands again.
     browser.update_in(cx, |b, window, cx| b.focus_list(window, cx));
     cx.run_until_parked();
-    let on = cx.update(|window, cx| window.is_action_available(&MoveToTrash, cx));
-    assert!(on);
+    assert_eq!(changing_files(cx), [true; 4]);
     release(owned, cx);
 }

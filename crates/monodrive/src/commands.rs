@@ -259,7 +259,7 @@ pub fn all() -> Vec<Command> {
                 "New Folder with Selection",
                 File,
                 &["ctrl-cmd-n"],
-                BROWSER,
+                LIST,
                 || Box::new(NewFolderWithSelection),
             )),
         ),

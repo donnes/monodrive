@@ -3122,13 +3122,28 @@ impl Render for Browser {
                     cx.listener(|this, _: &MoveHere, window, cx| this.paste(true, window, cx)),
                 )
             })
-            // Only here, so the menu bar's item is off and can't reach the
-            // selection while the keys are somewhere else, such as the sidebar.
+            // Only here, so the menu bar's items are off and can't change the
+            // selection's files while the keys are somewhere else, such as the
+            // sidebar.
             .when(self.renaming.is_none() && !self.selection.is_empty(), |d| {
                 d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
                     let paths = this.chosen();
                     this.submit(Request::Trash { paths }, window, cx)
                 }))
+                .on_action(cx.listener(|this, _: &Duplicate, window, cx| {
+                    let paths = this.chosen();
+                    this.submit(Request::Duplicate { paths }, window, cx)
+                }))
+                .on_action(cx.listener(
+                    |this, _: &NewFolderWithSelection, window, cx| {
+                        this.new_folder_with_selection(window, cx)
+                    },
+                ))
+            })
+            .when(self.renaming.is_none() && self.selection.len() == 1, |d| {
+                d.on_action(
+                    cx.listener(|this, _: &Rename, window, cx| this.rename_selected(window, cx)),
+                )
             })
             .when(self.showing_recents(), |d| {
                 d.on_action(cx.listener(|this, _: &ClearRecents, _, cx| this.clear_recents(cx)))
@@ -3321,24 +3336,6 @@ impl Render for Browser {
                     d.on_action(cx.listener(move |this, _: &AddToSidebar, _, cx| {
                         this.add_to_sidebar(path.clone(), cx)
                     }))
-                })
-                .when(self.selection.len() == 1, |d| {
-                    d.on_action(
-                        cx.listener(|this, _: &Rename, window, cx| {
-                            this.rename_selected(window, cx)
-                        }),
-                    )
-                })
-                .when(!self.selection.is_empty(), |d| {
-                    d.on_action(cx.listener(|this, _: &Duplicate, window, cx| {
-                        let paths = this.chosen();
-                        this.submit(Request::Duplicate { paths }, window, cx)
-                    }))
-                    .on_action(cx.listener(
-                        |this, _: &NewFolderWithSelection, window, cx| {
-                            this.new_folder_with_selection(window, cx)
-                        },
-                    ))
                 })
             })
             .on_action(
