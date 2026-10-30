@@ -11,12 +11,12 @@ use crate::browser::{
     Back, CopyPath, DeselectAll, Duplicate, EmptyTrash, EnclosingFolder, FocusSearch, Forward,
     GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, MoveHere,
     MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenInTerminal, OpenSelected,
-    OpenSettings, Redo, Rename, ResetZoom, RevealInFinder, ReverseSort, ShowActivity,
+    OpenSettings, Redo, Rename, ResetZoom, RevealInFinder, ReverseSort, ShowCopiesAndMoves,
     ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
     Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
-use crate::{activity, browser, goto, menu, palette, settings, text_field};
+use crate::{browser, empty_trash, goto, jobs, menu, palette, settings, text_field};
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
     OsAction, actions,
@@ -394,9 +394,13 @@ pub fn all() -> Vec<Command> {
         command("Close Window", Window, &["cmd-w"], None, || {
             Box::new(CloseWindow)
         }),
-        separated(command("Activity", Window, &["cmd-alt-j"], None, || {
-            Box::new(ShowActivity)
-        })),
+        separated(command(
+            "Copies and Moves",
+            Window,
+            &["cmd-alt-j"],
+            None,
+            || Box::new(ShowCopiesAndMoves),
+        )),
     ]
 }
 
@@ -569,7 +573,8 @@ pub fn apply(cx: &mut App) {
     settings::bind(cx);
     palette::bind(cx);
     goto::bind(cx);
-    activity::bind(cx);
+    jobs::bind(cx);
+    empty_trash::bind(cx);
     menu::bind(cx);
     let mut bindings = Vec::new();
     for command in all() {

@@ -4,17 +4,24 @@
 //!
 //! `cargo run -p monodrive --example snapshot -- [folder]` writes
 //! `target/snapshots/list.png`, `grid.png`, `rename.png`, `menu.png`,
-//! `menu-grid.png`, `menu-folder.png` and `activity.png`. Without a folder
-//! it draws a made-up one, so the pictures show nobody's files. Rename edits
-//! the fifth name in place. The menus are the context menu on the second
-//! entry, in the list and the grid, and on the folder. Activity shows real
-//! jobs, run by an operation owner on a temp folder.
+//! `menu-grid.png`, `menu-folder.png`, `ring.png`, `ring-waiting.png`,
+//! `jobs.png`, `rename-error.png`, `toast.png` and `empty-trash.png`.
+//! Without a folder it draws a made-up one, so the pictures show nobody's
+//! files. Rename edits the fifth name in place. The menus are the context
+//! menu on the second entry, in the list and the grid, and on the folder.
+//! The ring and its popover show a running copy and an agent's move waiting
+//! at a name that's taken. The last three use an operation owner on a temp
+//! folder: renaming the last entry to a name that's taken, then to a free
+//! one, which is undone after the picture, and a Trash of 12 items.
 
-use gpui::{Action, HeadlessAppContext as Cx};
+use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
-use monodrive::browser::{Browser, Operations, Rename, SelectNext, ShowActivity, ShowContextMenu};
+use monodrive::browser::{
+    Browser, CancelRename, CommitRename, EmptyTrash, Operations, Rename, SelectLast, SelectNext,
+    ShowContextMenu, ShowCopiesAndMoves, Undo,
+};
 use monodrive::preferences::{Preferences, View};
-use monodrive_core::ops::{self, Conflict, Origin, Request};
+use monodrive_core::ops::{self, Done, Job, Origin, State, Task};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -103,25 +110,145 @@ fn main() -> gpui::Result<()> {
         cx.capture_screenshot(window.into())?.save(&path)?;
         println!("{}", path.display());
     }
+    // A running copy, then an agent's move waiting at a name that's taken.
+    let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+        cx.new(|cx| Browser::new(folder.clone(), cx))
+    })?;
+    cx.run_until_parked();
+    let (running, waiting) = jobs(&folder);
+    for (name, shown) in [
+        ("ring", vec![running.clone()]),
+        ("ring-waiting", vec![waiting, running]),
+    ] {
+        window.update(&mut cx, |browser, _, cx| browser.show_jobs(shown, cx))?;
+        cx.run_until_parked();
+        save(&mut cx, window, &out, name)?;
+    }
+    dispatch(&mut cx, window, &ShowCopiesAndMoves)?;
+    save(&mut cx, window, &out, "jobs")?;
+
     let scratch = tempfile::tempdir_in(&out)?;
-    let client = jobs(scratch.path())?;
+    let paths = ops::Paths {
+        state: scratch.path().join("state"),
+        settings: scratch.path().join("settings.json"),
+        trash: scratch.path().join("Trash"),
+    };
+    std::fs::create_dir_all(&paths.trash)?;
+    for ix in 1..=12 {
+        std::fs::write(paths.trash.join(format!("old {ix}.txt")), "")?;
+    }
+    let owner = ops::Owner::bind(paths.clone()).map_err(std::io::Error::other)?;
+    std::thread::spawn(move || owner.serve());
+    let client = ops::Client::new(paths, None);
     cx.update(|cx| cx.set_global(Operations(Arc::new(Mutex::new(client)))));
     let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
         cx.new(|cx| Browser::new(folder.clone(), cx))
     })?;
     cx.run_until_parked();
-    // Actions reach the browser through what has focus.
-    cx.update_window(window.into(), |root, window, cx| {
-        if let Ok(browser) = root.downcast::<Browser>() {
-            window.focus(&browser.focus_handle(cx), cx);
-        }
-        window.dispatch_action(Box::new(ShowActivity), cx)
-    })?;
+    // The last entry, renamed to a name that's taken: the owner refuses it.
+    dispatch(&mut cx, window, &SelectLast)?;
+    dispatch(&mut cx, window, &Rename)?;
+    let taken = names(&folder)
+        .into_iter()
+        .find(|name| name.contains('.'))
+        .unwrap_or_default();
+    type_text(&mut cx, window, &taken)?;
+    dispatch(&mut cx, window, &CommitRename)?;
+    save(&mut cx, window, &out, "rename-error")?;
+    // A free name, then Undo once it's drawn.
+    dispatch(&mut cx, window, &CancelRename)?;
+    dispatch(&mut cx, window, &Rename)?;
+    type_text(&mut cx, window, "Renamed")?;
+    dispatch(&mut cx, window, &CommitRename)?;
+    save(&mut cx, window, &out, "toast")?;
+    dispatch(&mut cx, window, &Undo)?;
+    dispatch(&mut cx, window, &EmptyTrash)?;
+    save(&mut cx, window, &out, "empty-trash")?;
+    Ok(())
+}
+
+fn save(
+    cx: &mut Cx,
+    window: gpui::WindowHandle<Browser>,
+    out: &Path,
+    name: &str,
+) -> gpui::Result<()> {
+    cx.update_window(window.into(), |_, window, _| window.refresh())?;
     cx.run_until_parked();
-    let path = out.join("activity.png");
+    let path = out.join(format!("{name}.png"));
     cx.capture_screenshot(window.into())?.save(&path)?;
     println!("{}", path.display());
     Ok(())
+}
+
+/// Types `text` into what has focus, as one keystroke's characters.
+fn type_text(cx: &mut Cx, window: gpui::WindowHandle<Browser>, text: &str) -> gpui::Result<()> {
+    cx.update_window(window.into(), |_, window, cx| {
+        let keystroke = Keystroke {
+            key: "x".into(),
+            key_char: Some(text.into()),
+            ..Keystroke::default()
+        };
+        window.dispatch_keystroke(keystroke, cx);
+        window.refresh();
+    })?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+/// The folder's names, sorted.
+fn names(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// A copy of three files into `folder`'s Invoices, two thirds of the way,
+/// and an agent's move of notes.md waiting at the name there.
+fn jobs(folder: &Path) -> (Job, Job) {
+    let into = folder.join("Invoices");
+    let task = |name: &str, done: Option<Done>| Task {
+        source: folder.join(name),
+        done,
+    };
+    let running = Job {
+        id: 2,
+        title: "Copy".into(),
+        origin: Origin::Window,
+        into: into.clone(),
+        state: State::Running,
+        tasks: vec![
+            task("Brief.pdf", Some(Done::To(into.join("Brief.pdf")))),
+            task("budget.xlsx", None),
+            task("photo.jpg", None),
+        ],
+        bytes: 160_000_000,
+        total_bytes: 240_000_000,
+    };
+    let waiting = Job {
+        id: 3,
+        title: "Move".into(),
+        origin: Origin::Agent {
+            client: Some("claude-code".into()),
+        },
+        into: into.clone(),
+        state: State::Waiting,
+        tasks: vec![task(
+            "notes.md",
+            Some(Done::Failed(format!(
+                "{} already exists. Continue the job with keep_both, replace or skip.",
+                into.join("notes.md").display()
+            ))),
+        )],
+        bytes: 0,
+        total_bytes: 3_000,
+    };
+    (running, waiting)
 }
 
 /// Sends `action` to the browser in `window` as a key would, and draws.
@@ -141,70 +268,6 @@ fn dispatch(
     })?;
     cx.run_until_parked();
     Ok(())
-}
-
-/// An owner on `dir` that has run a finished copy, one stopped at a name
-/// that's taken, and a move that failed.
-fn jobs(dir: &Path) -> gpui::Result<ops::Client> {
-    let paths = ops::Paths {
-        state: dir.join("state"),
-        settings: dir.join("settings.json"),
-        trash: dir.join("Trash"),
-    };
-    let owner = ops::Owner::bind(paths.clone()).map_err(std::io::Error::other)?;
-    std::thread::spawn(move || owner.serve());
-    let (from, into) = (dir.join("Drafts"), dir.join("Invoices"));
-    std::fs::create_dir_all(from.join("Old"))?;
-    std::fs::create_dir_all(&into)?;
-    for (name, size) in [("Brief.pdf", 240_000), ("notes.md", 3_000)] {
-        std::fs::write(from.join(name), vec![b'x'; size])?;
-    }
-    let mut client = ops::Client::new(paths, None);
-    let names = |names: &[&str]| names.iter().map(|name| from.join(name)).collect();
-    let agent = Origin::Agent {
-        client: Some("claude-code".into()),
-    };
-    for (origin, request) in [
-        (
-            Origin::Window,
-            Request::Copy {
-                paths: names(&["Brief.pdf", "notes.md"]),
-                into: into.clone(),
-                conflict: Conflict::Stop,
-            },
-        ),
-        (
-            agent.clone(),
-            Request::Copy {
-                paths: names(&["notes.md"]),
-                into: into.clone(),
-                conflict: Conflict::Stop,
-            },
-        ),
-        (
-            agent,
-            // A folder can't go into itself.
-            Request::Move {
-                paths: vec![from.clone()],
-                into: from.join("Old"),
-                conflict: Conflict::Stop,
-            },
-        ),
-    ] {
-        client
-            .submit(origin, request)
-            .map_err(std::io::Error::other)?;
-        // Each finishes in moments; the next copy needs this one's files.
-        while client
-            .jobs()
-            .map_err(std::io::Error::other)?
-            .iter()
-            .any(|job| job.state.active())
-        {
-            std::thread::yield_now();
-        }
-    }
-    Ok(client)
 }
 
 /// A folder like a real one: a few folders, documents, pictures and an app.

@@ -100,6 +100,11 @@ pub fn accent() -> Hsla {
     tokens().accent
 }
 
+/// macOS's system red, for what failed or can't be undone.
+pub fn danger() -> Hsla {
+    rgb(if is_light() { 0xff3b30 } else { 0xff453a }).into()
+}
+
 /// Black or white, whichever reads on the accent.
 pub fn on_accent() -> Hsla {
     let rgba = accent().to_rgb();

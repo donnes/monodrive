@@ -199,7 +199,7 @@ impl Render for ContextMenu {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::press_outside))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::press_outside))
             .child(
-                card(viewport.height - px(2. * MARGIN), rows)
+                card(WIDTH, viewport.height - px(2. * MARGIN), rows)
                     .id("context-menu")
                     .key_context("ContextMenu")
                     .track_focus(&self.focus)
@@ -226,9 +226,14 @@ impl Render for ContextMenu {
 // another one is a change to these alone.
 
 /// The card around the rows, `max_height` at most, scrolling past that.
-fn card(max_height: Pixels, rows: impl IntoIterator<Item = impl IntoElement>) -> gpui::Div {
+/// The copies and moves popover is one too.
+pub(crate) fn card(
+    width: f32,
+    max_height: Pixels,
+    rows: impl IntoIterator<Item = impl IntoElement>,
+) -> gpui::Div {
     div()
-        .w(px(WIDTH))
+        .w(px(width))
         .max_h(max_height)
         .rounded(px(RADIUS))
         .shadow(vec![

@@ -1,11 +1,12 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
-use crate::activity::{self, ActivityView};
 use crate::background::{Backdrop, Look};
 use crate::commands::{self, OpenPalette, Scope};
+use crate::empty_trash::{self, EmptyTrashView};
 use crate::file_icons;
 use crate::goto::{GotoEvent, GotoView};
+use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
 use crate::palette::{PaletteEvent, PaletteView};
 use crate::pasteboard::Pasteboard;
@@ -13,7 +14,7 @@ use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, View, WorkspaceStyle
 use crate::selection::Selection;
 use crate::settings::{self, SettingsView};
 use crate::text_field::{self, TextField};
-use crate::theme::{self, accent, content, icon, icon_button, on_accent, section_label};
+use crate::theme::{self, accent, content, danger, icon, icon_button, on_accent, section_label};
 use crate::thumbnails::{self, Thumb};
 use crate::{traffic_lights, workspace};
 use chrono::{DateTime, Local};
@@ -21,13 +22,13 @@ use gpui::RenderImage;
 use gpui::{
     Action, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
     FocusHandle, Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, Keystroke, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, PromptLevel,
-    ScrollStrategy, ScrollWheelEvent, Subscription, Task, UniformListScrollHandle, Window,
-    WindowAppearance, WindowControlArea, actions, canvas, div, point, prelude::*, px, uniform_list,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollStrategy,
+    ScrollWheelEvent, Subscription, Task, UniformListScrollHandle, Window, WindowAppearance,
+    WindowControlArea, actions, canvas, div, point, prelude::*, px, uniform_list,
 };
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::{Index, Progress, Status};
-use monodrive_core::ops::{self, Conflict, Done, Job, Origin, Outcome, Request, State};
+use monodrive_core::ops::{self, Conflict, Done, Job, Origin, Outcome, Request};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -86,7 +87,7 @@ actions!(
         ResetZoom,
         Undo,
         Redo,
-        ShowActivity,
+        ShowCopiesAndMoves,
         Rename,
         CommitRename,
         CancelRename,
@@ -165,8 +166,8 @@ const FRAME_SETTLE: Duration = Duration::from_millis(300);
 const REFRESH_DELAY: Duration = Duration::from_millis(150);
 /// How often the sidebar checks on an index that is still building.
 const INDEX_POLL: Duration = Duration::from_millis(500);
-/// How often a pasted job is checked on until it ends, as Activity does.
-const JOB_CHECK: Duration = Duration::from_secs(1);
+/// How long a toast stays.
+const TOAST_FOR: Duration = Duration::from_secs(4);
 
 pub struct Browser {
     /// Keeps the browser's keys working wherever focus is.
@@ -235,9 +236,19 @@ pub struct Browser {
     /// Hands disk changes from fsearch's thread to this view.
     _changes: Task<()>,
     error: Option<String>,
-    /// Why the last change didn't happen, until the next one or leaving
-    /// the folder.
-    notice: Option<String>,
+    /// What the last change did or why it didn't happen, at the bottom of
+    /// the files for a few seconds.
+    toast: Option<Toast>,
+    /// Copies and moves, the window's and agents': the title bar's ring and
+    /// its popover.
+    jobs: Entity<Jobs>,
+    /// The popover's keys.
+    jobs_focus: FocusHandle,
+    /// A job of the window's needs an answer: the popover opens once the
+    /// next frame has drawn.
+    jobs_wanted: bool,
+    /// The owner's folder, whose changes may be an agent's new job.
+    ops_state: Option<PathBuf>,
     /// The name being edited in place.
     renaming: Option<Renaming>,
     /// What a change made, to select once the listing that has it lands.
@@ -311,6 +322,17 @@ impl Browser {
             cx.notify();
         })
         .detach();
+        let jobs = cx.new(|_| Jobs::default());
+        cx.subscribe(&jobs, |this, _, event: &JobsEvent, cx| match event {
+            JobsEvent::Finished(job) => this.job_finished(job.clone(), cx),
+            JobsEvent::NeedsYou => {
+                this.jobs_wanted = true;
+                cx.notify();
+            }
+        })
+        .detach();
+        // Repaints the ring as the jobs change.
+        cx.observe(&jobs, |_, _, cx| cx.notify()).detach();
         let mut browser = Self {
             focus: cx.focus_handle(),
             list_focus: cx.focus_handle().tab_stop(true),
@@ -344,7 +366,11 @@ impl Browser {
             refresh: None,
             _changes: Task::ready(()),
             error: None,
-            notice: None,
+            toast: None,
+            jobs,
+            jobs_focus: cx.focus_handle(),
+            jobs_wanted: false,
+            ops_state: ops::Paths::user().map(|paths| paths.state),
             renaming: None,
             select_after: Vec::new(),
             query: String::new(),
@@ -406,7 +432,6 @@ impl Browser {
 
     /// Leaves search, if any, and lists the current folder.
     fn show_folder(&mut self, cx: &mut Context<Self>) {
-        self.notice = None;
         self.query.clear();
         self.search.update(cx, |field, cx| field.clear(cx));
         self.reload(cx);
@@ -531,6 +556,13 @@ impl Browser {
     /// Refreshes the listing shortly after the disk changes under a folder on
     /// screen.
     fn disk_changed(&mut self, batch: &[(PathBuf, bool)], cx: &mut Context<Self>) {
+        if let Some(state) = &self.ops_state
+            && batch.iter().any(|(changed, below)| {
+                changed.starts_with(state) || (*below && state.starts_with(changed))
+            })
+        {
+            self.jobs.update(cx, |jobs, cx| jobs.poke(cx));
+        }
         if !self.query.is_empty() {
             return;
         }
@@ -986,8 +1018,7 @@ impl Browser {
             folders.push(self.folder().to_path_buf());
         }
         if let Err(e) = workspace::open_in_terminal(&folders) {
-            self.notice = Some(e);
-            cx.notify();
+            self.toast(e, true, false, cx);
         }
     }
 
@@ -1584,8 +1615,17 @@ impl Browser {
         }
     }
 
+    /// Opens or closes a sheet; the jobs popover's list is kept fresh while
+    /// it's open.
+    fn set_sheet(&mut self, sheet: Option<Sheet>, cx: &mut Context<Self>) {
+        let jobs = matches!(sheet, Some(Sheet::Jobs));
+        self.sheet = sheet;
+        self.jobs.update(cx, |list, cx| list.set_open(jobs, cx));
+        cx.notify();
+    }
+
     fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sheet = None;
+        self.set_sheet(None, cx);
         let back = self
             .focus_before_sheet
             .take()
@@ -1608,32 +1648,59 @@ impl Browser {
         )
         .detach();
         window.focus(&view.focus_handle(cx), cx);
-        self.sheet = Some(Sheet::Settings(view));
-        cx.notify();
+        self.set_sheet(Some(Sheet::Settings(view)), cx);
     }
 
-    fn open_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Sheet::Activity(view)) = &self.sheet {
-            window.focus(&view.focus_handle(cx), cx);
-            return;
+    /// ⌥⌘J and the ring: the copies and moves popover, under the ring.
+    fn toggle_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.sheet, Some(Sheet::Jobs)) {
+            return self.close_sheet(window, cx);
         }
         self.remember_focus(window, cx);
-        let view = cx.new(ActivityView::new);
-        cx.subscribe_in(
-            &view,
-            window,
-            |this, _, _: &activity::Dismissed, window, cx| this.close_sheet(window, cx),
-        )
-        .detach();
-        cx.subscribe_in(
-            &view,
-            window,
-            |this, _, activity::Retried(job), window, cx| this.follow_job(*job, window, cx),
-        )
-        .detach();
-        window.focus(&view.focus_handle(cx), cx);
-        self.sheet = Some(Sheet::Activity(view));
-        cx.notify();
+        window.focus(&self.jobs_focus, cx);
+        self.set_sheet(Some(Sheet::Jobs), cx);
+    }
+
+    /// The popover's place, and what closes it: Esc, ⌥⌘J or a press
+    /// outside, which reaches nothing behind it.
+    fn jobs_popover(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let close =
+            |this: &mut Self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>| {
+                cx.stop_propagation();
+                this.close_sheet(window, cx)
+            };
+        div()
+            .id("jobs-layer")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(close))
+            .on_mouse_down(MouseButton::Right, cx.listener(close))
+            .child(
+                div()
+                    .id("jobs-popover")
+                    .key_context("Jobs")
+                    .track_focus(&self.jobs_focus)
+                    .on_action(cx.listener(|this, _: &jobs::Dismiss, window, cx| {
+                        this.close_sheet(window, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &ShowCopiesAndMoves, window, cx| {
+                        this.close_sheet(window, cx)
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                    .absolute()
+                    .top(px(theme::TITLE_BAR_HEIGHT - 4.))
+                    .right(px(8.))
+                    .child(self.jobs.clone()),
+            )
+    }
+
+    /// Shows `jobs` in the title bar as if the owner had just reported
+    /// them. The snapshot example draws a running job this way, since a real
+    /// one finishes before it can be drawn.
+    pub fn show_jobs(&mut self, jobs: Vec<Job>, cx: &mut Context<Self>) {
+        self.jobs.update(cx, |list, cx| list.take(Ok(jobs), cx));
     }
 
     fn open_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1658,8 +1725,7 @@ impl Browser {
         })
         .detach();
         window.focus(&view.focus_handle(cx), cx);
-        self.sheet = Some(Sheet::Goto(view));
-        cx.notify();
+        self.set_sheet(Some(Sheet::Goto(view)), cx);
     }
 
     /// Shows `folder` with `select` selected, the way Go to Folder and a
@@ -1740,8 +1806,7 @@ impl Browser {
             view
         };
         window.focus(&view.focus_handle(cx), cx);
-        self.sheet = Some(Sheet::Palette(view));
-        cx.notify();
+        self.set_sheet(Some(Sheet::Palette(view)), cx);
     }
 
     /// Runs `work` with the operation owner off the UI thread, then `done`
@@ -1782,29 +1847,42 @@ impl Browser {
                 | Request::Undo
                 | Request::Redo
         );
-        self.notice = None;
         self.with_owner(
             window,
             cx,
-            move |owner| owner.submit(Origin::Window, request),
-            move |this, outcome, _, cx| this.settle(outcome, select, cx),
+            move |owner| {
+                let outcome = owner.submit(Origin::Window, request.clone())?;
+                Ok((request, outcome))
+            },
+            move |this, done, _, cx| this.settle(done, select, cx),
         );
     }
 
-    /// Shows how a change went: why anything didn't happen, in the title
-    /// bar, and the folder as it is now, with what the change put here
-    /// selected (`select`) or what it moved still selected where it went.
-    /// The disk's own events would refresh it too, but only once the index
-    /// runs.
-    fn settle(&mut self, outcome: Result<Outcome, String>, select: bool, cx: &mut Context<Self>) {
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                self.notice = Some(e);
-                return;
-            }
+    /// Shows how a change went: what it did, or why anything didn't happen,
+    /// in a toast, and the folder as it is now, with what the change put
+    /// here selected (`select`) or what it moved still selected where it
+    /// went. The disk's own events would refresh it too, but only once the
+    /// index runs.
+    fn settle(
+        &mut self,
+        done: Result<(Request, Outcome), String>,
+        select: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (request, outcome) = match done {
+            Ok(done) => done,
+            Err(e) => return self.toast(e, true, false, cx),
         };
-        self.notice = outcome.failures().next().map(str::to_owned);
+        if let Some(why) = outcome.failures().next() {
+            let why = short_reason(why, [self.folder()]);
+            self.toast(why, true, false, cx);
+        } else if let Some(said) = said(&request, &outcome) {
+            let undo = !matches!(request, Request::EmptyTrash { .. });
+            self.toast(said, false, undo, cx);
+        } else {
+            // An undo leaves the last toast's Undo stale.
+            self.toast = None;
+        }
         let landed = outcome
             .items
             .iter()
@@ -1832,7 +1910,6 @@ impl Browser {
     /// edit.
     fn new_item(&mut self, folder: bool, window: &Window, cx: &mut Context<Self>) {
         let here = self.folder().to_path_buf();
-        self.notice = None;
         self.with_owner(
             window,
             cx,
@@ -1848,7 +1925,8 @@ impl Browser {
                 } else {
                     Request::NewFile { path }
                 };
-                owner.submit(Origin::Window, request)
+                let outcome = owner.submit(Origin::Window, request.clone())?;
+                Ok((request, outcome))
             },
             move |this, outcome, window, cx| this.rename_made(outcome, folder, window, cx),
         );
@@ -1866,10 +1944,9 @@ impl Browser {
             .iter()
             .any(|path| path.parent() != Some(here.as_path()))
         {
-            self.notice = Some("A new folder can only take items from one folder.".into());
-            return cx.notify();
+            let why = "A new folder can only take items from one folder.".to_string();
+            return self.toast(why, true, false, cx);
         }
-        self.notice = None;
         self.with_owner(
             window,
             cx,
@@ -1879,7 +1956,8 @@ impl Browser {
                     path,
                     items: chosen,
                 };
-                owner.submit(Origin::Window, request)
+                let outcome = owner.submit(Origin::Window, request.clone())?;
+                Ok((request, outcome))
             },
             |this, outcome, window, cx| this.rename_made(outcome, true, window, cx),
         );
@@ -1888,17 +1966,17 @@ impl Browser {
     /// Selects what a New Folder or New File made and edits its name.
     fn rename_made(
         &mut self,
-        outcome: Result<Outcome, String>,
+        done: Result<(Request, Outcome), String>,
         folder: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let made = outcome
+        let made = done
             .as_ref()
             .ok()
-            .and_then(|outcome| outcome.items.first())
+            .and_then(|(_, outcome)| outcome.items.first())
             .and_then(|item| item.result.clone().ok());
-        self.settle(outcome, true, cx);
+        self.settle(done, true, cx);
         if let Some(path) = made {
             self.start_rename(path, folder, window, cx);
         }
@@ -1933,7 +2011,6 @@ impl Browser {
             }
             return;
         }
-        self.notice = None;
         let conflict = Conflict::Stop;
         let request = if moving {
             Request::Move {
@@ -1952,109 +2029,72 @@ impl Browser {
             window,
             cx,
             move |owner| owner.submit(Origin::Window, request),
-            |this, outcome, window, cx| match outcome {
-                Ok(outcome) => this.follow_job(outcome.op, window, cx),
-                Err(e) => this.notice = Some(e),
+            |this, outcome, _, cx| match outcome {
+                Ok(outcome) => this.jobs.update(cx, |jobs, cx| jobs.follow(outcome.op, cx)),
+                Err(e) => this.toast(e, true, false, cx),
             },
         );
     }
 
-    /// Checks on a pasted job off the UI thread, at once and then every
-    /// `JOB_CHECK`, until it ends; nothing repaints until then. The owner is
-    /// taken afresh each time, so a closed window or a gone owner ends it.
-    fn follow_job(&self, job: u64, window: &Window, cx: &mut Context<Self>) {
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let Ok(Some(ops)) =
-                    cx.update(|_, cx| cx.try_global::<Operations>().map(|ops| ops.0.clone()))
-                else {
-                    return;
-                };
-                let jobs = cx
-                    .background_executor()
-                    .spawn(async move { lock(&ops).jobs() })
-                    .await;
-                let Some(found) = jobs
-                    .ok()
-                    .and_then(|jobs| jobs.into_iter().find(|j| j.id == job))
-                else {
-                    return;
-                };
-                if !found.state.active() {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.job_ended(found, window, cx);
-                        cx.notify();
-                    });
-                    return;
-                }
-                cx.background_executor().timer(JOB_CHECK).await;
-            }
-        })
-        .detach();
-    }
-
-    /// How a pasted job ended: one that stopped at a name that's taken, or
-    /// failed, opens Activity, where it can be settled or retried; a
-    /// finished one shows here with its items selected.
-    fn job_ended(&mut self, job: Job, window: &mut Window, cx: &mut Context<Self>) {
-        match job.state {
-            State::Completed if self.query.is_empty() => {
-                self.select_after = job
-                    .tasks
-                    .into_iter()
-                    .filter_map(|task| match task.done {
-                        Some(Done::To(path)) => Some(path),
-                        _ => None,
-                    })
-                    .collect();
-                self.list(false, cx);
-            }
-            State::Waiting | State::Failed | State::Interrupted => self.open_activity(window, cx),
-            _ => {}
+    /// A paste or Move Here finished: what it made is selected, if it's
+    /// here, and a toast offers Undo.
+    fn job_finished(&mut self, job: Job, cx: &mut Context<Self>) {
+        self.toast(jobs::title(&job), false, true, cx);
+        if self.query.is_empty() && job.into == self.folder() {
+            self.select_after = job
+                .tasks
+                .into_iter()
+                .filter_map(|task| match task.done {
+                    Some(Done::To(path)) => Some(path),
+                    _ => None,
+                })
+                .collect();
+            self.list(false, cx);
         }
     }
 
     /// Empty Trash: erases what's in the Trash for good, once a person has
     /// confirmed how many items that is.
     fn empty_trash(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.notice = None;
         self.with_owner(
             window,
             cx,
             |owner| owner.trash_items(),
-            |this, items, window, cx| {
-                let items = match items {
-                    Ok(items) if items.is_empty() => {
-                        this.notice = Some("The Trash is empty.".into());
-                        return;
-                    }
-                    Ok(items) => items,
-                    Err(e) => {
-                        this.notice = Some(e);
-                        return;
-                    }
-                };
-                let count = match items.len() {
-                    1 => "1 item".to_string(),
-                    n => format!("{n} items"),
-                };
-                let answer = window.prompt(
-                    PromptLevel::Warning,
-                    &format!("Permanently erase {count} in the Trash?"),
-                    Some("You can't undo this."),
-                    &["Empty Trash", "Cancel"],
-                    cx,
-                );
-                cx.spawn_in(window, async move |this, cx| {
-                    if answer.await == Ok(0) {
-                        let _ = this.update_in(cx, |this, window, cx| {
-                            this.submit(Request::EmptyTrash { items }, window, cx)
-                        });
-                    }
-                })
-                .detach();
+            |this, items, window, cx| match items {
+                Ok(items) if items.is_empty() => {
+                    this.toast("The Trash is empty.".into(), false, false, cx)
+                }
+                Ok(items) => this.ask_empty_trash(items, window, cx),
+                Err(e) => this.toast(e, true, false, cx),
             },
         );
+    }
+
+    fn ask_empty_trash(
+        &mut self,
+        items: Vec<ops::TrashItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remember_focus(window, cx);
+        let view = cx.new(|cx| EmptyTrashView::new(items, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, answer: &empty_trash::Answer, window, cx| {
+                let items = match answer {
+                    empty_trash::Answer::Empty(items) => Some(items.clone()),
+                    empty_trash::Answer::Cancel => None,
+                };
+                this.close_sheet(window, cx);
+                if let Some(items) = items {
+                    this.submit(Request::EmptyTrash { items }, window, cx);
+                }
+            },
+        )
+        .detach();
+        window.focus(&view.focus_handle(cx), cx);
+        self.set_sheet(Some(Sheet::EmptyTrash(view)), cx);
     }
 
     /// ↩: edits the selected item's name in place.
@@ -2131,31 +2171,29 @@ impl Browser {
         let sent = self.with_owner(
             window,
             cx,
-            move |owner| owner.submit(Origin::Window, request),
-            move |this, outcome, window, cx| {
-                let failure = match &outcome {
-                    Ok(outcome) => outcome.failures().next().map(str::to_owned),
+            move |owner| {
+                let outcome = owner.submit(Origin::Window, request.clone())?;
+                Ok((request, outcome))
+            },
+            move |this, done, window, cx| {
+                let failure = match &done {
+                    Ok((_, outcome)) => outcome.failures().next().map(str::to_owned),
                     Err(e) => Some(e.clone()),
                 };
+                let failure = failure.map(|why| rename_reason(&why, &path));
                 let still = this.renaming.as_mut().filter(|r| r.path == path);
                 match (failure, still) {
                     (Some(why), Some(renaming)) => {
                         renaming.sending = false;
-                        // The field sits by the name, so the folder it's in
-                        // only crowds the reason.
-                        let folder = path.parent().map(|p| format!("{}/", p.display()));
-                        renaming.error = Some(match folder {
-                            Some(folder) => why.replace(&folder, ""),
-                            None => why,
-                        });
+                        renaming.error = Some(why);
                         window.focus(&renaming.field.focus_handle(cx), cx);
                     }
-                    (Some(why), None) => this.notice = Some(why),
+                    (Some(why), None) => this.toast(why, true, false, cx),
                     (None, still) => {
                         if still.is_some() {
                             this.end_rename(window, cx);
                         }
-                        this.settle(outcome, false, cx);
+                        this.settle(done, false, cx);
                     }
                 }
             },
@@ -2177,67 +2215,41 @@ impl Browser {
         cx.notify();
     }
 
-    /// The name being edited in place, if it's `path`'s, and why the last
-    /// name didn't take: beside it in the list, under it in the grid
-    /// (`stacked`).
-    fn rename_field(
-        &self,
-        path: &Path,
-        width: f32,
-        stacked: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
+    /// The name being edited in place, if it's `path`'s, outlined in red
+    /// while the last name tried can't be used. The title bar says why.
+    fn rename_field(&self, path: &Path, width: f32, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let renaming = self.renaming.as_ref().filter(|r| r.path == path)?;
         // Solid over the selection's accent, whatever the pane's glass.
         let mut fill = theme::pane_fill();
         fill.a = 1.;
-        let field = div()
-            .key_context("Rename")
-            .on_action(
-                cx.listener(|this, _: &CommitRename, window, cx| this.commit_rename(window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &CancelRename, window, cx| this.end_rename(window, cx)),
-            )
-            // A click in the name places the caret; it isn't a click on
-            // the row or the list.
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .w(px(width))
-            .flex_shrink_0()
-            .px(px(4.))
-            .rounded(px(4.))
-            .border_1()
-            .border_color(accent())
-            .bg(fill)
-            .text_color(content(1.))
-            .child(renaming.field.clone());
-        let error = renaming.error.clone().map(|why| {
-            div()
-                .min_w_0()
-                .px(px(6.))
-                .rounded(px(4.))
-                .bg(fill)
-                .text_size(px(11.))
-                .text_color(accent())
-                .when(stacked, |d| d.max_w(px(width)).text_center())
-                .when(!stacked, |d| d.truncate())
-                .child(why)
-        });
         Some(
             div()
-                .min_w_0()
-                .flex()
-                .gap_1()
-                .map(|d| {
-                    if stacked {
-                        d.flex_col().items_center()
-                    } else {
-                        d.items_center()
-                    }
+                .key_context("Rename")
+                .on_action(
+                    cx.listener(|this, _: &CommitRename, window, cx| {
+                        this.commit_rename(window, cx)
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &CancelRename, window, cx| this.end_rename(window, cx)),
+                )
+                // A click in the name places the caret; it isn't a click on
+                // the row or the list.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .w(px(width))
+                .flex_shrink_0()
+                .px(px(4.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(if renaming.error.is_some() {
+                    danger()
+                } else {
+                    accent()
                 })
-                .child(field)
-                .children(error),
+                .bg(fill)
+                .text_color(content(1.))
+                .child(renaming.field.clone()),
         )
     }
 
@@ -2577,14 +2589,21 @@ impl Browser {
                 }
             })
             .child(drag_area().flex_1().h_full())
-            .children(self.notice.clone().map(|notice| {
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.))
-                    .text_color(accent())
-                    .child(notice)
-            }))
+            .children(
+                self.renaming
+                    .as_ref()
+                    .and_then(|renaming| renaming.error.clone())
+                    .map(|why| {
+                        // The path gives way first, as it does for the count.
+                        div()
+                            .flex_shrink_0()
+                            .max_w(px(360.))
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(danger())
+                            .child(why)
+                    }),
+            )
             .child(
                 div()
                     .flex_shrink_0()
@@ -2592,6 +2611,117 @@ impl Browser {
                     .text_color(content(0.4))
                     .child(count),
             )
+            .children(self.jobs.read(cx).ring().map(|ring| {
+                ring.on_click(cx.listener(|this, _, window, cx| this.toggle_jobs(window, cx)))
+            }))
+    }
+
+    /// The toast at the bottom of the files, with its Undo.
+    fn toast_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let toast = self.toast.as_ref()?;
+        let ink = if toast.failed { danger() } else { content(0.9) };
+        Some(
+            div()
+                .absolute()
+                .bottom(px(14.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("toast")
+                        .occlude()
+                        .relative()
+                        .max_w(px(520.))
+                        .mx_4()
+                        .h(px(34.))
+                        .pl_3()
+                        .pr(px(6.))
+                        .rounded(px(10.))
+                        .shadow(vec![
+                            gpui::BoxShadow::new(px(0.), px(6.), theme::black(0.25))
+                                .blur_radius(px(18.))
+                                .spread_radius(px(-4.)),
+                        ])
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(theme::floating_surface(10.))
+                        .when(toast.failed, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .rounded(px(10.))
+                                    .bg(danger().opacity(0.12)),
+                            )
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(content(0.12)),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(13.))
+                                .text_color(ink)
+                                .child(toast.text.clone()),
+                        )
+                        .when(toast.undo, |d| {
+                            d.child(
+                                div()
+                                    .id("toast-undo")
+                                    .debug_selector(|| "toast-undo".into())
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Undo")
+                                    .relative()
+                                    .flex_shrink_0()
+                                    .h(px(24.))
+                                    .px_2()
+                                    .rounded(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(accent())
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(content(0.1)))
+                                    .child("Undo")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toast = None;
+                                        this.submit(Request::Undo, window, cx)
+                                    })),
+                            )
+                        })
+                        .when(!toast.undo, |d| d.pr_3()),
+                ),
+        )
+    }
+
+    /// Says `text` at the bottom of the files for `TOAST_FOR`, in red if
+    /// it's a failure, with Undo if `undo`. It replaces the last one.
+    fn toast(&mut self, text: String, failed: bool, undo: bool, cx: &mut Context<Self>) {
+        let expire = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOAST_FOR).await;
+            let _ = this.update(cx, |this, cx| {
+                this.toast = None;
+                cx.notify();
+            });
+        });
+        self.toast = Some(Toast {
+            text,
+            failed,
+            undo,
+            _expire: expire,
+        });
+        cx.notify();
     }
 
     /// The grid's rows of cells: an icon or picture over the name.
@@ -2658,7 +2788,7 @@ impl Browser {
                                     .when(selected, |d| d.bg(content(0.1)))
                                     .child(art),
                             )
-                            .child(match self.rename_field(&entry.path, cell - 8., true, cx) {
+                            .child(match self.rename_field(&entry.path, cell - 8., cx) {
                                 Some(field) => field.text_size(px(label)).into_any_element(),
                                 None => div()
                                     .max_w(px(cell - 8.))
@@ -2755,7 +2885,7 @@ impl Browser {
                                 .gap_2()
                                 .when(tree, |d| d.child(self.disclosure(ix, depth, open, cx)))
                                 .child(file_icons::icon(entry, icon_size, window, cx))
-                                .child(match self.rename_field(&entry.path, 260., false, cx) {
+                                .child(match self.rename_field(&entry.path, 260., cx) {
                                     Some(field) => field.into_any_element(),
                                     None => div()
                                         .flex_shrink_0()
@@ -2937,6 +3067,14 @@ impl Render for Browser {
                 this.open_menu(request, window, cx)
             });
         }
+        // A sheet the person opened meanwhile stays; the ring shows the job.
+        if std::mem::take(&mut self.jobs_wanted) && !self.sheet_open() {
+            cx.defer_in(window, |this, window, cx| {
+                if !this.sheet_open() {
+                    this.toggle_jobs(window, cx)
+                }
+            });
+        }
         let package = self.package().is_some();
         // Only the sheet's controls take Tab while it's open.
         let sheet = self.sheet_open();
@@ -3109,9 +3247,9 @@ impl Render for Browser {
                     }))
                     // Esc leaves search first, then lets go of the selection.
                     .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+                        this.toast = None;
                         if this.query.is_empty() {
                             this.selection.clear();
-                            this.notice = None;
                             cx.notify();
                         } else {
                             this.show_folder(cx);
@@ -3196,11 +3334,9 @@ impl Render for Browser {
                         this.show_package_contents(cx)
                     }))
                 })
-                .on_action(
-                    cx.listener(|this, _: &ShowActivity, window, cx| {
-                        this.open_activity(window, cx)
-                    }),
-                )
+                .on_action(cx.listener(
+                    |this, _: &ShowCopiesAndMoves, window, cx| this.toggle_jobs(window, cx),
+                ))
             })
             .on_action(|_: &ToggleHiddenFiles, _, cx| {
                 preferences::update(cx, |p| p.show_hidden = !p.show_hidden)
@@ -3296,14 +3432,16 @@ impl Render for Browser {
                                         ),
                                 )
                             })
-                            .child(list),
+                            .child(list)
+                            .children(self.toast_view(cx)),
                     ),
             )
             .children(self.sheet.as_ref().map(|sheet| match sheet {
                 Sheet::Settings(view) => view.clone().into_any_element(),
                 Sheet::Palette(view) => view.clone().into_any_element(),
                 Sheet::Goto(view) => view.clone().into_any_element(),
-                Sheet::Activity(view) => view.clone().into_any_element(),
+                Sheet::Jobs => self.jobs_popover(cx).into_any_element(),
+                Sheet::EmptyTrash(view) => view.clone().into_any_element(),
             }))
             .children(self.menu.as_ref().map(|menu| menu.view.clone()))
             // Last, so its window listeners run before any element's.
@@ -3338,11 +3476,73 @@ struct MenuRequest {
     origin: FocusHandle,
 }
 
+/// A message after a change.
+struct Toast {
+    text: String,
+    failed: bool,
+    /// Offers Undo, which reverses the newest change, whoever made it.
+    undo: bool,
+    _expire: Task<()>,
+}
+
+/// What a toast says once `request` has changed what `outcome` lists.
+fn said(request: &Request, outcome: &Outcome) -> Option<String> {
+    let asked: Vec<&Path> = outcome
+        .items
+        .iter()
+        .map(|item| item.path.as_path())
+        .collect();
+    let what = match asked.as_slice() {
+        [one] => jobs::quoted(one),
+        many => format!("{} items", many.len()),
+    };
+    Some(match request {
+        Request::Trash { .. } => format!("Moved {what} to the Trash"),
+        Request::Duplicate { .. } => format!("Duplicated {what}"),
+        Request::Rename { name, .. } => format!("Renamed to \"{name}\""),
+        Request::NewFolder { path } | Request::NewFile { path } => {
+            format!("Made {}", jobs::quoted(path))
+        }
+        Request::NewFolderWith { path, items } => {
+            let what = match items.as_slice() {
+                [one] => jobs::quoted(one),
+                many => format!("{} items", many.len()),
+            };
+            format!("Moved {what} into {}", jobs::quoted(path))
+        }
+        Request::EmptyTrash { .. } => format!("Erased {what} for good"),
+        _ => return None,
+    })
+}
+
+/// `why` without the folders it names, which the person can see, and with
+/// the home folder as ~.
+pub(crate) fn short_reason<'a>(why: &str, folders: impl IntoIterator<Item = &'a Path>) -> String {
+    let mut why = why.to_string();
+    for folder in folders {
+        why = why.replace(&format!("{}/", folder.display()), "");
+    }
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() => why.replace(&home, "~"),
+        _ => why,
+    }
+}
+
+/// Why `path` couldn't take a name, short enough for the title bar:
+/// "\"draft.txt\" is already taken."
+fn rename_reason(why: &str, path: &Path) -> String {
+    let why = short_reason(why, path.parent());
+    match why.strip_suffix(" already exists.") {
+        Some(name) => format!("\"{name}\" is already taken."),
+        None => why,
+    }
+}
+
 /// A name being edited in place.
 struct Renaming {
     path: PathBuf,
     field: Entity<TextField>,
-    /// Why the last name didn't take, shown beside the field.
+    /// Why the last name didn't take, shown in the title bar.
     error: Option<String>,
     /// Sent to the owner and not yet answered, so a blur meanwhile doesn't
     /// send it again.
@@ -3351,7 +3551,7 @@ struct Renaming {
     _blur: Subscription,
 }
 
-fn lock(ops: &Mutex<ops::Client>) -> MutexGuard<'_, ops::Client> {
+pub(crate) fn lock(ops: &Mutex<ops::Client>) -> MutexGuard<'_, ops::Client> {
     ops.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -3360,7 +3560,9 @@ enum Sheet {
     Settings(Entity<SettingsView>),
     Palette(Entity<PaletteView>),
     Goto(Entity<GotoView>),
-    Activity(Entity<ActivityView>),
+    /// The copies and moves popover; `jobs` draws it.
+    Jobs,
+    EmptyTrash(Entity<EmptyTrashView>),
 }
 
 /// A grid cell's name in at most two lines, as Finder sets it: the first
@@ -4239,8 +4441,10 @@ mod tests {
         press(cx, "cmd-shift-z");
         assert!(b.exists() && !a.exists());
         press(cx, "cmd-shift-z");
-        let notice = browser.read_with(cx, |browser, _| browser.notice.clone());
-        assert_eq!(notice.as_deref(), Some("Nothing to redo."));
+        assert_eq!(
+            toast(&browser, cx),
+            Some(("Nothing to redo.".into(), true, false))
+        );
         cx.update(|_, cx| drop(cx.remove_global::<Operations>()));
         serving.join().unwrap().unwrap();
     }
@@ -4250,7 +4454,16 @@ mod tests {
     /// and Paste leave the user's alone.
     struct Owned {
         state: tempfile::TempDir,
+        paths: ops::Paths,
         serving: std::thread::JoinHandle<std::io::Result<()>>,
+    }
+
+    /// An owner serving `paths` on its own thread, and the window's client.
+    fn serve(paths: &ops::Paths) -> (std::thread::JoinHandle<std::io::Result<()>>, Operations) {
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let client = ops::Client::new(paths.clone(), None);
+        (serving, Operations(Arc::new(Mutex::new(client))))
     }
 
     fn own(cx: &mut TestAppContext) -> Owned {
@@ -4260,15 +4473,31 @@ mod tests {
             settings: state.path().join("settings.json"),
             trash: state.path().join("Trash"),
         };
-        let owner = ops::Owner::bind(paths.clone()).unwrap();
-        let serving = std::thread::spawn(move || owner.serve());
-        let client = ops::Client::new(paths, None);
+        let (serving, operations) = serve(&paths);
         cx.update(|cx| {
-            cx.set_global(Operations(Arc::new(Mutex::new(client))));
+            cx.set_global(operations);
             let board = objc2_app_kit::NSPasteboard::pasteboardWithUniqueName();
             cx.set_global(Pasteboard(board));
         });
-        Owned { state, serving }
+        Owned {
+            state,
+            paths,
+            serving,
+        }
+    }
+
+    /// Waits for the owner's jobs to end without polling: the window lets go,
+    /// the owner exits once its jobs are done, and the next one reads how
+    /// they ended from the journal.
+    fn restart(owned: &mut Owned, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| drop(cx.remove_global::<Operations>()));
+        let (serving, operations) = {
+            let ended = std::mem::replace(&mut owned.serving, std::thread::spawn(|| Ok(())));
+            ended.join().unwrap().unwrap();
+            serve(&owned.paths)
+        };
+        owned.serving = serving;
+        cx.update(|_, cx| cx.set_global(operations));
     }
 
     /// Lets the owner go once its jobs are done, and the pasteboard with it.
@@ -4282,8 +4511,24 @@ mod tests {
         owned.serving.join().unwrap().unwrap();
     }
 
-    fn notice(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
-        browser.read_with(cx, |browser, _| browser.notice.clone())
+    /// The toast's text, whether it's a failure, and whether it offers Undo.
+    fn toast(
+        browser: &Entity<Browser>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(String, bool, bool)> {
+        browser.read_with(cx, |browser, _| {
+            let toast = browser.toast.as_ref()?;
+            Some((toast.text.clone(), toast.failed, toast.undo))
+        })
+    }
+
+    /// Draws a frame, then clicks the middle of what `selector` marks.
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let at = cx.debug_bounds(selector).unwrap().center();
+        cx.simulate_click(at, with(""));
+        cx.run_until_parked();
     }
 
     /// The name being edited, and why the last one didn't take.
@@ -4320,7 +4565,7 @@ mod tests {
         assert_eq!(editing(&browser, cx), Some(("b.txt".into(), None)));
         // A name that can't be used says why and stays open.
         for (name, why) in [
-            ("zeta", "already exists"),
+            ("zeta", "\"zeta\" is already taken."),
             ("x/y", "can't be a name"),
             ("", "can't be a name"),
         ] {
@@ -4427,10 +4672,15 @@ mod tests {
             shown(&browser, cx),
             (vec!["docs".into(), "zeta".into(), "a.txt".into()], vec![])
         );
-        press(cx, "cmd-z");
+        assert_eq!(
+            toast(&browser, cx),
+            Some(("Moved \"a copy.txt\" to the Trash".into(), false, true))
+        );
+        // The toast's Undo is the shared one.
+        click(cx, "toast-undo");
         assert!(project.join("a copy.txt").exists());
         assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
-        assert_eq!(notice(&browser, cx), None);
+        assert_eq!(toast(&browser, cx), None);
         release(owned, cx);
     }
 
@@ -4445,51 +4695,65 @@ mod tests {
         // Pasted where it is, it's duplicated.
         press(cx, "cmd-v");
         assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
+        assert_eq!(
+            toast(&browser, cx),
+            Some(("Duplicated \"a.txt\"".into(), false, true))
+        );
         // Elsewhere it's a job, here a move. When it ends is the owner
-        // thread's business, so `job_ended` is tested on its own below.
+        // thread's business; the next test waits for it.
         press(cx, "up up cmd-down cmd-alt-v");
-        assert_eq!(notice(&browser, cx), None);
+        assert!(toast(&browser, cx).is_some_and(|(_, failed, _)| !failed));
         release(owned, cx);
         assert!(project.join("docs/a.txt").exists() && !project.join("a.txt").exists());
     }
 
     #[gpui::test]
-    fn a_pasted_job_that_stops_opens_activity_and_one_that_finishes_is_selected(
+    fn a_paste_that_meets_a_taken_name_asks_and_keep_both_finishes_the_same_job(
         cx: &mut TestAppContext,
     ) {
         let (_dir, project) = folder();
+        let docs = project.join("docs");
+        std::fs::write(docs.join("a.txt"), "theirs").unwrap();
+        let mut owned = own(cx);
         let (browser, cx) = browse(&project, cx);
-        let ended = |state: State, done: Option<Done>| Job {
-            id: 1,
-            title: "Copy".into(),
-            origin: Origin::Window,
-            into: project.clone(),
-            state,
-            tasks: vec![ops::Task {
-                source: "/elsewhere/a.txt".into(),
-                done,
-            }],
-            bytes: 0,
-            total_bytes: 0,
-        };
-        let end = |job: Job, cx: &mut VisualTestContext| {
-            cx.update(|window, cx| browser.update(cx, |b, cx| b.job_ended(job, window, cx)));
-            cx.run_until_parked();
-        };
-        let activity = |cx: &mut VisualTestContext| {
-            browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Activity(_))))
-        };
-        end(
-            ended(State::Completed, Some(Done::To(project.join("a.txt")))),
-            cx,
+        press(cx, "down down down cmd-c up up cmd-down cmd-v");
+        restart(&mut owned, cx);
+        cx.executor().advance_clock(jobs::CHECK);
+        cx.run_until_parked();
+        let (popover, ring) = (
+            |cx: &mut VisualTestContext| {
+                browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Jobs)))
+            },
+            |cx: &mut VisualTestContext| {
+                browser.read_with(cx, |b, cx| b.jobs.read(cx).ring().is_some())
+            },
         );
-        assert_eq!(shown(&browser, cx).1, ["a.txt"]);
-        assert!(!activity(cx));
-        for state in [State::Waiting, State::Failed] {
-            end(ended(state, None), cx);
-            assert!(activity(cx), "{state:?}");
-            press(cx, "escape");
-        }
+        // The person just pasted, so the question opens by itself.
+        assert!(popover(cx) && ring(cx));
+        click(cx, "job-Keep Both");
+        restart(&mut owned, cx);
+        cx.executor().advance_clock(jobs::CHECK);
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(docs.join("a.txt")).unwrap(),
+            "theirs"
+        );
+        assert!(docs.join("a 2.txt").exists());
+        assert_eq!(shown(&browser, cx).1, ["a 2.txt"]);
+        assert_eq!(
+            toast(&browser, cx),
+            Some(("Copied \"a.txt\" to docs".into(), false, true))
+        );
+        // One job, answered in place.
+        let jobs = ops::Client::new(owned.paths.clone(), None).jobs().unwrap();
+        let ended: Vec<_> = jobs.iter().map(|job| (job.id, job.state)).collect();
+        assert_eq!(ended, [(1, ops::State::Completed)]);
+        // It leaves the ring a few seconds after it finished.
+        press(cx, "escape");
+        assert!(!popover(cx) && ring(cx));
+        cx.executor().advance_clock(jobs::LINGER);
+        assert!(!ring(cx));
+        release(owned, cx);
     }
 
     /// The context menu's rows and the one highlighted, while it's open.
@@ -4651,19 +4915,28 @@ mod tests {
             std::fs::write(trash.join(name), "").unwrap();
         }
         let (browser, cx) = browse(&project, cx);
+        let asking = |cx: &mut VisualTestContext| {
+            browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::EmptyTrash(_))))
+        };
+        // Esc and Cancel keep everything.
         press(cx, "cmd-shift-backspace");
-        let (asked, _) = cx.pending_prompt().unwrap();
-        assert_eq!(asked, "Permanently erase 2 items in the Trash?");
-        cx.simulate_prompt_answer("Cancel");
-        cx.run_until_parked();
+        assert!(asking(cx));
+        press(cx, "escape");
+        assert!(!asking(cx));
+        press(cx, "cmd-shift-backspace");
+        click(cx, "empty-trash-cancel");
+        assert!(!asking(cx));
         assert_eq!(ops::trash_items(&trash).unwrap().len(), 2);
-        press(cx, "cmd-shift-backspace");
-        cx.simulate_prompt_answer("Empty Trash");
-        cx.run_until_parked();
+        // ↩ empties, as Finder's default button does.
+        press(cx, "cmd-shift-backspace enter");
+        assert!(!asking(cx));
         assert!(ops::trash_items(&trash).unwrap().is_empty());
         press(cx, "cmd-shift-backspace");
-        assert!(!cx.has_pending_prompt());
-        assert_eq!(notice(&browser, cx).as_deref(), Some("The Trash is empty."));
+        assert!(!asking(cx));
+        assert_eq!(
+            toast(&browser, cx),
+            Some(("The Trash is empty.".into(), false, false))
+        );
         release(owned, cx);
     }
 }

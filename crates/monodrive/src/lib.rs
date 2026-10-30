@@ -1,15 +1,16 @@
 //! The Monodrive app. `main.rs` decodes the command line; benchmarks build
 //! views from here.
 
-mod activity;
 mod agents;
 pub mod assets;
 mod background;
 pub mod browser;
 mod commands;
+mod empty_trash;
 pub mod file_icons;
 mod frame;
 mod goto;
+mod jobs;
 mod menu;
 mod palette;
 mod palettes;
@@ -46,7 +47,8 @@ pub fn run(folder: Option<PathBuf>) {
             #[cfg(feature = "profile")]
             profile::start(cx);
             preferences::init(cx);
-            // Connects on the first undo or redo, starting the owner if needed.
+            // Connects on the first change or look at the jobs, starting the
+            // owner if needed.
             if let Some(paths) = monodrive_core::ops::Paths::user() {
                 let client = monodrive_core::ops::Client::new(paths, std::env::current_exe().ok());
                 cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));

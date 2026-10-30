@@ -228,7 +228,7 @@ pub fn card(
     label: &'static str,
     header: impl IntoElement,
     body: impl IntoElement,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .role(Role::Dialog)
