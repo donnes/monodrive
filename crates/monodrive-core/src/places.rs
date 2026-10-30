@@ -855,12 +855,18 @@ mod tests {
         let start = shown(&store).len() - 4;
         let tail = |store: &Store| shown(store)[start..].to_vec();
         // A to the line between C and D.
-        store.pin_before(&[a.clone()], start + 3, &[]).unwrap();
+        store
+            .pin_before(std::slice::from_ref(&a), start + 3, &[])
+            .unwrap();
         assert_eq!(tail(&store), [b.clone(), c.clone(), a.clone(), d.clone()]);
         // Downward by one line stays put, and upward needs no adjusting.
-        store.pin_before(&[c.clone()], start + 2, &[]).unwrap();
+        store
+            .pin_before(std::slice::from_ref(&c), start + 2, &[])
+            .unwrap();
         assert_eq!(tail(&store), [b.clone(), c.clone(), a.clone(), d.clone()]);
-        store.pin_before(&[d.clone()], start, &[]).unwrap();
+        store
+            .pin_before(std::slice::from_ref(&d), start, &[])
+            .unwrap();
         assert_eq!(tail(&store), [d.clone(), b.clone(), c.clone(), a.clone()]);
         // Several at once, one from each side, and a new one among them.
         store
@@ -869,7 +875,7 @@ mod tests {
         assert_eq!(tail(&store)[..3], [b.clone(), a.clone(), e.clone()]);
         assert_eq!(tail(&store)[3..], [d.clone(), c.clone()]);
         // Past the end is the end.
-        store.pin_before(&[b.clone()], 99, &[]).unwrap();
+        store.pin_before(std::slice::from_ref(&b), 99, &[]).unwrap();
         assert_eq!(tail(&store).last(), Some(&b));
         // One that can't be pinned leaves the list as it was.
         let before = shown(&store);
