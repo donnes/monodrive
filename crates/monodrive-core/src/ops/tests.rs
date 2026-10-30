@@ -1157,6 +1157,17 @@ fn a_batch_rename_shows_invalid_names_and_collisions_and_runs_only_when_asked_to
     assert!(matches!(status("a-B.txt"), rename::Status::Collision(_)));
     // k.txt is in the batch but keeps its name, so k-.txt can't take it.
     assert_eq!(status("k-.txt"), collision("k.txt already exists."));
+    // One é composed and one decomposed: the same name to APFS.
+    let accents = files.join("accents");
+    std::fs::create_dir(&accents).unwrap();
+    let pair = touch(&accents, &["\u{e9}-.txt", "e-\u{301}.txt"]);
+    let plan = rename::Plan::new(&pair, &replacing("-", "", false));
+    assert_eq!(plan.rows[0].status, rename::Status::Ok);
+    assert!(
+        matches!(plan.rows[1].status, rename::Status::Collision(_)),
+        "{:?}",
+        plan.rows[1]
+    );
     let outside = rename::Plan::new(&paths[..1], &replacing("x", "taken", false));
     assert_eq!(
         outside.rows[0].status,
@@ -1264,6 +1275,16 @@ fn a_batch_rename_refuses_once_its_preview_is_out_of_date() {
     }
     let refused = run(&mut engine, reordered).unwrap_err();
     assert!(refused.contains("aren't the items previewed"), "{refused}");
+
+    let mut renumbered = previewed(&paths[..1], false);
+    if let Request::RenameMany { rule, .. } = &mut renumbered {
+        *rule = numbered("other", 0);
+    }
+    let refused = run(&mut engine, renumbered).unwrap_err();
+    assert!(
+        refused.contains("a.txt: would be named other 1.txt, not n 1.txt"),
+        "{refused}"
+    );
     assert_eq!(names(&files), ["a.txt", "b.txt", "n 2.txt"]);
 
     assert_eq!(
@@ -1311,17 +1332,11 @@ fn a_batch_cut_short_by_a_crash_leaves_no_hidden_names_and_undoes() {
             .try_into()
             .unwrap();
         let request = rename_many(&[&two, &one, &c], numbered("", 0));
-        let step = |from: &Path, to: &str| {
-            let (id, stamp) = disk::stamp(from).unwrap();
-            Step {
-                id,
-                undone: Spot::Path(from.to_path_buf()),
-                done: Spot::Path(files.join(to)),
-                applied: false,
-                stamp,
-            }
-        };
-        let steps = vec![step(&two, "1.txt"), step(&one, "2.txt"), step(&c, "3.txt")];
+        let steps = vec![
+            renaming(&two, "1.txt"),
+            renaming(&one, "2.txt"),
+            renaming(&c, "3.txt"),
+        ];
         let (order, temps) = route(&steps, &[0, 1, 2], true, engine.next);
         assert_eq!(order, [1, 0, 2]);
         let [temp] = temps.try_into().unwrap();
@@ -1352,4 +1367,99 @@ fn a_batch_cut_short_by_a_crash_leaves_no_hidden_names_and_undoes() {
             assert_eq!(names(&files), ["1.txt", "2.txt", "c.txt"]);
         }
     }
+}
+
+/// A batch's step renaming `from` to `to` beside it, not yet made.
+fn renaming(from: &Path, to: &str) -> Step {
+    let (id, stamp) = disk::stamp(from).unwrap();
+    Step {
+        id,
+        undone: Spot::Path(from.to_path_buf()),
+        done: Spot::Path(from.with_file_name(to)),
+        applied: false,
+        stamp,
+    }
+}
+
+#[test]
+fn a_crash_partway_round_a_three_item_cycle_puts_every_item_back() {
+    // Without and with something else taking 2's old name meanwhile.
+    for outsider in [false, true] {
+        let (dir, files, mut engine) = engine();
+        let [one, two, three] = touch(&files, &["1", "2", "3"]).try_into().unwrap();
+        // 3 to 1, 1 to 2, 2 to 3.
+        let request = rename_many(&[&three, &one, &two], numbered("", 0));
+        let steps = vec![
+            renaming(&three, "1"),
+            renaming(&one, "2"),
+            renaming(&two, "3"),
+        ];
+        let (order, temps) = route(&steps, &[0, 1, 2], true, engine.next);
+        assert_eq!(order, [2, 1, 0]);
+        let [temp] = temps.try_into().unwrap();
+        let submitted = submission(Origin::Window, request);
+        engine
+            .begin(&submitted, None, steps, Vec::new(), vec![temp.clone()])
+            .unwrap();
+        // Parked 3, then moved 2 into its place: 3's old and new names are
+        // both taken now.
+        disk::rename_new(&three, &temp.path).unwrap();
+        disk::rename_new(&two, &three).unwrap();
+        if outsider {
+            std::fs::write(&two, "outsider").unwrap();
+        }
+        drop(engine);
+
+        let mut engine = Engine::open(paths(dir.path())).unwrap();
+        let settled = engine.submit(submitted).unwrap();
+        assert!(settled.interrupted);
+        if outsider {
+            // It stays parked, but undo knows where, and finishes once 2 is
+            // free again.
+            let why = settled.items[0].result.as_ref().unwrap_err();
+            assert!(why.contains("undo puts it back"), "{why}");
+            assert!(run(&mut engine, Request::Undo).is_err());
+            std::fs::rename(&two, dir.path().join("outsider")).unwrap();
+            moved(run(&mut engine, Request::Undo));
+        }
+        assert_eq!(names(&files), ["1", "2", "3"]);
+        assert_eq!([&one, &two, &three].map(|path| read(path)), ["1", "2", "3"]);
+        assert_eq!(
+            run(&mut engine, Request::Undo).unwrap_err(),
+            "Nothing to undo."
+        );
+    }
+}
+
+/// Makes `path` immutable, so nothing can rename it, or lets it be again.
+fn immutable(path: &Path, on: bool) {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    let flags = if on { libc::UF_IMMUTABLE } else { 0 };
+    // SAFETY: a NUL-terminated path that outlives the call.
+    assert_eq!(unsafe { libc::chflags(path.as_ptr(), flags) }, 0);
+}
+
+#[test]
+fn a_failure_partway_round_a_cycle_puts_its_items_back() {
+    let (_dir, files, mut engine) = engine();
+    let [one, two, three] = touch(&files, &["1", "2", "3"]).try_into().unwrap();
+    // 3 parks and 2 takes its name, then 1 can't move, so 3 can't go on.
+    immutable(&one, true);
+    let outcome = run(
+        &mut engine,
+        rename_many(&[&three, &one, &two], numbered("", 0)),
+    );
+    immutable(&one, false);
+    let outcome = outcome.unwrap();
+    assert!(
+        outcome.items.iter().all(|item| item.result.is_err()),
+        "{outcome:?}"
+    );
+    assert_eq!(names(&files), ["1", "2", "3"]);
+    assert_eq!([&one, &two, &three].map(|path| read(path)), ["1", "2", "3"]);
+    assert_eq!(
+        run(&mut engine, Request::Undo).unwrap_err(),
+        "Nothing to undo."
+    );
 }

@@ -16,6 +16,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # Open With, through NSWorkspace.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSRunningApplication", "NSWorkspace"] }
 block2 = "0.6"
+# Compares names the way APFS does, which ignores Unicode normalization.
+unicode-normalization = "0.1"
 # No crates.io release yet, so it's pinned to a commit. Bump deliberately.
 fsearch = { git = "https://github.com/noahdunnagan/fsearch", rev = "88e63fdf850cf7749deae8198b187accd21f8ba5" }
 

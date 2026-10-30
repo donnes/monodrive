@@ -230,6 +230,14 @@ impl Step {
         if done { &self.done } else { &self.undone }
     }
 
+    fn spot_mut(&mut self, done: bool) -> &mut Spot {
+        if done {
+            &mut self.done
+        } else {
+            &mut self.undone
+        }
+    }
+
     /// The item's path now, if it's known.
     fn here(&self) -> Option<&Path> {
         match self.spot(self.applied) {
@@ -281,11 +289,7 @@ impl Step {
             }
             Spot::Trash(_) => {
                 let landed = disk::trash(from)?;
-                *(if done {
-                    &mut self.done
-                } else {
-                    &mut self.undone
-                }) = Spot::Trash(Some(landed.clone()));
+                *self.spot_mut(done) = Spot::Trash(Some(landed.clone()));
                 landed
             }
         };
@@ -320,11 +324,7 @@ impl Step {
             )
         })?;
         if let Spot::Trash(_) = self.spot(!self.applied) {
-            *(if self.applied {
-                &mut self.undone
-            } else {
-                &mut self.done
-            }) = Spot::Trash(Some(there.clone()));
+            *self.spot_mut(!self.applied) = Spot::Trash(Some(there.clone()));
         }
         self.applied = !self.applied;
         self.restamp(&there);
@@ -656,17 +656,26 @@ impl Engine {
     fn settle(&self, op: u64) -> Record {
         let begun = &self.begun[&op];
         let reversal = begun.target.is_some();
-        let mut items: Vec<Item> = begun
+        let mut found = begun.steps.clone();
+        let start: Vec<bool> = found.iter().map(|step| step.applied).collect();
+        let stuck: Vec<&Path> = begun
             .temps
             .iter()
-            .filter_map(|temp| unpark(begun.steps.get(temp.step)?, &temp.path))
+            .filter(|temp| !unpark(&mut found, &start, temp))
+            .map(|temp| temp.path.as_path())
             .collect();
+        let mut items = Vec::new();
         let mut steps = Vec::new();
-        for step in &begun.steps {
-            let mut step = step.clone();
+        for mut step in found {
             let path = step.here().map(Path::to_path_buf).unwrap_or_default();
             let before = step.applied;
-            let result = step.locate();
+            let result = match step.locate() {
+                Ok(at) if stuck.contains(&at.as_path()) => Err(format!(
+                    "{}: Monodrive stopped partway and left this here; undo puts it back.",
+                    at.display()
+                )),
+                result => result,
+            };
             if reversal || step.applied != before {
                 steps.push(step);
             }
@@ -1161,6 +1170,7 @@ fn shift_all(
     temps: &[Temp],
     done: bool,
 ) -> Vec<(usize, Item)> {
+    let start: Vec<bool> = steps.iter().map(|step| step.applied).collect();
     let leaving: Vec<FileId> = order.iter().map(|&i| steps[i].id).collect();
     let mut parked: HashMap<usize, Result<&Path, String>> = temps
         .iter()
@@ -1173,18 +1183,21 @@ fn shift_all(
             (temp.step, parked)
         })
         .collect();
-    order
+    let mut put_back = Vec::new();
+    let mut results: Vec<(usize, Item)> = order
         .iter()
         .map(|&i| {
             let from = steps[i].here().map(Path::to_path_buf).unwrap_or_default();
             let result = match parked.remove(&i) {
                 Some(Ok(temp)) => steps[i].place(temp, done).map_err(|e| {
-                    let back = disk::rename_new(temp, &from).is_ok();
-                    if back {
-                        e
-                    } else {
-                        format!("{e} It's at {} for now.", temp.display())
+                    let (back, returned) = return_parked(steps, &start, i, temp);
+                    put_back.extend(back);
+                    if returned {
+                        return e;
                     }
+                    steps[i].applied = !start[i];
+                    steps[i].restamp(temp);
+                    format!("{e} It's at {} for now; undo puts it back.", temp.display())
                 }),
                 Some(Err(e)) => Err(e),
                 None => steps[i].shift(done),
@@ -1194,30 +1207,90 @@ fn shift_all(
             }
             (i, Item { path: from, result })
         })
-        .collect()
+        .collect();
+    for (_, item) in results.iter_mut().filter(|(i, _)| put_back.contains(i)) {
+        item.result = Err(format!(
+            "{}: put back, since the items renamed in a cycle with it couldn't all be.",
+            item.path.display()
+        ));
+    }
+    results
+}
+
+/// Puts step `i`'s parked item back where it was, first moving back the
+/// operation's items that took its place since. `start` says where each
+/// step's item began. Returns the steps moved back, and whether the item
+/// went back; if it didn't, its step's other spot becomes `temp`, so the
+/// item is still where undo or redo can find it.
+fn return_parked(steps: &mut [Step], start: &[bool], i: usize, temp: &Path) -> (Vec<usize>, bool) {
+    if let Spot::Path(origin) = steps[i].spot(start[i]).clone() {
+        let (back, free) = vacate(steps, start, &origin);
+        if free && disk::rename_new(temp, &origin).is_ok() {
+            return (back, true);
+        }
+        *steps[i].spot_mut(!start[i]) = Spot::Path(temp.to_path_buf());
+        return (back, false);
+    }
+    (Vec::new(), false)
+}
+
+/// Frees `spot` by moving the operation's item that went there back where
+/// it began, freeing that place first the same way. Returns the steps moved
+/// back, and whether `spot` is free.
+fn vacate(steps: &mut [Step], start: &[bool], spot: &Path) -> (Vec<usize>, bool) {
+    let mut chain: Vec<usize> = Vec::new();
+    let mut at = spot.to_path_buf();
+    while let Some(there) = disk::id(&at) {
+        let came = (0..steps.len()).find(|&i| {
+            steps[i].id == there
+                && !chain.contains(&i)
+                && matches!(steps[i].spot(!start[i]), Spot::Path(to) if *to == at)
+        });
+        let Some(i) = came else {
+            return (Vec::new(), false);
+        };
+        let Spot::Path(began) = steps[i].spot(start[i]) else {
+            return (Vec::new(), false);
+        };
+        at = began.clone();
+        chain.push(i);
+    }
+    let mut back = Vec::new();
+    for &i in chain.iter().rev() {
+        let (Spot::Path(from), Spot::Path(to)) = (
+            steps[i].spot(!start[i]).clone(),
+            steps[i].spot(start[i]).clone(),
+        ) else {
+            return (back, false);
+        };
+        if disk::rename_new(&from, &to).is_err() {
+            return (back, false);
+        }
+        steps[i].applied = start[i];
+        steps[i].restamp(&to);
+        back.push(i);
+    }
+    (back, true)
 }
 
 /// After a crash: moves an item off the hidden name its operation parked it
-/// at, back where it was or else on where it was going. One that can't
-/// move stays there, reported.
-fn unpark(step: &Step, temp: &Path) -> Option<Item> {
-    if disk::id(temp) != Some(step.id) {
-        return None;
+/// at, back where it was, else on where it was going, else back after
+/// moving back what took its place. False if it's still there.
+fn unpark(steps: &mut [Step], start: &[bool], temp: &Temp) -> bool {
+    let Some(step) = steps.get(temp.step) else {
+        return true;
+    };
+    if disk::id(&temp.path) != Some(step.id) {
+        return true;
     }
     for spot in [step.spot(step.applied), step.spot(!step.applied)] {
         if let Spot::Path(to) = spot
-            && disk::rename_new(temp, to).is_ok()
+            && disk::rename_new(&temp.path, to).is_ok()
         {
-            return None;
+            return true;
         }
     }
-    Some(Item {
-        path: temp.to_path_buf(),
-        result: Err(format!(
-            "{}: Monodrive stopped partway and left this here, since both its names are taken.",
-            temp.display()
-        )),
-    })
+    return_parked(steps, start, temp.step, &temp.path).1
 }
 
 /// A move whose destination is free now.

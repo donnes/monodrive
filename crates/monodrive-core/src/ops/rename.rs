@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 /// How each new name is made from the old one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,8 +155,9 @@ pub enum Status {
     Collision(String),
 }
 
-/// What a plan was worked out from: each path's item and stamp, and which
-/// it would rename. A batch only runs if it works out the same.
+/// What a plan was worked out from and came to: each path's item and stamp,
+/// its new name, and whether it would be renamed. A batch only runs if it
+/// works out the same.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fingerprint(Vec<Seen>);
 
@@ -163,13 +165,14 @@ pub struct Fingerprint(Vec<Seen>);
 struct Seen {
     path: PathBuf,
     found: Option<(FileId, Stamp)>,
+    name: String,
     ok: bool,
 }
 
 impl Plan {
     /// Reads the disk and changes nothing. Numbers count in the order of
-    /// `paths`. On a volume that ignores case, names that differ only in
-    /// case collide.
+    /// `paths`. New names collide as APFS compares them: whatever their
+    /// Unicode normalization, and their case where the volume ignores it.
     pub fn new(paths: &[PathBuf], rule: &Rule) -> Self {
         let mut rows: Vec<Row> = paths
             .iter()
@@ -207,9 +210,9 @@ impl Plan {
                 .entry(folder.clone())
                 .or_insert_with(|| disk::ignores_case(&folder));
             let key = if folded {
-                row.name.to_lowercase()
+                row.name.to_lowercase().nfd().collect()
             } else {
-                row.name.clone()
+                row.name.nfd().collect()
             };
             match taken.entry((folder, key)) {
                 Entry::Occupied(first) => {
@@ -263,6 +266,7 @@ impl Plan {
                 .map(|row| Seen {
                     path: row.path.clone(),
                     found: row.found,
+                    name: row.name.clone(),
                     ok: row.status == Status::Ok,
                 })
                 .collect(),
@@ -296,6 +300,12 @@ impl Plan {
                 _ if now.found != then.found => {
                     format!("{}: changed since the preview.", row.path.display())
                 }
+                _ if now.name != then.name => format!(
+                    "{}: would be named {}, not {} as previewed.",
+                    row.path.display(),
+                    now.name,
+                    then.name
+                ),
                 Status::Ok => format!("{}: can be renamed now.", row.path.display()),
                 _ => row.problem(),
             })
