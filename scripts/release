@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Builds a release Monodrive.app and packs it into a disk image.
+# .github/workflows/release.yml runs this; running it here publishes nothing.
+#
+#   scripts/release <version>   target/release/dist/Monodrive-<version>-arm64.dmg and SHA256SUMS
+#
+# With MONODRIVE_SIGN_IDENTITY set, it signs with that identity and notarizes
+# through APPLE_API_KEY_PATH, APPLE_API_KEY_ID and APPLE_API_ISSUER. Without it,
+# it signs ad hoc.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: scripts/release <version>" >&2
+  exit 2
+fi
+version=$1
+identity=${MONODRIVE_SIGN_IDENTITY:--}
+
+MONODRIVE_VERSION=$version scripts/bundle --release
+app=target/release/Monodrive.app
+
+# Notarization requires the hardened runtime. Ad hoc builds use it too, so a
+# nightly fails here the same way a signed release would.
+if [[ "$identity" == - ]]; then
+  codesign --force --options runtime --timestamp=none --sign - "$app"
+else
+  codesign --force --options runtime --timestamp --sign "$identity" "$app"
+fi
+codesign --verify --deep --strict "$app"
+
+# --version opens no window, so it doesn't start the index.
+reported=$("$app/Contents/MacOS/monodrive" --version)
+if [[ "$reported" != "Monodrive $version" ]]; then
+  echo "the app reports \"$reported\", expected \"Monodrive $version\"" >&2
+  exit 1
+fi
+
+dist=target/release/dist
+rm -rf "$dist"
+mkdir -p "$dist/stage"
+cp -R "$app" "$dist/stage/"
+ln -s /Applications "$dist/stage/Applications"
+dmg=$dist/Monodrive-$version-arm64.dmg
+hdiutil create -quiet -volname Monodrive -srcfolder "$dist/stage" -format UDZO -fs APFS "$dmg"
+rm -rf "$dist/stage"
+
+if [[ "$identity" != - ]]; then
+  codesign --force --timestamp --sign "$identity" "$dmg"
+  xcrun notarytool submit "$dmg" \
+    --key "$APPLE_API_KEY_PATH" \
+    --key-id "$APPLE_API_KEY_ID" \
+    --issuer "$APPLE_API_ISSUER" \
+    --wait
+  # Stapling fails when notarization rejected the image.
+  xcrun stapler staple "$dmg"
+  spctl --assess --type open --context context:primary-signature "$dmg"
+fi
+
+(cd "$dist" && shasum -a 256 "$(basename "$dmg")" > SHA256SUMS)
+echo "$dmg"

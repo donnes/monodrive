@@ -59,6 +59,7 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 - `cargo run -p monodrive` opens the window on your home folder; `cargo run -p monodrive -- <folder>` opens another.
 - `scripts/dev [folder]` rebuilds the app and relaunches it on the same folder whenever a source file changes, through watchexec. A failed build leaves the last app running, and Ctrl-C stops both. It relaunches into the foreground, so it's for a person at the keyboard, not for agents. `mise.toml` pins the watchexec it needs; run `mise install` in the repo.
 - `scripts/bundle` builds `target/debug/Monodrive.app` with the app icon, so the Dock and Finder show it. Run `target/debug/Monodrive.app/Contents/MacOS/monodrive` to launch it and keep its PID.
+- `scripts/release <version>` builds the signed disk image `.github/workflows/release.yml` publishes, and publishes nothing itself.
 - `cargo run -p monodrive -- mcp` runs the MCP server on stdio. To try it with an agent, build first and register the binary, for example `claude mcp add monodrive -- <repo>/target/debug/monodrive mcp`.
 - Opening the window starts the index. See rule 3 before running the app on a machine without one.
 

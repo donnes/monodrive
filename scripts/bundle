@@ -14,13 +14,13 @@ profile=debug
 build=()
 case "${1:-}" in
   "") ;;
-  --release) profile=release; build=(--release) ;;
+  --release) profile=release; build=(--release --locked) ;;
   *) echo "usage: scripts/bundle [--release]" >&2; exit 2 ;;
 esac
 
 cargo build -p monodrive ${build[@]+"${build[@]}"}
 
-version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+version=${MONODRIVE_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)}
 app="target/$profile/Monodrive.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # Replace the binary's inode, so macOS doesn't reuse an older signature cache.
@@ -53,8 +53,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleName</key><string>Monodrive</string>
 <key>CFBundleDisplayName</key><string>Monodrive</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>$version</string>
-<key>CFBundleVersion</key><string>$version</string>
+<key>CFBundleShortVersionString</key><string>${version%%-*}</string>
+<key>CFBundleVersion</key><string>${version/-nightly./.}</string>
 <key>CFBundleIconFile</key><string>app-icon</string>
 <key>CFBundleIconName</key><string>app-icon</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>

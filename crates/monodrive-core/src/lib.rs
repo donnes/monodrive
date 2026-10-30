@@ -22,6 +22,12 @@ pub mod user_commands;
 pub mod volumes;
 pub mod worktrees;
 
+/// Nightlies carry a version Cargo.toml can't, which `scripts/release` passes in.
+pub const VERSION: &str = match option_env!("MONODRIVE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// `~/Library/Application Support/Monodrive`.
 pub fn support_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;

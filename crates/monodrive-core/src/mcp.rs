@@ -533,7 +533,7 @@ impl Server {
                     json!({
                         "protocolVersion": version,
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "monodrive", "version": env!("CARGO_PKG_VERSION")},
+                        "serverInfo": {"name": "monodrive", "version": crate::VERSION},
                         "instructions": INSTRUCTIONS,
                     }),
                 )
