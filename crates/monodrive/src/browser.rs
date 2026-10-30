@@ -11,6 +11,7 @@ use crate::menu::{ContextMenu, MenuEvent};
 use crate::palette::{PaletteEvent, PaletteView};
 use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, View, WorkspaceStyle};
+use crate::quick_look::{self, Preview};
 use crate::selection::Selection;
 use crate::settings::{self, SettingsView};
 use crate::text_field::{self, TextField};
@@ -101,6 +102,7 @@ actions!(
         ShowPackageContents,
         RevealInFinder,
         OpenInTerminal,
+        QuickLook,
         ShowContextMenu,
     ]
 );
@@ -289,6 +291,10 @@ pub struct Browser {
     menu_request: Option<MenuRequest>,
     /// Whether this lone selected entry is a package, as last worked out.
     package: Option<(PathBuf, bool)>,
+    /// What Quick Look was last asked to show, while it's open.
+    preview: Option<Preview>,
+    /// The Quick Look panel, from the first time it opens.
+    quick_look: Option<quick_look::Panel>,
 }
 
 impl Browser {
@@ -331,6 +337,8 @@ impl Browser {
         .detach();
         // Repaints the ring as the jobs change.
         cx.observe(&jobs, |_, _, cx| cx.notify()).detach();
+        // Whatever moves the selection repaints, so Quick Look follows it here.
+        cx.observe_self(|this, _| this.follow_selection()).detach();
         let mut browser = Self {
             focus: cx.focus_handle(),
             list_focus: cx.focus_handle().tab_stop(true),
@@ -390,6 +398,8 @@ impl Browser {
             menu: None,
             menu_request: None,
             package: None,
+            preview: None,
+            quick_look: None,
         };
         browser.reload(cx);
         browser
@@ -1535,6 +1545,59 @@ impl Browser {
     fn go(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(path, cx);
         self.focus_list(window, cx);
+    }
+
+    /// Space and ⌘Y: Quick Look on the selection, or closes it.
+    fn toggle_quick_look(&mut self, window: &mut Window) {
+        if self.close_quick_look() {
+            return;
+        }
+        let Some(preview) = Preview::of(&self.selection, &self.entries) else {
+            return;
+        };
+        if self.quick_look.is_none() {
+            self.quick_look = quick_look::Panel::new(window);
+        }
+        if let Some(panel) = &self.quick_look {
+            panel.show(&preview);
+        }
+        self.preview = Some(preview);
+    }
+
+    /// Closes Quick Look, saying whether it was open.
+    fn close_quick_look(&mut self) -> bool {
+        // The panel also closes itself, on Esc or its close button.
+        let open = self.preview.take().is_some()
+            && self.quick_look.as_ref().is_none_or(|panel| panel.is_open());
+        if open && let Some(panel) = &self.quick_look {
+            panel.close();
+        }
+        open
+    }
+
+    /// While Quick Look is open it shows what's selected now, and closes
+    /// when nothing is, as on going into another folder.
+    fn follow_selection(&mut self) {
+        let Some(shown) = &self.preview else {
+            return;
+        };
+        let preview = Preview::of(&self.selection, &self.entries);
+        if preview.as_ref() == Some(shown) {
+            return;
+        }
+        // Not if the panel closed itself meanwhile.
+        let open = self.quick_look.as_ref().is_none_or(|panel| panel.is_open());
+        match preview.filter(|_| open) {
+            Some(preview) => {
+                if let Some(panel) = &self.quick_look {
+                    panel.show(&preview);
+                }
+                self.preview = Some(preview);
+            }
+            None => {
+                self.close_quick_look();
+            }
+        }
     }
 
     /// Typing in the list or sidebar searches: the first character moves
@@ -3246,9 +3309,13 @@ impl Render for Browser {
                             field.select_all(&text_field::SelectAll, window, cx);
                         });
                     }))
-                    // Esc leaves search first, then lets go of the selection.
+                    // Esc closes Quick Look first, then leaves search, then
+                    // lets go of the selection.
                     .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
                         this.toast = None;
+                        if this.close_quick_look() {
+                            return;
+                        }
                         if this.query.is_empty() {
                             this.selection.clear();
                             cx.notify();
@@ -3334,6 +3401,14 @@ impl Render for Browser {
                     d.on_action(cx.listener(|this, _: &ShowPackageContents, _, cx| {
                         this.show_package_contents(cx)
                     }))
+                })
+                // Not while a name is edited, so Space types there.
+                .when(self.renaming.is_none() && !self.selection.is_empty(), |d| {
+                    d.on_action(
+                        cx.listener(|this, _: &QuickLook, window, _| {
+                            this.toggle_quick_look(window)
+                        }),
+                    )
                 })
                 .on_action(cx.listener(
                     |this, _: &ShowCopiesAndMoves, window, cx| this.toggle_jobs(window, cx),
@@ -4019,6 +4094,69 @@ mod tests {
                 vec!["docs".into()]
             )
         );
+    }
+
+    /// The names Quick Look was asked to show, and the one in front.
+    fn previewed(
+        browser: &Entity<Browser>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(Vec<String>, usize)> {
+        browser.read_with(cx, |browser, _| {
+            let preview = browser.preview.as_ref()?;
+            let names = preview
+                .items
+                .iter()
+                .map(|(path, _)| path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            Some((names, preview.index))
+        })
+    }
+
+    #[gpui::test]
+    fn space_previews_the_selection_and_quick_look_follows_it(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let (browser, cx) = browse(&project, cx);
+        let one = |name: &str| Some((vec![name.to_string()], 0));
+        press(cx, "space");
+        assert_eq!(previewed(&browser, cx), None);
+        press(cx, "down space");
+        assert_eq!(previewed(&browser, cx), one("docs"));
+        // The arrows still move the selection, and the panel follows; it
+        // pages through several from the cursor.
+        press(cx, "down");
+        assert_eq!(previewed(&browser, cx), one("zeta"));
+        press(cx, "shift-down");
+        assert_eq!(
+            previewed(&browser, cx),
+            Some((vec!["zeta".into(), "a.txt".into()], 1))
+        );
+        // Esc closes it and keeps the selection; ⌘Y opens and closes it too.
+        press(cx, "escape");
+        assert_eq!(previewed(&browser, cx), None);
+        assert_eq!(shown(&browser, cx).1, ["zeta", "a.txt"]);
+        press(cx, "cmd-y");
+        assert!(previewed(&browser, cx).is_some());
+        press(cx, "cmd-y");
+        assert_eq!(previewed(&browser, cx), None);
+        // Going into a folder selects nothing, so it closes; going back
+        // selects the folder left, and it shows that.
+        press(cx, "alt-up space cmd-down");
+        assert_eq!(shown(&browser, cx), (vec!["inner.md".into()], vec![]));
+        assert_eq!(previewed(&browser, cx), None);
+        press(cx, "down space cmd-[");
+        assert_eq!(previewed(&browser, cx), one("docs"));
+        // Space types in the search field, and the panel stays as it was.
+        // A lone space searches for nothing, so the index never starts.
+        press(cx, "cmd-f space");
+        let typed = browser.read_with(cx, |b, cx| b.search.read(cx).text().to_string());
+        assert_eq!(typed, " ");
+        assert_eq!(previewed(&browser, cx), one("docs"));
+        press(cx, "escape escape");
+        assert_eq!(previewed(&browser, cx), None);
+        // It types in a name being edited too.
+        press(cx, "alt-down enter space");
+        assert_eq!(editing(&browser, cx), Some((" .txt".into(), None)));
+        assert_eq!(previewed(&browser, cx), None);
     }
 
     #[gpui::test]
@@ -4779,12 +4917,13 @@ mod tests {
         cx.simulate_mouse_up(at, MouseButton::Right, with(""));
     }
 
-    const ON_A_FILE: [&str; 8] = [
+    const ON_A_FILE: [&str; 9] = [
         "Open",
         "Reveal in Finder",
         "Open in Terminal",
         "Rename",
         "Duplicate",
+        "Quick Look",
         "Move to Trash",
         "Copy",
         "Copy Path",

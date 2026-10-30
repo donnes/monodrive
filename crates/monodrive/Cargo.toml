@@ -13,10 +13,12 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-fea
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 unicode-segmentation = "1"
 # Pins the traffic lights to Monocode's spacing, draws Finder's icons, puts
-# files on the pasteboard, and hands them to Finder and Terminal.
+# files on the pasteboard, hands them to Finder and Terminal, and previews
+# them with Quick Look.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-uniform-type-identifiers", "NSBitmapImageRep", "NSButton", "NSControl", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-uniform-type-identifiers", "NSBitmapImageRep", "NSButton", "NSControl", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSGeometry", "NSString", "NSURL"] }
+objc2-quick-look-ui = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "QLPreviewItem", "QLPreviewPanel"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes", "UTType"] }
 raw-window-handle = "0.6"
 serde.workspace = true

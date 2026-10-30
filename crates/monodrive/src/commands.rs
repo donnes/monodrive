@@ -11,9 +11,9 @@ use crate::browser::{
     Back, CopyPath, DeselectAll, Duplicate, EmptyTrash, EnclosingFolder, FocusSearch, Forward,
     GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, MoveHere,
     MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenInTerminal, OpenSelected,
-    OpenSettings, Redo, Rename, ResetZoom, RevealInFinder, ReverseSort, ShowCopiesAndMoves,
-    ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
-    Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    OpenSettings, QuickLook, Redo, Rename, ResetZoom, RevealInFinder, ReverseSort,
+    ShowCopiesAndMoves, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
+    ToggleHiddenFiles, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{browser, empty_trash, goto, jobs, menu, palette, settings, text_field};
@@ -237,6 +237,14 @@ pub fn all() -> Vec<Command> {
         on(
             SELECTION,
             command("Duplicate", File, &["cmd-d"], LIST, || Box::new(Duplicate)),
+        ),
+        // Space as in Finder. ⌘Y comes first because the menu bar takes the
+        // first key, and a bare Space there would beat typing one.
+        on(
+            SELECTION,
+            command("Quick Look", File, &["cmd-y", "space"], LIST, || {
+                Box::new(QuickLook)
+            }),
         ),
         on(
             SELECTION,
@@ -724,6 +732,29 @@ mod tests {
     }
 
     #[test]
+    fn quick_look_is_in_the_file_menu_on_command_y_and_space() {
+        let commands = all();
+        let file: Vec<_> = commands
+            .iter()
+            .filter(|c| c.group == Group::File)
+            .map(|c| c.title)
+            .collect();
+        let at = file
+            .iter()
+            .position(|title| *title == "Quick Look")
+            .unwrap();
+        assert_eq!(file[at - 1], "Duplicate");
+        // The menu bar shows the first key and AppKit matches it before any
+        // view: a bare Space there would stop the search field typing one.
+        let quick_look = &commands[commands
+            .iter()
+            .position(|c| c.title == "Quick Look")
+            .unwrap()];
+        assert_eq!(quick_look.keys, ["cmd-y", "space"]);
+        assert_eq!(quick_look.context, Some("FileList"));
+    }
+
+    #[test]
     fn labels_read_as_macos_shows_them() {
         assert_eq!(label("cmd-shift-p"), "⇧⌘P");
         assert_eq!(label("ctrl-alt-shift-cmd-k"), "⌃⌥⇧⌘K");
@@ -762,6 +793,7 @@ mod tests {
                 "Open in Terminal",
                 "| Rename ↩",
                 "Duplicate ⌘D",
+                "Quick Look ⌘Y",
                 "| Move to Trash ⌘⌫",
                 "| Copy ⌘C",
                 "| Copy Path ⌥⌘C",

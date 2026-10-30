@@ -18,6 +18,7 @@ mod pasteboard;
 pub mod preferences;
 #[cfg(feature = "profile")]
 mod profile;
+mod quick_look;
 mod selection;
 mod settings;
 mod text_field;
