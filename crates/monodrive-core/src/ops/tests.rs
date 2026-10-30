@@ -531,6 +531,19 @@ fn status(shared: &jobs::Shared, op: u64) -> Job {
     jobs.into_iter().find(|job| job.id == op).unwrap()
 }
 
+/// Continues a stopped job and runs it here to the end, checking it stays
+/// the same job.
+fn continued(shared: &jobs::Shared, job: u64, conflict: Option<Conflict>) -> Job {
+    let count = shared.lock().jobs().len();
+    let op = run(&mut shared.lock(), Request::Retry { job, conflict })
+        .unwrap()
+        .op;
+    assert_eq!(op, job);
+    jobs::run(shared, op);
+    assert_eq!(shared.lock().jobs().len(), count);
+    status(shared, op)
+}
+
 fn copy(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
     Request::Copy {
         paths: paths.iter().map(|p| p.to_path_buf()).collect(),
@@ -568,31 +581,10 @@ fn copies_and_moves_follow_each_conflict_choice() {
     assert!(
         matches!(&stopped.tasks[0].done, Some(Done::Failed(why)) if why.contains("already exists"))
     );
-    let retried = run(
-        &mut shared.lock(),
-        Request::Retry {
-            job: stopped.id,
-            conflict: Some(Conflict::Skip),
-        },
-    )
-    .unwrap()
-    .op;
-    jobs::run(&shared, retried);
-    let skipped = status(&shared, retried);
+    let skipped = continued(&shared, stopped.id, Some(Conflict::Skip));
     assert_eq!(skipped.state, State::Completed);
     assert!(matches!(skipped.tasks[0].done, Some(Done::Skipped(_))));
     assert_eq!(read(&dest.join("a.txt")), "old a");
-    // The stopped job says what took it over, and can't be settled twice.
-    assert_eq!(status(&shared, stopped.id).retried_as, Some(retried));
-    let again = Request::Retry {
-        job: stopped.id,
-        conflict: Some(Conflict::KeepBoth),
-    };
-    assert!(
-        run(&mut shared.lock(), again)
-            .unwrap_err()
-            .contains("already retried")
-    );
 
     let both = job(&shared, copy(&[&a], &dest, Conflict::KeepBoth));
     assert_eq!(both.tasks[0].done, Some(Done::To(dest.join("a 2.txt"))));
@@ -673,7 +665,100 @@ fn cancel_keeps_finished_items_and_a_queued_job_never_starts() {
 }
 
 #[test]
-fn an_interrupted_job_is_settled_from_the_disk_and_retry_skips_what_finished() {
+fn answering_a_waiting_job_continues_it_in_place() {
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let (a, b, c) = (src.join("a.txt"), src.join("b"), src.join("c.txt"));
+    let waiting = job(&shared, copy(&[&b, &a, &c], &dest, Conflict::Stop));
+    assert_eq!(waiting.state, State::Waiting);
+    assert_eq!(waiting.tasks[0].done, Some(Done::To(dest.join("b"))));
+    assert_eq!(waiting.tasks[2].done, None);
+    let done = continued(&shared, waiting.id, Some(Conflict::KeepBoth));
+    assert_eq!(done.state, State::Completed);
+    let landed: Vec<_> = done.tasks.into_iter().map(|task| task.done).collect();
+    assert_eq!(
+        landed,
+        [dest.join("b"), dest.join("a 2.txt"), dest.join("c 2.txt")].map(|to| Some(Done::To(to)))
+    );
+    // A finished job has nothing left to continue.
+    let again = Request::Retry {
+        job: waiting.id,
+        conflict: None,
+    };
+    let refused = run(&mut shared.lock(), again).unwrap_err();
+    assert!(refused.contains("nothing left"), "{refused}");
+    // Undo takes back what the answer did, apart from what came before it.
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    assert_eq!(undone.items.len(), 2);
+    for item in undone.items {
+        untrash(&item.result.unwrap(), &files);
+    }
+    assert!(dest.join("b/inner.md").exists() && !dest.join("a 2.txt").exists());
+}
+
+#[test]
+fn a_failed_job_continues_in_place_once_the_reason_is_gone() {
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, _) = transfer_fixture(&files);
+    let later = files.join("later");
+    let failed = job(&shared, copy(&[&src.join("a.txt")], &later, Conflict::Stop));
+    assert_eq!(failed.state, State::Failed);
+    assert!(
+        matches!(&failed.tasks[0].done, Some(Done::Failed(why)) if why.contains("not a folder"))
+    );
+    std::fs::create_dir(&later).unwrap();
+    let done = continued(&shared, failed.id, None);
+    assert_eq!(done.state, State::Completed);
+    assert_eq!(done.tasks[0].done, Some(Done::To(later.join("a.txt"))));
+    assert_eq!(read(&later.join("a.txt")), "new a");
+}
+
+#[test]
+fn a_continued_job_cut_short_by_a_crash_keeps_both_runs() {
+    let (dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let (a, b, c) = (src.join("a.txt"), src.join("b"), src.join("c.txt"));
+    let waiting = job(&shared, copy(&[&b, &a, &c], &dest, Conflict::Stop));
+    let answer = submission(
+        Origin::Window,
+        Request::Retry {
+            job: waiting.id,
+            conflict: Some(Conflict::KeepBoth),
+        },
+    );
+    assert_eq!(shared.lock().submit(answer.clone()).unwrap().op, waiting.id);
+    // The owner copies a.txt, then dies before c.txt.
+    assert!(jobs::next(&shared, waiting.id));
+    drop(shared);
+
+    let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
+    let settled = status(&shared, waiting.id);
+    assert_eq!(settled.state, State::Interrupted);
+    let landed: Vec<_> = settled.tasks.into_iter().map(|task| task.done).collect();
+    assert_eq!(
+        landed,
+        [
+            Some(Done::To(dest.join("b"))),
+            Some(Done::To(dest.join("a 2.txt"))),
+            None
+        ]
+    );
+    // The answer sent again is the same continuation, not another.
+    assert_eq!(shared.lock().submit(answer).unwrap().op, waiting.id);
+    // Undo reaches the continuation's copy first, then the first run's.
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    let [trashed] = undone.items.try_into().unwrap();
+    untrash(&trashed.result.unwrap(), &files);
+    assert!(dest.join("b").exists() && !dest.join("a 2.txt").exists());
+    let done = continued(&shared, waiting.id, None);
+    assert_eq!(done.tasks[2].done, Some(Done::To(dest.join("c 2.txt"))));
+}
+
+#[test]
+fn an_interrupted_job_is_settled_from_the_disk_and_continues_past_what_finished() {
     let (dir, files, engine) = engine();
     let shared = jobs::Shared::new(engine, None);
     let (src, dest) = transfer_fixture(&files);
@@ -712,20 +797,11 @@ fn an_interrupted_job_is_settled_from_the_disk_and_retry_skips_what_finished() {
     // The same submission again is the same job, not a new one.
     assert_eq!(shared.lock().submit(submitted).unwrap().op, op);
 
-    let retried = run(
-        &mut shared.lock(),
-        Request::Retry {
-            job: op,
-            conflict: None,
-        },
-    )
-    .unwrap()
-    .op;
-    jobs::run(&shared, retried);
-    let retry = status(&shared, retried);
-    assert_eq!(retry.tasks.len(), 1);
-    assert_eq!(retry.tasks[0].done, Some(Done::To(dest.join("a.txt"))));
-    // Undo takes back the retry, then all the interrupted job changed.
+    let resumed = continued(&shared, op, None);
+    assert_eq!(resumed.state, State::Completed);
+    assert_eq!(resumed.tasks[1].done, Some(Done::To(dest.join("c.txt"))));
+    assert_eq!(resumed.tasks[2].done, Some(Done::To(dest.join("a.txt"))));
+    // Undo takes back the continuation, then all the interrupted run changed.
     run(&mut shared.lock(), Request::Undo).unwrap();
     run(&mut shared.lock(), Request::Undo).unwrap();
     for path in [&a, &b, &c] {

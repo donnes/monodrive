@@ -123,7 +123,7 @@ enum ToolCall {
     CancelJob {
         job: u64,
     },
-    RetryJob {
+    ContinueJob {
         job: u64,
         conflict: Option<Conflict>,
     },
@@ -288,7 +288,9 @@ impl Server {
                 into: expand_home(&into),
                 conflict,
             }),
-            ToolCall::RetryJob { job, conflict } => self.queue(Request::Retry { job, conflict }),
+            ToolCall::ContinueJob { job, conflict } => self
+                .submit(Request::Retry { job, conflict })
+                .map(|outcome| format!("job {} queued again\n", outcome.op)),
             ToolCall::CancelJob { job } => self
                 .submit(Request::Cancel { job })
                 .map(|_| format!("Cancelling job {job}; it keeps the items it finished.\n")),
@@ -378,15 +380,12 @@ fn summary(job: &Job) -> String {
         Origin::Agent { client: Some(name) } => format!("agent {name}"),
         Origin::Agent { client: None } => "an agent".to_string(),
     };
-    let state = match job.retried_as {
-        Some(again) => format!("retried as job {again}"),
-        None => job.state.label().to_string(),
-    };
     format!(
-        "job {} {} into {}: {state}, {done} of {} items, {} of {} bytes, by {by}",
+        "job {} {} into {}: {}, {done} of {} items, {} of {} bytes, by {by}",
         job.id,
         job.title,
         job.into.display(),
+        job.state.label(),
         job.tasks.len(),
         job.bytes,
         job.total_bytes,
@@ -589,9 +588,10 @@ pub const TOOLS: [Tool; 18] = [
         input_schema: job_schema,
     },
     Tool {
-        name: "retry_job",
-        description: "Run again the items a stopped job didn't change, optionally with another \
-    conflict choice. Returns the new job's id.",
+        name: "continue_job",
+        description: "Continue a job that's waiting at a conflict, failed or was interrupted. It stays \
+    the same job: finished items are kept and the rest run again, optionally with another conflict \
+    choice.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -620,7 +620,7 @@ fn conflict_schema() -> Value {
         "type": "string",
         "enum": ["stop", "skip", "keep_both", "replace"],
         "default": "stop",
-        "description": "stop waits for a retry; replace trashes what's there first."
+        "description": "stop waits for continue_job; replace trashes what's there first."
     })
 }
 
@@ -820,9 +820,14 @@ mod tests {
             settings: dir.path().join("settings.json"),
             trash: dir.path().join("Trash"),
         };
-        let owner = ops::Owner::bind(paths.clone()).unwrap();
-        let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(ops::Client::new(paths, None));
+        // An owner outlives its last client until its jobs are done, so a
+        // fresh one sees each job as it ended.
+        let serve = || {
+            let owner = ops::Owner::bind(paths.clone()).unwrap();
+            let serving = std::thread::spawn(move || owner.serve());
+            (serving, Server::new(ops::Client::new(paths.clone(), None)))
+        };
+        let (serving, mut server) = serve();
         let (file, into) = (dir.path().join("a.txt"), dir.path().join("into"));
         std::fs::write(&file, "a").unwrap();
         std::fs::create_dir(&into).unwrap();
@@ -843,10 +848,46 @@ mod tests {
         ] {
             assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
         }
-        // The owner outlives its last client until the job is done.
         drop(server);
         serving.join().unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(into.join("a.txt")).unwrap(), "a");
+
+        // Copied again, it waits at the name; continuing keeps its id.
+        let (serving, mut server) = serve();
+        let reply = call(
+            &mut server,
+            json!({"name": "copy", "arguments": {"paths": [file], "into": into}}),
+        );
+        assert_eq!(text(&reply), "job 2 queued\n");
+        drop(server);
+        serving.join().unwrap().unwrap();
+        let (serving, mut server) = serve();
+        let status = |server: &mut Server| {
+            let reply = call(
+                server,
+                json!({"name": "job_status", "arguments": {"job": 2}}),
+            );
+            text(&reply).lines().next().unwrap_or_default().to_string()
+        };
+        assert!(status(&mut server).contains(": waiting, 1 of 1 items"));
+        let reply = call(
+            &mut server,
+            json!({"name": "continue_job", "arguments": {"job": 2, "conflict": "keep_both"}}),
+        );
+        assert_eq!(text(&reply), "job 2 queued again\n");
+        drop(server);
+        serving.join().unwrap().unwrap();
+        let (serving, mut server) = serve();
+        assert!(status(&mut server).contains(": completed, 1 of 1 items"));
+        let reply = call(
+            &mut server,
+            json!({"name": "continue_job", "arguments": {"job": 2}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(text(&reply), "Job 2 has nothing left to do.");
+        drop(server);
+        serving.join().unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(into.join("a 2.txt")).unwrap(), "a");
     }
 
     #[test]
@@ -875,7 +916,6 @@ mod tests {
             ],
             bytes: 10,
             total_bytes: 30,
-            retried_as: None,
         };
         assert_eq!(
             describe(&job),

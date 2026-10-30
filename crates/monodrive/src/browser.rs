@@ -4471,7 +4471,6 @@ mod tests {
             }],
             bytes: 0,
             total_bytes: 0,
-            retried_as: None,
         };
         let end = |job: Job, cx: &mut VisualTestContext| {
             cx.update(|window, cx| browser.update(cx, |b, cx| b.job_ended(job, window, cx)));

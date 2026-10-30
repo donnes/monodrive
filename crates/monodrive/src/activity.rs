@@ -141,7 +141,6 @@ impl ActivityView {
         // What can be done with the job now: stop it while it's going,
         // choose how a waiting one settles its conflict, or try again.
         let actions: Vec<(&'static str, Request)> = match job.state {
-            _ if job.retried_as.is_some() => Vec::new(),
             State::Queued | State::Running => vec![("Cancel", Request::Cancel { job: id })],
             State::Waiting => vec![
                 ("Skip", retry(Some(Conflict::Skip))),
@@ -176,10 +175,7 @@ impl ActivityView {
                             .flex_shrink_0()
                             .text_size(px(12.))
                             .text_color(content(0.5))
-                            .child(match job.retried_as {
-                                Some(_) => "Retried".to_string(),
-                                None => capitalized(job.state.label()),
-                            }),
+                            .child(capitalized(job.state.label())),
                     )
                     .children(actions.into_iter().map(|(label, request)| {
                         div()

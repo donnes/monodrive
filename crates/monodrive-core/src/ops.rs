@@ -90,8 +90,9 @@ pub enum Request {
         #[serde(default)]
         conflict: Conflict,
     },
-    /// Runs again the items a finished job didn't change, with `conflict`
-    /// instead of the job's own when given.
+    /// Continues a job that stopped, as the same job: it keeps what it
+    /// finished and runs the rest, with `conflict` instead of the job's own
+    /// when given.
     Retry {
         job: u64,
         conflict: Option<Conflict>,
@@ -341,6 +342,14 @@ enum Record {
         submission: Submission,
         spec: jobs::Spec,
     },
+    /// A stopped job queued again under its own id. Its next changes join
+    /// the history as operation `op`.
+    Continue {
+        op: u64,
+        submission: Submission,
+        job: u64,
+        conflict: Conflict,
+    },
     /// One of a job's items as it stands: written before each change it
     /// makes and after.
     Work {
@@ -358,6 +367,7 @@ impl Record {
             Record::Begin { op, .. }
             | Record::End { op, .. }
             | Record::Job { op, .. }
+            | Record::Continue { op, .. }
             | Record::Work { op, .. }
             | Record::Finish { op, .. } => *op,
         }
@@ -534,13 +544,27 @@ impl Engine {
                     submission.id.clone(),
                     (submission.request.clone(), accepted),
                 );
-                if let Request::Retry { job, .. } = submission.request
-                    && let Some(old) = self.job_mut(job)
-                {
-                    old.retried_as = Some(op);
-                }
                 self.jobs
                     .push(jobs::Entry::new(op, submission.origin, spec));
+            }
+            Record::Continue {
+                op,
+                submission,
+                job,
+                conflict,
+            } => {
+                self.next = self.next.max(op + 1);
+                let accepted = Outcome {
+                    op: job,
+                    title: submission.request.title().to_string(),
+                    items: Vec::new(),
+                    interrupted: false,
+                };
+                self.finished
+                    .insert(submission.id, (submission.request, accepted));
+                if let Some(entry) = self.job_mut(job) {
+                    entry.resume(op, conflict);
+                }
             }
             Record::Work { op, index, work } => {
                 if let Some(slot) = self.job_mut(op).and_then(|job| job.work.get_mut(index)) {
@@ -550,14 +574,7 @@ impl Engine {
             Record::Finish { op, state } => {
                 let Some(job) = self.job_mut(op) else { return };
                 job.state = state;
-                let title = job.title();
-                let steps: Vec<Step> = job
-                    .work
-                    .iter()
-                    .flat_map(|work| &work.steps)
-                    .filter(|step| step.applied)
-                    .cloned()
-                    .collect();
+                let (op, title, steps) = (job.run, job.title(), job.run_steps());
                 if !steps.is_empty() {
                     self.history.truncate(self.history.len() - self.undone);
                     self.undone = 0;

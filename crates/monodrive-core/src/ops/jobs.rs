@@ -29,7 +29,7 @@ pub enum Conflict {
     /// Moves the one there to the Trash first.
     Replace,
     Skip,
-    /// Stops the job there, waiting for a retry with another choice.
+    /// Stops the job there, waiting to be continued with another choice.
     #[default]
     Stop,
 }
@@ -39,7 +39,7 @@ pub enum Conflict {
 pub enum State {
     Queued,
     Running,
-    /// Stopped at a conflict; a retry with another choice goes on.
+    /// Stopped at a conflict; continuing it with another choice goes on.
     Waiting,
     Completed,
     Failed,
@@ -79,8 +79,6 @@ pub struct Job {
     /// Copied so far, of the bytes in the items' files.
     pub bytes: u64,
     pub total_bytes: u64,
-    /// The job that retried this one, which took over its remaining items.
-    pub retried_as: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +138,13 @@ pub(super) struct Work {
     done: Option<Done>,
 }
 
+impl Work {
+    /// Not done, and nothing on disk changed for it.
+    fn untouched(&self) -> bool {
+        !matches!(self.done, Some(Done::To(_))) && self.steps.iter().all(|step| !step.applied)
+    }
+}
+
 /// A job in the owner's memory.
 pub(super) struct Entry {
     pub(super) id: u64,
@@ -147,7 +152,11 @@ pub(super) struct Entry {
     spec: Spec,
     pub(super) work: Vec<Work>,
     pub(super) state: State,
-    pub(super) retried_as: Option<u64>,
+    /// The operation this run's changes join the history as: the job's id,
+    /// then each continuation's.
+    pub(super) run: u64,
+    /// Which items this run works on; the rest finished in an earlier one.
+    fresh: Vec<bool>,
     cancel: Arc<AtomicBool>,
     /// The running item's bytes copied so far.
     copied: Arc<AtomicU64>,
@@ -155,7 +164,7 @@ pub(super) struct Entry {
 
 impl Entry {
     pub(super) fn new(id: u64, origin: Origin, spec: Spec) -> Self {
-        let work = spec
+        let work: Vec<Work> = spec
             .sources
             .iter()
             .enumerate()
@@ -169,12 +178,44 @@ impl Entry {
             id,
             origin,
             spec,
+            fresh: vec![true; work.len()],
             work,
             state: State::Queued,
-            retried_as: None,
+            run: id,
             cancel: Arc::default(),
             copied: Arc::default(),
         }
+    }
+
+    /// Queues the job again as run `run`, keeping what's finished: an item
+    /// done, or one that stopped partway, stays as it is.
+    pub(super) fn resume(&mut self, run: u64, conflict: Conflict) {
+        self.run = run;
+        self.spec.conflict = conflict;
+        self.state = State::Queued;
+        self.cancel = Arc::default();
+        for (work, fresh) in self.work.iter_mut().zip(&mut self.fresh) {
+            *fresh = work.untouched();
+            if *fresh {
+                *work = Work {
+                    source: work.source.clone(),
+                    id: work.id,
+                    ..Work::default()
+                };
+            }
+        }
+    }
+
+    /// What this run changed, for the undo history.
+    pub(super) fn run_steps(&self) -> Vec<Step> {
+        self.work
+            .iter()
+            .zip(&self.fresh)
+            .filter(|(_, fresh)| **fresh)
+            .flat_map(|(work, _)| &work.steps)
+            .filter(|step| step.applied)
+            .cloned()
+            .collect()
     }
 
     pub(super) fn title(&self) -> &'static str {
@@ -212,7 +253,6 @@ impl Entry {
                 .collect(),
             bytes: finished + live,
             total_bytes: self.work.iter().map(|work| work.bytes).sum(),
-            retried_as: self.retried_as,
         }
     }
 }
@@ -433,7 +473,7 @@ impl Item<'_> {
                 }
                 Conflict::Stop => {
                     return Next::Stop(format!(
-                        "{} already exists. Retry the job with keep_both, replace or skip.",
+                        "{} already exists. Continue the job with keep_both, replace or skip.",
                         to.display()
                     ));
                 }
@@ -645,9 +685,10 @@ pub(super) fn numbered(path: &Path) -> Option<PathBuf> {
 }
 
 impl Engine {
-    /// Accepts a copy, move or retry as a queued job.
+    /// Accepts a copy or move as a queued job, or queues a stopped one again.
     pub(super) fn queue(&mut self, submission: Submission) -> Result<Outcome, String> {
-        let spec = match &submission.request {
+        let op = self.next;
+        let record = match &submission.request {
             Request::Copy {
                 paths,
                 into,
@@ -675,12 +716,17 @@ impl Engine {
                     // would hold the engine while the owner waits.
                     .map(|path| disk::lookup(path).map_err(|e| format!("{}: {e}", path.display())))
                     .collect::<Result<_, _>>()?;
-                Spec {
+                let spec = Spec {
                     kind,
                     into: into.clone(),
                     conflict: *conflict,
                     sources: paths.clone(),
                     ids,
+                };
+                Record::Job {
+                    op,
+                    submission: submission.clone(),
+                    spec,
                 }
             }
             Request::Retry { job, conflict } => {
@@ -688,39 +734,17 @@ impl Engine {
                 if old.state.active() {
                     return Err(format!("Job {job} is still going."));
                 }
-                if let Some(again) = old.retried_as {
-                    return Err(format!("Job {job} was already retried as job {again}."));
+                if !old.work.iter().any(Work::untouched) {
+                    return Err(format!("Job {job} has nothing left to do."));
                 }
-                // Only what changed nothing: a finished item, or one that
-                // stopped partway, stays as it is.
-                let (sources, ids): (Vec<PathBuf>, Vec<Option<FileId>>) = old
-                    .work
-                    .iter()
-                    .filter(|work| {
-                        !matches!(work.done, Some(Done::To(_)))
-                            && work.steps.iter().all(|step| !step.applied)
-                    })
-                    .map(|work| (work.source.clone(), work.id))
-                    .unzip();
-                if sources.is_empty() {
-                    return Err(format!("Job {job} has nothing left to retry."));
-                }
-                Spec {
-                    kind: old.spec.kind,
-                    into: old.spec.into.clone(),
+                Record::Continue {
+                    op,
+                    submission: submission.clone(),
+                    job: *job,
                     conflict: conflict.unwrap_or(old.spec.conflict),
-                    sources,
-                    // A job from before ids were kept has none to keep.
-                    ids: ids.into_iter().collect::<Option<_>>().unwrap_or_default(),
                 }
             }
             _ => unreachable!("only jobs are queued"),
-        };
-        let op = self.next;
-        let record = Record::Job {
-            op,
-            submission: submission.clone(),
-            spec,
         };
         self.write(&record)?;
         self.fold(&record);
