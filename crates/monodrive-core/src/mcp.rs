@@ -336,7 +336,7 @@ impl Server {
                 let path = expand_home(&path);
                 self.places
                     .pin(&path, at, &volumes::list())
-                    .map(|()| format!("{}\n", path.display()))
+                    .map(|pinned| format!("{}\n", pinned.display()))
             }
             ToolCall::Unpin { path } => {
                 let path = expand_home(&path);
@@ -1048,7 +1048,8 @@ mod tests {
     #[test]
     fn place_tools_pin_list_and_unpin_favorites_and_eject_refuses_without_ejecting() {
         let dir = tempfile::tempdir().unwrap();
-        let (work, gone) = (dir.path().join("Work"), dir.path().join("Gone"));
+        let real = dir.path().canonicalize().unwrap();
+        let (work, gone) = (real.join("Work"), real.join("Gone"));
         std::fs::create_dir(&work).unwrap();
         std::fs::create_dir(&gone).unwrap();
         let mut server = server();
@@ -1060,7 +1061,7 @@ mod tests {
             );
             assert_eq!(text(&reply), format!("{}\n", path.display()));
         }
-        std::fs::rename(&gone, dir.path().join("Moved")).unwrap();
+        std::fs::rename(&gone, real.join("Moved")).unwrap();
         let reply = call(&mut server, json!({"name": "list_places"}));
         assert_eq!(reply["result"]["isError"], false);
         let lines: Vec<&str> = text(&reply).lines().collect();

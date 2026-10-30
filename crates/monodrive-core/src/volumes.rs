@@ -15,6 +15,7 @@ use objc2_foundation::{
     NSURLVolumeUUIDStringKey,
 };
 use serde::{Deserialize, Serialize};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -35,6 +36,9 @@ pub enum VolumeId {
 pub struct Volume {
     pub name: String,
     pub mount: PathBuf,
+    /// The physical disk it's on, as IOKit's id for it. Ejecting the disk
+    /// unmounts every volume with the same one. `None` for a network share.
+    pub disk: Option<u64>,
     /// `None` when macOS knows none, as for some FAT drives.
     pub id: Option<VolumeId>,
     pub total: u64,
@@ -72,10 +76,11 @@ pub fn list() -> Vec<Volume> {
         let keys = NSArray::from_slice(&keys);
         let mut volumes: Vec<Volume> = mounts()
             .into_iter()
-            .filter_map(|mount| {
+            .filter_map(|(mount, device)| {
                 let url = NSURL::fileURLWithPath(&NSString::from_str(&mount.to_string_lossy()));
                 let values = url.resourceValuesForKeys_error(&keys).ok()?;
-                Some(volume(mount, &values))
+                let disk = device.as_deref().and_then(physical_disk);
+                Some(volume(mount, disk, &values))
             })
             .collect();
         volumes.sort_by_key(|volume| !volume.startup);
@@ -83,10 +88,11 @@ pub fn list() -> Vec<Volume> {
     })
 }
 
-/// Where the kernel has a volume mounted that Finder would show. Read from
-/// the mount table, not NSFileManager, whose list lags a mount by a moment,
-/// so a `watch` callback that lists again sees the new volume.
-fn mounts() -> Vec<PathBuf> {
+/// Where the kernel has a volume mounted that Finder would show, and the
+/// device it's mounted from, such as `disk4s1`. Read from the mount table,
+/// not NSFileManager, whose list lags a mount by a moment, so a `watch`
+/// callback that lists again sees the new volume.
+fn mounts() -> Vec<(PathBuf, Option<CString>)> {
     // SAFETY: a null buffer asks only for the count.
     let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
     // Room for a few mounted between the two calls.
@@ -106,14 +112,68 @@ fn mounts() -> Vec<PathBuf> {
         .iter()
         .filter(|fs| fs.f_flags & libc::MNT_DONTBROWSE as u32 == 0)
         .map(|fs| {
-            // SAFETY: the kernel NUL-terminates the mount path.
-            let path = unsafe { std::ffi::CStr::from_ptr(fs.f_mntonname.as_ptr()) };
-            PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes()))
+            // SAFETY: the kernel NUL-terminates both names.
+            let (path, from) = unsafe {
+                (
+                    CStr::from_ptr(fs.f_mntonname.as_ptr()),
+                    CStr::from_ptr(fs.f_mntfromname.as_ptr()),
+                )
+            };
+            let device = from.to_bytes().strip_prefix(b"/dev/");
+            (
+                PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())),
+                device.and_then(|name| CString::new(name).ok()),
+            )
         })
         .collect()
 }
 
-fn volume(mount: PathBuf, values: &NSDictionary<NSURLResourceKey, AnyObject>) -> Volume {
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOBSDNameMatching(port: libc::mach_port_t, options: u32, name: *const c_char)
+    -> *mut c_void;
+    fn IOServiceGetMatchingService(port: libc::mach_port_t, matching: *mut c_void) -> u32;
+    fn IORegistryEntryGetParentEntry(entry: u32, plane: *const c_char, parent: *mut u32) -> i32;
+    fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> i32;
+    fn IOObjectConformsTo(object: u32, class: *const c_char) -> libc::boolean_t;
+    fn IOObjectRelease(object: u32) -> i32;
+}
+
+/// The physical disk under the device `name`: the outermost storage medium
+/// above it in IOKit's registry. An APFS volume sits in a container that
+/// sits in a partition of the disk, beside the disk's other partitions.
+fn physical_disk(name: &CStr) -> Option<u64> {
+    let mut disk = None;
+    // SAFETY: port 0 is the default main port; the matching dictionary is
+    // consumed by the lookup; each entry is released once it's been asked
+    // for its parent.
+    unsafe {
+        let matching = IOBSDNameMatching(0, 0, name.as_ptr());
+        if matching.is_null() {
+            return None;
+        }
+        let mut entry = IOServiceGetMatchingService(0, matching);
+        while entry != 0 {
+            let mut id = 0;
+            if IOObjectConformsTo(entry, c"IOMedia".as_ptr()) != 0
+                && IORegistryEntryGetRegistryEntryID(entry, &mut id) == 0
+            {
+                disk = Some(id);
+            }
+            let mut parent = 0;
+            let found = IORegistryEntryGetParentEntry(entry, c"IOService".as_ptr(), &mut parent);
+            IOObjectRelease(entry);
+            entry = if found == 0 { parent } else { 0 };
+        }
+    }
+    disk
+}
+
+fn volume(
+    mount: PathBuf,
+    disk: Option<u64>,
+    values: &NSDictionary<NSURLResourceKey, AnyObject>,
+) -> Volume {
     let get = |key: &NSURLResourceKey| values.objectForKey(key);
     let text = |key| get(key)?.downcast::<NSString>().ok().map(|s| s.to_string());
     let number = |key| get(key)?.downcast::<NSNumber>().ok();
@@ -140,6 +200,7 @@ fn volume(mount: PathBuf, values: &NSDictionary<NSURLResourceKey, AnyObject>) ->
             ejectable: flag(NSURLVolumeIsEjectableKey),
             removable: flag(NSURLVolumeIsRemovableKey),
             startup: flag(NSURLVolumeIsRootFileSystemKey),
+            disk,
             mount,
         }
     }
@@ -170,44 +231,73 @@ pub fn eject(mount: &Path, origin: &Origin, ops: &mut ops::Client) -> Result<Str
         .iter()
         .find(|volume| volume.mount == mount)
         .ok_or_else(|| format!("{} isn't a mounted volume.", mount.display()))?;
-    ready(volume, ops)?;
+    ready(volume, &volumes, ops)?;
     unmount(volume)?;
     Ok(format!("Ejected {}.", volume.name))
 }
 
-/// Whether `volume` may be ejected now: not the startup disk, and no job
-/// queued, running or waiting at a conflict reads or writes it.
-fn ready(volume: &Volume, ops: &mut ops::Client) -> Result<(), String> {
-    if volume.startup {
-        return Err(format!("{} is the startup disk.", volume.name));
+/// Ejecting takes the whole disk, every volume on it, when its media can
+/// be ejected or unplugged; otherwise it unmounts only this volume.
+fn whole_disk(volume: &Volume) -> bool {
+    volume.ejectable || volume.removable
+}
+
+/// Whether `volume` may be ejected now: neither it nor another volume
+/// ejecting it takes along is the startup disk, and no job queued, running
+/// or waiting at a conflict reads or writes any of them.
+fn ready(volume: &Volume, volumes: &[Volume], ops: &mut ops::Client) -> Result<(), String> {
+    let along = volumes.iter().filter(|other| {
+        whole_disk(volume)
+            && other.mount != volume.mount
+            && other.disk.is_some()
+            && other.disk == volume.disk
+    });
+    let leaving: Vec<&Volume> = std::iter::once(volume).chain(along).collect();
+    // Why one of them can't go, said of the volume asked about.
+    let refuse = |going: &Volume, why: &str| {
+        if going.mount == volume.mount {
+            format!("{} is {why}", going.name)
+        } else {
+            format!("Ejecting {} also ejects {}, {why}", volume.name, going.name)
+        }
+    };
+    if let Some(startup) = leaving.iter().find(|going| going.startup) {
+        return Err(refuse(startup, "the startup disk."));
     }
     let jobs = ops.jobs()?;
-    let busy = jobs.iter().find(|job| {
+    let active = jobs.iter().filter(|job| {
         matches!(
             job.state,
             ops::State::Queued | ops::State::Running | ops::State::Waiting
-        ) && (job.into.starts_with(&volume.mount)
-            || job
-                .tasks
-                .iter()
-                .any(|task| task.source.starts_with(&volume.mount)))
+        )
     });
-    match busy {
-        Some(job) => Err(format!(
-            "{} is in use by Monodrive's job {} ({} into {}, {}). Let it finish or cancel it first.",
-            volume.name,
-            job.id,
-            job.title,
-            job.into.display(),
-            job.state.label()
-        )),
-        None => Ok(()),
+    for job in active {
+        let touches = |mount: &Path| {
+            job.into.starts_with(mount)
+                || job.tasks.iter().any(|task| task.source.starts_with(mount))
+        };
+        if let Some(going) = leaving.iter().find(|going| touches(&going.mount)) {
+            let which = if going.mount == volume.mount {
+                ""
+            } else {
+                "which is "
+            };
+            let why = format!(
+                "{which}in use by Monodrive's job {} ({} into {}, {}). Let it finish or cancel it first.",
+                job.id,
+                job.title,
+                job.into.display(),
+                job.state.label()
+            );
+            return Err(refuse(going, &why));
+        }
     }
+    Ok(())
 }
 
 fn unmount(volume: &Volume) -> Result<(), String> {
     let mut options = NSFileManagerUnmountOptions::WithoutUI;
-    if volume.ejectable || volume.removable {
+    if whole_disk(volume) {
         options |= NSFileManagerUnmountOptions::AllPartitionsAndEjectDisk;
     }
     let (sent, done) = std::sync::mpsc::channel();
@@ -352,6 +442,7 @@ mod tests {
         assert!(startup.total > 0 && startup.free <= startup.total);
         assert!(matches!(startup.id, Some(VolumeId::Uuid(_))));
         assert!(!startup.network);
+        assert!(startup.disk.is_some());
     }
 
     #[test]
@@ -383,30 +474,58 @@ mod tests {
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
         let mut client = ops::Client::new(paths, None);
-        let volume = |name: &str, mount: &Path, startup| Volume {
+        let volume = |name: &str, mount: &Path, disk: u64, ejectable| Volume {
             name: name.into(),
             mount: mount.into(),
+            disk: Some(disk),
             id: None,
             total: 0,
             free: 0,
             read_only: false,
             network: false,
-            ejectable: true,
+            ejectable,
             removable: false,
-            startup,
+            startup: mount == Path::new("/"),
         };
-        let busy = ready(&volume("Backup", dir.path(), false), &mut client).unwrap_err();
+        let volumes = [
+            volume("Macintosh HD", "/".as_ref(), 0, false),
+            volume("Scratch", "/Volumes/Scratch".as_ref(), 0, false),
+            volume("Backup", "/Volumes/Backup".as_ref(), 4, true),
+            volume("Photos", dir.path(), 4, true),
+            volume("Other", "/Volumes/Other".as_ref(), 5, true),
+        ];
+        let check = |name: &str, client: &mut ops::Client| {
+            let volume = volumes.iter().find(|v| v.name == name).unwrap();
+            ready(volume, &volumes, client)
+        };
+        let busy = check("Photos", &mut client).unwrap_err();
         assert!(
-            busy.starts_with("Backup is in use by Monodrive's job 1 (Copy into "),
+            busy.starts_with("Photos is in use by Monodrive's job 1 (Copy into "),
             "{busy}"
         );
         assert!(busy.contains("waiting"), "{busy}");
-        let elsewhere = volume("Other", "/Volumes/Other".as_ref(), false);
-        assert_eq!(ready(&elsewhere, &mut client), Ok(()));
-        let startup = volume("Macintosh HD", "/".as_ref(), true);
+        // Ejecting a disk unmounts all its volumes, so each one counts.
+        let sibling = check("Backup", &mut client).unwrap_err();
+        assert!(
+            sibling.starts_with(
+                "Ejecting Backup also ejects Photos, which is in use by Monodrive's job 1"
+            ),
+            "{sibling}"
+        );
+        assert_eq!(check("Other", &mut client), Ok(()));
+        // A volume that isn't ejectable is only unmounted, alone.
+        assert_eq!(check("Scratch", &mut client), Ok(()));
         assert_eq!(
-            ready(&startup, &mut client),
+            check("Macintosh HD", &mut client),
             Err("Macintosh HD is the startup disk.".into())
+        );
+        let booted_from_external = [
+            volume("External", "/".as_ref(), 7, true),
+            volume("Extra", "/Volumes/Extra".as_ref(), 7, true),
+        ];
+        assert_eq!(
+            ready(&booted_from_external[1], &booted_from_external, &mut client),
+            Err("Ejecting Extra also ejects External, the startup disk.".into())
         );
         drop(client);
         serving.join().unwrap().unwrap();

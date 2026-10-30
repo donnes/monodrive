@@ -3,9 +3,11 @@
 //! settings.json rather than in it, because the window and every MCP server
 //! change them and only the window writes settings.json.
 
+use crate::ops;
 use crate::volumes::{self, Volume, VolumeId};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// How many recently opened files are kept.
 pub const RECENTS: usize = 50;
@@ -96,9 +98,10 @@ impl Favorite {
         }
     }
 
-    /// Whether this is the folder at `path`, as pinned or where it is now.
-    fn is(&self, path: &Path, volumes: &[Volume]) -> bool {
-        self.path == path || self.resolve(volumes) == Availability::Available(path.into())
+    /// Whether this favorite is the folder at `path` now. Its saved path
+    /// alone isn't enough: another drive may be mounted there.
+    fn is_at(&self, path: &Path, volumes: &[Volume]) -> bool {
+        self.resolve(volumes) == Availability::Available(path.into())
     }
 }
 
@@ -125,71 +128,94 @@ impl Store {
             .collect())
     }
 
-    /// Pins the folder at `path` at position `at`, or last. A folder that's
-    /// already pinned moves to `at`, or stays where it is without one.
-    pub fn pin(&self, path: &Path, at: Option<usize>, volumes: &[Volume]) -> Result<(), String> {
+    /// Pins the folder at `path` at position `at`, or last, and returns
+    /// where it really is. A folder that's already pinned moves to `at`, or
+    /// stays where it is without one.
+    pub fn pin(
+        &self,
+        path: &Path,
+        at: Option<usize>,
+        volumes: &[Volume],
+    ) -> Result<PathBuf, String> {
         if !path.is_absolute() {
             return Err(format!("{}: give an absolute path.", path.display()));
         }
-        match std::fs::metadata(path) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => return Err(format!("{} isn't a folder.", path.display())),
-            Err(e) => return Err(format!("{}: {e}", path.display())),
+        // Where the folder really is, so a link to a folder on another
+        // volume pins that volume.
+        let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !path.is_dir() {
+            return Err(format!("{} isn't a folder.", path.display()));
         }
-        let mut favorites = self.favorites()?;
-        let favorite = match favorites.iter().position(|f| f.is(path, volumes)) {
-            Some(_) if at.is_none() => return Ok(()),
-            Some(ix) => favorites.remove(ix),
-            None => Favorite {
-                path: path.into(),
-                volume: volumes::holding(volumes, path)
-                    .filter(|volume| !volume.startup)
-                    .and_then(|volume| {
-                        Some(Pinned {
-                            id: volume.id.clone()?,
-                            name: volume.name.clone(),
-                            mount: volume.mount.clone(),
-                        })
-                    }),
-            },
-        };
-        let at = at.unwrap_or(favorites.len()).min(favorites.len());
-        favorites.insert(at, favorite);
-        self.save_favorites(favorites)
+        locked(&self.places, || {
+            let mut favorites = self.favorites()?;
+            let favorite = match favorites.iter().position(|f| f.is_at(&path, volumes)) {
+                Some(_) if at.is_none() => return Ok(path),
+                Some(ix) => favorites.remove(ix),
+                None => Favorite {
+                    volume: volumes::holding(volumes, &path)
+                        .filter(|volume| !volume.startup)
+                        .and_then(|volume| {
+                            Some(Pinned {
+                                id: volume.id.clone()?,
+                                name: volume.name.clone(),
+                                mount: volume.mount.clone(),
+                            })
+                        }),
+                    path: path.clone(),
+                },
+            };
+            let at = at.unwrap_or(favorites.len()).min(favorites.len());
+            favorites.insert(at, favorite);
+            self.save_favorites(favorites)?;
+            Ok(path)
+        })
     }
 
-    /// Forgets the favorite at `path`, as pinned or where it is now. The
+    /// Forgets the favorite that's the folder at `path` now, or else one
+    /// saved at `path`, so an unavailable one can be forgotten too. The
     /// folder itself stays where it is.
     pub fn unpin(&self, path: &Path, volumes: &[Volume]) -> Result<(), String> {
-        let mut favorites = self.favorites()?;
-        let ix = favorites
-            .iter()
-            .position(|f| f.is(path, volumes))
-            .ok_or_else(|| format!("{} isn't in Favorites.", path.display()))?;
-        favorites.remove(ix);
-        self.save_favorites(favorites)
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        locked(&self.places, || {
+            let mut favorites = self.favorites()?;
+            let ix = favorites
+                .iter()
+                .position(|f| f.is_at(&real, volumes))
+                .or_else(|| favorites.iter().position(|f| f.path == path))
+                .ok_or_else(|| format!("{} isn't in Favorites.", path.display()))?;
+            favorites.remove(ix);
+            self.save_favorites(favorites)
+        })
     }
 
-    /// Files opened through Monodrive, newest first.
-    pub fn recents(&self) -> Vec<PathBuf> {
-        std::fs::read(&self.recents)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    /// Files opened through Monodrive, newest first. A file that doesn't
+    /// read is an error, so `opened` never replaces it.
+    pub fn recents(&self) -> Result<Vec<PathBuf>, String> {
+        match std::fs::read(&self.recents) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| format!("{}: {e}", self.recents.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(format!("{}: {e}", self.recents.display())),
+        }
     }
 
     /// Records that the file at `path` was opened, keeping the newest
     /// `RECENTS`.
     pub fn opened(&self, path: &Path) -> Result<(), String> {
-        let mut recents = self.recents();
-        recents.retain(|recent| recent != path);
-        recents.insert(0, path.into());
-        recents.truncate(RECENTS);
-        write(&self.recents, &recents)
+        locked(&self.recents, || {
+            let mut recents = self.recents()?;
+            recents.retain(|recent| recent != path);
+            recents.insert(0, path.into());
+            recents.truncate(RECENTS);
+            write(&self.recents, &recents)
+        })
     }
 
+    /// Empties the list, even one that doesn't read.
     pub fn clear_recents(&self) -> Result<(), String> {
-        write(&self.recents, &Vec::<PathBuf>::new())
+        locked(&self.recents, || {
+            write(&self.recents, &Vec::<PathBuf>::new())
+        })
     }
 
     /// The saved favorites, or the defaults until they're first changed. A
@@ -228,15 +254,26 @@ fn defaults() -> Vec<Favorite> {
         .collect()
 }
 
-/// Writes `value` as JSON, then renames it into place, so a crash never
-/// leaves half a file.
-fn write(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
-    if let Some(dir) = path.parent() {
+/// Runs a read, change and write of `file` holding its lock file, which
+/// the window and every MCP server share, so no change is lost to another.
+fn locked<T>(file: &Path, change: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let lock = file.with_extension("lock");
+    let fail = |e: std::io::Error| format!("{}: {e}", lock.display());
+    if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(fail)?;
     }
+    let _held = ops::lock(&lock, libc::LOCK_EX).map_err(fail)?;
+    change()
+}
+
+/// Writes `value` as JSON under a name of this writer's own, then renames
+/// it into place, so a crash never leaves half a file.
+fn write(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
     let json = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.tmp");
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, json).map_err(fail)?;
     std::fs::rename(&tmp, path).map_err(fail)
 }
@@ -256,6 +293,7 @@ mod tests {
         Volume {
             name: name.into(),
             mount: mount.into(),
+            disk: None,
             id: uuid.map(|uuid| VolumeId::Uuid(uuid.into())),
             total: 0,
             free: 0,
@@ -265,6 +303,14 @@ mod tests {
             removable: false,
             startup: mount == Path::new("/"),
         }
+    }
+
+    /// A temp folder and its real path: pins record where a folder really
+    /// is, and macOS's temp folder is behind a link.
+    fn real_tempdir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        (dir, real)
     }
 
     fn paths(store: &Store, volumes: &[Volume]) -> Vec<PathBuf> {
@@ -277,9 +323,9 @@ mod tests {
 
     #[test]
     fn favorites_start_as_todays_sidebar_then_pin_move_and_unpin_persist() {
-        let dir = tempfile::tempdir().unwrap();
+        let (_dir, dir) = real_tempdir();
         let (store, root) = (
-            store(dir.path()),
+            store(&dir),
             [volume("Macintosh HD", "/".as_ref(), Some("R"))],
         );
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
@@ -292,10 +338,10 @@ mod tests {
         ];
         assert_eq!(paths(&store, &root), defaults);
 
-        let (work, notes) = (dir.path().join("Work"), dir.path().join("notes.md"));
+        let (work, notes) = (dir.join("Work"), dir.join("notes.md"));
         std::fs::create_dir(&work).unwrap();
         std::fs::write(&notes, "").unwrap();
-        store.pin(&work, None, &root).unwrap();
+        assert_eq!(store.pin(&work, None, &root), Ok(work.clone()));
         // Pinning it again leaves it where it is; `at` moves it.
         store.pin(&work, None, &root).unwrap();
         assert_eq!(paths(&store, &root).last(), Some(&work));
@@ -343,9 +389,9 @@ mod tests {
 
     #[test]
     fn a_favorite_follows_its_volume_by_identity_never_by_name_or_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let (first, second) = (dir.path().join("Backup"), dir.path().join("Backup 1"));
+        let (_dir, dir) = real_tempdir();
+        let store = store(&dir);
+        let (first, second) = (dir.join("Backup"), dir.join("Backup 1"));
         for mount in [&first, &second] {
             std::fs::create_dir_all(mount.join("Photos")).unwrap();
         }
@@ -378,18 +424,123 @@ mod tests {
     fn recents_keep_the_newest_once_each_up_to_the_limit_until_cleared() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        assert_eq!(store.recents(), Vec::<PathBuf>::new());
+        assert_eq!(store.recents(), Ok(Vec::new()));
         let file = |n: usize| PathBuf::from(format!("/files/{n}.txt"));
         for n in 0..RECENTS + 10 {
             store.opened(&file(n)).unwrap();
         }
         store.opened(&file(30)).unwrap();
-        let recents = store.recents();
+        let recents = store.recents().unwrap();
         assert_eq!(recents.len(), RECENTS);
         assert_eq!(recents[..2], [file(30), file(RECENTS + 9)]);
         assert_eq!(recents.iter().filter(|path| **path == file(30)).count(), 1);
         assert!(!recents.contains(&file(9)));
         store.clear_recents().unwrap();
-        assert_eq!(store.recents(), Vec::<PathBuf>::new());
+        assert_eq!(store.recents(), Ok(Vec::new()));
+    }
+    #[test]
+    fn concurrent_pins_and_opens_all_survive() {
+        let (_dir, dir) = real_tempdir();
+        let root = [volume("Macintosh HD", "/".as_ref(), Some("R"))];
+        let folders: Vec<PathBuf> = (0..40).map(|n| dir.join(format!("f{n}"))).collect();
+        for folder in &folders {
+            std::fs::create_dir(folder).unwrap();
+        }
+        // Each thread stands in for a process: its own Store, the same files.
+        std::thread::scope(|scope| {
+            for chunk in folders.chunks(5) {
+                let (store, root) = (store(&dir), &root);
+                scope.spawn(move || {
+                    for folder in chunk {
+                        store.pin(folder, None, root).unwrap();
+                        store.opened(&folder.join("a.txt")).unwrap();
+                    }
+                });
+            }
+        });
+        let store = store(&dir);
+        let pinned = paths(&store, &root);
+        assert!(folders.iter().all(|f| pinned.contains(f)), "{pinned:?}");
+        assert_eq!(store.recents().unwrap().len(), folders.len());
+    }
+
+    #[test]
+    fn a_link_pins_the_folder_it_leads_to_on_that_folders_volume() {
+        let (_dir, dir) = real_tempdir();
+        let store = store(&dir);
+        let (first, second) = (dir.join("Backup"), dir.join("Backup 1"));
+        for mount in [&first, &second] {
+            std::fs::create_dir_all(mount.join("Photos")).unwrap();
+        }
+        let link = dir.join("Photos link");
+        std::os::unix::fs::symlink(first.join("Photos"), &link).unwrap();
+        let root = volume("Macintosh HD", "/".as_ref(), Some("R"));
+        let mounted = [root.clone(), volume("Backup", &first, Some("U1"))];
+        store.pin(&link, Some(0), &mounted).unwrap();
+        let remounted = [root, volume("Backup", &second, Some("U1"))];
+        let place = store.places(&remounted).unwrap().remove(0);
+        assert_eq!(place.favorite.path, first.join("Photos"));
+        assert_eq!(
+            place.availability,
+            Availability::Available(second.join("Photos"))
+        );
+    }
+
+    #[test]
+    fn a_recents_file_that_doesnt_read_is_never_overwritten() {
+        let (_dir, dir) = real_tempdir();
+        let store = store(&dir);
+        std::fs::create_dir_all(store.recents.parent().unwrap()).unwrap();
+        std::fs::write(&store.recents, "[").unwrap();
+        assert!(store.opened("/files/a.txt".as_ref()).is_err());
+        assert!(store.recents().is_err());
+        assert_eq!(std::fs::read_to_string(&store.recents).unwrap(), "[");
+    }
+
+    #[test]
+    fn another_drive_at_a_missing_drives_path_pins_its_own_folder() {
+        let (_dir, dir) = real_tempdir();
+        let store = store(&dir);
+        let mount = dir.join("Backup");
+        std::fs::create_dir_all(mount.join("Photos")).unwrap();
+        let photos = mount.join("Photos");
+        let root = volume("Macintosh HD", "/".as_ref(), Some("R"));
+        store
+            .pin(
+                &photos,
+                Some(0),
+                &[root.clone(), volume("Backup", &mount, Some("A"))],
+            )
+            .unwrap();
+        // Drive A is gone and drive B mounts where it was.
+        let other = [root, volume("Backup", &mount, Some("B"))];
+        store.pin(&photos, Some(0), &other).unwrap();
+        let places = store.places(&other).unwrap();
+        let ids: Vec<_> = places[..2]
+            .iter()
+            .map(|place| place.favorite.volume.as_ref().map(|v| v.id.clone()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                Some(VolumeId::Uuid("B".into())),
+                Some(VolumeId::Uuid("A".into()))
+            ]
+        );
+        assert_eq!(
+            places[0].availability,
+            Availability::Available(photos.clone())
+        );
+        assert!(matches!(
+            places[1].availability,
+            Availability::Unavailable(_)
+        ));
+        // Unpinning takes the folder that's there first, then A's by its
+        // saved path.
+        store.unpin(&photos, &other).unwrap();
+        let left = store.places(&other).unwrap();
+        assert!(matches!(left[0].availability, Availability::Unavailable(_)));
+        store.unpin(&photos, &other).unwrap();
+        assert_eq!(store.places(&other).unwrap().len(), 5);
     }
 }

@@ -210,7 +210,7 @@ fn private_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Opens `path` and flocks it; the lock lasts as long as the file is open.
-fn lock(path: &Path, operation: libc::c_int) -> io::Result<File> {
+pub(crate) fn lock(path: &Path, operation: libc::c_int) -> io::Result<File> {
     let file = File::options()
         .create(true)
         .truncate(false)

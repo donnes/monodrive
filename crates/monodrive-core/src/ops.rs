@@ -10,6 +10,7 @@ mod owner;
 
 pub use disk::FileId;
 pub use jobs::{Conflict, Done, Job, State, Task};
+pub(crate) use owner::lock;
 pub use owner::{Client, Owner, Watch, run_owner};
 
 use disk::Stamp;
