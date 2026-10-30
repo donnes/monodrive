@@ -582,6 +582,17 @@ fn copies_and_moves_follow_each_conflict_choice() {
     assert_eq!(skipped.state, State::Completed);
     assert!(matches!(skipped.tasks[0].done, Some(Done::Skipped(_))));
     assert_eq!(read(&dest.join("a.txt")), "old a");
+    // The stopped job says what took it over, and can't be settled twice.
+    assert_eq!(status(&shared, stopped.id).retried_as, Some(retried));
+    let again = Request::Retry {
+        job: stopped.id,
+        conflict: Some(Conflict::KeepBoth),
+    };
+    assert!(
+        run(&mut shared.lock(), again)
+            .unwrap_err()
+            .contains("already retried")
+    );
 
     let both = job(&shared, copy(&[&a], &dest, Conflict::KeepBoth));
     assert_eq!(both.tasks[0].done, Some(Done::To(dest.join("a 2.txt"))));

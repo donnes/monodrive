@@ -378,12 +378,15 @@ fn summary(job: &Job) -> String {
         Origin::Agent { client: Some(name) } => format!("agent {name}"),
         Origin::Agent { client: None } => "an agent".to_string(),
     };
+    let state = match job.retried_as {
+        Some(again) => format!("retried as job {again}"),
+        None => job.state.label().to_string(),
+    };
     format!(
-        "job {} {} into {}: {}, {done} of {} items, {} of {} bytes, by {by}",
+        "job {} {} into {}: {state}, {done} of {} items, {} of {} bytes, by {by}",
         job.id,
         job.title,
         job.into.display(),
-        job.state.label(),
         job.tasks.len(),
         job.bytes,
         job.total_bytes,
@@ -872,6 +875,7 @@ mod tests {
             ],
             bytes: 10,
             total_bytes: 30,
+            retried_as: None,
         };
         assert_eq!(
             describe(&job),

@@ -79,6 +79,8 @@ pub struct Job {
     /// Copied so far, of the bytes in the items' files.
     pub bytes: u64,
     pub total_bytes: u64,
+    /// The job that retried this one, which took over its remaining items.
+    pub retried_as: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +147,7 @@ pub(super) struct Entry {
     spec: Spec,
     pub(super) work: Vec<Work>,
     pub(super) state: State,
+    pub(super) retried_as: Option<u64>,
     cancel: Arc<AtomicBool>,
     /// The running item's bytes copied so far.
     copied: Arc<AtomicU64>,
@@ -168,6 +171,7 @@ impl Entry {
             spec,
             work,
             state: State::Queued,
+            retried_as: None,
             cancel: Arc::default(),
             copied: Arc::default(),
         }
@@ -208,6 +212,7 @@ impl Entry {
                 .collect(),
             bytes: finished + live,
             total_bytes: self.work.iter().map(|work| work.bytes).sum(),
+            retried_as: self.retried_as,
         }
     }
 }
@@ -682,6 +687,9 @@ impl Engine {
                 let old = self.job_mut(*job).ok_or_else(|| format!("No job {job}."))?;
                 if old.state.active() {
                     return Err(format!("Job {job} is still going."));
+                }
+                if let Some(again) = old.retried_as {
+                    return Err(format!("Job {job} was already retried as job {again}."));
                 }
                 // Only what changed nothing: a finished item, or one that
                 // stopped partway, stays as it is.

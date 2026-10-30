@@ -1403,6 +1403,12 @@ impl Browser {
             |this, _, _: &activity::Dismissed, window, cx| this.close_sheet(window, cx),
         )
         .detach();
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, activity::Retried(job), window, cx| this.follow_job(*job, window, cx),
+        )
+        .detach();
         window.focus(&view.focus_handle(cx), cx);
         self.sheet = Some(Sheet::Activity(view));
         cx.notify();
@@ -1913,7 +1919,13 @@ impl Browser {
                 match (failure, still) {
                     (Some(why), Some(renaming)) => {
                         renaming.sending = false;
-                        renaming.error = Some(why);
+                        // The field sits by the name, so the folder it's in
+                        // only crowds the reason.
+                        let folder = path.parent().map(|p| format!("{}/", p.display()));
+                        renaming.error = Some(match folder {
+                            Some(folder) => why.replace(&folder, ""),
+                            None => why,
+                        });
                         window.focus(&renaming.field.focus_handle(cx), cx);
                     }
                     (Some(why), None) => this.notice = Some(why),
@@ -4032,7 +4044,9 @@ mod tests {
             let (text, error) = editing(&browser, cx).unwrap();
             assert_eq!(text, name);
             assert!(
-                error.as_deref().is_some_and(|e| e.contains(why)),
+                error
+                    .as_deref()
+                    .is_some_and(|e| e.contains(why) && !e.contains(&*project.to_string_lossy())),
                 "{name}: {error:?}"
             );
         }
@@ -4172,6 +4186,7 @@ mod tests {
             }],
             bytes: 0,
             total_bytes: 0,
+            retried_as: None,
         };
         let end = |job: Job, cx: &mut VisualTestContext| {
             cx.update(|window, cx| browser.update(cx, |b, cx| b.job_ended(job, window, cx)));

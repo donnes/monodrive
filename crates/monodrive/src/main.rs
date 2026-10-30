@@ -14,6 +14,13 @@ fn main() {
             eprintln!("usage: monodrive [folder] | monodrive mcp | monodrive --version");
             std::process::exit(2);
         }
-        folder => monodrive::run(folder.map(monodrive_core::expand_home)),
+        // Relative to where it was started, and without `..`: the window
+        // and the owner only take absolute paths, and the path bar shows it.
+        folder => monodrive::run(folder.map(|folder| {
+            let folder = monodrive_core::expand_home(folder);
+            std::fs::canonicalize(&folder)
+                .or_else(|_| std::path::absolute(&folder))
+                .unwrap_or(folder)
+        })),
     }
 }

@@ -534,6 +534,11 @@ impl Engine {
                     submission.id.clone(),
                     (submission.request.clone(), accepted),
                 );
+                if let Request::Retry { job, .. } = submission.request
+                    && let Some(old) = self.job_mut(job)
+                {
+                    old.retried_as = Some(op);
+                }
                 self.jobs
                     .push(jobs::Entry::new(op, submission.origin, spec));
             }

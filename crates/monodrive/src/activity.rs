@@ -24,6 +24,10 @@ pub fn bind(cx: &mut App) {
 /// Asks the browser to close the sheet.
 pub struct Dismissed;
 
+/// A job retried from the list: the window follows the new one as it
+/// follows a paste.
+pub struct Retried(pub u64);
+
 /// How often the open list asks the owner again. It repaints only when
 /// something changed.
 const REFRESH: Duration = Duration::from_secs(1);
@@ -37,6 +41,7 @@ pub struct ActivityView {
 }
 
 impl EventEmitter<Dismissed> for ActivityView {}
+impl EventEmitter<Retried> for ActivityView {}
 
 impl Focusable for ActivityView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -86,16 +91,20 @@ impl ActivityView {
     /// Cancels or retries a job; the next refresh shows the result.
     fn ask(&mut self, request: Request, cx: &mut Context<Self>) {
         let Some(ops) = self.ops.clone() else { return };
+        let retry = matches!(request, Request::Retry { .. });
         let asked = cx
             .background_executor()
             .spawn(async move { lock(&ops).submit(Origin::Window, request) });
         cx.spawn(async move |this, cx| {
-            if let Err(e) = asked.await {
-                let _ = this.update(cx, |this, cx| {
+            let asked = asked.await;
+            let _ = this.update(cx, |this, cx| match asked {
+                Ok(outcome) if retry => cx.emit(Retried(outcome.op)),
+                Ok(_) => {}
+                Err(e) => {
                     this.error = Some(e);
                     cx.notify();
-                });
-            }
+                }
+            });
         })
         .detach();
     }
@@ -132,6 +141,7 @@ impl ActivityView {
         // What can be done with the job now: stop it while it's going,
         // choose how a waiting one settles its conflict, or try again.
         let actions: Vec<(&'static str, Request)> = match job.state {
+            _ if job.retried_as.is_some() => Vec::new(),
             State::Queued | State::Running => vec![("Cancel", Request::Cancel { job: id })],
             State::Waiting => vec![
                 ("Skip", retry(Some(Conflict::Skip))),
@@ -166,7 +176,10 @@ impl ActivityView {
                             .flex_shrink_0()
                             .text_size(px(12.))
                             .text_color(content(0.5))
-                            .child(capitalized(job.state.label())),
+                            .child(match job.retried_as {
+                                Some(_) => "Retried".to_string(),
+                                None => capitalized(job.state.label()),
+                            }),
                     )
                     .children(actions.into_iter().map(|(label, request)| {
                         div()
