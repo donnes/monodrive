@@ -13,7 +13,7 @@ The window, `find_files`, `grep`'s `filters` and saved searches all read one lan
 | `modified:>=2026-01-01` | Whole local days: `today`, `yesterday` or a date, with the same comparisons as size. `>2026-01-01` starts the day after. |
 | `in:~/Work` | Searches under that folder, ahead of the window's scope. A relative path starts from the scope's folder. |
 
-Anything else goes to fsearch as typed: fuzzy words, `'exact`, `!not`, globs such as `src/**/*.rs` and `!node_modules/`, and fsearch's own `re:` and `path:`. Repeating `kind:` or `ext:` widens the search. Every other filter narrows it, and `ext:` narrows `kind:` (`kind:image ext:png` is PNGs only). A search takes one `size:`, `modified:` and `in:`. Folder, file, link and app set the entry kind fsearch matches, so they can't be combined with another kind.
+Anything else goes to fsearch as typed: fuzzy words, `'exact`, `!not`, globs such as `src/**/*.rs` and `!node_modules/`, and fsearch's own `re:` and `path:`. Repeating `kind:` or `ext:` widens the search. Every other filter narrows it. `kind:`, `ext:` and globs narrow each other's extensions, so `kind:image ext:png` and `*.png kind:image` are PNGs only. A search takes one `size:`, `modified:` and `in:`. Folder, file, link and app set the entry kind fsearch matches, so they can't be combined with another kind.
 
 ## How it maps onto fsearch
 

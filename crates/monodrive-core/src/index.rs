@@ -276,16 +276,17 @@ impl Index {
         caps: Caps,
     ) -> Result<GrepResults, String> {
         let mut q = fsearch_query(filters, scope, self.engine.home(), now())?;
-        q.limit = caps.files;
+        // One more of each than the caps take, so a cut shows.
+        q.limit = caps.files + 1;
         let mode = match mode {
             GrepMode::Literal => fsearch::GrepMode::Literal,
             GrepMode::Regex => fsearch::GrepMode::Regex,
             GrepMode::Symbol => fsearch::GrepMode::Symbol,
         };
         let mut grep = fsearch::Grep::new(pattern, mode)?;
-        grep.max_per_file = caps.per_file;
+        grep.max_per_file = caps.per_file + 1;
         let (result, _indexed) = self.engine.grep(&q, &grep)?;
-        Ok(bounded(result, caps.lines))
+        Ok(bounded(result, caps))
     }
 }
 
@@ -305,20 +306,33 @@ fn fsearch_query(
         .map(Term::to_string)
         .collect();
     let mut q = fsearch::Query::parse(&words.join(" "), home)?;
+    let mut kind_exts: Option<Vec<Vec<u8>>> = None;
     let mut exts: Option<Vec<Vec<u8>>> = None;
     for term in &query.terms {
         match term {
             Term::Word(_) | Term::In(_) => {}
             Term::Kind(kinds) => {
                 for kind in kinds {
-                    let (key, value) = match kind {
-                        search::Kind::Folder => ("kind", "dir"),
-                        search::Kind::File => ("kind", "file"),
-                        search::Kind::Link => ("kind", "link"),
-                        search::Kind::Document => ("type", "doc"),
-                        group => ("type", group.name()),
+                    let entry = match kind {
+                        search::Kind::Folder => Some("dir"),
+                        search::Kind::File => Some("file"),
+                        search::Kind::Link => Some("link"),
+                        _ => None,
                     };
-                    q.filter(key, value, home)?;
+                    if let Some(entry) = entry {
+                        q.filter("kind", entry, home)?;
+                        continue;
+                    }
+                    let group = match kind {
+                        search::Kind::Document => "doc",
+                        group => group.name(),
+                    };
+                    // On a query of its own, so its extensions narrow the
+                    // words' instead of joining them.
+                    let mut types = fsearch::Query::default();
+                    types.filter("type", group, home)?;
+                    (q.kind, q.apps) = (types.kind.or(q.kind), q.apps || types.apps);
+                    kind_exts.get_or_insert_default().extend(types.exts);
                 }
             }
             Term::Ext(list) => exts
@@ -336,12 +350,11 @@ fn fsearch_query(
             }
         }
     }
-    // An extension narrows what its kinds take.
-    if let Some(exts) = exts {
+    for wanted in [kind_exts, exts].into_iter().flatten() {
         if q.exts.is_empty() {
-            q.exts = exts;
+            q.exts = wanted;
         } else {
-            q.exts.retain(|ext| exts.contains(ext));
+            q.exts.retain(|ext| wanted.contains(ext));
             if q.exts.is_empty() {
                 // fsearch's own way to match nothing: no name has a '/'.
                 q.exts.push(b"/".to_vec());
@@ -362,15 +375,17 @@ fn now() -> i64 {
         })
 }
 
-/// fsearch's matches cut to `lines` in all.
-fn bounded(result: fsearch::GrepResult, lines: usize) -> GrepResults {
-    let found: usize = result.files.iter().map(|file| file.lines.len()).sum();
-    let mut left = lines;
+/// fsearch's matches cut to `caps`, incomplete when that left any out.
+fn bounded(result: fsearch::GrepResult, caps: Caps) -> GrepResults {
+    let mut complete = result.complete && result.files.len() <= caps.files;
+    let mut left = caps.lines;
     let files = result
         .files
         .into_iter()
+        .take(caps.files)
         .map_while(|file| {
-            let take = file.lines.len().min(left);
+            let take = file.lines.len().min(caps.per_file).min(left);
+            complete &= take == file.lines.len();
             left -= take;
             let mut hits = file.hits.into_iter();
             (take > 0).then(|| GrepFile {
@@ -392,10 +407,7 @@ fn bounded(result: fsearch::GrepResult, lines: usize) -> GrepResults {
             })
         })
         .collect();
-    GrepResults {
-        files,
-        complete: result.complete && found <= lines,
-    }
+    GrepResults { files, complete }
 }
 
 #[cfg(test)]
@@ -434,6 +446,12 @@ mod tests {
         assert!(takes("kind:image ext:png", all, png));
         assert!(!takes("kind:image ext:png", all, jpg));
         assert!(takes("ext:rs ext:toml", all, rs));
+        // A kind narrows the extensions a glob already asks for.
+        assert!(takes("*.png kind:image", all, png));
+        assert!(!takes("*.png kind:image", all, jpg));
+        for nothing in [png, rs] {
+            assert!(!takes("*.rs kind:image", all, nothing));
+        }
         for nothing in [png, rs] {
             assert!(!takes("kind:image ext:rs", all, nothing));
         }
@@ -526,7 +544,11 @@ mod tests {
             complete: true,
             ..Default::default()
         };
-        let cut = bounded(result(), 4);
+        let caps = |lines| Caps {
+            lines,
+            ..Caps::default()
+        };
+        let cut = bounded(result(), caps(4));
         let shape: Vec<(String, usize)> = cut
             .files
             .iter()
@@ -539,7 +561,38 @@ mod tests {
             vec![Range { start: 0, end: 4 }]
         );
         assert!(!cut.complete);
-        assert!(bounded(result(), 7).complete);
+        assert!(bounded(result(), caps(7)).complete);
+    }
+
+    #[test]
+    fn content_matches_past_the_file_or_per_file_cap_make_it_incomplete() {
+        let file = |path: &str, lines: usize| fsearch::FileMatches {
+            path: path.as_bytes().to_vec(),
+            lines: (1..=lines).map(|n| (n, format!("line {n}"))).collect(),
+            hits: Vec::new(),
+        };
+        let result = |files| fsearch::GrepResult {
+            files,
+            complete: true,
+            ..Default::default()
+        };
+        let caps = Caps {
+            files: 2,
+            per_file: 5,
+            lines: 100,
+        };
+        // fsearch is asked for one more of each than the caps take.
+        let extra_line = bounded(result(vec![file("/a", 6)]), caps);
+        assert_eq!(extra_line.files[0].lines.len(), 5);
+        assert!(!extra_line.complete);
+        let extra_file = bounded(
+            result(vec![file("/a", 1), file("/b", 1), file("/c", 1)]),
+            caps,
+        );
+        assert_eq!(extra_file.files.len(), 2);
+        assert!(!extra_file.complete);
+        let full = bounded(result(vec![file("/a", 5), file("/b", 5)]), caps);
+        assert!(full.complete);
     }
 
     #[test]
