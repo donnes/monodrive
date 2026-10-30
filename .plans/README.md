@@ -19,7 +19,7 @@ Update a plan's row when its work lands on `main`.
 | 09 Drag and drop | Done, with spring-loaded folders; drags to and from other apps need a person to check | 8173471 and earlier |
 | 10 Open With and Get Info | Done; launching apps, the open panel and terminals need a person to check | 5c5f7b1, 5a19615, 74b635c |
 | 11 Search | Done; filter UI skipped for now | 1c1c4f5, ef44c3d |
-| 12 Batch rename | Done; the real app needs a person to check | |
+| 12 Batch rename | Done | 1574337, 13200b7 |
 | 13 Archives | Core on main; UI picked, not built | |
 | 14 Remote locations | Core on main; UI picked, not built | |
 | 15 File and folder comparison | Core on main; UI picked, not built | |
