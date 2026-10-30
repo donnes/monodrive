@@ -203,19 +203,28 @@ struct Session {
     decided: Option<(Target, (bool, bool), Decision)>,
 }
 
+#[derive(Default)]
+struct DragState {
+    /// What the drag out of a pane took when it started, each path with
+    /// whether it's a folder, whatever the keys select meanwhile. It outlasts
+    /// the session, for a drag that comes back from outside the window.
+    carried: Vec<(PathBuf, bool)>,
+    session: Option<Session>,
+}
+
 /// The window's drag of files, if there is one. The panes and the sidebar hold
 /// it to offer what's under the pointer, and draw from it. GPUI redraws the
 /// window after each move of a drag, so nothing here asks for a frame.
 #[derive(Clone, Default)]
-pub(super) struct Drag(Rc<RefCell<Option<Session>>>);
+pub(super) struct Drag(Rc<RefCell<DragState>>);
 
 impl Drag {
     pub(super) fn active(&self) -> bool {
-        self.0.borrow().is_some()
+        self.0.borrow().session.is_some()
     }
 
     fn begin(&self, sources: Vec<PathBuf>, folders: bool) {
-        *self.0.borrow_mut() = Some(Session {
+        self.0.borrow_mut().session = Some(Session {
             sources,
             folders,
             target: None,
@@ -223,19 +232,37 @@ impl Drag {
         });
     }
 
+    /// A drag out of a pane starts, with `files`.
+    fn carry(&self, files: Vec<(PathBuf, bool)>) {
+        self.0.borrow_mut().carried = files;
+        self.resume();
+    }
+
+    /// The session of what's carried.
+    fn resume(&self) {
+        let (sources, folders) = {
+            let state = self.0.borrow();
+            (
+                state.carried.iter().map(|(path, _)| path.clone()).collect(),
+                state.carried.iter().all(|(_, folder)| *folder),
+            )
+        };
+        self.begin(sources, folders);
+    }
+
     /// A move starts: what's under the pointer comes from the offers after it.
     /// Says whether there's a session to offer to.
     fn next_move(&self) -> bool {
-        let mut session = self.0.borrow_mut();
-        if let Some(session) = session.as_mut() {
+        let mut state = self.0.borrow_mut();
+        if let Some(session) = state.session.as_mut() {
             session.target = None;
         }
-        session.is_some()
+        state.session.is_some()
     }
 
     /// The innermost element's offer comes first, and stands.
     pub(super) fn offer(&self, target: Target) {
-        if let Some(session) = self.0.borrow_mut().as_mut()
+        if let Some(session) = self.0.borrow_mut().session.as_mut()
             && session.target.is_none()
         {
             session.target = Some(target);
@@ -244,16 +271,16 @@ impl Drag {
 
     /// Everything dragged is a folder, so it can be pinned.
     pub(super) fn folders(&self) -> bool {
-        self.0.borrow().as_ref().is_some_and(|s| s.folders)
+        self.0.borrow().session.as_ref().is_some_and(|s| s.folders)
     }
 
     /// Before a frame: ends with GPUI's drag, and works out what it would do.
     fn settle(&self, dragging: bool, keys: Modifiers, volumes: &[Volume]) {
-        let mut slot = self.0.borrow_mut();
+        let mut state = self.0.borrow_mut();
         if !dragging {
-            *slot = None;
+            state.session = None;
         }
-        let Some(session) = slot.as_mut() else {
+        let Some(session) = state.session.as_mut() else {
             return;
         };
         let Some(target) = session.target.clone() else {
@@ -275,8 +302,8 @@ impl Drag {
 
     /// Reads what the frame shows a drop would do.
     pub(super) fn decision<R>(&self, read: impl FnOnce(&Target, &Decision) -> R) -> Option<R> {
-        let session = self.0.borrow();
-        let (target, _, decision) = session.as_ref()?.decided.as_ref()?;
+        let state = self.0.borrow();
+        let (target, _, decision) = state.session.as_ref()?.decided.as_ref()?;
         Some(read(target, decision))
     }
 
@@ -301,7 +328,7 @@ impl Drag {
     /// The button's up: what to do, worked out once more for the keys held
     /// and the volumes mounted now. The drag ends either way.
     fn finish(&self, keys: Modifiers, volumes: &[Volume]) -> Option<Decision> {
-        let session = self.0.borrow_mut().take()?;
+        let session = self.0.borrow_mut().session.take()?;
         let target = session.target?;
         Some(decide(&session.sources, &target, keys, |a, b| {
             same_volume(volumes, a, b)
@@ -402,9 +429,12 @@ impl Pane {
                 self.selection.select(entry);
             }
         }
-        let (sources, folders) = self.drag_sources();
-        let count = sources.len();
-        self.drag.begin(sources, folders);
+        let dragged = outermost(self.selection.in_order(&self.entries));
+        let count = dragged.len();
+        let files = dragged
+            .into_iter()
+            .map(|entry| (entry.path.clone(), entry.kind == Kind::Dir));
+        self.drag.carry(files.collect());
         cx.notify();
         cx.new(|_| DragImage {
             entry,
@@ -413,22 +443,10 @@ impl Pane {
         })
     }
 
-    /// What a drag of the selection carries, and whether it's all folders.
-    /// A link may lead anywhere, and finding out would read the disk, so it
-    /// doesn't count as one.
-    pub(super) fn drag_sources(&self) -> (Vec<PathBuf>, bool) {
-        let dragged = outermost(self.selection.in_order(&self.entries));
-        let folders = dragged.iter().all(|entry| entry.kind == Kind::Dir);
-        (dragged.iter().map(|e| e.path.clone()).collect(), folders)
-    }
-
     /// What AppKit gets once a drag leaves the window: file URLs, built without
     /// asking the disk, so nothing downloads a cloud placeholder.
     pub(super) fn drag_out(&self) -> Option<ExternalDragPayload> {
-        let dragged = outermost(self.selection.in_order(&self.entries));
-        let files = dragged
-            .into_iter()
-            .map(|entry| (entry.path.clone(), entry.kind == Kind::Dir));
+        let files = self.drag.0.borrow().carried.clone();
         Some(ExternalDragPayload::Files(FileDragPaths::new(files)))
     }
 
@@ -467,15 +485,12 @@ impl Pane {
 impl Browser {
     /// The window's end of a drag: what starts each move and what a drop does.
     pub(super) fn drags(&self, root: Div, cx: &mut Context<Self>) -> Div {
-        root.on_drag_move::<FileDrag>(cx.listener(
-            |this, event: &DragMoveEvent<FileDrag>, _, cx| {
-                if !this.drag.next_move() {
-                    // Back from outside the window, where GPUI gave it to AppKit.
-                    let (sources, folders) = event.drag(cx).pane.read(cx).drag_sources();
-                    this.drag.begin(sources, folders);
-                }
-            },
-        ))
+        root.on_drag_move::<FileDrag>(cx.listener(|this, _: &DragMoveEvent<FileDrag>, _, _| {
+            if !this.drag.next_move() {
+                // Back from outside the window, where GPUI gave it to AppKit.
+                this.drag.resume();
+            }
+        }))
         .on_drag_move::<ExternalPaths>(cx.listener(
             |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 if !this.drag.next_move() {
@@ -503,7 +518,7 @@ impl Browser {
         });
         cx.spawn(async move |_, _| {
             let (paths, folders) = checked.await;
-            if let Some(session) = drag.0.borrow_mut().as_mut()
+            if let Some(session) = drag.0.borrow_mut().session.as_mut()
                 && session.sources == paths
             {
                 session.folders = folders;
@@ -587,7 +602,10 @@ impl Browser {
 
 #[cfg(test)]
 mod tests {
+    use super::super::drag_tests::{carry, draw, hover, says};
+    use super::super::tests::{browse, folder as project_folder, in_pane, press, row, shown};
     use super::*;
+    use gpui::{ExternalDragPayload as Payload, TestAppContext};
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(PathBuf::from).collect()
@@ -685,6 +703,30 @@ mod tests {
             same,
         );
         assert_eq!(decided.says(), "Move g to a");
+    }
+
+    #[gpui::test]
+    fn the_drag_keeps_what_it_started_with_whatever_the_keys_select_after(cx: &mut TestAppContext) {
+        let (_dir, project) = project_folder();
+        let (browser, cx) = browse(&project, cx);
+        let (docs, file) = (row(&browser, 0, cx), row(&browser, 2, cx));
+        carry(file, docs, "", cx);
+        press(cx, "up");
+        assert_eq!(shown(&browser, cx).1, ["zeta"]);
+        assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to docs");
+        // What leaves the window is what the image shows.
+        let Payload::Files(files) = in_pane(&browser, cx, |pane, _| pane.drag_out()).unwrap();
+        assert_eq!(files.entries(), [(project.join("a.txt"), false)]);
+        // GPUI handing it to AppKit ends what the window knows of it, and it
+        // comes back the same drag.
+        browser.read_with(cx, |b, _| {
+            b.drag.settle(false, Modifiers::default(), &[]);
+        });
+        hover(docs, "", cx);
+        hover(docs, "", cx);
+        draw(cx);
+        assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to docs");
+        press(cx, "escape");
     }
 
     #[test]

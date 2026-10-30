@@ -14,25 +14,30 @@ use gpui::{
 
 /// Draws a frame, as the test platform doesn't on its own: what offers a
 /// target listens only in frames with a drag.
-fn draw(cx: &mut VisualTestContext) {
+pub(super) fn draw(cx: &mut VisualTestContext) {
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 }
 
 /// Moves the pointer to `to` with the button down, and shows what's there.
-fn hover(to: Point<Pixels>, keys: &str, cx: &mut VisualTestContext) {
+pub(super) fn hover(to: Point<Pixels>, keys: &str, cx: &mut VisualTestContext) {
     cx.simulate_mouse_move(to, MouseButton::Left, with(keys));
     draw(cx);
 }
 
 /// Presses on what's at `from`, starts a drag and carries it to `to`.
-fn carry(from: Point<Pixels>, to: Point<Pixels>, keys: &str, cx: &mut VisualTestContext) {
+pub(super) fn carry(
+    from: Point<Pixels>,
+    to: Point<Pixels>,
+    keys: &str,
+    cx: &mut VisualTestContext,
+) {
     cx.simulate_mouse_down(from, MouseButton::Left, with(keys));
     hover(from + point(px(8.), px(0.)), keys, cx);
     hover(to, keys, cx);
 }
 
-fn says(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
+pub(super) fn says(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
     browser.read_with(cx, |b, _| b.drag.decision(|_, d| d.says()))
 }
 
@@ -348,10 +353,12 @@ fn what_leaves_the_window_is_the_selection_as_paths_with_their_kinds(cx: &mut Te
     let (docs, file) = (row(&browser, 0, cx), row(&browser, 2, cx));
     cx.simulate_click(docs, with(""));
     cx.simulate_click(file, with("cmd"));
+    carry(file, docs + point(px(0.), px(300.)), "", cx);
     let payload = in_pane(&browser, cx, |pane, _| pane.drag_out()).unwrap();
     let ExternalDragPayload::Files(files) = payload;
     assert_eq!(
         files.entries(),
         [(project.join("docs"), true), (project.join("a.txt"), false)]
     );
+    press(cx, "escape");
 }
