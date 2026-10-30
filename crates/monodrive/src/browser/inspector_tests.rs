@@ -861,6 +861,15 @@ fn an_open_waiting_on_the_disk_gives_way_to_what_came_after(cx: &mut TestAppCont
     cx.run_until_parked();
     assert!(world.fake.opened.lock().unwrap().is_empty());
 
+    // Nor does Show Package Contents go into it.
+    on_pane(&browser, cx, |pane, cx| {
+        pane.select_row(package, cx);
+        pane.show_package_contents(cx);
+        pane.select_row(zeta, cx);
+    });
+    cx.run_until_parked();
+    in_pane(&browser, cx, |pane, _| assert_eq!(pane.folder(), project));
+
     // Went elsewhere: it doesn't come back.
     let there = project.join("zeta");
     on_pane(&browser, cx, |pane, cx| {

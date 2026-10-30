@@ -1228,10 +1228,14 @@ impl Pane {
         let is_dir = cx
             .background_executor()
             .spawn(async move { target.is_dir() });
+        let asked_on = self.selected_now();
         self.opening = cx.spawn(async move |this, cx| {
-            if is_dir.await {
-                let _ = this.update(cx, |this, cx| this.navigate(package, cx));
-            }
+            let is_dir = is_dir.await;
+            let _ = this.update(cx, |this, cx| {
+                if is_dir && this.selected_now() == asked_on {
+                    this.navigate(package, cx);
+                }
+            });
         });
     }
 
