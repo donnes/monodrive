@@ -1679,3 +1679,43 @@ fn closing_a_tab_or_a_pane_gives_back_its_thumbnails(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!cached(&thumbs[0], cx));
 }
+
+#[gpui::test]
+fn a_thumbnail_stays_until_the_last_pane_showing_it_lets_go(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (empty, pictures) = (dir.path().join("empty"), dir.path().join("pictures"));
+    std::fs::create_dir(&empty).unwrap();
+    std::fs::create_dir(&pictures).unwrap();
+    image::RgbaImage::new(40, 40)
+        .save(pictures.join("picture.png"))
+        .unwrap();
+    let (browser, cx) = browse(&empty, cx);
+    press(cx, "cmd-t");
+    on_pane(&browser, cx, |pane, cx| pane.navigate(pictures.clone(), cx));
+    cx.run_until_parked();
+    let thumbs = drawn_thumbs(&browser, cx);
+    let cached =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| cx.has_asset::<Thumbnail>(&thumbs[0]));
+    // A new pane on the same folder draws the same picture; it goes when one
+    // of the two does, and the other keeps it.
+    press(cx, "cmd-alt-s");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let image = |cx: &mut VisualTestContext| {
+        in_pane(&browser, cx, |pane, _| {
+            pane.thumbs[&thumbs[0]].clone().unwrap()
+        })
+    };
+    let before = image(cx);
+    press(cx, "cmd-alt-s");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    // Still the same picture: it wasn't dropped and decoded again.
+    assert!(cached(cx));
+    assert!(Arc::ptr_eq(&before, &image(cx)));
+    // The last one out takes it.
+    press(cx, "cmd-w");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!cached(cx));
+}

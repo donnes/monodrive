@@ -2178,6 +2178,9 @@ impl Pane {
                                 modified: entry.modified,
                             })
                             .and_then(|thumb| {
+                                if !self.thumbs.contains_key(&thumb) {
+                                    thumbnails::hold(&thumb, cx);
+                                }
                                 let image = thumbnails::get(&thumb, window, cx);
                                 self.drawn.insert(thumb.clone());
                                 self.thumbs.insert(thumb, image.clone());

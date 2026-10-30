@@ -2,10 +2,11 @@
 //! shown, off the UI thread, and kept by GPUI's asset cache until the
 //! browser leaves the folder and releases it.
 
-use gpui::{App, Asset, RenderImage, Window};
+use gpui::{App, Asset, Global, RenderImage, Window};
 use image::ImageReader;
 use monodrive_core::cloud::Availability;
 use monodrive_core::entries::{Entry, Kind};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -106,14 +107,28 @@ fn decode(path: &Path, side: u32) -> Option<RenderImage> {
     Some(RenderImage::new(vec![image::Frame::new(pixels)]))
 }
 
+/// How many panes hold each thumbnail: GPUI's cache is shared, and two panes on
+/// one folder draw the same pictures.
+#[derive(Default)]
+struct Holders(HashMap<Thumb, usize>);
+impl Global for Holders {}
+
+/// A pane holds `thumb` until it calls `release`.
+pub fn hold(thumb: &Thumb, cx: &mut App) {
+    *cx.default_global::<Holders>()
+        .0
+        .entry(thumb.clone())
+        .or_default() += 1;
+}
+
 /// The thumbnail if it's ready; until then, `None`, and the view draws again
 /// when it lands.
 pub fn get(thumb: &Thumb, window: &mut Window, cx: &mut App) -> Option<Arc<RenderImage>> {
     window.use_asset::<Thumbnail>(thumb, cx).flatten()
 }
 
-/// Gives back a thumbnail no longer drawn, in memory and on the GPU; one
-/// still decoding is dropped when it finishes. `window` is the window being
+/// A pane lets go of a thumbnail. Once none hold it, it's given back, in memory
+/// and on the GPU; one still decoding is dropped when it finishes. `window` is the window being
 /// drawn, which `App` can't reach from inside its update.
 pub fn release(
     thumb: &Thumb,
@@ -121,6 +136,14 @@ pub fn release(
     window: Option<&mut Window>,
     cx: &mut App,
 ) {
+    let holders = &mut cx.default_global::<Holders>().0;
+    if let Some(count) = holders.get_mut(thumb) {
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        holders.remove(thumb);
+    }
     cx.remove_asset::<Thumbnail>(thumb);
     if let Some(image) = image {
         cx.drop_image(image, window);
