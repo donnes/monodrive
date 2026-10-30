@@ -48,7 +48,7 @@ use std::time::Duration;
 
 const SEARCH_LIMIT: usize = 200;
 /// How long the disk must settle before a changed folder lists again.
-const REFRESH_DELAY: Duration = Duration::from_millis(150);
+pub(super) const REFRESH_DELAY: Duration = Duration::from_millis(150);
 /// What stands for the path levels that don't fit.
 const COLLAPSED: &str = "…";
 /// A crumb's side padding.

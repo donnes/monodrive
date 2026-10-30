@@ -1498,15 +1498,12 @@ fn copy_and_move_to_the_other_pane_are_jobs_with_undo(cx: &mut TestAppContext) {
         toast(&browser, cx),
         Some(("Copied \"a.txt\" to docs".into(), false, true))
     );
-    // What it made is selected where it landed, and the shared Undo takes it out.
+    // What it made is selected where it landed. Undo is offered and not taken:
+    // it would move the copy to the user's own Trash.
     let right = browser.read_with(cx, |b, _| b.tabs[b.active].other().cloned().unwrap());
     let chosen = right.read_with(cx, |pane, _| pane.chosen());
     assert_eq!(chosen, [docs.join("a.txt")]);
-    click(cx, "toast-undo");
-    restart(&mut owned, cx);
-    cx.executor().advance_clock(jobs::CHECK);
-    cx.run_until_parked();
-    assert!(!docs.join("a.txt").exists());
+    std::fs::rename(docs.join("a.txt"), docs.join("copied.txt")).unwrap();
     // A move goes through the same way, and leaves the source listing.
     press(cx, "alt-f6");
     restart(&mut owned, cx);
@@ -1566,4 +1563,20 @@ fn the_sidebar_closes_and_search_still_works_without_it(cx: &mut TestAppContext)
     click(cx, "toggle-sidebar");
     assert!(open(cx));
     assert!(on_screen("place-0", cx).is_some());
+}
+
+#[gpui::test]
+fn a_change_on_disk_reaches_both_panes_on_screen(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    // Left on the project, right in docs, with the commands on the right.
+    press(cx, "cmd-alt-s down cmd-down");
+    let left = browser.read_with(cx, |b, _| b.tabs[b.active].pane.clone());
+    assert_eq!(left.read_with(cx, |pane, _| pane.entries.len()), 3);
+    std::fs::write(project.join("new.txt"), "").unwrap();
+    let changed = vec![(project.canonicalize().unwrap(), false)];
+    browser.update(cx, |b, cx| b.disk_changed(&changed, cx));
+    cx.executor().advance_clock(REFRESH_DELAY);
+    cx.run_until_parked();
+    assert_eq!(left.read_with(cx, |pane, _| pane.entries.len()), 4);
 }

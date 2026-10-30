@@ -428,6 +428,13 @@ impl Browser {
         }
     }
 
+    /// The disk changed: every pane on screen checks what it's showing.
+    fn disk_changed(&self, batch: &[(PathBuf, bool)], cx: &mut Context<Self>) {
+        for pane in self.shown_panes() {
+            pane.update(cx, |pane, cx| pane.disk_changed(batch, cx));
+        }
+    }
+
     /// The menu bar's checkmarks go with the window in front.
     pub fn window_activated(&self, cx: &mut Context<Self>) {
         self.mirror_pane(cx);
@@ -608,10 +615,7 @@ impl Browser {
                     this._changes = cx.spawn(async move |this, cx| {
                         while let Ok(batch) = receive.recv().await {
                             if this
-                                .update(cx, |this, cx| {
-                                    this.pane()
-                                        .update(cx, |pane, cx| pane.disk_changed(&batch, cx))
-                                })
+                                .update(cx, |this, cx| this.disk_changed(&batch, cx))
                                 .is_err()
                             {
                                 return;
