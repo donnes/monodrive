@@ -13,6 +13,7 @@ pub mod paths;
 pub mod places;
 pub mod search;
 pub mod sizes;
+pub mod storage;
 pub mod volumes;
 
 /// `~/Library/Application Support/Monodrive`.

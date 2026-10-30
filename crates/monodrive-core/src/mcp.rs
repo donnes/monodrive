@@ -1,7 +1,8 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
 //! service method; the behavior lives in `archives`, `compare`, `entries`,
-//! `index`, `info`, `ops`, `places`, `search`, `sizes` and `volumes`.
+//! `index`, `info`, `ops`, `places`, `search`, `sizes`, `storage` and
+//! `volumes`.
 
 use crate::archives::{self, Archive};
 use crate::compare::{
@@ -15,6 +16,7 @@ use crate::ops::{self, Conflict, Done, Job, Origin, Request, rename};
 use crate::places::{self, Availability, Place, SavedSearch};
 use crate::search::{Query, Scope};
 use crate::sizes::{self, FolderSize};
+use crate::storage::{self, Cleanup, Duplicates, Match, Report, Stop, Usage};
 use crate::volumes::{self, Volume, VolumeId};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,7 +39,8 @@ undo and redo change files through the same undo history as the Monodrive window
 shows what rename_many would do. copy, move, archive_create and archive_extract run as jobs that \
 job_status follows; archive_list shows what a ZIP holds without extracting it. \
 compare compares two files or folders, diff shows two text files' differences, and compare_copy \
-copies differences one way as a job. \
+copies differences one way as a job. storage_scan shows what takes up space in a folder, duplicates \
+finds identical files there, and cleanup_duplicates trashes the copies you choose. \
 list_places shows the sidebar's favorites and the mounted volumes; pin, unpin and eject manage them. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches.";
 
@@ -75,15 +78,20 @@ pub struct Server {
     /// The name the agent's MCP client gave, to attribute its changes.
     client: Option<String>,
     places: places::Store,
-    /// What compare_copy previewed, oldest first, so a confirm runs only
-    /// that.
+    /// What compare_copy and cleanup_duplicates previewed, oldest first,
+    /// so a confirm runs only that.
     plans: Vec<Previewed>,
 }
 
 struct Previewed {
     token: String,
     made: Instant,
-    plan: CopyPlan,
+    plan: Plan,
+}
+
+enum Plan {
+    Copy(CopyPlan),
+    Cleanup(Cleanup, String),
 }
 
 /// How many previews a session keeps, and for how long.
@@ -224,6 +232,36 @@ enum ToolCall {
         #[serde(default = "default_timeout")]
         timeout_seconds: u64,
     },
+    StorageScan {
+        path: String,
+        #[serde(default = "largest")]
+        largest: usize,
+        #[serde(default = "depth")]
+        depth: usize,
+        #[serde(default = "folder_limit")]
+        limit: usize,
+        #[serde(default = "scan_timeout")]
+        timeout_seconds: u64,
+    },
+    Duplicates {
+        path: String,
+        #[serde(default = "min_size")]
+        min_size: u64,
+        #[serde(default = "largest")]
+        limit: usize,
+        #[serde(default = "scan_timeout")]
+        timeout_seconds: u64,
+    },
+    CleanupDuplicates {
+        path: Option<String>,
+        #[serde(default)]
+        trash: Vec<String>,
+        #[serde(default)]
+        confirm: bool,
+        plan: Option<String>,
+        #[serde(default = "scan_timeout")]
+        timeout_seconds: u64,
+    },
     JobStatus {
         job: Option<u64>,
     },
@@ -279,6 +317,26 @@ fn archive_limit() -> usize {
 
 fn compare_limit() -> usize {
     200
+}
+
+fn largest() -> usize {
+    20
+}
+
+fn depth() -> usize {
+    2
+}
+
+fn folder_limit() -> usize {
+    10
+}
+
+fn min_size() -> u64 {
+    1
+}
+
+fn scan_timeout() -> u64 {
+    30
 }
 
 fn diff_context() -> usize {
@@ -552,6 +610,41 @@ impl Server {
                 }
                 (false, ..) => Err("Pass left and right to preview a copy.".into()),
             },
+            ToolCall::StorageScan {
+                path,
+                largest,
+                depth,
+                limit,
+                timeout_seconds,
+            } => {
+                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
+                storage::scan(&expand_home(&path), &storage::Progress::default(), deadline)
+                    .map(|report| storage_report(&report, largest, depth, limit, timeout_seconds))
+            }
+            ToolCall::Duplicates {
+                path,
+                min_size,
+                limit,
+                timeout_seconds,
+            } => {
+                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
+                let progress = storage::Progress::default();
+                storage::scan(&expand_home(&path), &progress, deadline).map(|report| {
+                    let found = report.duplicates(&|size| size >= min_size, &progress, deadline);
+                    duplicate_groups(&report, &found, limit, timeout_seconds)
+                })
+            }
+            ToolCall::CleanupDuplicates {
+                path,
+                trash,
+                confirm,
+                plan,
+                timeout_seconds,
+            } => match (confirm, path) {
+                (true, _) => self.run_cleanup(plan.as_deref()),
+                (false, Some(path)) => self.preview_cleanup(&path, &trash, timeout_seconds),
+                (false, None) => Err("Pass path and trash to preview a cleanup.".into()),
+            },
             ToolCall::ContinueJob { job, conflict } => self
                 .submit(Request::Retry { job, conflict })
                 .map(|outcome| format!("job {} queued again\n", outcome.op)),
@@ -702,6 +795,14 @@ impl Server {
         if plan.request().is_none() {
             return Ok(preview + "Nothing to copy.\n");
         }
+        let token = self.keep(Plan::Copy(plan));
+        Ok(format!(
+            "{preview}plan: {token}\nPass confirm: true and this plan within 10 minutes to copy it.\n"
+        ))
+    }
+
+    /// Keeps a previewed plan under a new token.
+    fn keep(&mut self, plan: Plan) -> String {
         let token = format!("{:016x}", RandomState::new().hash_one(self.plans.len()));
         self.plans.retain(|kept| kept.made.elapsed() < PLAN_LIFE);
         if self.plans.len() >= PLANS_KEPT {
@@ -712,24 +813,113 @@ impl Server {
             made: Instant::now(),
             plan,
         });
-        Ok(format!(
-            "{preview}plan: {token}\nPass confirm: true and this plan within 10 minutes to copy it.\n"
-        ))
+        token
+    }
+
+    /// Where the plan a preview kept under `token` is, if it's still kept
+    /// and `is` the kind asked for.
+    fn kept(
+        &mut self,
+        token: Option<&str>,
+        is: fn(&Plan) -> bool,
+        again: &str,
+    ) -> Result<usize, String> {
+        self.plans.retain(|kept| kept.made.elapsed() < PLAN_LIFE);
+        token
+            .and_then(|token| {
+                self.plans
+                    .iter()
+                    .position(|kept| kept.token == token && is(&kept.plan))
+            })
+            .ok_or_else(|| {
+                format!("No previewed plan with that token in this session. A plan runs once, within 10 minutes; preview again with {again}.")
+            })
     }
 
     /// Queues exactly the plan a preview kept, once. The owner refuses each
     /// item whose source or destination changed since.
     fn run_plan(&mut self, token: Option<&str>, limit: usize) -> Result<String, String> {
-        self.plans.retain(|kept| kept.made.elapsed() < PLAN_LIFE);
-        let at = token
-            .and_then(|token| self.plans.iter().position(|kept| kept.token == token))
-            .ok_or("No previewed plan with that token in this session. A plan runs once, within 10 minutes; preview again with left and right.")?;
-        let plan = &self.plans[at].plan;
+        let at = self.kept(
+            token,
+            |plan| matches!(plan, Plan::Copy(_)),
+            "left and right",
+        )?;
+        let Plan::Copy(plan) = &self.plans[at].plan else {
+            return Err("Not a copy plan.".into());
+        };
         let preview = copy_plan(plan, limit);
         let request = plan.request().ok_or("Nothing to copy.")?;
         let queued = self.queue(request)?;
         self.plans.remove(at);
         Ok(preview + &queued)
+    }
+
+    /// Scans `path` again, verifies the copies of `trash` there, and
+    /// previews trashing exactly those, kept under a token for
+    /// `run_cleanup`.
+    fn preview_cleanup(
+        &mut self,
+        path: &str,
+        trash: &[String],
+        timeout: u64,
+    ) -> Result<String, String> {
+        // By their folders' real paths, as the scan reports them.
+        let (trash, sizes): (Vec<PathBuf>, Vec<u64>) = expand(trash)
+            .into_iter()
+            .map(|path| {
+                let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+                let meta = std::fs::symlink_metadata(&path).map_err(fail)?;
+                let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
+                    return Err(format!("{}: not a file.", path.display()));
+                };
+                Ok((folder.canonicalize().map_err(fail)?.join(name), meta.len()))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .unzip();
+        let deadline = Instant::now().checked_add(Duration::from_secs(timeout));
+        let progress = storage::Progress::default();
+        let report = storage::scan(&expand_home(path), &progress, deadline)?;
+        let found = report.duplicates(&|size| sizes.contains(&size), &progress, deadline);
+        let plan = found.cleanup(&trash).map_err(|why| match found.stopped {
+            Some(stop) => format!("{why}\n{}", stopped_scan(stop, timeout)),
+            None => why,
+        })?;
+        let preview = cleanup_plan(&plan);
+        let token = self.keep(Plan::Cleanup(plan, preview.clone()));
+        Ok(format!(
+            "{preview}plan: {token}\nPass confirm: true and this plan within 10 minutes to trash them.\n"
+        ))
+    }
+
+    /// Trashes exactly what a preview kept, once, as one change undo
+    /// reverses. The owner refuses each copy that changed since.
+    fn run_cleanup(&mut self, token: Option<&str>) -> Result<String, String> {
+        let at = self.kept(
+            token,
+            |plan| matches!(plan, Plan::Cleanup(..)),
+            "path and trash",
+        )?;
+        let Plan::Cleanup(plan, preview) = &self.plans[at].plan else {
+            return Err("Not a cleanup plan.".into());
+        };
+        let (request, preview) = (plan.request(), preview.clone());
+        // Kept when the owner refuses it whole, such as while agents may
+        // not change files, so it can be confirmed again.
+        let outcome = self.submit(request)?;
+        self.plans.remove(at);
+        let mut out = preview;
+        for item in &outcome.items {
+            let _ = match &item.result {
+                Ok(path) => writeln!(out, "trashed: {} → {}", item.path.display(), path.display()),
+                Err(why) => writeln!(out, "kept: {why}"),
+            };
+        }
+        if outcome.failures().next().is_some() {
+            Err(out)
+        } else {
+            Ok(out)
+        }
     }
 
     /// Where the index is, without starting it.
@@ -1183,6 +1373,205 @@ fn unified(diff: &TextDiff, left: &Path, right: &Path, limit: usize) -> String {
     out
 }
 
+/// A scan's totals, its unreadable folders, the largest files, then its
+/// biggest folders as a tree, `depth` levels and `limit` a level.
+fn storage_report(
+    report: &Report,
+    largest: usize,
+    depth: usize,
+    limit: usize,
+    timeout: u64,
+) -> String {
+    let root = report.root();
+    let total = root.usage;
+    let mut out = format!(
+        "{}/\nsize: {} bytes ({} on disk, {} unshared)\nfiles: {}\nfolders: {}\n",
+        root.path.display(),
+        total.bytes,
+        total.on_disk,
+        total.unshared,
+        total.files,
+        report.folders.len() - 1
+    );
+    unreadable(
+        &mut out,
+        &report.unreadable,
+        "what couldn't be read isn't counted",
+    );
+    let large = report.largest(largest);
+    if !large.is_empty() {
+        out.push_str("largest files:\n");
+    }
+    for file in &large {
+        let _ = writeln!(out, "{}  {}", file.path.display(), usage(&file.usage));
+    }
+    if !root.children.is_empty() && depth > 0 {
+        out.push_str("folders, most on disk first:\n");
+        folder_tree(&mut out, report, 0, depth, limit, "");
+    }
+    if let Some(stop) = report.stopped {
+        out.push_str(&stopped_scan(stop, timeout));
+    }
+    out
+}
+
+fn folder_tree(
+    out: &mut String,
+    report: &Report,
+    at: usize,
+    depth: usize,
+    limit: usize,
+    indent: &str,
+) {
+    let children = &report.folders[at].children;
+    for &child in children.iter().take(limit) {
+        let folder = &report.folders[child];
+        let note = if folder.unreadable {
+            ", partly unreadable"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "{indent}{}/  {}{note}",
+            folder.path.display(),
+            usage(&folder.usage)
+        );
+        if depth > 1 {
+            folder_tree(out, report, child, depth - 1, limit, &format!("{indent}  "));
+        }
+    }
+    if children.len() > limit {
+        let _ = writeln!(
+            out,
+            "{indent}({} more; pass a larger limit)",
+            children.len() - limit
+        );
+    }
+}
+
+/// Bytes, on disk, and what's unshared when clones or snapshots share some.
+fn usage(usage: &Usage) -> String {
+    let mut line = format!("{} bytes, {} on disk", usage.bytes, usage.on_disk);
+    if usage.unshared < usage.on_disk {
+        let _ = write!(line, ", {} unshared", usage.unshared);
+    }
+    line
+}
+
+/// How many couldn't be read, and the first few with why.
+fn unreadable(out: &mut String, why: &[String], meaning: &str) {
+    const SHOWN: usize = 10;
+    if why.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "unreadable: {} ({meaning})", why.len());
+    for line in why.iter().take(SHOWN) {
+        let _ = writeln!(out, "{line}");
+    }
+    if why.len() > SHOWN {
+        let _ = writeln!(out, "({} more)", why.len() - SHOWN);
+    }
+}
+
+fn stopped_scan(stop: Stop, timeout: u64) -> String {
+    match stop {
+        Stop::Deadline => format!(
+            "(Stopped after {timeout}s: these results are partial; pass a larger timeout_seconds.)\n"
+        ),
+        Stop::Budget => format!(
+            "(Stopped after {} files and folders: these results are partial; scan a smaller folder.)\n",
+            storage::MAX_ITEMS
+        ),
+        Stop::Cancelled => "(Cancelled: these results are partial.)\n".into(),
+    }
+}
+
+/// Verified groups and then candidates, each a header and its paths.
+fn duplicate_groups(report: &Report, found: &Duplicates, limit: usize, timeout: u64) -> String {
+    const COPIES: usize = 20;
+    let verified: Vec<_> = found
+        .groups
+        .iter()
+        .filter(|group| group.matched == Match::Content)
+        .collect();
+    let mut out = format!(
+        "{}/\n{} verified, {} candidates; {} bytes in extra verified copies\n",
+        report.root().path.display(),
+        verified.len(),
+        found.groups.len() - verified.len(),
+        verified.iter().map(|group| group.wasted()).sum::<u64>(),
+    );
+    for group in found.groups.iter().take(limit) {
+        let what = match group.matched {
+            Match::Content => "verified",
+            Match::Sample => "candidate, same size, start, middle and end",
+            Match::Size => "candidate, same size",
+        };
+        let _ = writeln!(
+            out,
+            "{what}: {} copies of {} bytes",
+            group.members.len(),
+            group.size
+        );
+        for member in group.members.iter().take(COPIES) {
+            let shared = if member.unshared < member.on_disk {
+                format!(
+                    "  ({} unshared; a clone or snapshot shares the rest)",
+                    member.unshared
+                )
+            } else {
+                String::new()
+            };
+            let _ = writeln!(out, "{}{shared}", member.path.display());
+        }
+        if group.members.len() > COPIES {
+            let _ = writeln!(out, "({} more copies)", group.members.len() - COPIES);
+        }
+    }
+    if found.groups.len() > limit {
+        let _ = writeln!(
+            out,
+            "({} more; pass a larger limit)",
+            found.groups.len() - limit
+        );
+    }
+    if found
+        .groups
+        .iter()
+        .any(|group| group.matched != Match::Content)
+    {
+        out.push_str("(Candidates aren't verified; only verified copies can be cleaned up.)\n");
+    }
+    unreadable(&mut out, &found.unreadable, "left out of the groups");
+    if let Some(stop) = found.stopped {
+        out.push_str(&stopped_scan(stop, timeout));
+    }
+    out
+}
+
+/// Each group a copy a line, kept or trashed, then what it frees.
+fn cleanup_plan(plan: &Cleanup) -> String {
+    let mut out = String::new();
+    let (mut kept, mut trashed) = (0, 0);
+    for copies in &plan.groups {
+        for seen in &copies.keep {
+            kept += 1;
+            let _ = writeln!(out, "keep: {}", seen.path.display());
+        }
+        for seen in &copies.trash {
+            trashed += 1;
+            let _ = writeln!(out, "trash: {}", seen.path.display());
+        }
+    }
+    let _ = writeln!(
+        out,
+        "{trashed} to trash, {kept} kept; frees at least {} bytes once the Trash is emptied. Undo puts them back.",
+        plan.frees
+    );
+    out
+}
+
 /// What a one-way copy does, a line an item, then the totals.
 fn copy_plan(plan: &CopyPlan, limit: usize) -> String {
     let mut out = format!(
@@ -1278,7 +1667,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 36] = [
+pub const TOOLS: [Tool; 39] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -1555,6 +1944,65 @@ pub const TOOLS: [Tool; 36] = [
                     "plan": {"type": "string", "description": "The token a preview printed; needed with confirm."},
                     "limit": {"type": "integer", "minimum": 1, "default": 200},
                     "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}
+                }
+            })
+        },
+    },
+    Tool {
+        name: "storage_scan",
+        description: "What takes up space in a folder: totals, the largest files, and the folders \
+    holding the most, as a tree. Never follows links and counts hard links once. on disk is the blocks \
+    files take; unshared is what trashing them frees once the Trash is emptied, less when APFS clones \
+    or snapshots share blocks. Reports unreadable folders; stops at timeout_seconds with partial totals.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "A folder. Absolute; ~ is your home."},
+                    "largest": {"type": "integer", "minimum": 0, "default": 20, "description": "How many of the largest files to print."},
+                    "depth": {"type": "integer", "minimum": 0, "default": 2, "description": "Levels of folders to print."},
+                    "limit": {"type": "integer", "minimum": 1, "default": 10, "description": "Most folders to print in each."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}
+                },
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "duplicates",
+        description: "Find files with identical contents in a folder. Same-size files are candidates; \
+    reading their start, middle and end narrows them, and reading them whole verifies them. Hard links \
+    are one file, never duplicates. Prints verified groups, then unverified candidates, each copy's path \
+    a line. Only verified copies can go to cleanup_duplicates.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "A folder. Absolute; ~ is your home."},
+                    "min_size": {"type": "integer", "minimum": 1, "default": 1, "description": "Smallest file size in bytes."},
+                    "limit": {"type": "integer", "minimum": 1, "default": 20, "description": "Most groups to print."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}
+                },
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "cleanup_duplicates",
+        description: "Move chosen duplicate copies to the Trash. A preview with path and trash scans \
+    path, verifies those copies again, and prints what's kept and trashed with a plan token; it refuses \
+    a copy that isn't verified and a plan that would trash every copy of a group. confirm: true with \
+    that plan trashes exactly that, once, within 10 minutes, as one change undo reverses. Copies that \
+    changed since the preview stay.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The folder duplicates scanned. Absolute; ~ is your home."},
+                    "trash": {"type": "array", "items": {"type": "string"}, "description": "Copies to trash, as duplicates prints them."},
+                    "confirm": {"type": "boolean", "default": false},
+                    "plan": {"type": "string", "description": "The token a preview printed; needed with confirm."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}
                 }
             })
         },
@@ -2520,6 +2968,154 @@ mod tests {
         assert_eq!(read("docs/only.md"), "stale");
         assert_eq!(read("a.txt"), "one\nold\n");
         assert!(right.join("docs/extra.md").exists());
+    }
+
+    #[test]
+    fn storage_tools_scan_find_duplicates_and_trash_chosen_copies_only_on_confirm() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let paths = ops::Paths {
+            state: root.join("state"),
+            settings: root.join("settings.json"),
+            trash: root.join("Trash"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let mut server = Server::new(ops::Client::new(paths, None), places(&root));
+        let photos = root.join("photos");
+        let photo: Vec<u8> = (0..300_000u32).map(|n| (n % 253) as u8).collect();
+        let mut other = photo.clone();
+        other[100_000] ^= 1;
+        let (a, b, c) = (
+            photos.join("a/photo.jpg"),
+            photos.join("b/photo.jpg"),
+            photos.join("other.jpg"),
+        );
+        for (path, bytes) in [(&a, &photo), (&b, &photo), (&c, &other)] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let on_disk = |path: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(path).unwrap().blocks() * 512
+        };
+        let line = |path: &Path| {
+            format!(
+                "{}  300000 bytes, {} on disk",
+                path.display(),
+                on_disk(path)
+            )
+        };
+
+        let reply = call(
+            &mut server,
+            json!({"name": "storage_scan", "arguments": {"path": photos, "largest": 1}}),
+        );
+        let lines: Vec<&str> = text(&reply).lines().collect();
+        assert_eq!(lines[0], format!("{}/", photos.display()));
+        assert!(lines[1].starts_with("size: 900000 bytes ("), "{lines:?}");
+        assert_eq!(lines[2..5], ["files: 3", "folders: 2", "largest files:"]);
+        // All take as much on disk, so the first met comes first.
+        assert_eq!(lines[5], line(&c));
+        assert_eq!(lines[6], "folders, most on disk first:");
+        let folder = |name: &str| {
+            let path = photos.join(name);
+            format!(
+                "{}/  300000 bytes, {} on disk",
+                path.display(),
+                on_disk(&path.join("photo.jpg"))
+            )
+        };
+        assert_eq!(lines[7..], [folder("a"), folder("b")]);
+
+        let reply = call(
+            &mut server,
+            json!({"name": "duplicates", "arguments": {"path": photos}}),
+        );
+        assert_eq!(
+            text(&reply),
+            format!(
+                "{}/\n1 verified, 0 candidates; 300000 bytes in extra verified copies\n\
+                 verified: 2 copies of 300000 bytes\n{}\n{}\n",
+                photos.display(),
+                a.display(),
+                b.display()
+            )
+        );
+
+        let preview = |server: &mut Server, trash: &[&PathBuf]| {
+            call(
+                server,
+                json!({"name": "cleanup_duplicates", "arguments": {"path": photos, "trash": trash}}),
+            )
+        };
+        let refused = preview(&mut server, &[&a, &b]);
+        assert_eq!(refused["result"]["isError"], true);
+        assert!(
+            text(&refused).starts_with("Keep at least one of "),
+            "{refused}"
+        );
+        let refused = preview(&mut server, &[&c]);
+        assert!(
+            text(&refused).ends_with("not a verified duplicate in this scan."),
+            "{refused}"
+        );
+        let reply = preview(&mut server, &[&b]);
+        let token = text(&reply)
+            .lines()
+            .find_map(|line| line.strip_prefix("plan: "))
+            .unwrap_or_default()
+            .to_string();
+        let plan = format!(
+            "keep: {}\ntrash: {}\n1 to trash, 1 kept; frees at least {} bytes once the Trash is emptied. Undo puts them back.\n",
+            a.display(),
+            b.display(),
+            on_disk(&b)
+        );
+        assert_eq!(
+            text(&reply),
+            format!(
+                "{plan}plan: {token}\nPass confirm: true and this plan within 10 minutes to trash them.\n"
+            )
+        );
+
+        let confirmed =
+            json!({"name": "cleanup_duplicates", "arguments": {"confirm": true, "plan": token}});
+        let settings = root.join("settings.json");
+        std::fs::write(&settings, r#"{"agents_change_files": false}"#).unwrap();
+        let reply = call(&mut server, confirmed.clone());
+        assert!(
+            text(&reply).starts_with("Agents can't change files"),
+            "{reply}"
+        );
+        std::fs::write(&settings, r#"{"agents_change_files": true}"#).unwrap();
+        let reply = call(&mut server, confirmed.clone());
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        let trashed = text(&reply).strip_prefix(&plan).unwrap();
+        assert!(
+            trashed.starts_with(&format!("trashed: {} → ", b.display())),
+            "{reply}"
+        );
+        assert!(!b.exists() && a.exists());
+        let reply = call(&mut server, confirmed);
+        assert!(text(&reply).starts_with("No previewed plan"), "{reply}");
+        let reply = call(&mut server, json!({"name": "undo"}));
+        assert_eq!(
+            text(&reply),
+            format!("Undo Trash Duplicates\n{}\n", b.display())
+        );
+        assert_eq!(std::fs::read(&b).unwrap(), photo);
+
+        for bad in [
+            json!({"name": "storage_scan", "arguments": {}}),
+            json!({"name": "duplicates", "arguments": {"path": photos, "min_size": 0.5}}),
+            json!({"name": "cleanup_duplicates", "arguments": {"path": photos, "trash": b}}),
+            json!({"name": "cleanup_duplicates", "arguments": {"confirm": "yes"}}),
+        ] {
+            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
+        }
+        drop(server);
+        serving.join().unwrap().unwrap();
     }
 
     #[test]

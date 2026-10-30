@@ -140,6 +140,12 @@ pub enum Request {
     EmptyTrash {
         items: Vec<TrashItem>,
     },
+    /// Moves duplicate files to the Trash as one operation, as a storage
+    /// scan's cleanup says. A copy that isn't as `found` says is refused,
+    /// and so is every copy of a group none of whose kept copies is.
+    TrashDuplicates {
+        groups: Vec<Copies>,
+    },
     /// Renames each item where it is by `rule`, as one operation; numbers
     /// count in the order of `paths`. Refused whole if the plan differs from
     /// `preview`, or has problems that aren't skipped.
@@ -163,6 +169,20 @@ pub struct Planned {
     /// What's at `to`, which goes to the Trash first. With `None`, nothing
     /// may be there.
     pub replaces: Option<(FileId, Stamp)>,
+}
+
+/// A file as a scan verified it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seen {
+    pub path: PathBuf,
+    pub found: (FileId, Stamp),
+}
+
+/// Files with the same contents: those to keep and those to trash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Copies {
+    pub keep: Vec<Seen>,
+    pub trash: Vec<Seen>,
 }
 
 /// An item in the Trash as Empty Trash counted it. Only that same item is
@@ -193,6 +213,7 @@ impl Request {
             Request::Redo => "Redo",
             Request::EmptyTrash { .. } => "Empty Trash",
             Request::RenameMany { .. } => "Batch Rename",
+            Request::TrashDuplicates { .. } => "Trash Duplicates",
         }
     }
 }
@@ -879,6 +900,7 @@ impl Engine {
         };
         match request {
             Request::Trash { paths } => each(paths, &plan_trash),
+            Request::TrashDuplicates { groups } => groups.iter().flat_map(plan_copies).collect(),
             Request::PutBack { paths } => each(paths, &|path| self.plan_put_back(path)),
             Request::Rename { path, name } => vec![(path.clone(), plan_rename(path, name))],
             Request::NewFolder { path } => vec![(path.clone(), plan_new(path, Make::Folder))],
@@ -1122,6 +1144,36 @@ fn plan_trash(path: &Path) -> Result<Plan, String> {
         applied: false,
         stamp,
     }))
+}
+
+/// Trashes a group's copies only while one it keeps is still as it was
+/// found, and each only if it is too.
+fn plan_copies(copies: &Copies) -> Vec<(PathBuf, Result<Plan, String>)> {
+    let as_found = |seen: &Seen| disk::stamp(&seen.path).ok() == Some(seen.found);
+    let kept = copies.keep.iter().any(as_found);
+    copies
+        .trash
+        .iter()
+        .map(|seen| {
+            let path = &seen.path;
+            let plan = if !kept {
+                Err(format!(
+                    "{}: left alone, since no copy kept beside it is as the scan found it. Scan again.",
+                    path.display()
+                ))
+            } else if copies.keep.iter().any(|k| k.found.0 == seen.found.0) {
+                Err(format!("{}: is a copy kept.", path.display()))
+            } else if !as_found(seen) {
+                Err(format!(
+                    "{}: changed since the scan, so it stays. Scan again.",
+                    path.display()
+                ))
+            } else {
+                plan_trash(path)
+            };
+            (path.clone(), plan)
+        })
+        .collect()
 }
 
 fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {

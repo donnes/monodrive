@@ -151,6 +151,62 @@ fn trash_puts_back_and_undoing_a_new_folder_trashes_it_until_redo() {
 }
 
 #[test]
+fn a_duplicate_cleanup_refuses_what_changed_since_the_scan_and_undoes_in_one_step() {
+    use crate::storage::{self, Progress};
+    let (_dir, files, mut engine) = engine();
+    let files = files.canonicalize().unwrap();
+    let named = |names: &[&str]| names.iter().map(|n| files.join(n)).collect::<Vec<_>>();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(files.join(name), "same").unwrap();
+    }
+    for name in ["x.md", "y.md"] {
+        std::fs::write(files.join(name), "other").unwrap();
+    }
+    let report = storage::scan(&files, &Progress::default(), None).unwrap();
+    let found = report.duplicates(&|_| true, &Progress::default(), None);
+    let plan = found.cleanup(&named(&["b.txt", "c.txt", "y.md"])).unwrap();
+    // Edited after the scan: c.txt itself, and x.md, the only copy kept
+    // beside y.md, so neither c.txt nor y.md may go.
+    std::fs::write(files.join("c.txt"), "SAME").unwrap();
+    std::fs::write(files.join("x.md"), "OTHER").unwrap();
+
+    let outcome = run(&mut engine, plan.request()).unwrap();
+    assert_eq!(outcome.title, "Trash Duplicates");
+    let results: Vec<(&Path, Result<(), &str>)> = outcome
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.path.as_path(),
+                item.result.as_ref().map(|_| ()).map_err(String::as_str),
+            )
+        })
+        .collect();
+    let (b, c, y) = (files.join("b.txt"), files.join("c.txt"), files.join("y.md"));
+    let refusals = [
+        format!(
+            "{}: changed since the scan, so it stays. Scan again.",
+            c.display()
+        ),
+        format!(
+            "{}: left alone, since no copy kept beside it is as the scan found it. Scan again.",
+            y.display()
+        ),
+    ];
+    assert_eq!(
+        results,
+        [
+            (b.as_path(), Ok(())),
+            (c.as_path(), Err(refusals[0].as_str())),
+            (y.as_path(), Err(refusals[1].as_str())),
+        ]
+    );
+    assert!(!b.exists() && c.exists() && y.exists());
+    assert_eq!(moved(run(&mut engine, Request::Undo)), vec![b.clone()]);
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "same");
+}
+
+#[test]
 fn undo_refuses_to_trash_a_new_file_or_copied_folder_once_it_was_edited() {
     let (_dir, files, mut engine) = engine();
     let file = files.join("draft.md");

@@ -5,6 +5,8 @@
 //! the folder changed.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,42 +45,113 @@ pub fn measure(
     cancelled: &AtomicBool,
     deadline: Option<Instant>,
 ) -> Result<FolderSize, String> {
-    let stopped =
+    let mut stopped =
         || cancelled.load(Ordering::Relaxed) || deadline.is_some_and(|end| Instant::now() >= end);
     let mut size = FolderSize::default();
+    let mut counted = None;
+    size.complete = walk(folder, &mut stopped, &mut |met| match met {
+        Met::Folder { .. } => size.folders += 1,
+        Met::Item { meta, .. } => {
+            size.files += 1;
+            size.bytes += meta.len();
+            size.on_disk += meta.blocks() * 512;
+        }
+        Met::Unreadable { at, .. } => {
+            size.unreadable += u64::from(counted != Some(at));
+            counted = Some(at);
+        }
+    })?;
+    Ok(size)
+}
+
+/// What `walk` meets, a folder's items all together.
+pub(crate) enum Met<'a> {
+    /// A folder inside folder `parent`. Folders are numbered from 1 as
+    /// they're met; the one walked is 0.
+    Folder { parent: usize, path: &'a Path },
+    /// An item in folder `at` that isn't a folder. A hard-linked file comes
+    /// only the first time.
+    Item {
+        at: usize,
+        name: OsString,
+        meta: &'a Metadata,
+    },
+    /// Folder `at`, or an item in it at `path`, couldn't be read. What
+    /// couldn't be read isn't met.
+    Unreadable {
+        at: usize,
+        path: &'a Path,
+        why: std::io::Error,
+    },
+}
+
+/// Walks every item under `folder` without following links, until
+/// `stopped` says to stop. True if it met everything. Fails only when
+/// `folder` itself can't be listed.
+pub(crate) fn walk(
+    folder: &Path,
+    stopped: &mut dyn FnMut() -> bool,
+    met: &mut dyn FnMut(Met),
+) -> Result<bool, String> {
     let mut linked = HashSet::new();
-    let mut pending = vec![folder.to_path_buf()];
-    while let Some(dir) = pending.pop() {
+    let mut found = 0;
+    let mut pending = vec![(folder.to_path_buf(), 0)];
+    while let Some((dir, at)) = pending.pop() {
         if stopped() {
-            return Ok(size);
+            return Ok(false);
         }
         let listing = match std::fs::read_dir(&dir) {
             Ok(listing) => listing,
-            Err(e) if dir == folder => return Err(format!("{}: {e}", folder.display())),
-            Err(_) => {
-                size.unreadable += 1;
+            Err(e) if at == 0 => return Err(format!("{}: {e}", folder.display())),
+            Err(why) => {
+                met(Met::Unreadable {
+                    at,
+                    path: &dir,
+                    why,
+                });
                 continue;
             }
         };
-        let mut hidden = false;
         for item in listing {
             if stopped() {
-                return Ok(size);
+                return Ok(false);
             }
             // DirEntry's metadata doesn't follow links. An item gone since
             // the listing began has nothing to count; any other failure,
             // such as a folder without search permission, hides some.
-            let (item, meta) = match item.and_then(|item| Ok((item.path(), item.metadata()?))) {
-                Ok(found) => found,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => {
-                    hidden = true;
+            let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+            let item = match item {
+                Ok(item) => item,
+                Err(e) if gone(&e) => continue,
+                Err(why) => {
+                    met(Met::Unreadable {
+                        at,
+                        path: &dir,
+                        why,
+                    });
+                    continue;
+                }
+            };
+            let meta = match item.metadata() {
+                Ok(meta) => meta,
+                Err(e) if gone(&e) => continue,
+                Err(why) => {
+                    met(Met::Unreadable {
+                        at,
+                        path: &item.path(),
+                        why,
+                    });
                     continue;
                 }
             };
             if meta.is_dir() {
-                size.folders += 1;
-                pending.push(item);
+                found += 1;
+                let path = item.path();
+                met(Met::Folder {
+                    parent: at,
+                    path: &path,
+                });
+                pending.push((path, found));
                 continue;
             }
             if meta.nlink() > 1 {
@@ -90,14 +163,14 @@ pub fn measure(
                     linked.insert(id);
                 }
             }
-            size.files += 1;
-            size.bytes += meta.len();
-            size.on_disk += meta.blocks() * 512;
+            met(Met::Item {
+                at,
+                name: item.file_name(),
+                meta: &meta,
+            });
         }
-        size.unreadable += u64::from(hidden);
     }
-    size.complete = true;
-    Ok(size)
+    Ok(true)
 }
 
 /// How many folders' totals are kept. The oldest go first.

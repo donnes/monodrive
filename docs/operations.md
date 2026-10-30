@@ -63,6 +63,10 @@ A rename into a name another item of the same operation still holds waits for th
 
 `compare::compare` reads only metadata, so a comparison never claims two files are equal until `verify` has read them. `Comparison::plan` turns selected differences into a one-way copy: what's only on the left, and a differing file or link whose left copy is newer. It checks each item against what the comparison found, then `Request::CopyPlanned` carries each source's identity and stamp, and those of what it replaces. The owner runs it as one copy job whose items each have their own folder. An item whose source or destination no longer matches is refused, not copied or replaced. A replaced item goes to the Trash as for any copy, and only while it's still the item and stamp the plan named. An agent's preview prints a token for the plan, and confirming runs that kept plan, never one made again. Nothing only on the right is ever deleted. The comparison reads a folder only on the left as one item, so edits inside it count from the plan on.
 
+## Duplicate cleanup
+
+`Request::TrashDuplicates` carries a storage scan's cleanup: for each group of identical files, the copies to keep and the copies to trash, each with the identity and stamp it had when it was verified. The owner trashes a group's copies only while at least one copy it keeps is still that file and stamp, and each copy only if it is too; anything else stays, with the reason. It's one operation, so one undo puts every trashed copy back. An agent's preview prints a token, and confirming runs that kept plan once. [Storage inspection](storage.md) covers how copies are verified.
+
 ## Trash
 
 Items go to the Trash through `NSFileManager trashItemAtURL:resultingItemURL:`, and the returned location is recorded for put back. A volume without a Trash fails the item; nothing falls back to permanent deletion. Without Full Disk Access, macOS can refuse to read the Trash, and the error passes through to the user or agent.
