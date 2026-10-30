@@ -80,7 +80,7 @@ fn jobs(dir: &Path) -> gpui::Result<ops::Client> {
     let owner = ops::Owner::bind(paths.clone()).map_err(std::io::Error::other)?;
     std::thread::spawn(move || owner.serve());
     let (from, into) = (dir.join("Drafts"), dir.join("Invoices"));
-    std::fs::create_dir_all(&from)?;
+    std::fs::create_dir_all(from.join("Old"))?;
     std::fs::create_dir_all(&into)?;
     for (name, size) in [("Brief.pdf", 240_000), ("notes.md", 3_000)] {
         std::fs::write(from.join(name), vec![b'x'; size])?;
@@ -109,9 +109,10 @@ fn jobs(dir: &Path) -> gpui::Result<ops::Client> {
         ),
         (
             agent,
+            // A folder can't go into itself.
             Request::Move {
-                paths: names(&["missing.txt"]),
-                into: into.clone(),
+                paths: vec![from.clone()],
+                into: from.join("Old"),
                 conflict: Conflict::Stop,
             },
         ),

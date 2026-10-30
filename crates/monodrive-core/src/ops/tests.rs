@@ -593,3 +593,71 @@ fn an_interrupted_job_is_settled_from_the_disk_and_retry_skips_what_finished() {
         assert!(path.exists(), "{}", path.display());
     }
 }
+
+#[test]
+fn a_copy_placed_just_before_a_crash_still_undoes_to_the_trash() {
+    let (dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, dest) = transfer_fixture(&files);
+    let (b, placed) = (src.join("b"), dest.join("b"));
+    let op = run(&mut shared.lock(), copy(&[&b], &dest, Conflict::Stop))
+        .unwrap()
+        .op;
+    // The owner copies to the hidden name, records the placement, renames
+    // the copy into place, and dies before recording that it did.
+    let temp = dest.join(format!(".monodrive-{op}-0"));
+    disk::copy(&b, &temp, None).unwrap();
+    let (id, stamp) = disk::stamp(&temp).unwrap();
+    let mut work = shared.lock().job_mut(op).unwrap().work[0].clone();
+    work.to = Some(placed.clone());
+    work.temp = Some(temp.clone());
+    work.steps.push(Step {
+        id,
+        undone: Spot::Path(temp.clone()),
+        done: Spot::Path(placed.clone()),
+        applied: false,
+        stamp,
+    });
+    shared
+        .lock()
+        .write(&Record::Work { op, index: 0, work })
+        .unwrap();
+    disk::rename_new(&temp, &placed).unwrap();
+    drop(shared);
+
+    let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
+    assert_eq!(
+        status(&shared, op).tasks[0].done,
+        Some(Done::To(placed.clone()))
+    );
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    let trashed = undone.items[0].result.clone().unwrap();
+    assert!(!placed.exists() && !temp.exists());
+    assert!(
+        trashed.components().any(|c| c.as_os_str() == ".Trash"),
+        "{}",
+        trashed.display()
+    );
+    untrash(&trashed, &files);
+}
+
+#[test]
+fn a_source_replaced_while_its_job_waits_is_left_alone() {
+    let (_dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (src, _) = transfer_fixture(&files);
+    let c = src.join("c.txt");
+    let op = run(&mut shared.lock(), transfer(&[&c], &files, Conflict::Stop))
+        .unwrap()
+        .op;
+    std::fs::write(files.join("other"), "other").unwrap();
+    std::fs::rename(files.join("other"), &c).unwrap();
+    jobs::run(&shared, op);
+    let job = status(&shared, op);
+    assert!(
+        matches!(&job.tasks[0].done, Some(Done::Failed(why)) if why.contains("a different item")),
+        "{job:?}"
+    );
+    assert_eq!(read(&c), "other");
+    assert!(!files.join("c.txt").exists());
+}

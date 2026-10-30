@@ -8,6 +8,7 @@ use super::{
     Engine, FileId, Origin, Outcome, Record, Request, Spot, Stamp, Step, Submission, disk, existing,
 };
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -111,17 +112,24 @@ pub(super) struct Spec {
     into: PathBuf,
     conflict: Conflict,
     sources: Vec<PathBuf>,
+    /// Which item each source was when the job was accepted, so a source
+    /// replaced while the job waits is refused rather than moved.
+    #[serde(default)]
+    ids: Vec<FileId>,
 }
 
 /// One item of a job, as the journal keeps it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct Work {
     pub(super) source: PathBuf,
+    /// The source as accepted; see `Spec::ids`.
+    #[serde(default)]
+    id: Option<FileId>,
     /// Where it goes, once it starts.
     pub(super) to: Option<PathBuf>,
     /// The hidden copy made beside `to` and renamed into place once it's
     /// complete, so a partial copy never sits at `to`.
-    temp: Option<PathBuf>,
+    pub(super) temp: Option<PathBuf>,
     /// Each change in the order it's made, `applied` once made. Each is
     /// written before it happens.
     pub(super) steps: Vec<Step>,
@@ -147,8 +155,10 @@ impl Entry {
         let work = spec
             .sources
             .iter()
-            .map(|source| Work {
+            .enumerate()
+            .map(|(i, source)| Work {
                 source: source.clone(),
+                id: spec.ids.get(i).copied(),
                 ..Work::default()
             })
             .collect();
@@ -376,6 +386,12 @@ impl Item<'_> {
             Ok(found) => found,
             Err(e) => return fail(e),
         };
+        if self.work.id.is_some_and(|accepted| accepted != id) {
+            return fail(format!(
+                "{}: a different item is there now than when the job was queued, so it was left alone.",
+                source.display()
+            ));
+        }
         let into = &self.spec.into;
         if !into.is_dir() {
             return fail(format!("{}: not a folder.", into.display()));
@@ -442,7 +458,9 @@ impl Item<'_> {
         }
         self.work.to = Some(to.clone());
         self.work.bytes = disk::tally(&source).map_or(self.work.bytes, |(_, bytes)| bytes);
-        let same_volume = disk::volume(&source).ok() == disk::volume(into).ok();
+        // The destination folder may be a link to another volume.
+        let into_volume = std::fs::metadata(into).map(|meta| meta.dev());
+        let same_volume = disk::volume(&source).ok() == into_volume.ok();
         let result = if self.spec.kind == Kind::Move && same_volume {
             self.move_here(id, stamp, &to, replacing)
         } else {
@@ -646,11 +664,16 @@ impl Engine {
                 if paths.is_empty() {
                     return Err("Name at least one item.".into());
                 }
+                let ids = paths
+                    .iter()
+                    .map(|path| existing(path).map(|(id, _)| id))
+                    .collect::<Result<_, _>>()?;
                 Spec {
                     kind,
                     into: into.clone(),
                     conflict: *conflict,
                     sources: paths.clone(),
+                    ids,
                 }
             }
             Request::Retry { job, conflict } => {
@@ -660,15 +683,15 @@ impl Engine {
                 }
                 // Only what changed nothing: a finished item, or one that
                 // stopped partway, stays as it is.
-                let sources: Vec<PathBuf> = old
+                let (sources, ids): (Vec<PathBuf>, Vec<Option<FileId>>) = old
                     .work
                     .iter()
                     .filter(|work| {
                         !matches!(work.done, Some(Done::To(_)))
                             && work.steps.iter().all(|step| !step.applied)
                     })
-                    .map(|work| work.source.clone())
-                    .collect();
+                    .map(|work| (work.source.clone(), work.id))
+                    .unzip();
                 if sources.is_empty() {
                     return Err(format!("Job {job} has nothing left to retry."));
                 }
@@ -677,6 +700,8 @@ impl Engine {
                     into: old.spec.into.clone(),
                     conflict: conflict.unwrap_or(old.spec.conflict),
                     sources,
+                    // A job from before ids were kept has none to keep.
+                    ids: ids.into_iter().collect::<Option<_>>().unwrap_or_default(),
                 }
             }
             _ => unreachable!("only jobs are queued"),
@@ -748,6 +773,15 @@ impl Engine {
                     let _ = step.locate();
                 }
                 work.steps.retain(|step| step.applied);
+                // A copy found in place came from the hidden name; undoing it
+                // sends it to the Trash, as when its placement was recorded.
+                if let Some(temp) = &work.temp {
+                    for step in &mut work.steps {
+                        if step.undone == Spot::Path(temp.clone()) {
+                            step.undone = Spot::Trash(None);
+                        }
+                    }
+                }
                 let to = work.to.clone().unwrap_or_default();
                 let placed = work
                     .steps

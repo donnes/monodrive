@@ -23,7 +23,7 @@ The window and each `monodrive mcp` server are separate processes, and an agent'
 
 ## Copy and move jobs
 
-A job's items run one at a time. Each item revalidates its source and destination folder when it starts, and refuses to copy or move a folder into itself.
+A job's items run one at a time. A job records each source's inode when it's accepted. When an item starts it revalidates its source and destination folder, refuses a source that's a different item than the one queued, and refuses to copy or move a folder into itself.
 
 - **Conflicts.** When the name is taken, the request's choice applies: keep both ("name 2"), replace, skip, or stop. Monodrive never asks, and MCP defaults to stop. Stop leaves the job waiting; a retry with another choice runs the rest. Replace moves what was there to the Trash before the new item takes its place, and refuses if it can't.
 - **Moves.** On one volume a move is a rename that never replaces. Across volumes it's a copy, then the source goes to the Trash. If the source changed during the copy or can't be trashed, it stays where it was and the item says so.

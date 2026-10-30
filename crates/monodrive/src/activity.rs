@@ -1,6 +1,7 @@
 //! Activity (⌥⌘J): the copies and moves the window and agents started, how
-//! far each has got, what failed, and Cancel for one still going. Esc or a
-//! click outside closes it.
+//! far each has got, and what failed. A job still going can be cancelled, one
+//! waiting at a conflict settled with Skip, Keep Both or Replace, and a
+//! failed or interrupted one retried. Esc or a click outside closes it.
 
 use crate::browser::{Operations, format_bytes};
 use crate::palette;
@@ -9,7 +10,7 @@ use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Role, Task,
     Window, actions, div, prelude::*, px,
 };
-use monodrive_core::ops::{Client, Done, Job, Origin, Request};
+use monodrive_core::ops::{Client, Conflict, Done, Job, Origin, Request, State};
 use monodrive_core::paths;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -82,11 +83,12 @@ impl ActivityView {
         }
     }
 
-    fn cancel(&mut self, job: u64, cx: &mut Context<Self>) {
+    /// Cancels or retries a job; the next refresh shows the result.
+    fn ask(&mut self, request: Request, cx: &mut Context<Self>) {
         let Some(ops) = self.ops.clone() else { return };
         let asked = cx
             .background_executor()
-            .spawn(async move { lock(&ops).submit(Origin::Window, Request::Cancel { job }) });
+            .spawn(async move { lock(&ops).submit(Origin::Window, request) });
         cx.spawn(async move |this, cx| {
             if let Err(e) = asked.await {
                 let _ = this.update(cx, |this, cx| {
@@ -126,6 +128,19 @@ impl ActivityView {
             done as f32 / job.tasks.len() as f32
         };
         let id = job.id;
+        let retry = |conflict| Request::Retry { job: id, conflict };
+        // What can be done with the job now: stop it while it's going,
+        // choose how a waiting one settles its conflict, or try again.
+        let actions: Vec<(&'static str, Request)> = match job.state {
+            State::Queued | State::Running => vec![("Cancel", Request::Cancel { job: id })],
+            State::Waiting => vec![
+                ("Skip", retry(Some(Conflict::Skip))),
+                ("Keep Both", retry(Some(Conflict::KeepBoth))),
+                ("Replace", retry(Some(Conflict::Replace))),
+            ],
+            State::Failed | State::Interrupted => vec![("Retry", retry(None))],
+            State::Completed | State::Cancelled => Vec::new(),
+        };
         div()
             .px_3()
             .py_2()
@@ -153,25 +168,25 @@ impl ActivityView {
                             .text_color(content(0.5))
                             .child(capitalized(job.state.label())),
                     )
-                    .when(job.state.active(), |d| {
-                        d.child(
-                            div()
-                                .id(("cancel", id))
-                                .role(Role::Button)
-                                .aria_label("Cancel")
-                                .flex_shrink_0()
-                                .h(px(22.))
-                                .px_2()
-                                .rounded(px(6.))
-                                .flex()
-                                .items_center()
-                                .text_size(px(12.))
-                                .bg(content(0.08))
-                                .cursor_pointer()
-                                .child("Cancel")
-                                .on_click(cx.listener(move |this, _, _, cx| this.cancel(id, cx))),
-                        )
-                    }),
+                    .children(actions.into_iter().map(|(label, request)| {
+                        div()
+                            .id(gpui::ElementId::NamedInteger(label.into(), id))
+                            .role(Role::Button)
+                            .aria_label(label)
+                            .flex_shrink_0()
+                            .h(px(22.))
+                            .px_2()
+                            .rounded(px(6.))
+                            .flex()
+                            .items_center()
+                            .text_size(px(12.))
+                            .bg(content(0.08))
+                            .cursor_pointer()
+                            .child(label)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.ask(request.clone(), cx)),
+                            )
+                    })),
             )
             .child(
                 div()
