@@ -3,9 +3,10 @@
 
 use crate::activity::{self, ActivityView};
 use crate::background::{Backdrop, Look};
-use crate::commands::{self, OpenPalette};
+use crate::commands::{self, OpenPalette, Scope};
 use crate::file_icons;
 use crate::goto::{GotoEvent, GotoView};
+use crate::menu::{ContextMenu, MenuEvent};
 use crate::palette::{PaletteEvent, PaletteView};
 use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, View, WorkspaceStyle};
@@ -14,7 +15,7 @@ use crate::settings::{self, SettingsView};
 use crate::text_field::{self, TextField};
 use crate::theme::{self, accent, content, icon, icon_button, on_accent, section_label};
 use crate::thumbnails::{self, Thumb};
-use crate::traffic_lights;
+use crate::{traffic_lights, workspace};
 use chrono::{DateTime, Local};
 use gpui::RenderImage;
 use gpui::{
@@ -22,7 +23,7 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, PromptLevel,
     ScrollStrategy, ScrollWheelEvent, Subscription, Task, UniformListScrollHandle, Window,
-    WindowAppearance, WindowControlArea, actions, canvas, div, prelude::*, px, uniform_list,
+    WindowAppearance, WindowControlArea, actions, canvas, div, point, prelude::*, px, uniform_list,
 };
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::{Index, Progress, Status};
@@ -96,6 +97,10 @@ actions!(
         MoveToTrash,
         EmptyTrash,
         MoveHere,
+        ShowPackageContents,
+        RevealInFinder,
+        OpenInTerminal,
+        ShowContextMenu,
     ]
 );
 
@@ -147,6 +152,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("down", text_field::End, Some("Rename")),
         // → steps from the sidebar into the files, as it does into a folder.
         KeyBinding::new("right", FocusList, Some("Sidebar")),
+        // The context menu on the selection, as on other desktops. GPUI's
+        // macOS keys have no name for a PC keyboard's Menu key.
+        KeyBinding::new("shift-f10", ShowContextMenu, Some("FileList")),
     ]);
 }
 
@@ -266,6 +274,10 @@ pub struct Browser {
     swept: bool,
     /// Where the listing was laid out last frame, in the window.
     list_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The context menu, while it has the keys.
+    menu: Option<OpenMenu>,
+    /// A context menu asked for, opened once the next frame has drawn.
+    menu_request: Option<MenuRequest>,
 }
 
 impl Browser {
@@ -350,6 +362,8 @@ impl Browser {
             marquee: None,
             swept: false,
             list_bounds: Rc::default(),
+            menu: None,
+            menu_request: None,
         };
         browser.reload(cx);
         browser
@@ -781,11 +795,12 @@ impl Browser {
         if std::mem::take(&mut self.swept) || self.marquee.as_ref().is_some_and(|m| m.dragging) {
             return;
         }
-        let Some(entry) = self.entries.get(ix) else {
+        let modifiers = event.modifiers();
+        // ⌃-click opened the context menu as it went down.
+        let Some(entry) = self.entries.get(ix).filter(|_| !modifiers.control) else {
             return;
         };
         self.focus_list(window, cx);
-        let modifiers = event.modifiers();
         if modifiers.platform {
             self.selection.toggle(entry);
         } else if modifiers.shift {
@@ -797,6 +812,185 @@ impl Browser {
             }
         }
         cx.notify();
+    }
+
+    /// A right-click or ⌃-click on row `ix`, or on no row. An entry outside
+    /// the selection becomes the selection first, as in Finder, and no row
+    /// lets go of it, so the menu is on the folder.
+    fn context_click(
+        &mut self,
+        ix: Option<usize>,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        window.prevent_default();
+        self.focus_list(window, cx);
+        match ix.and_then(|ix| self.entries.get(ix)) {
+            Some(entry) if !self.selection.contains(&entry.path) => self.selection.select(entry),
+            Some(_) => {}
+            None => self.selection.clear(),
+        }
+        self.request_menu(self.scopes(), at, self.list_focus.clone(), cx);
+    }
+
+    /// What a context menu on the listing is on: the selection, and whether
+    /// that's a lone package, or else the folder.
+    fn scopes(&self) -> Vec<Scope> {
+        match self.selection.in_order(&self.entries).as_slice() {
+            [] => vec![Scope::Folder],
+            [only]
+                if matches!(only.kind, Kind::Dir | Kind::Link)
+                    && workspace::is_package(&only.path) =>
+            {
+                vec![Scope::Selection, Scope::Package]
+            }
+            _ => vec![Scope::Selection],
+        }
+    }
+
+    /// Asks for a context menu at `at` in the window, whose commands run as
+    /// if from `origin`.
+    fn request_menu(
+        &mut self,
+        scopes: Vec<Scope>,
+        at: Point<Pixels>,
+        origin: FocusHandle,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu = None;
+        self.menu_request = Some(MenuRequest { scopes, at, origin });
+        cx.notify();
+    }
+
+    /// Opens a context menu with the commands that would run from its
+    /// origin now. That's read off the frame drawn last, which is why it
+    /// waits for the frame showing what the click selected.
+    fn open_menu(&mut self, request: MenuRequest, window: &mut Window, cx: &mut Context<Self>) {
+        let MenuRequest { scopes, at, origin } = request;
+        let rows = commands::context_menu(&scopes, cx.global::<Preferences>(), |action| {
+            window.is_action_available_in(action, &origin)
+        });
+        if rows.is_empty() {
+            return;
+        }
+        let view = cx.new(|cx| ContextMenu::new(rows, at, cx));
+        cx.subscribe_in(&view, window, |this, _, event: &MenuEvent, window, cx| {
+            let Some(menu) = this.menu.take() else {
+                return;
+            };
+            window.focus(&menu.origin, cx);
+            if let MenuEvent::Run(action) = event {
+                window.dispatch_action(action.boxed_clone(), cx);
+            }
+            cx.notify();
+        })
+        .detach();
+        window.focus(&view.focus_handle(cx), cx);
+        self.menu = Some(OpenMenu { view, origin });
+        cx.notify();
+    }
+
+    /// Where ⇧F10 opens the menu: under the cursor's entry if it's in view,
+    /// else in the listing's corner.
+    fn menu_point(&self, cx: &App) -> Point<Pixels> {
+        let bounds = self.list_bounds.get();
+        let corner = bounds.origin + point(px(12.), px(12.));
+        let Some(ix) = self.cursor_ix() else {
+            return corner;
+        };
+        let below = match self.view {
+            View::List => {
+                let height = cx.global::<Preferences>().row_size.metrics().0;
+                point(px(60.), px(4. + height * (ix as f32 + 1.)))
+            }
+            View::Grid => {
+                let (across, height) = (self.across.max(1), grid_cell(self.grid_icon).1);
+                let column = (ix % across) as f32 + 0.5;
+                let row = (ix / across) as f32 + 1.;
+                point(px(8. + self.cell_width * column), px(4. + height * row))
+            }
+        };
+        let at = bounds.origin + self.scroll.0.borrow().base_handle.offset() + below;
+        if bounds.contains(&at) { at } else { corner }
+    }
+
+    /// Right-click and ⌃-click on `element` open the context menu on row
+    /// `ix`.
+    fn context_target<E: InteractiveElement>(element: E, ix: usize, cx: &mut Context<Self>) -> E {
+        element
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.context_click(Some(ix), event.position, window, cx)
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if event.modifiers.control {
+                        this.context_click(Some(ix), event.position, window, cx)
+                    }
+                }),
+            )
+    }
+
+    /// A right-click or ⌃-click on the sidebar's place `ix`.
+    fn place_menu(
+        &mut self,
+        ix: usize,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        window.prevent_default();
+        self.sidebar_cursor = ix;
+        window.focus(&self.sidebar_focus, cx);
+        self.request_menu(vec![Scope::Sidebar], at, self.sidebar_focus.clone(), cx);
+    }
+
+    fn open_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, _, path)) = places().into_iter().nth(self.sidebar_cursor) {
+            self.go(path, window, cx);
+        }
+    }
+
+    /// Open in Terminal: at each selected folder and the folder holding
+    /// each other item, or here with nothing selected.
+    fn open_in_terminal(&mut self, cx: &mut Context<Self>) {
+        let mut folders: Vec<PathBuf> = Vec::new();
+        for entry in self.selection.in_order(&self.entries) {
+            let folder = match entry.kind {
+                Kind::Dir => Some(entry.path.as_path()),
+                _ => entry.path.parent(),
+            };
+            if let Some(folder) = folder.filter(|f| !folders.iter().any(|seen| seen == f)) {
+                folders.push(folder.to_path_buf());
+            }
+        }
+        if folders.is_empty() {
+            folders.push(self.folder().to_path_buf());
+        }
+        if let Err(e) = workspace::open_in_terminal(&folders) {
+            self.notice = Some(e);
+            cx.notify();
+        }
+    }
+
+    /// Show Package Contents: goes inside the lone selected folder or link,
+    /// which ↩ on a package will one day launch instead.
+    fn show_package_contents(&mut self, cx: &mut Context<Self>) {
+        let chosen = self.selection.in_order(&self.entries);
+        let [only] = chosen.as_slice() else {
+            return;
+        };
+        if matches!(only.kind, Kind::Dir | Kind::Link)
+            && let Some(ix) = self.entries.iter().position(|e| e.path == only.path)
+        {
+            self.open(ix, cx);
+        }
     }
 
     /// A point in the window as a point in the listing, measured from the
@@ -2158,11 +2352,15 @@ impl Browser {
                             this.select_row(0, cx);
                         }
                     }))
-                    .on_action(cx.listener(|this, _: &OpenPlace, window, cx| {
-                        if let Some((_, _, path)) = places().into_iter().nth(this.sidebar_cursor) {
-                            this.go(path, window, cx);
-                        }
-                    }))
+                    .on_action(
+                        cx.listener(|this, _: &OpenPlace, window, cx| this.open_place(window, cx)),
+                    )
+                    // Open from the sidebar's menu, or ⌘O there, opens its place.
+                    .on_action(
+                        cx.listener(|this, _: &OpenSelected, window, cx| {
+                            this.open_place(window, cx)
+                        }),
+                    )
                     .flex()
                     .flex_col()
                     .child(section_label("Favorites"))
@@ -2291,9 +2489,25 @@ impl Browser {
             .hover(|s| s.bg(content(0.1)).text_color(content(1.)))
             .child(icon(glyph, 16.).text_color(content(if selected { 0.7 } else { 0.35 })))
             .child(div().flex_1().truncate().child(label))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.sidebar_cursor = ix;
-                this.go(path.clone(), window, cx);
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.place_menu(ix, event.position, window, cx)
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if event.modifiers.control {
+                        this.place_menu(ix, event.position, window, cx)
+                    }
+                }),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !event.modifiers().control {
+                    this.sidebar_cursor = ix;
+                    this.go(path.clone(), window, cx);
+                }
             }))
     }
 
@@ -2458,6 +2672,7 @@ impl Browser {
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 this.click_entry(ix, event, window, cx)
                             }))
+                            .map(|d| Self::context_target(d, ix, cx))
                     });
                 div().flex().px_1().children(cells).into_any_element()
             })
@@ -2555,6 +2770,7 @@ impl Browser {
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_entry(ix, event, window, cx)
                         }))
+                        .map(|d| Self::context_target(d, ix, cx))
                         .into_any_element(),
                 )
             })
@@ -2692,6 +2908,19 @@ impl Render for Browser {
             let image = self.thumbs.remove(&thumb).flatten();
             thumbnails::release(&thumb, image, window, cx);
         }
+        // The menu gives way to whatever took the keys from it.
+        if self
+            .menu
+            .as_ref()
+            .is_some_and(|menu| !menu.view.focus_handle(cx).is_focused(window))
+        {
+            self.menu = None;
+        }
+        if let Some(request) = self.menu_request.take() {
+            cx.defer_in(window, move |this, window, cx| {
+                this.open_menu(request, window, cx)
+            });
+        }
         // Only the sheet's controls take Tab while it's open.
         let sheet = self.sheet_open();
         let regions = !sheet;
@@ -2752,9 +2981,24 @@ impl Render for Browser {
                     cx.listener(|this, _: &MoveHere, window, cx| this.paste(true, window, cx)),
                 )
             })
+            .on_action(cx.listener(|this, _: &ShowContextMenu, _, cx| {
+                if this.renaming.is_none() {
+                    let at = this.menu_point(cx);
+                    this.request_menu(this.scopes(), at, this.list_focus.clone(), cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.context_click(None, event.position, window, cx)
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if event.modifiers.control {
+                        return this.context_click(None, event.position, window, cx);
+                    }
                     this.focus_list(window, cx);
                     this.swept = false;
                     let at = this.listing_point(event.position);
@@ -2925,6 +3169,17 @@ impl Render for Browser {
                     cx.listener(|this, _: &GoToFolder, window, cx| this.open_goto(window, cx)),
                 )
                 .on_action(cx.listener(|this, _: &CopyPath, _, cx| this.copy_path(cx)))
+                .on_action(cx.listener(|this, _: &OpenInTerminal, _, cx| this.open_in_terminal(cx)))
+                .when(!self.selection.is_empty(), |d| {
+                    d.on_action(cx.listener(|this, _: &RevealInFinder, _, _| {
+                        workspace::reveal(&this.chosen())
+                    }))
+                })
+                .when(self.selection.len() == 1, |d| {
+                    d.on_action(cx.listener(|this, _: &ShowPackageContents, _, cx| {
+                        this.show_package_contents(cx)
+                    }))
+                })
                 .on_action(
                     cx.listener(|this, _: &ShowActivity, window, cx| {
                         this.open_activity(window, cx)
@@ -3034,6 +3289,7 @@ impl Render for Browser {
                 Sheet::Goto(view) => view.clone().into_any_element(),
                 Sheet::Activity(view) => view.clone().into_any_element(),
             }))
+            .children(self.menu.as_ref().map(|menu| menu.view.clone()))
             // Last, so its window listeners run before any element's.
             .children(
                 self.resizing_sidebar
@@ -3051,6 +3307,19 @@ fn sort_by(by: SortBy, cx: &mut App) {
             p.sort = sorted_by(p.sort, by);
         }
     });
+}
+
+/// The context menu, and what had the keys before it, where its commands
+/// run.
+struct OpenMenu {
+    view: Entity<ContextMenu>,
+    origin: FocusHandle,
+}
+
+struct MenuRequest {
+    scopes: Vec<Scope>,
+    at: Point<Pixels>,
+    origin: FocusHandle,
 }
 
 /// A name being edited in place.
@@ -4206,6 +4475,116 @@ mod tests {
             assert!(activity(cx), "{state:?}");
             press(cx, "escape");
         }
+    }
+
+    /// The context menu's rows and the one highlighted, while it's open.
+    fn menu(
+        browser: &Entity<Browser>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(Vec<&'static str>, Option<&'static str>)> {
+        browser.read_with(cx, |browser, cx| {
+            let menu = browser.menu.as_ref()?.view.read(cx);
+            let titles: Vec<_> = menu.rows.iter().map(|row| row.title).collect();
+            let active = menu.active.map(|ix| titles[ix]);
+            Some((titles, active))
+        })
+    }
+
+    fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.simulate_mouse_down(at, MouseButton::Right, with(""));
+        cx.simulate_mouse_up(at, MouseButton::Right, with(""));
+    }
+
+    const ON_A_FILE: [&str; 9] = [
+        "New Folder with Selection",
+        "Open",
+        "Reveal in Finder",
+        "Open in Terminal",
+        "Rename",
+        "Duplicate",
+        "Move to Trash",
+        "Copy",
+        "Copy Path",
+    ];
+
+    #[gpui::test]
+    fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestAppContext) {
+        let (_dir, folder) = sized();
+        let (browser, cx) = browse(&folder, cx);
+        let rows: Vec<_> = [0, 1, 2, 3, 6].map(|ix| row(&browser, ix, cx)).into();
+        cx.simulate_click(rows[0], with(""));
+        // Outside the selection, the entry clicked becomes the selection.
+        right_click(cx, rows[2]);
+        assert_eq!(shown(&browser, cx).1, ["c.txt"]);
+        assert_eq!(menu(&browser, cx), Some((ON_A_FILE.to_vec(), None)));
+        // Esc closes it, and leaves the selection as it was.
+        press(cx, "escape");
+        assert_eq!(menu(&browser, cx), None);
+        assert_eq!(shown(&browser, cx).1, ["c.txt"]);
+        // ⌃-click inside the selection keeps it, and the menu has only what
+        // runs on several: no Rename.
+        cx.simulate_click(rows[1], with("cmd"));
+        let control = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        cx.simulate_click(rows[1], control);
+        assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
+        let (titles, _) = menu(&browser, cx).unwrap();
+        assert!(!titles.contains(&"Rename") && titles.contains(&"Duplicate"));
+        // A press outside closes it and reaches nothing behind it. The menu
+        // opened rightward from the pointer, so this is left of it.
+        let outside = rows[3] - gpui::point(px(50.), px(0.));
+        cx.simulate_click(outside, with(""));
+        assert_eq!(menu(&browser, cx), None);
+        assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
+        // Empty space lets go of the selection for the folder's menu.
+        right_click(cx, rows[4]);
+        assert!(shown(&browser, cx).1.is_empty());
+        let folder_menu = vec![
+            "New Folder",
+            "New File",
+            "Paste",
+            "as List",
+            "as Grid",
+            "Show Hidden Files",
+            "Sort by Name",
+            "Sort by Date Modified",
+            "Sort by Size",
+            "Sort by Kind",
+        ];
+        assert_eq!(menu(&browser, cx), Some((folder_menu, None)));
+        press(cx, "escape");
+    }
+
+    #[gpui::test]
+    fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let owned = own(cx);
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down down down shift-f10");
+        assert_eq!(menu(&browser, cx), Some((ON_A_FILE.to_vec(), None)));
+        // ↑ and ↓ come round from the ends.
+        press(cx, "up");
+        assert_eq!(menu(&browser, cx).unwrap().1, Some("Copy Path"));
+        press(cx, "down down down down down down");
+        assert_eq!(menu(&browser, cx).unwrap().1, Some("Duplicate"));
+        press(cx, "enter");
+        assert_eq!(menu(&browser, cx), None);
+        assert!(project.join("a copy.txt").exists());
+        assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
+        // A package's menu has Show Package Contents, which goes inside.
+        std::fs::create_dir(project.join("Kit.app")).unwrap();
+        browser.update(cx, |browser, cx| browser.list(true, cx));
+        cx.run_until_parked();
+        press(cx, "alt-up down shift-f10");
+        assert_eq!(shown(&browser, cx).1, ["Kit.app"]);
+        press(cx, "down down down");
+        assert_eq!(menu(&browser, cx).unwrap().1, Some("Show Package Contents"));
+        press(cx, "enter");
+        let inside = browser.read_with(cx, |browser, _| browser.folder().to_path_buf());
+        assert_eq!(inside, project.join("Kit.app"));
+        release(owned, cx);
     }
 
     #[gpui::test]

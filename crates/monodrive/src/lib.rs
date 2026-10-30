@@ -10,6 +10,7 @@ mod commands;
 pub mod file_icons;
 mod frame;
 mod goto;
+mod menu;
 mod palette;
 mod palettes;
 mod pasteboard;
@@ -22,6 +23,7 @@ mod text_field;
 mod theme;
 mod thumbnails;
 mod traffic_lights;
+mod workspace;
 
 use commands::{CloseWindow, Hide, HideOthers, Minimize, Quit, ShowAll};
 use gpui::{

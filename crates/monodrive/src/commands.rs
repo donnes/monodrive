@@ -10,12 +10,13 @@
 use crate::browser::{
     Back, CopyPath, DeselectAll, Duplicate, EmptyTrash, EnclosingFolder, FocusSearch, Forward,
     GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoToFolder, MoveHere,
-    MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenSelected, OpenSettings, Redo,
-    Rename, ResetZoom, ReverseSort, ShowActivity, SortByKind, SortByModified, SortByName,
-    SortBySize, ToggleHiddenFiles, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenInTerminal, OpenSelected,
+    OpenSettings, Redo, Rename, ResetZoom, RevealInFinder, ReverseSort, ShowActivity,
+    ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
+    Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
-use crate::{activity, browser, goto, palette, settings, text_field};
+use crate::{activity, browser, goto, menu, palette, settings, text_field};
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
     OsAction, actions,
@@ -72,6 +73,19 @@ impl Group {
     }
 }
 
+/// Where a context menu offers a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// On what's selected in the listing.
+    Selection,
+    /// On a lone app or other package.
+    Package,
+    /// On the listing's empty space, so the folder shown.
+    Folder,
+    /// On a place in the sidebar.
+    Sidebar,
+}
+
 pub struct Command {
     pub title: &'static str,
     pub group: Group,
@@ -84,6 +98,8 @@ pub struct Command {
     pub separated: bool,
     /// The standard AppKit command it is, so system panels' fields get it.
     pub os_action: Option<OsAction>,
+    /// Where context menus offer it.
+    pub scopes: &'static [Scope],
 }
 
 impl Command {
@@ -119,6 +135,7 @@ pub fn all() -> Vec<Command> {
             action,
             separated: false,
             os_action: None,
+            scopes: &[],
         }
     }
     fn separated(command: Command) -> Command {
@@ -133,7 +150,12 @@ pub fn all() -> Vec<Command> {
             ..command
         }
     }
+    fn on(scopes: &'static [Scope], command: Command) -> Command {
+        Command { scopes, ..command }
+    }
     const LIST: Option<&str> = Some("FileList");
+    const SELECTION: &[Scope] = &[Scope::Selection];
+    const FOLDER: &[Scope] = &[Scope::Folder];
     use Group::*;
     vec![
         command("Settings…", App, &["cmd-,"], None, || {
@@ -156,36 +178,75 @@ pub fn all() -> Vec<Command> {
         separated(command("Quit Monodrive", App, &["cmd-q"], None, || {
             Box::new(Quit)
         })),
-        command("New Folder", File, &["cmd-shift-n"], BROWSER, || {
-            Box::new(NewFolder)
-        }),
-        command(
-            "New Folder with Selection",
-            File,
-            &["ctrl-cmd-n"],
-            BROWSER,
-            || Box::new(NewFolderWithSelection),
+        on(
+            FOLDER,
+            command("New Folder", File, &["cmd-shift-n"], BROWSER, || {
+                Box::new(NewFolder)
+            }),
         ),
-        command("New File", File, &[], BROWSER, || Box::new(NewFile)),
-        separated(command(
-            "Open",
-            File,
-            &["cmd-down", "cmd-o"],
-            BROWSER,
-            || Box::new(OpenSelected),
-        )),
+        on(
+            SELECTION,
+            command(
+                "New Folder with Selection",
+                File,
+                &["ctrl-cmd-n"],
+                BROWSER,
+                || Box::new(NewFolderWithSelection),
+            ),
+        ),
+        on(
+            FOLDER,
+            command("New File", File, &[], BROWSER, || Box::new(NewFile)),
+        ),
+        on(
+            &[Scope::Selection, Scope::Sidebar],
+            separated(command(
+                "Open",
+                File,
+                &["cmd-down", "cmd-o"],
+                BROWSER,
+                || Box::new(OpenSelected),
+            )),
+        ),
+        on(
+            &[Scope::Package],
+            command("Show Package Contents", File, &[], BROWSER, || {
+                Box::new(ShowPackageContents)
+            }),
+        ),
+        on(
+            SELECTION,
+            command("Reveal in Finder", File, &[], BROWSER, || {
+                Box::new(RevealInFinder)
+            }),
+        ),
+        on(
+            SELECTION,
+            command("Open in Terminal", File, &[], BROWSER, || {
+                Box::new(OpenInTerminal)
+            }),
+        ),
         // Return renames, as in Finder; → and ⌘↓ still go in.
-        separated(command("Rename", File, &["enter"], LIST, || {
-            Box::new(Rename)
-        })),
-        command("Duplicate", File, &["cmd-d"], LIST, || Box::new(Duplicate)),
-        separated(command(
-            "Move to Trash",
-            File,
-            &["cmd-backspace"],
-            LIST,
-            || Box::new(MoveToTrash),
-        )),
+        on(
+            SELECTION,
+            separated(command("Rename", File, &["enter"], LIST, || {
+                Box::new(Rename)
+            })),
+        ),
+        on(
+            SELECTION,
+            command("Duplicate", File, &["cmd-d"], LIST, || Box::new(Duplicate)),
+        ),
+        on(
+            SELECTION,
+            separated(command(
+                "Move to Trash",
+                File,
+                &["cmd-backspace"],
+                LIST,
+                || Box::new(MoveToTrash),
+            )),
+        ),
         // From the list only, so ⌘Z while typing a search never changes
         // files; the menu bar's Undo works anywhere in the window.
         command("Undo", Edit, &["cmd-z"], LIST, || Box::new(Undo)),
@@ -196,17 +257,23 @@ pub fn all() -> Vec<Command> {
                 Box::new(text_field::Cut)
             })),
         ),
-        standard(
-            OsAction::Copy,
-            command("Copy", Edit, &["cmd-c"], None, || {
-                Box::new(text_field::Copy)
-            }),
+        on(
+            SELECTION,
+            standard(
+                OsAction::Copy,
+                command("Copy", Edit, &["cmd-c"], None, || {
+                    Box::new(text_field::Copy)
+                }),
+            ),
         ),
-        standard(
-            OsAction::Paste,
-            command("Paste", Edit, &["cmd-v"], None, || {
-                Box::new(text_field::Paste)
-            }),
+        on(
+            FOLDER,
+            standard(
+                OsAction::Paste,
+                command("Paste", Edit, &["cmd-v"], None, || {
+                    Box::new(text_field::Paste)
+                }),
+            ),
         ),
         command("Move Here", Edit, &["cmd-alt-v"], LIST, || {
             Box::new(MoveHere)
@@ -220,9 +287,12 @@ pub fn all() -> Vec<Command> {
         command("Deselect All", Edit, &["cmd-alt-a"], BROWSER, || {
             Box::new(DeselectAll)
         }),
-        separated(command("Copy Path", Edit, &["cmd-alt-c"], BROWSER, || {
-            Box::new(CopyPath)
-        })),
+        on(
+            SELECTION,
+            separated(command("Copy Path", Edit, &["cmd-alt-c"], BROWSER, || {
+                Box::new(CopyPath)
+            })),
+        ),
         command("Back", Go, &["cmd-["], BROWSER, || Box::new(Back)),
         command("Forward", Go, &["cmd-]"], BROWSER, || Box::new(Forward)),
         command("Enclosing Folder", Go, &["cmd-up"], BROWSER, || {
@@ -252,8 +322,14 @@ pub fn all() -> Vec<Command> {
         separated(command("Search", Go, &["cmd-f"], BROWSER, || {
             Box::new(FocusSearch)
         })),
-        command("as List", View, &["cmd-1"], None, || Box::new(ViewAsList)),
-        command("as Grid", View, &["cmd-2"], None, || Box::new(ViewAsGrid)),
+        on(
+            FOLDER,
+            command("as List", View, &["cmd-1"], None, || Box::new(ViewAsList)),
+        ),
+        on(
+            FOLDER,
+            command("as Grid", View, &["cmd-2"], None, || Box::new(ViewAsGrid)),
+        ),
         separated(command(
             "Command Palette…",
             View,
@@ -261,29 +337,44 @@ pub fn all() -> Vec<Command> {
             None,
             || Box::new(OpenPalette),
         )),
-        separated(command("Show Hidden Files", View, &["cmd->"], None, || {
-            Box::new(ToggleHiddenFiles)
-        })),
-        separated(command(
-            "Sort by Name",
-            View,
-            &["ctrl-alt-cmd-1"],
-            None,
-            || Box::new(SortByName),
-        )),
-        command(
-            "Sort by Date Modified",
-            View,
-            &["ctrl-alt-cmd-2"],
-            None,
-            || Box::new(SortByModified),
+        on(
+            FOLDER,
+            separated(command("Show Hidden Files", View, &["cmd->"], None, || {
+                Box::new(ToggleHiddenFiles)
+            })),
         ),
-        command("Sort by Size", View, &["ctrl-alt-cmd-3"], None, || {
-            Box::new(SortBySize)
-        }),
-        command("Sort by Kind", View, &["ctrl-alt-cmd-4"], None, || {
-            Box::new(SortByKind)
-        }),
+        on(
+            FOLDER,
+            separated(command(
+                "Sort by Name",
+                View,
+                &["ctrl-alt-cmd-1"],
+                None,
+                || Box::new(SortByName),
+            )),
+        ),
+        on(
+            FOLDER,
+            command(
+                "Sort by Date Modified",
+                View,
+                &["ctrl-alt-cmd-2"],
+                None,
+                || Box::new(SortByModified),
+            ),
+        ),
+        on(
+            FOLDER,
+            command("Sort by Size", View, &["ctrl-alt-cmd-3"], None, || {
+                Box::new(SortBySize)
+            }),
+        ),
+        on(
+            FOLDER,
+            command("Sort by Kind", View, &["ctrl-alt-cmd-4"], None, || {
+                Box::new(SortByKind)
+            }),
+        ),
         command(
             "Reverse Sort Order",
             View,
@@ -410,6 +501,52 @@ pub fn label(keys: &str) -> String {
         .join(" ")
 }
 
+/// One row of a context menu.
+pub struct MenuRow {
+    pub title: &'static str,
+    /// Its shortcut as bound now.
+    pub keys: Option<String>,
+    pub checked: bool,
+    /// Starts a new section.
+    pub separated: bool,
+    pub action: Box<dyn Action>,
+}
+
+/// The context menu on `scopes`: the commands offered there that `runs` says
+/// would run now, in the menu bar's order, with a separator wherever the menu
+/// bar starts a new section or menu.
+pub fn context_menu(
+    scopes: &[Scope],
+    prefs: &Preferences,
+    runs: impl Fn(&dyn Action) -> bool,
+) -> Vec<MenuRow> {
+    let ticked = checked(prefs);
+    let mut rows = Vec::new();
+    let (mut section, mut group, mut last) = (0, None, None);
+    for command in all() {
+        if command.separated || group != Some(command.group) {
+            section += 1;
+            group = Some(command.group);
+        }
+        let action = (command.action)();
+        if !command.scopes.iter().any(|scope| scopes.contains(scope)) || !runs(&*action) {
+            continue;
+        }
+        rows.push(MenuRow {
+            title: command.title,
+            keys: command
+                .shortcuts(&prefs.shortcuts)
+                .first()
+                .map(|k| label(k)),
+            checked: ticked.contains(&command.id()),
+            separated: last.is_some_and(|last| last != section),
+            action,
+        });
+        last = Some(section);
+    }
+    rows
+}
+
 /// The overrides the keymap was last built from.
 struct Applied(Shortcuts);
 impl Global for Applied {}
@@ -432,6 +569,7 @@ pub fn apply(cx: &mut App) {
     palette::bind(cx);
     goto::bind(cx);
     activity::bind(cx);
+    menu::bind(cx);
     let mut bindings = Vec::new();
     for command in all() {
         let predicate = command
@@ -589,6 +727,71 @@ mod tests {
         assert_eq!(label("cmd-up"), "⌘↑");
         assert_eq!(label("enter"), "↩");
         assert_eq!(label("f5"), "F5");
+    }
+
+    #[test]
+    fn a_context_menu_offers_what_applies_and_runs_in_the_menu_bars_sections() {
+        let shown = |scopes: &[Scope], prefs: &Preferences, runs: &dyn Fn(&dyn Action) -> bool| {
+            context_menu(scopes, prefs, runs)
+                .iter()
+                .map(|row| {
+                    let check = if row.checked { "✓ " } else { "" };
+                    let line = if row.separated { "| " } else { "" };
+                    let keys = row
+                        .keys
+                        .as_deref()
+                        .map_or(String::new(), |k| format!(" {k}"));
+                    format!("{line}{check}{}{keys}", row.title)
+                })
+                .collect::<Vec<_>>()
+        };
+        let prefs = Preferences::default();
+        let all = |_: &dyn Action| true;
+        assert_eq!(
+            shown(&[Scope::Selection, Scope::Package], &prefs, &all),
+            [
+                "New Folder with Selection ⌃⌘N",
+                "| Open ⌘↓",
+                "Show Package Contents",
+                "Reveal in Finder",
+                "Open in Terminal",
+                "| Rename ↩",
+                "Duplicate ⌘D",
+                "| Move to Trash ⌘⌫",
+                "| Copy ⌘C",
+                "| Copy Path ⌥⌘C",
+            ]
+        );
+        assert_eq!(
+            shown(&[Scope::Folder], &prefs, &all),
+            [
+                "New Folder ⇧⌘N",
+                "New File",
+                "| Paste ⌘V",
+                "| ✓ as List ⌘1",
+                "as Grid ⌘2",
+                "| Show Hidden Files ⌘>",
+                "| ✓ Sort by Name ⌃⌥⌘1",
+                "Sort by Date Modified ⌃⌥⌘2",
+                "Sort by Size ⌃⌥⌘3",
+                "Sort by Kind ⌃⌥⌘4",
+            ]
+        );
+        assert_eq!(shown(&[Scope::Sidebar], &prefs, &all), ["Open ⌘↓"]);
+        // What wouldn't run now is left out, and so is a separator with
+        // nothing after it; shortcuts are the ones bound now.
+        let mut rebound = Preferences::default();
+        rebound
+            .shortcuts
+            .insert(Duplicate.name().into(), Some("ctrl-d".into()));
+        rebound.shortcuts.insert(Rename.name().into(), None);
+        let some = |action: &dyn Action| {
+            [Duplicate.name(), Rename.name(), CopyPath.name()].contains(&action.name())
+        };
+        assert_eq!(
+            shown(&[Scope::Selection], &rebound, &some),
+            ["Rename", "Duplicate ⌃D", "| Copy Path ⌥⌘C"]
+        );
     }
 
     #[test]

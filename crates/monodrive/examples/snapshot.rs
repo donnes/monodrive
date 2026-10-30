@@ -3,13 +3,16 @@
 //! at a UI change.
 //!
 //! `cargo run -p monodrive --example snapshot -- [folder]` writes
-//! `target/snapshots/list.png`, `grid.png`, `rename.png` and
-//! `activity.png`. Without a folder it draws a made-up one, so the pictures
-//! show nobody's files. Rename edits the fifth name in place. Activity
-//! shows real jobs, run by an operation owner on a temp folder.
+//! `target/snapshots/list.png`, `grid.png`, `rename.png`, `menu.png`,
+//! `menu-folder.png` and `activity.png`. Without a folder it draws a
+//! made-up one, so the pictures show nobody's files. Rename edits the fifth
+//! name in place. The menus are the context menu on the second entry and on
+//! the folder. Activity shows real jobs, run by an operation owner on a temp
+//! folder.
 
+use gpui::{Action, HeadlessAppContext as Cx};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
-use monodrive::browser::{Browser, Operations, Rename, SelectNext, ShowActivity};
+use monodrive::browser::{Browser, Operations, Rename, SelectNext, ShowActivity, ShowContextMenu};
 use monodrive::preferences::{Preferences, View};
 use monodrive_core::ops::{self, Conflict, Origin, Request};
 use std::path::{Path, PathBuf};
@@ -73,6 +76,23 @@ fn main() -> gpui::Result<()> {
     let path = out.join("rename.png");
     cx.capture_screenshot(window.into())?.save(&path)?;
     println!("{}", path.display());
+    for (name, selected) in [("menu", 2), ("menu-folder", 0)] {
+        let window = cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+            cx.new(|cx| Browser::new(folder.clone(), cx))
+        })?;
+        cx.run_until_parked();
+        let actions = std::iter::repeat_n(&SelectNext as &dyn Action, selected)
+            .chain([&ShowContextMenu as &dyn Action]);
+        for action in actions {
+            dispatch(&mut cx, window, action)?;
+        }
+        // The menu opens once the frame showing the selection has drawn.
+        cx.update_window(window.into(), |_, window, _| window.refresh())?;
+        cx.run_until_parked();
+        let path = out.join(format!("{name}.png"));
+        cx.capture_screenshot(window.into())?.save(&path)?;
+        println!("{}", path.display());
+    }
     let scratch = tempfile::tempdir_in(&out)?;
     let client = jobs(scratch.path())?;
     cx.update(|cx| cx.set_global(Operations(Arc::new(Mutex::new(client)))));
@@ -91,6 +111,25 @@ fn main() -> gpui::Result<()> {
     let path = out.join("activity.png");
     cx.capture_screenshot(window.into())?.save(&path)?;
     println!("{}", path.display());
+    Ok(())
+}
+
+/// Sends `action` to the browser in `window` as a key would, and draws.
+fn dispatch(
+    cx: &mut Cx,
+    window: gpui::WindowHandle<Browser>,
+    action: &dyn Action,
+) -> gpui::Result<()> {
+    cx.update_window(window.into(), |root, window, cx| {
+        if let Ok(browser) = root.downcast::<Browser>()
+            && window.focused(cx).is_none()
+        {
+            window.focus(&browser.focus_handle(cx), cx);
+        }
+        window.dispatch_action(action.boxed_clone(), cx);
+        window.refresh();
+    })?;
+    cx.run_until_parked();
     Ok(())
 }
 
