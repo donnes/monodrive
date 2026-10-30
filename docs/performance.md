@@ -24,3 +24,7 @@ The baselines are from an M3 Pro on 2026-10-29, with the folders already in the 
 - `cargo run -p monodrive --release --features profile` prints the launch times, to the first frame and to the folder's contents, and frame draw times when the app quits. Launch it a few times and take the median; the first launch after a build is slower.
 
 Criterion keeps the last run in `target/criterion` and compares the next one against it.
+
+## Remote sources
+
+Remote numbers are measured apart from local speed, against a throwaway server on this Mac, so they show what Monodrive adds and not a network. `cargo run --release -p monodrive-core --example remote_e2e` prints them. On an M3 Pro on 2026-10-30, a first listing of 10,000 entries takes 43 ms straight over `sftp-server` and 60 ms through ssh on loopback. Connecting through ssh takes 52 ms. Copying 300 MB through ssh runs at 328 MB/s down and 315 MB/s up, and cancel ends a running copy within about 20 ms. Peak memory stays at 16 MB over `sftp-server`.

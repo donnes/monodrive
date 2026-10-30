@@ -16,6 +16,7 @@ use crate::index::{self, Caps, GrepMode, Index, Status};
 use crate::info::{self, Info};
 use crate::ops::{self, Conflict, Done, Job, Origin, Request, rename};
 use crate::places::{self, Availability, Place, SavedSearch};
+use crate::remote::{self, Connection, Connections, RemoteEntry, RemoteError, RemotePath, Source};
 use crate::search::{Query, Scope};
 use crate::sizes::{self, FolderSize};
 use crate::storage::{self, Cleanup, Duplicates, Match, Report, Stop, Usage};
@@ -28,6 +29,7 @@ use std::fmt::Write as _;
 use std::hash::{BuildHasher, RandomState};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -54,7 +56,12 @@ catalog_refresh and catalog_forget manage those catalogs. worktrees lists a Git 
 and worktree_status shows one's changes, without fetching or changing anything; repo_register, repos \
 and repo_forget manage the repositories Monodrive remembers. commands_list shows the commands the user \
 saved, command_preview prints exactly what one would run on paths, and command_run runs it, which \
-command_status follows and command_cancel stops. Only the user saves commands.";
+command_status follows and command_cancel stops. Only the user saves commands. remote_sources shows \
+the saved SSH servers; remote_add and remote_forget manage them. remote_list, remote_stat and \
+remote_read browse one, naming items as source:/path, and remote_copy copies to or from one as a job \
+job_status follows. remote_mkdir and remote_rename change a source, and remote_disconnect ends this \
+session's connection to one. Monodrive never prompts: a server that needs a password reports \
+interactive authentication required.";
 
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
@@ -99,6 +106,8 @@ pub struct Server {
     /// What compare_copy and cleanup_duplicates previewed, oldest first,
     /// so a confirm runs only that.
     plans: Vec<Previewed>,
+    /// Each opened on the first tool that needs it; each session its own.
+    remote: Connections,
 }
 
 struct Previewed {
@@ -372,6 +381,48 @@ enum ToolCall {
     CommandCancel {
         run: u64,
     },
+    RemoteSources {},
+    RemoteAdd {
+        host: String,
+        id: Option<String>,
+        path: Option<String>,
+    },
+    RemoteForget {
+        source: String,
+    },
+    RemoteDisconnect {
+        source: String,
+    },
+    RemoteList {
+        path: String,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "remote_page")]
+        limit: usize,
+    },
+    RemoteStat {
+        paths: Vec<String>,
+    },
+    RemoteRead {
+        path: String,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default = "remote_read_limit")]
+        limit: u32,
+    },
+    RemoteCopy {
+        paths: Vec<String>,
+        into: String,
+        #[serde(default)]
+        conflict: Conflict,
+    },
+    RemoteMkdir {
+        path: String,
+    },
+    RemoteRename {
+        path: String,
+        name: String,
+    },
 }
 
 fn folders_first() -> bool {
@@ -422,6 +473,14 @@ fn diff_limit() -> usize {
     500
 }
 
+fn remote_page() -> usize {
+    200
+}
+
+fn remote_read_limit() -> u32 {
+    64 << 10
+}
+
 fn catalog_timeout() -> u64 {
     300
 }
@@ -432,6 +491,7 @@ impl Server {
             index: None,
             ops,
             client: None,
+            remote: Connections::new(places.clone(), remote::ssh::connector()),
             places,
             catalogs,
             plans: Vec::new(),
@@ -939,12 +999,160 @@ impl Server {
             ToolCall::CommandCancel { run } => self.ops.cancel_run(run).map(|()| {
                 format!("Cancelling run {run}. Commands aren't undoable: what it changed stays.\n")
             }),
+            ToolCall::RemoteSources {} => self.places.remotes().map(|sources| {
+                let mut out = String::new();
+                for source in &sources {
+                    let _ = writeln!(out, "{}", self.source_line(source));
+                }
+                if !sources.is_empty() {
+                    out.push_str(
+                        "Each can list, read, write, mkdir, rename and show metadata. None has a \
+                        Trash, and Monodrive offers no remote delete.\n",
+                    );
+                }
+                out
+            }),
+            ToolCall::RemoteAdd { host, id, path } => self.can_change().and_then(|()| {
+                self.places
+                    .add_remote(&host, id.as_deref(), path.as_deref())
+                    .map(|source| format!("{}\n", self.source_line(&source)))
+            }),
+            ToolCall::RemoteForget { source } => self.places.forget_remote(&source).map(|source| {
+                self.remote.disconnect(&source.id);
+                format!("Forgot {}; nothing on the server changed.\n", source.id)
+            }),
+            ToolCall::RemoteDisconnect { source } => Ok(if self.remote.disconnect(&source) {
+                format!("Disconnected from {source}. Its jobs on the owner keep their own connection.\n")
+            } else {
+                format!("{source} wasn't connected.\n")
+            }),
+            ToolCall::RemoteList {
+                path,
+                offset,
+                limit,
+            } => self
+                .remote_at(&path)
+                .and_then(|(open, at)| {
+                    let page = open.list(&at, offset, limit)?;
+                    Ok(remote_page_text(&page, offset))
+                })
+                .map_err(String::from),
+            ToolCall::RemoteStat { paths } => {
+                let blocks: Vec<Result<String, RemoteError>> = paths
+                    .iter()
+                    .map(|path| {
+                        let (open, at) = self.remote_at(path)?;
+                        Ok(remote_stat(&open.metadata(&at)?))
+                    })
+                    .collect();
+                let failed = blocks.iter().any(Result::is_err);
+                let joined = blocks
+                    .into_iter()
+                    .map(|block| block.unwrap_or_else(|e| format!("{e}\n")))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if failed { Err(joined) } else { Ok(joined) }
+            }
+            ToolCall::RemoteRead {
+                path,
+                offset,
+                limit,
+            } => self
+                .remote_at(&path)
+                .and_then(|(open, at)| {
+                    let (data, size) = open.read(&at, offset, limit)?;
+                    Ok(remote_read_text(&at, offset, &data, size))
+                })
+                .map_err(String::from),
+            ToolCall::RemoteCopy {
+                paths,
+                into,
+                conflict,
+            } => self.remote_copy(&paths, &into, conflict),
+            ToolCall::RemoteMkdir { path } => self.can_change().and_then(|()| {
+                let (open, at) = self.remote_at(&path)?;
+                open.mkdir(&at)?;
+                Ok(format!("{at}\n"))
+            }),
+            ToolCall::RemoteRename { path, name } => self.can_change().and_then(|()| {
+                let (open, at) = self.remote_at(&path)?;
+                let to = at
+                    .parent()
+                    .ok_or_else(|| format!("{at} has no name to change."))?
+                    .join(&name)?;
+                open.rename(&at, &to)?;
+                Ok(format!("{to}\n"))
+            }),
         };
         match text {
             Ok(text) if text.is_empty() => tool_text("No results.", false),
             Ok(text) => tool_text(&text, false),
             Err(e) => tool_text(&e, true),
         }
+    }
+
+    fn can_change(&self) -> Result<(), String> {
+        if self.ops.agents_change_files() {
+            Ok(())
+        } else {
+            Err("Agents can't change remote sources: Let agents change files is off in Monodrive's Agents settings.".into())
+        }
+    }
+
+    fn source_line(&self, source: &Source) -> String {
+        let state = if self.remote.is_connected(&source.id) {
+            "connected"
+        } else {
+            "not connected"
+        };
+        let start = source
+            .start
+            .as_deref()
+            .unwrap_or("the server's default folder");
+        format!("{}: {}, starts at {start}, {state}", source.id, source.host)
+    }
+
+    /// The connection for `qualified`, and the path; `source:` alone means
+    /// where the source starts.
+    fn remote_at(&self, qualified: &str) -> Result<(Arc<Connection>, RemotePath), RemoteError> {
+        if let Some(source) = qualified.strip_suffix(':') {
+            let open = self.remote.connect(source)?;
+            let at = open.start()?;
+            return Ok((open, at));
+        }
+        let at = RemotePath::parse(qualified)?;
+        Ok((self.remote.connect(at.source())?, at))
+    }
+
+    fn remote_copy(
+        &mut self,
+        paths: &[String],
+        into: &str,
+        conflict: Conflict,
+    ) -> Result<String, String> {
+        let is_local = |path: &str| path.starts_with('/') || path.starts_with('~');
+        if is_local(into) {
+            let paths = paths
+                .iter()
+                .map(|path| RemotePath::parse(path))
+                .collect::<Result<_, _>>()?;
+            return self.queue(Request::Download {
+                paths,
+                into: expand_home(into),
+                conflict,
+            });
+        }
+        if !paths.iter().all(|path| is_local(path)) {
+            return Err(
+                "One side of a remote copy is local: copy between a source and this Mac.".into(),
+            );
+        }
+        let queued = self.queue(Request::Upload {
+            paths: expand(paths),
+            into: RemotePath::parse(into)?,
+            conflict,
+        })?;
+        Ok(format!("{queued}{}\n", remote::NO_UNDO))
     }
 
     /// Runs a change through the operation owner: each resulting path on
@@ -1620,6 +1828,9 @@ fn summary(job: &Job) -> String {
 /// The summary, then each finished item: where it went, or why not.
 fn describe(job: &Job) -> String {
     let mut out = format!("{}\n", summary(job));
+    if job.transfer() == Some(ops::Transfer::Upload) {
+        let _ = writeln!(out, "{}", remote::NO_UNDO);
+    }
     for done in job.tasks.iter().filter_map(|task| task.done.as_ref()) {
         let _ = match done {
             Done::To(path) => writeln!(out, "{}", path.display()),
@@ -1627,6 +1838,73 @@ fn describe(job: &Job) -> String {
         };
     }
     out
+}
+
+/// Each entry on a line of its own: its qualified path, marked as `ls -F`
+/// marks it, then a tab and its bytes if it's a file.
+fn remote_page_text(page: &remote::Page, offset: usize) -> String {
+    let mut out = String::new();
+    for entry in &page.entries {
+        let _ = write!(out, "{}{}", entry.path, suffix(entry.kind));
+        if entry.kind == Kind::File {
+            let _ = write!(out, "\t{}", entry.size);
+        }
+        out.push('\n');
+    }
+    if page.more {
+        let _ = writeln!(
+            out,
+            "(more; pass offset {} to see the next)",
+            offset + page.entries.len()
+        );
+    }
+    if page.left_out > 0 {
+        let _ = writeln!(
+            out,
+            "({} names left out: not UTF-8, or not plain names)",
+            page.left_out
+        );
+    }
+    out
+}
+
+fn remote_stat(entry: &RemoteEntry) -> String {
+    let mut out = format!("{}\n", entry.path);
+    let kind = match entry.kind {
+        Kind::Dir => "folder",
+        Kind::File => "file",
+        Kind::Link => "link",
+        Kind::Other => "other",
+    };
+    let _ = writeln!(out, "kind: {kind}");
+    if entry.kind == Kind::File {
+        let _ = writeln!(out, "size: {} bytes", entry.size);
+    }
+    if entry.modified > 0 {
+        let when = SystemTime::UNIX_EPOCH + Duration::from_secs(entry.modified);
+        let _ = writeln!(out, "modified: {}", utc(when));
+    }
+    if let Some(mode) = entry.permissions {
+        let _ = writeln!(out, "permissions: {mode:o}");
+    }
+    if let Some(link) = &entry.link {
+        let _ = writeln!(out, "leads to: {}", link.escape_default());
+    }
+    out
+}
+
+fn remote_read_text(at: &RemotePath, offset: u64, data: &[u8], size: u64) -> String {
+    let end = offset.saturating_add(data.len() as u64);
+    let head = format!("{at}: bytes {offset} to {end} of {size}\n");
+    match std::str::from_utf8(data) {
+        Ok(text) if !text.contains('\0') => format!("{head}{text}"),
+        // A range can end partway through a character.
+        Err(e) if e.valid_up_to() + 4 > data.len() => {
+            let text = String::from_utf8_lossy(&data[..e.valid_up_to()]);
+            format!("{head}{text}")
+        }
+        _ => format!("{head}(binary, not shown; remote_copy takes it whole)\n"),
+    }
 }
 
 /// Arguments as a JSON array, so spaces, quotes and newlines in them read
@@ -2304,7 +2582,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 56] = [
+pub const TOOLS: [Tool; 66] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2924,6 +3202,138 @@ pub const TOOLS: [Tool; 56] = [
             })
         },
     },
+    Tool {
+        name: "remote_sources",
+        description: "The saved SSH servers, a line each: id, host, where browsing starts, and \
+    whether this session is connected. Never connects.",
+        input_schema: || json!({"type": "object", "properties": {}}),
+    },
+    Tool {
+        name: "remote_add",
+        description: "Save an SSH server to browse, by host, user@host or an alias in the user's \
+    ssh config. Doesn't connect. Authentication is ssh's own and never prompts: a server that needs \
+    a password reports interactive authentication required.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string"},
+                    "id": {"type": "string", "description": "What its paths are qualified with; made from the host by default."},
+                    "path": {"type": "string", "description": "Absolute folder to start in."}
+                },
+                "required": ["host"]
+            })
+        },
+    },
+    Tool {
+        name: "remote_forget",
+        description: "Forget a saved server and disconnect from it. Nothing on the server changes.",
+        input_schema: remote_source_schema,
+    },
+    Tool {
+        name: "remote_disconnect",
+        description: "End this session's connection to a server. The next remote tool connects again.",
+        input_schema: remote_source_schema,
+    },
+    Tool {
+        name: "remote_list",
+        description: "One folder on a saved server, in the server's order: source:/path a line, \
+    folders ending in /, links in @, files then a tab and their bytes. Connects if needed, and reads \
+    only this folder. source: alone is where the source starts.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "source:/path."},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100000, "default": 200}
+                },
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "remote_stat",
+        description: "Describe items on a saved server: kind, size, modified, permissions, and \
+    where a link leads. Prints a block per path.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Each source:/path."}
+                },
+                "required": ["paths"]
+            })
+        },
+    },
+    Tool {
+        name: "remote_read",
+        description: "Read part of a file on a saved server: at most 1 MB, 64 KB by default. Text \
+    only; for binary files it says so.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "source:/path."},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536}
+                },
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "remote_copy",
+        description: "Copy between a saved server and this Mac, as a job: from source:/path items \
+    into a local folder, or from local items into a source:/path folder. Returns a job id at once; \
+    job_status follows it, and continue_job goes on after a lost connection, checking everything \
+    again and starting the item over. Copying to this Mac is undoable; copying to a server isn't.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "All source:/path, or all local: absolute, ~ is your home."
+                    },
+                    "into": {"type": "string", "description": "The folder they go into: local, or source:/path."},
+                    "conflict": {
+                        "type": "string",
+                        "enum": ["stop", "skip", "keep_both", "replace"],
+                        "default": "stop",
+                        "description": "stop waits for continue_job. replace trashes what's on this Mac first, but overwrites a file on a server for good."
+                    }
+                },
+                "required": ["paths", "into"]
+            })
+        },
+    },
+    Tool {
+        name: "remote_mkdir",
+        description: "Make a folder on a saved server. Its parent must exist.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "source:/path."}},
+                "required": ["path"]
+            })
+        },
+    },
+    Tool {
+        name: "remote_rename",
+        description: "Rename an item within its folder on a saved server. Never replaces.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "source:/path."},
+                    "name": {"type": "string"}
+                },
+                "required": ["path", "name"]
+            })
+        },
+    },
 ];
 
 fn tools() -> Value {
@@ -3018,6 +3428,14 @@ fn command_schema() -> Value {
             }
         },
         "required": ["name"]
+    })
+}
+
+fn remote_source_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"source": {"type": "string", "description": "An id remote_sources prints."}},
+        "required": ["source"]
     })
 }
 
@@ -3267,6 +3685,295 @@ mod tests {
              cancelled after 40 ms: [\"/bin/tool\",\"/b\"]\n\
              not run: [\"/bin/tool\",\"/c\"]\n\
              output, 100 bytes:\nstart\n[92 bytes left out]\nend\n"
+        );
+    }
+
+    #[test]
+    fn remote_tools_browse_copy_both_ways_and_print_qualified_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let paths = ops::Paths {
+            state: root.join("state"),
+            settings: root.join("settings.json"),
+            trash: root.join("Trash"),
+        };
+        let store = places(&root);
+        let connector =
+            || -> remote::Connector { Arc::new(|_: &Source| Ok(remote::fixture::transport())) };
+        let serve = || {
+            let owner = ops::Owner::bind_with(paths.clone(), connector()).unwrap();
+            let serving = std::thread::spawn(move || owner.serve());
+            let mut server = Server::new(
+                ops::Client::new(paths.clone(), None),
+                store.clone(),
+                catalog_store(&root),
+            );
+            server.remote = Connections::new(store.clone(), connector());
+            (serving, server)
+        };
+        let (serving, mut server) = serve();
+
+        let tools = server
+            .handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .unwrap();
+        let names = tools["result"]["tools"].to_string();
+        for tool in ["remote_sources", "remote_copy", "remote_read"] {
+            assert!(names.contains(tool), "{tool}");
+        }
+        assert!(
+            !names.contains("remote_delete"),
+            "no remote delete is offered"
+        );
+
+        let (far, near) = (root.join("far"), root.join("near"));
+        std::fs::create_dir(&far).unwrap();
+        std::fs::create_dir(&near).unwrap();
+        std::fs::write(far.join("a file.txt"), "hello remote").unwrap();
+        std::fs::write(far.join("binary"), [0, 1, 2]).unwrap();
+        std::fs::create_dir(far.join("sub")).unwrap();
+        std::os::unix::fs::symlink("a file.txt", far.join("link")).unwrap();
+        std::fs::write(near.join("up.txt"), "going up").unwrap();
+
+        assert_eq!(
+            text(&call(&mut server, json!({"name": "remote_sources"}))),
+            "No results."
+        );
+        let bad = call(
+            &mut server,
+            json!({"name": "remote_add", "arguments": {"host": "-oProxyCommand=x"}}),
+        );
+        assert_eq!(bad["result"]["isError"], true);
+        let added = call(
+            &mut server,
+            json!({"name": "remote_add", "arguments": {"host": "me@box", "id": "box", "path": far}}),
+        );
+        let line = format!("box: me@box, starts at {}, not connected\n", far.display());
+        assert_eq!(text(&added), line);
+        let listed = text(&call(&mut server, json!({"name": "remote_sources"}))).to_string();
+        assert!(listed.starts_with(&line), "{listed}");
+        assert!(listed.contains("None has a Trash"), "{listed}");
+
+        let qualified = |name: &str| format!("box:{}", far.join(name).display());
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_list", "arguments": {"path": "box:"}}),
+        );
+        let mut lines: Vec<&str> = text(&reply).lines().collect();
+        lines.sort_unstable();
+        let (file, binary, sub, link) = (
+            format!("{}\t12", qualified("a file.txt")),
+            format!("{}\t3", qualified("binary")),
+            format!("{}/", qualified("sub")),
+            format!("{}@", qualified("link")),
+        );
+        assert_eq!(
+            lines,
+            [file.as_str(), binary.as_str(), link.as_str(), sub.as_str()]
+        );
+        let reply = call(&mut server, json!({"name": "remote_sources"}));
+        assert!(text(&reply).contains(", connected"), "{reply}");
+
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_list", "arguments": {"path": qualified(""), "limit": 2}}),
+        );
+        assert!(
+            text(&reply).contains("(more; pass offset 2 to see the next)"),
+            "{reply}"
+        );
+        // A path that isn't qualified is never read as a local one.
+        for local in [
+            far.display().to_string(),
+            "~/x".to_string(),
+            "relative".to_string(),
+        ] {
+            let reply = call(
+                &mut server,
+                json!({"name": "remote_list", "arguments": {"path": local}}),
+            );
+            assert_eq!(reply["result"]["isError"], true, "{local}");
+        }
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_list", "arguments": {"path": "gone:/x"}}),
+        );
+        assert_eq!(text(&reply), "gone isn't a saved remote source.");
+
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_stat", "arguments": {"paths": [qualified("link"), qualified("nope")]}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        let shown = text(&reply);
+        assert!(shown.contains("kind: link"), "{shown}");
+        assert!(shown.contains("leads to: a file.txt"), "{shown}");
+        assert!(shown.contains("nope"), "{shown}");
+
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_read", "arguments": {"path": qualified("a file.txt"), "offset": 6, "limit": 3}}),
+        );
+        assert_eq!(
+            text(&reply),
+            format!("{}: bytes 6 to 9 of 12\nrem", qualified("a file.txt"))
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_read", "arguments": {"path": qualified("binary")}}),
+        );
+        assert!(text(&reply).ends_with("(binary, not shown; remote_copy takes it whole)\n"));
+
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_mkdir", "arguments": {"path": qualified("made")}}),
+        );
+        assert_eq!(text(&reply), format!("{}\n", qualified("made")));
+        assert!(far.join("made").is_dir());
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_rename", "arguments": {"path": qualified("made"), "name": "named"}}),
+        );
+        assert_eq!(text(&reply), format!("{}\n", qualified("named")));
+        for bad in ["a/b", "..", ""] {
+            let reply = call(
+                &mut server,
+                json!({"name": "remote_rename", "arguments": {"path": qualified("named"), "name": bad}}),
+            );
+            assert_eq!(reply["result"]["isError"], true, "{bad}");
+        }
+        assert!(far.join("named").is_dir());
+
+        // Both sides remote, or both local, isn't a remote copy.
+        for (from, into) in [
+            (qualified("binary"), qualified("sub")),
+            (
+                near.join("up.txt").display().to_string(),
+                near.display().to_string(),
+            ),
+            (
+                near.join("up.txt").display().to_string(),
+                "relative".to_string(),
+            ),
+        ] {
+            let reply = call(
+                &mut server,
+                json!({"name": "remote_copy", "arguments": {"paths": [from], "into": into}}),
+            );
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+        }
+
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_copy", "arguments": {"paths": [qualified("a file.txt")], "into": near}}),
+        );
+        assert_eq!(text(&reply), "job 1 queued\n");
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_copy", "arguments": {
+                "paths": [near.join("up.txt")], "into": qualified("sub"), "conflict": "skip"
+            }}),
+        );
+        assert_eq!(text(&reply), format!("job 2 queued\n{}\n", remote::NO_UNDO));
+        drop(server);
+        serving.join().unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(near.join("a file.txt")).unwrap(),
+            b"hello remote"
+        );
+        assert_eq!(std::fs::read(far.join("sub/up.txt")).unwrap(), b"going up");
+
+        let (serving, mut server) = serve();
+        let reply = call(
+            &mut server,
+            json!({"name": "job_status", "arguments": {"job": 1}}),
+        );
+        assert_eq!(
+            text(&reply).lines().nth(1),
+            Some(near.join("a file.txt").to_str().unwrap()),
+            "{reply}"
+        );
+        assert!(text(&reply).starts_with("job 1 Download into"), "{reply}");
+        let reply = call(
+            &mut server,
+            json!({"name": "job_status", "arguments": {"job": 2}}),
+        );
+        let shown = text(&reply);
+        assert!(
+            shown.starts_with(&format!(
+                "job 2 Upload into {}: completed",
+                qualified("sub")
+            )),
+            "{shown}"
+        );
+        assert!(shown.contains(remote::NO_UNDO), "{shown}");
+        assert!(shown.contains(&qualified("sub/up.txt")), "{shown}");
+
+        // The Agents setting gates every remote change, and nothing else.
+        std::fs::write(&paths.settings, r#"{"agents_change_files": false}"#).unwrap();
+        for tool in [
+            json!({"name": "remote_add", "arguments": {"host": "other"}}),
+            json!({"name": "remote_mkdir", "arguments": {"path": qualified("no")}}),
+            json!({"name": "remote_rename", "arguments": {"path": qualified("sub"), "name": "no"}}),
+            json!({"name": "remote_copy", "arguments": {"paths": [qualified("binary")], "into": near}}),
+            json!({"name": "remote_copy", "arguments": {"paths": [near.join("up.txt")], "into": qualified("no")}}),
+        ] {
+            let reply = call(&mut server, tool.clone());
+            assert_eq!(reply["result"]["isError"], true, "{tool}");
+            assert!(text(&reply).contains("Agents can't change"), "{reply}");
+        }
+        assert!(!far.join("no").exists());
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_read", "arguments": {"path": qualified("a file.txt")}}),
+        );
+        assert_eq!(reply["result"]["isError"], false);
+        std::fs::write(&paths.settings, "{}").unwrap();
+
+        // Forgetting disconnects and changes nothing on the server.
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_disconnect", "arguments": {"source": "box"}}),
+        );
+        assert!(text(&reply).contains("Disconnected from box"), "{reply}");
+        call(
+            &mut server,
+            json!({"name": "remote_list", "arguments": {"path": "box:"}}),
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_forget", "arguments": {"source": "box"}}),
+        );
+        assert_eq!(text(&reply), "Forgot box; nothing on the server changed.\n");
+        assert!(far.join("a file.txt").exists());
+        assert!(!server.remote.is_connected("box"));
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_list", "arguments": {"path": "box:"}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        drop(server);
+        serving.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn remote_tools_report_when_authentication_needs_a_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = places(dir.path());
+        store.add_remote("nas", None, None).unwrap();
+        let mut server = server();
+        server.places = store.clone();
+        server.remote = Connections::new(
+            store,
+            Arc::new(|source: &Source| Err(RemoteError::InteractiveAuth(source.host.clone()))),
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "remote_list", "arguments": {"path": "nas:/srv"}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(
+            text(&reply).contains("nas: interactive authentication required"),
+            "{reply}"
         );
     }
 

@@ -94,8 +94,8 @@ pub enum Cwd {
     Folder(PathBuf),
 }
 
-/// What a command runs on. Only local items for now: remote sources
-/// don't exist yet, and their paths mustn't be taken for local ones.
+/// What a command runs on. Only local items: a remote source's paths mustn't
+/// be taken for local ones.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sources {

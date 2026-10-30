@@ -4,7 +4,7 @@
 
 use super::jobs::{self, Shared};
 use super::{Engine, JOURNAL, Job, Origin, Outcome, Paths, Request, Submission};
-use crate::places;
+use crate::remote::{Connector, ssh};
 use crate::user_commands::{self, Run, Runs};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, Permissions};
@@ -68,6 +68,11 @@ impl Owner {
     /// Takes ownership of `paths.state`, settles what the last owner left
     /// unfinished, and listens. Fails while another owner has it.
     pub fn bind(paths: Paths) -> Result<Self, String> {
+        Self::bind_with(paths, ssh::connector())
+    }
+
+    /// `bind`, with remote jobs reaching their sources through `connector`.
+    pub fn bind_with(paths: Paths, connector: Connector) -> Result<Self, String> {
         let dir = paths.state.clone();
         private_dir(&dir)?;
         let lock = lock(&dir.join(LOCK), libc::LOCK_EX | libc::LOCK_NB).map_err(|e| {
@@ -95,7 +100,7 @@ impl Owner {
         woken.set_nonblocking(true).map_err(|e| e.to_string())?;
         Ok(Self {
             runs: Runs::new(wake.try_clone().ok()),
-            shared: Shared::new(engine, Some(wake)),
+            shared: Shared::with_connector(engine, Some(wake), connector),
             paths,
             woken,
             listener,
@@ -215,12 +220,7 @@ impl Owner {
                     .into(),
             );
         }
-        // places.json sits beside settings.json, as `places::Store::user`
-        // puts it.
-        let store = places::Store {
-            places: self.paths.settings.with_file_name("places.json"),
-            recents: self.paths.settings.with_file_name("recents.json"),
-        };
+        let store = self.paths.places();
         let plan = user_commands::preview(&store.command(name)?, paths)?;
         self.runs.start(id, origin, plan)
     }

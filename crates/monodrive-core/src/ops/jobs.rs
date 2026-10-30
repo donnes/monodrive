@@ -1,4 +1,4 @@
-//! Copy, move, compress and extract jobs. The owner queues them and runs at
+//! Copy, move, compress, extract and remote copy jobs. The owner queues them and runs at
 //! most `RUNNING` at once, each on its own thread, one item at a time, so its
 //! socket keeps answering while they work. Every change an item makes is a
 //! `Step`, written to the journal before and after it happens, so undo
@@ -11,6 +11,7 @@ use super::{
 };
 use crate::archives::{self, Archive};
 use crate::cloud;
+use crate::remote::{Connections, Connector, RemotePath};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
@@ -48,7 +49,9 @@ pub enum State {
     Completed,
     Failed,
     Cancelled,
-    /// The owner stopped while it ran; its items were settled from the disk.
+    /// The owner stopped while it ran, and its items were settled from the
+    /// disk, or it lost the connection to a remote source. Continuing it
+    /// checks again what it's copying and where.
     Interrupted,
 }
 
@@ -70,11 +73,21 @@ impl State {
     }
 }
 
+/// Which way a remote copy goes. A job with one has `source:/path` labels in
+/// place of paths on the server's side: `into` for an upload and each task's
+/// `source` and `Done::To` for what's remote. They print; they aren't absolute,
+/// so local services refuse them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transfer {
+    Download,
+    Upload,
+}
+
 /// A copy, move, compression or extraction, as clients see it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: u64,
-    /// "Copy", "Move", "Compress" or "Extract".
+    /// "Copy", "Move", "Compress", "Extract", "Download" or "Upload".
     pub title: String,
     pub origin: Origin,
     /// Where its items go: the archive's folder for Compress.
@@ -94,6 +107,16 @@ pub struct Job {
     /// The latest run has ended and changed something undo can reverse.
     #[serde(default)]
     pub undoable: bool,
+}
+
+impl Job {
+    pub fn transfer(&self) -> Option<Transfer> {
+        match self.title.as_str() {
+            "Download" => Some(Transfer::Download),
+            "Upload" => Some(Transfer::Upload),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,13 +146,15 @@ pub(super) enum Kind {
     Move,
     Compress,
     Extract,
+    Download,
+    Upload,
 }
 
 impl Kind {
     /// What an item is made as, before it's put in place.
     fn made(self) -> &'static str {
         match self {
-            Kind::Copy | Kind::Move => "copy",
+            Kind::Copy | Kind::Move | Kind::Download | Kind::Upload => "copy",
             Kind::Compress => "archive",
             Kind::Extract => "extraction",
         }
@@ -139,9 +164,9 @@ impl Kind {
 /// A job as accepted: what goes where.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Spec {
-    kind: Kind,
-    into: PathBuf,
-    conflict: Conflict,
+    pub(super) kind: Kind,
+    pub(super) into: PathBuf,
+    pub(super) conflict: Conflict,
     /// For an extraction, the entries it takes, as paths inside `archive`.
     sources: Vec<PathBuf>,
     /// Which item each source was when the job was accepted, so a source
@@ -155,6 +180,11 @@ pub(super) struct Spec {
     /// planned against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     planned: Vec<Planned>,
+    /// The server's side of a remote copy: for a download each source, and
+    /// for an upload the one folder they go into. `sources` and `into` hold
+    /// their labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) remote: Vec<RemotePath>,
 }
 
 impl Spec {
@@ -201,6 +231,7 @@ impl Spec {
                     ids: ids(paths)?,
                     archive: None,
                     planned: Vec::new(),
+                    remote: Vec::new(),
                 })
             }
             Request::CopyPlanned { into, items } => {
@@ -221,6 +252,7 @@ impl Spec {
                     ids: items.iter().map(|item| item.found.0).collect(),
                     archive: None,
                     planned: items.clone(),
+                    remote: Vec::new(),
                 })
             }
             Request::Compress { paths } => {
@@ -240,6 +272,7 @@ impl Spec {
                     ids,
                     archive: None,
                     planned: Vec::new(),
+                    remote: Vec::new(),
                 })
             }
             Request::Extract {
@@ -259,6 +292,44 @@ impl Spec {
                     sources: items.iter().map(|item| archive.join(item)).collect(),
                     archive: Some(archive.clone()),
                     planned: Vec::new(),
+                    remote: Vec::new(),
+                })
+            }
+            Request::Download {
+                paths,
+                into,
+                conflict,
+            } => {
+                absolute([into].into_iter())?;
+                if paths.is_empty() {
+                    return Err("Name at least one item.".into());
+                }
+                Ok(Self {
+                    kind: Kind::Download,
+                    into: into.clone(),
+                    conflict: *conflict,
+                    sources: paths.iter().map(|path| path.to_string().into()).collect(),
+                    ids: Vec::new(),
+                    archive: None,
+                    planned: Vec::new(),
+                    remote: paths.clone(),
+                })
+            }
+            Request::Upload {
+                paths,
+                into,
+                conflict,
+            } => {
+                absolute(paths.iter())?;
+                Ok(Self {
+                    kind: Kind::Upload,
+                    into: into.to_string().into(),
+                    conflict: *conflict,
+                    sources: paths.clone(),
+                    ids: ids(paths)?,
+                    archive: None,
+                    planned: Vec::new(),
+                    remote: vec![into.clone()],
                 })
             }
             _ => unreachable!("only jobs have a spec"),
@@ -286,7 +357,7 @@ pub(super) struct Work {
     pub(super) source: PathBuf,
     /// The source as accepted; see `Spec::ids`.
     #[serde(default)]
-    id: Option<FileId>,
+    pub(super) id: Option<FileId>,
     /// Where it goes, once it starts.
     pub(super) to: Option<PathBuf>,
     /// The hidden copy made beside `to` and renamed into place once it's
@@ -296,8 +367,16 @@ pub(super) struct Work {
     /// written before it happens.
     pub(super) steps: Vec<Step>,
     /// In the source's files.
-    bytes: u64,
-    done: Option<Done>,
+    pub(super) bytes: u64,
+    pub(super) done: Option<Done>,
+    /// A remote copy's source when it first started, as size and modification
+    /// time, so continuing it refuses one that changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) seen: Option<(u64, u64)>,
+    /// The unfinished item an upload made on the server, written down before
+    /// it's made. It's the only thing on a server a job ever removes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) left: Option<RemotePath>,
 }
 
 impl Work {
@@ -379,6 +458,8 @@ impl Entry {
                 *work = Work {
                     source: work.source.clone(),
                     id: work.id,
+                    seen: work.seen,
+                    left: work.left.take(),
                     ..Work::default()
                 };
             }
@@ -403,6 +484,8 @@ impl Entry {
             Kind::Move => "Move",
             Kind::Compress => "Compress",
             Kind::Extract => "Extract",
+            Kind::Download => "Download",
+            Kind::Upload => "Upload",
         }
     }
 
@@ -448,11 +531,23 @@ pub(super) struct Shared {
     /// Wakes the owner's poll loop when a job ends, so it can exit once
     /// idle.
     wake: Option<UnixStream>,
+    /// Remote jobs' connections, kept only while a job uses them.
+    pub(super) remote: Connections,
 }
 
 impl Shared {
+    #[cfg(test)]
     pub(super) fn new(engine: Engine, wake: Option<UnixStream>) -> Arc<Self> {
+        Self::with_connector(engine, wake, crate::remote::ssh::connector())
+    }
+
+    pub(super) fn with_connector(
+        engine: Engine,
+        wake: Option<UnixStream>,
+        connector: Connector,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            remote: Connections::new(engine.paths.places(), connector),
             engine: Mutex::new(engine),
             wake,
         })
@@ -463,7 +558,7 @@ impl Shared {
     }
 
     /// Journals an item as it stands.
-    fn record(&self, op: u64, index: usize, work: &Work) -> Result<(), String> {
+    pub(super) fn record(&self, op: u64, index: usize, work: &Work) -> Result<(), String> {
         let record = Record::Work {
             op,
             index,
@@ -505,6 +600,7 @@ pub(super) fn start(shared: &Arc<Shared>) {
         std::thread::spawn(move || {
             run(&shared, op);
             start(&shared);
+            shared.remote.release_idle();
             if let Some(mut wake) = shared.wake.as_ref() {
                 let _ = std::io::Write::write_all(&mut wake, &[0]);
             }
@@ -536,7 +632,9 @@ pub(super) fn run(shared: &Shared, op: u64) {
         .into_iter()
         .map(|(i, source)| {
             let bytes = match spec.kind {
-                Kind::Copy | Kind::Move => tally(&source),
+                Kind::Copy | Kind::Move | Kind::Upload => tally(&source),
+                // Only the server can say, so the item asks when it starts.
+                Kind::Download => 0,
                 Kind::Compress => spec.sources.iter().map(|source| tally(source)).sum(),
                 Kind::Extract => archive
                     .as_ref()
@@ -598,32 +696,39 @@ pub(super) fn next(shared: &Shared, op: u64) -> bool {
         work,
     };
     let done = item.transfer(&cancel, &copied);
-    let stop = matches!(done, Next::Stop(_));
+    let stop = match &done {
+        Next::Done(_) => None,
+        Next::Stop(_) => Some(State::Waiting),
+        Next::Interrupt(_) => Some(State::Interrupted),
+    };
     item.work.done = Some(match done {
         Next::Done(done) => done,
-        Next::Stop(why) => Done::Failed(why),
+        Next::Stop(why) | Next::Interrupt(why) => Done::Failed(why),
     });
     let _ = shared.record(op, index, &item.work);
-    if stop {
-        shared.finish(op, State::Waiting);
+    if let Some(state) = stop {
+        shared.finish(op, state);
         return false;
     }
     true
 }
 
-enum Next {
+pub(super) enum Next {
     Done(Done),
     /// A conflict under `Conflict::Stop`.
     Stop(String),
+    /// The connection to a remote source went, or couldn't be made. The items
+    /// not done wait for the job to be continued.
+    Interrupt(String),
 }
 
 /// One item on its way.
-struct Item<'a> {
-    shared: &'a Shared,
-    op: u64,
-    index: usize,
-    spec: &'a Spec,
-    work: Work,
+pub(super) struct Item<'a> {
+    pub(super) shared: &'a Shared,
+    pub(super) op: u64,
+    pub(super) index: usize,
+    pub(super) spec: &'a Spec,
+    pub(super) work: Work,
 }
 
 /// An extraction's archive, read once and kept while the job runs.
@@ -660,7 +765,7 @@ fn holders(path: &Path) -> Option<Vec<FileId>> {
 
 /// "{path}: a different item...", for a source replaced since the job was
 /// queued.
-fn replaced(path: &Path) -> String {
+pub(super) fn replaced(path: &Path) -> String {
     format!(
         "{}: a different item is there now than when the job was queued, so it was left alone.",
         path.display()
@@ -681,6 +786,8 @@ impl Item<'_> {
             Kind::Copy | Kind::Move => self.copy_or_move(cancel, copied),
             Kind::Compress => self.compress(cancel, copied),
             Kind::Extract => self.extract(cancel, copied),
+            Kind::Download => self.download(cancel, copied),
+            Kind::Upload => self.upload(cancel, copied),
         }
     }
 
@@ -728,7 +835,7 @@ impl Item<'_> {
                 into.display()
             ));
         }
-        let (to, replacing) = match self.claim(to, &source, &source) {
+        let (to, replacing) = match self.claim(to, &source, Some(&source)) {
             Ok(claimed) => claimed,
             Err(next) => return next,
         };
@@ -757,12 +864,13 @@ impl Item<'_> {
 
     /// Where an item meant for `to` goes under the job's conflict choice,
     /// and what it replaces. It comes from `source`, read from the item at
-    /// `read`, which is never replaced, nor any folder holding it.
-    fn claim(
+    /// `read`, which is never replaced, nor any folder holding it. A remote
+    /// source has none here.
+    pub(super) fn claim(
         &self,
         mut to: PathBuf,
         source: &Path,
-        read: &Path,
+        read: Option<&Path>,
     ) -> Result<(PathBuf, Option<Step>), Next> {
         let Ok((there, there_stamp)) = disk::stamp(&to) else {
             return Ok((to, None));
@@ -787,7 +895,10 @@ impl Item<'_> {
                 to = free;
                 Ok((to, None))
             }
-            Conflict::Replace if holders(read).is_none_or(|held| held.contains(&there)) => {
+            Conflict::Replace
+                if read
+                    .is_some_and(|read| holders(read).is_none_or(|held| held.contains(&there))) =>
+            {
                 Err(Next::Done(Done::Failed(format!(
                     "{}: can't be replaced by {}, which it is or holds.",
                     to.display(),
@@ -889,7 +1000,7 @@ impl Item<'_> {
                 path.display()
             ));
         };
-        let (to, replacing) = match self.claim(spec.into.join(name), &source, path) {
+        let (to, replacing) = match self.claim(spec.into.join(name), &source, Some(path)) {
             Ok(claimed) => claimed,
             Err(next) => return next,
         };
@@ -988,7 +1099,7 @@ impl Item<'_> {
     /// Makes the item at a hidden name beside `to` with `make`, then puts
     /// it in place, sending what it replaces to the Trash first, so nothing
     /// partial ever sits at `to`.
-    fn make_here(
+    pub(super) fn make_here(
         &mut self,
         to: &Path,
         replacing: Option<Step>,
@@ -1110,14 +1221,19 @@ fn now() -> u64 {
 /// `path` as "name 2.ext", "name 3.ext" and on: the first that's free.
 pub(super) fn numbered(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
+    (2..).find_map(|n: u32| {
+        let free = path.with_file_name(numbered_name(name, n));
+        disk::id(&free).is_none().then_some(free)
+    })
+}
+
+/// `name` as "name 2.ext".
+pub(super) fn numbered_name(name: &str, n: u32) -> String {
     let (stem, ext) = match name.rfind('.') {
         Some(dot) if dot > 0 => name.split_at(dot),
         _ => (name, ""),
     };
-    (2..).find_map(|n: u32| {
-        let free = path.with_file_name(format!("{stem} {n}{ext}"));
-        disk::id(&free).is_none().then_some(free)
-    })
+    format!("{stem} {n}{ext}")
 }
 
 impl Engine {
@@ -1204,7 +1320,9 @@ impl Engine {
         let mut records = Vec::new();
         for job in self.jobs.iter().filter(|job| job.state.active()) {
             for (index, work) in job.work.iter().enumerate() {
-                if work.done.is_some() || (work.to.is_none() && work.steps.is_empty()) {
+                if work.done.is_some()
+                    || (work.to.is_none() && work.steps.is_empty() && work.left.is_none())
+                {
                     continue;
                 }
                 let mut work = work.clone();
@@ -1237,6 +1355,12 @@ impl Engine {
                 );
                 if let Some(temp) = work.temp.as_deref() {
                     why = unfinished(why, temp, job.spec.kind);
+                }
+                if let Some(left) = &work.left {
+                    why = format!(
+                        "{why} An unfinished copy may be on the server at {left}; continuing \
+                        the job removes it."
+                    );
                 }
                 work.done = Some(if whole {
                     Done::To(to)

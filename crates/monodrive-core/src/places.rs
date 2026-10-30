@@ -6,6 +6,7 @@
 //! settings.json.
 
 use crate::ops;
+use crate::remote::{self, Source};
 use crate::search::{Query, Scope};
 use crate::user_commands::Definition;
 use crate::volumes::{self, Volume, VolumeId};
@@ -20,8 +21,8 @@ pub const RECENTS: usize = 50;
 /// Where the lists are saved.
 #[derive(Clone, Debug)]
 pub struct Store {
-    /// `places.json`: the favorites, saved searches and registered
-    /// repositories, and later saved servers.
+    /// `places.json`: the favorites, saved searches, registered repositories,
+    /// saved commands and remote sources.
     pub places: PathBuf,
     /// `recents.json`, newest first.
     pub recents: PathBuf,
@@ -84,6 +85,8 @@ struct Saved {
     repositories: Vec<Registration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     commands: Vec<Definition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    remotes: Vec<Source>,
 }
 
 impl Favorite {
@@ -370,6 +373,73 @@ impl Store {
                 .ok_or_else(|| format!("{name} isn't a saved command."))?;
             saved.commands.remove(ix);
             write(&self.places, &saved)
+        })
+    }
+
+    /// The saved remote sources in the order they were added.
+    pub fn remotes(&self) -> Result<Vec<Source>, String> {
+        Ok(self.saved()?.remotes)
+    }
+
+    pub fn remote(&self, id: &str) -> Result<Source, remote::RemoteError> {
+        self.remotes()
+            .map_err(remote::RemoteError::Failed)?
+            .into_iter()
+            .find(|source| source.id == id)
+            .ok_or_else(|| remote::RemoteError::UnknownSource(id.into()))
+    }
+
+    /// Saves a source for `host` and returns it, without connecting. The same
+    /// host and start already saved is returned as it is; a new one gets `id`,
+    /// which must be free, or a free one made from the host.
+    pub fn add_remote(
+        &self,
+        host: &str,
+        id: Option<&str>,
+        start: Option<&str>,
+    ) -> Result<Source, String> {
+        // Only to check the host and start: its id comes next.
+        let checked = Source::new("new", host, start)?;
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            let same =
+                |source: &&Source| source.host == checked.host && source.start == checked.start;
+            if let Some(known) = saved.remotes.iter().find(same)
+                && id.is_none_or(|id| id == known.id)
+            {
+                return Ok(known.clone());
+            }
+            let taken = |id: &str| saved.remotes.iter().any(|source| source.id == id);
+            let id = match id {
+                Some(id) if taken(id) => return Err(format!("{id} is already a remote source.")),
+                Some(id) => id.to_string(),
+                None => {
+                    let base = remote::id_for(host);
+                    std::iter::once(base.clone())
+                        .chain((2..).map(|n| format!("{base}-{n}")))
+                        .find(|id| !taken(id))
+                        .unwrap_or(base)
+                }
+            };
+            let source = Source::new(&id, host, start)?;
+            saved.remotes.push(source.clone());
+            write(&self.places, &saved)?;
+            Ok(source)
+        })
+    }
+
+    /// Forgets the source `id` and returns it. Nothing on the server changes.
+    pub fn forget_remote(&self, id: &str) -> Result<Source, String> {
+        locked(&self.places, || {
+            let mut saved = self.saved()?;
+            let ix = saved
+                .remotes
+                .iter()
+                .position(|source| source.id == id)
+                .ok_or_else(|| format!("{id} isn't a saved remote source."))?;
+            let source = saved.remotes.remove(ix);
+            write(&self.places, &saved)?;
+            Ok(source)
         })
     }
 

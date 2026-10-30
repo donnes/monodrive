@@ -9,12 +9,15 @@ pub(crate) mod disk;
 mod jobs;
 mod owner;
 pub mod rename;
+mod transfers;
 
 pub use disk::{FileId, Stamp};
-pub use jobs::{Conflict, Done, Job, State, Task};
+pub use jobs::{Conflict, Done, Job, State, Task, Transfer};
 pub(crate) use owner::lock;
 pub use owner::{Client, Owner, Watch, run_owner};
 
+use crate::places;
+use crate::remote::RemotePath;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -43,6 +46,15 @@ impl Paths {
             settings: support.join("settings.json"),
             trash: home.join(".Trash"),
         })
+    }
+
+    /// The lists saved beside settings.json, as `places::Store::user` puts
+    /// them.
+    fn places(&self) -> places::Store {
+        places::Store {
+            places: self.settings.with_file_name("places.json"),
+            recents: self.settings.with_file_name("recents.json"),
+        }
     }
 }
 
@@ -115,6 +127,23 @@ pub enum Request {
         #[serde(default)]
         entries: Vec<String>,
         into: PathBuf,
+        #[serde(default)]
+        conflict: Conflict,
+    },
+    /// Copies the items on remote sources into a local folder, as a job.
+    /// There's no remote move: moving would have to remove the source, with
+    /// nothing to bring it back.
+    Download {
+        paths: Vec<RemotePath>,
+        into: PathBuf,
+        #[serde(default)]
+        conflict: Conflict,
+    },
+    /// Copies local items into a folder on a remote source, as a job. No undo:
+    /// SFTP has no Trash. `Conflict::Replace` overwrites a file for good.
+    Upload {
+        paths: Vec<PathBuf>,
+        into: RemotePath,
         #[serde(default)]
         conflict: Conflict,
     },
@@ -208,6 +237,8 @@ impl Request {
             Request::Move { .. } => "Move",
             Request::Compress { .. } => "Compress",
             Request::Extract { .. } => "Extract",
+            Request::Download { .. } => "Download",
+            Request::Upload { .. } => "Upload",
             Request::Retry { .. } => "Retry",
             Request::Cancel { .. } => "Cancel",
             Request::Undo | Request::UndoOf { .. } => "Undo",
@@ -833,6 +864,8 @@ impl Engine {
             | Request::Move { .. }
             | Request::Compress { .. }
             | Request::Extract { .. }
+            | Request::Download { .. }
+            | Request::Upload { .. }
             | Request::Retry { .. } => self.queue(submission),
             Request::Cancel { job } => self.cancel(job),
             Request::RenameMany { .. } => self.rename_many(submission),
@@ -1605,3 +1638,6 @@ fn agents_change_files(paths: &Paths) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transfer_tests;
