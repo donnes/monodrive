@@ -57,9 +57,8 @@ Saved browsing workspaces were dropped.
 
 ## Next up, in order
 
-1. The design system: DESIGN.md, shared controls with pill buttons, 8 pt rows and 14 pt cards, and a check against hard-coded styling.
-2. A command palette on ⌘K, built on it, modeled on T3 Code's: a search field, section labels, rows with an icon, a title, an optional subtitle and a right-aligned shortcut, a chevron on rows that open a sub-page, and a key-hint footer. ⇧⌘P stays as a second shortcut. It searches commands, places and recent files, then indexed files once something is typed. Sub-pages include Remote locations, Cloud storage and Drives. Connect to Server moves from ⌘K to ⇧⌘K and is also in the palette.
-3. Then plans 08 to 19, 21 and 22 with the picks above. The palette's Remote locations and Cloud storage pages grow as plans 14 and 18 land.
+1. A command palette on ⌘K, built on it, modeled on T3 Code's: a search field, section labels, rows with an icon, a title, an optional subtitle and a right-aligned shortcut, a chevron on rows that open a sub-page, and a key-hint footer. ⇧⌘P stays as a second shortcut. It searches commands, places and recent files, then indexed files once something is typed. Sub-pages include Remote locations, Cloud storage and Drives. Connect to Server moves from ⌘K to ⇧⌘K and is also in the palette.
+2. Then plans 08 to 19, 21 and 22 with the picks above, following DESIGN.md. The palette's Remote locations and Cloud storage pages grow as plans 14 and 18 land.
 
 ## Current state
 
