@@ -2313,7 +2313,10 @@ impl Browser {
                     (Some(why), Some(renaming)) => {
                         renaming.sending = false;
                         renaming.error = Some(why);
-                        window.focus(&renaming.field.focus_handle(cx), cx);
+                        // Not out from under a sheet that took the keys.
+                        if this.sheet.is_none() && this.menu.is_none() {
+                            window.focus(&renaming.field.focus_handle(cx), cx);
+                        }
                     }
                     (Some(why), None) => this.toast(why, true, None, cx),
                     (None, still) => {
@@ -2346,6 +2349,7 @@ impl Browser {
     /// while the last name tried can't be used. The title bar says why.
     fn rename_field(&self, path: &Path, width: f32, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let renaming = self.renaming.as_ref().filter(|r| r.path == path)?;
+        let covered = self.sheet.is_some() || self.menu.is_some();
         // Solid over the selection's accent, whatever the pane's glass.
         let mut fill = theme::pane_fill();
         fill.a = 1.;
@@ -2373,8 +2377,9 @@ impl Browser {
             .bg(fill)
             .text_color(content(1.))
             .child(renaming.field.clone())
-            .children(renaming.error.clone().map(|why| {
+            .children(renaming.error.clone().filter(|_| !covered).map(|why| {
                 // Over the row below, so no row moves, and kept in the window.
+                // It would draw over a sheet or a menu too, so it waits for them.
                 div().absolute().left_0().top(gpui::relative(1.)).child(
                     gpui::deferred(
                         gpui::anchored()
@@ -4820,6 +4825,33 @@ mod tests {
         // The keys are back on the list, not in a field that went away.
         press(cx, "up");
         assert_eq!(shown(&browser, cx).1, ["zeta"]);
+    }
+
+    #[gpui::test]
+    fn a_rename_error_stays_under_sheets_and_menus(cx: &mut TestAppContext) {
+        let (_dir, project) = folder();
+        let _owned = own(cx);
+        let (browser, cx) = browse(&project, cx);
+        press(cx, "down down down enter");
+        retype(cx, "zeta");
+        press(cx, "enter");
+        let error_shown = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            cx.debug_bounds("rename-error").is_some()
+        };
+        assert!(error_shown(cx));
+        press(cx, "cmd-,");
+        assert!(browser.read_with(cx, |b, _| b.sheet.is_some()));
+        assert!(!error_shown(cx));
+        press(cx, "escape");
+        assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
+        assert!(error_shown(cx));
+        let at = row(&browser, 0, cx);
+        right_click(cx, at);
+        cx.run_until_parked();
+        assert!(menu(&browser, cx).is_some());
+        assert!(!error_shown(cx));
     }
 
     #[gpui::test]
