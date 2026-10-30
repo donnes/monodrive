@@ -3,9 +3,11 @@
 //! Everything shown is read off the UI thread and read again when a watch
 //! hears a change, so nothing here polls.
 
+use super::pane::Stop;
 use super::{
-    Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, OpenPlace, OpenSelected, Operations,
-    PlaceNext, PlacePrevious, Sheet, drag_area, home, lock, sidebar_width,
+    Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, OpenInNewTab, OpenPlace,
+    OpenSelected, Operations, PlaceNext, PlacePrevious, Sheet, drag_area, home, lock,
+    sidebar_width,
 };
 use crate::commands::{self, Scope};
 use crate::preferences::Preferences;
@@ -271,16 +273,27 @@ impl Browser {
         self.sidebar.load_volumes = Some(cx.spawn(async move |this, cx| {
             let volumes = listed.await;
             let _ = this.update(cx, |this, cx| {
-                let pane = this.pane().clone();
-                let here = pane.read(cx).folder().to_path_buf();
-                let gone = this.sidebar.volumes.iter().find(|old| {
-                    here.starts_with(&old.mount)
-                        && !old.startup
-                        && !volumes.iter().any(|new| new.mount == old.mount)
-                });
-                if let Some(name) = gone.map(|volume| volume.name.clone()) {
+                let gone: Vec<_> = this
+                    .sidebar
+                    .volumes
+                    .iter()
+                    .filter(|old| !old.startup && !volumes.iter().any(|new| new.mount == old.mount))
+                    .cloned()
+                    .collect();
+                let panes: Vec<_> = this
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes())
+                    .cloned()
+                    .collect();
+                for pane in panes {
+                    let here = pane.read(cx).folder().to_path_buf();
+                    let Some(volume) = gone.iter().find(|old| here.starts_with(&old.mount)) else {
+                        continue;
+                    };
                     if this.toast.is_none() {
-                        this.toast(format!("{name} was disconnected."), false, None, cx);
+                        let said = format!("{} was disconnected.", volume.name);
+                        this.toast(said, false, None, cx);
                     }
                     pane.update(cx, |pane, cx| pane.navigate(home(), cx));
                 }
@@ -347,11 +360,13 @@ impl Browser {
 
     /// Recents changed: lists it again where it's on screen.
     fn relist_recents(&mut self, cx: &mut Context<Self>) {
-        self.pane().update(cx, |pane, cx| {
-            if pane.showing_recents() {
-                pane.list(true, cx);
-            }
-        });
+        for pane in self.shown_panes() {
+            pane.update(cx, |pane, cx| {
+                if pane.showing_recents() {
+                    pane.list(true, cx);
+                }
+            });
+        }
     }
 
     /// Add to Sidebar: pins the folder selected, last.
@@ -489,6 +504,34 @@ impl Browser {
             }
             Availability::Unavailable(why) => self.toast(why, true, None, cx),
         }
+    }
+
+    /// Open in New Tab from the sidebar: the row the keys are on.
+    fn open_place_in_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stop = match self.row_at(self.sidebar_cursor) {
+            Some(Row::Recents) => {
+                let mut stop = self.pane().read(cx).stop().clone();
+                stop.recents = true;
+                stop
+            }
+            Some(Row::Favorite(ix)) => {
+                let Some(place) = self.sidebar.places.get(ix) else {
+                    return;
+                };
+                match place.availability.clone() {
+                    Availability::Available(path) => Stop::folder(path),
+                    Availability::Unavailable(why) => return self.toast(why, true, None, cx),
+                }
+            }
+            Some(Row::Volume(ix)) => {
+                let Some(volume) = self.sidebar.volumes.get(ix) else {
+                    return;
+                };
+                Stop::folder(volume.mount.clone())
+            }
+            None => return,
+        };
+        self.new_tab(stop, window, cx);
     }
 
     /// A right-click on the sidebar's row `ix`.
@@ -908,6 +951,9 @@ impl Browser {
                             this.open_place(window, cx)
                         }),
                     )
+                    .on_action(cx.listener(|this, _: &OpenInNewTab, window, cx| {
+                        this.open_place_in_tab(window, cx)
+                    }))
                     .when_some(
                         match at_cursor {
                             Some(Row::Favorite(ix)) => Some(ix),

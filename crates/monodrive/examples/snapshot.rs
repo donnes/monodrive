@@ -25,6 +25,8 @@
 //! over a picture that runs from bright to dark, `narrow.png`, where the path
 //! collapses, and `no-path-bar.png`.
 //!
+//! `tabs-one.png`, `tabs-three.png` and `tabs-many.png` show the top bar.
+//!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
 
@@ -32,8 +34,8 @@ use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
 use gpui::{AppContext, Focusable, HeadlessAppContext, px, size};
 use monodrive::browser::{
     Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
-    GoRecents, GoToFolder, GoTrash, OpenSettings, Operations, Places, Rename, SelectLast,
-    SelectNext, ShowContextMenu, ShowCopiesAndMoves, Undo,
+    EnclosingFolder, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings,
+    Operations, Places, Rename, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves, Undo,
 };
 use monodrive::connect;
 use monodrive::preferences::{Preferences, Theme, View};
@@ -344,6 +346,29 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();
     save(&mut cx, window, out, "background")?;
+    shoot_tabs(&mut cx, out, folder, &base)
+}
+
+/// The top bar with tabs, and the panes they hold.
+fn shoot_tabs(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
+    cx.update(|cx| cx.set_global(base.clone()));
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    save(cx, window, out, "tabs-one")?;
+    for action in [
+        &NewTab as &dyn Action,
+        &SelectNext,
+        &OpenSelected,
+        &NewTab,
+        &EnclosingFolder,
+    ] {
+        dispatch(cx, window, action)?;
+    }
+    save(cx, window, out, "tabs-three")?;
+    for _ in 0..24 {
+        dispatch(cx, window, &NewTab)?;
+    }
+    save(cx, window, out, "tabs-many")?;
     Ok(())
 }
 

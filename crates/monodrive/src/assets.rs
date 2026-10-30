@@ -13,6 +13,7 @@ macro_rules! icons {
 }
 
 icons!(
+    "add-01",
     "agent-amp",
     "agent-antigravity",
     "agent-claude",

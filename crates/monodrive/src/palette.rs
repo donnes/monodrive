@@ -1106,6 +1106,7 @@ fn glyph_for(command: &Command) -> &'static str {
         "Applications" => "app-window",
         "Open in Terminal" => "terminal",
         "New File" => "file",
+        "New Tab" => "add-01",
         _ => match command.group {
             Group::App | Group::Window => "app-window",
             Group::File | Group::Edit => "file",

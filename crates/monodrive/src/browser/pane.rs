@@ -9,8 +9,9 @@ use super::{
     FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
     GoRecents, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection,
     OpenInTerminal, OpenSelected, PageDown, PageUp, Places, PutBack, Redo, Rename, RevealInFinder,
-    ScrollToBottom, ScrollToTop, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-    ShowContextMenu, ShowPackageContents, Undo, home, short_reason, sidebar, trash, with_owner,
+    ReverseSort, ScrollToBottom, ScrollToTop, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+    ShowContextMenu, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, Undo,
+    ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -90,7 +91,29 @@ pub(super) struct Chrome {
     pub(super) ejectable: Option<PathBuf>,
 }
 
+/// Where a new pane starts.
+pub(super) struct Opening {
+    pub(super) history: Vec<Stop>,
+    pub(super) at: usize,
+    pub(super) view: View,
+    pub(super) sort: Sort,
+}
+
+impl Opening {
+    pub(super) fn at(stop: Stop, view: View, sort: Sort) -> Self {
+        Self {
+            history: vec![stop],
+            at: 0,
+            view,
+            sort,
+        }
+    }
+}
+
 pub struct Pane {
+    /// Its tab is on screen. A hidden pane lists nothing, and lists again
+    /// when it's shown.
+    shown: bool,
     /// The file list: where focus starts and returns.
     pub(super) list_focus: FocusHandle,
     /// The folder just left, to select once its parent lists.
@@ -157,7 +180,7 @@ pub struct Pane {
     /// This folder shows its hidden files anyway, because Go to Folder was
     /// asked for one of them. Cleared on leaving the folder.
     peek_hidden: bool,
-    sort: Sort,
+    pub(super) sort: Sort,
     /// A rectangle being dragged over the listing to select.
     marquee: Option<Marquee>,
     /// A rectangle was just dragged. GPUI still reports a click when it
@@ -181,7 +204,7 @@ impl EventEmitter<PaneEvent> for Pane {}
 
 impl Pane {
     pub(super) fn new(
-        folder: PathBuf,
+        opening: Opening,
         index: Arc<OnceLock<Result<Index, String>>>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -194,40 +217,25 @@ impl Pane {
             }
         })
         .detach();
-        cx.observe_global::<Preferences>(|this, cx| {
-            let prefs = cx.global::<Preferences>();
-            let listed = (prefs.show_hidden, prefs.sort) != (this.show_hidden, this.sort);
-            let (view, grid_icon) = (prefs.view, prefs.grid_icon);
-            if listed && this.query.is_empty() {
-                this.reload(cx);
-            }
-            this.grid_icon = grid_icon;
-            if view != this.view {
-                this.view = view;
-                this.rebuild();
-                // The other layout put it somewhere else; the grid shows it
-                // once it knows how many fit across.
-                this.reveal_pending = this.selection.cursor().is_some();
-            }
-            cx.notify();
-        })
-        .detach();
         // Whatever moves the selection repaints, so the Trash's bar follows it.
         cx.observe_self(|this, cx| this.follow_trash_selection(cx))
             .detach();
         let prefs = cx.global::<Preferences>();
-        let (view, grid_icon, show_hidden, sort) =
-            (prefs.view, prefs.grid_icon, prefs.show_hidden, prefs.sort);
-        let mut pane = Self {
+        let (grid_icon, show_hidden) = (prefs.grid_icon, prefs.show_hidden);
+        let Opening {
+            history,
+            at,
+            view,
+            sort,
+        } = opening;
+        Self {
+            shown: false,
             list_focus: cx.focus_handle().tab_stop(true),
             reselect: None,
             search,
             index,
-            history: vec![Stop {
-                folder,
-                recents: false,
-            }],
-            at: 0,
+            history,
+            at,
             entries: Vec::new(),
             depths: Vec::new(),
             root: Vec::new(),
@@ -265,9 +273,77 @@ impl Pane {
             missing: HashSet::new(),
             backdrop: cx.new(|_| Backdrop::default()),
             chrome: Chrome::default(),
-        };
-        pane.reload(cx);
-        pane
+        }
+    }
+
+    /// Whether its tab is on screen.
+    pub(super) fn set_shown(&mut self, shown: bool) {
+        self.shown = shown;
+        if !shown {
+            self.refresh = None;
+            self.held.clear();
+            self.marquee = None;
+        }
+    }
+
+    /// What's on screen, as a place in the history.
+    pub(super) fn stop(&self) -> &Stop {
+        &self.history[self.at]
+    }
+
+    /// Preferences changed: lists again if the hidden files did. With `adopt`,
+    /// Settings chose them for this pane, so it takes their view and sort.
+    pub(super) fn preferences_changed(&mut self, adopt: bool, cx: &mut Context<Self>) {
+        let prefs = cx.global::<Preferences>();
+        let (view, sort, show_hidden) = (prefs.view, prefs.sort, prefs.show_hidden);
+        self.grid_icon = prefs.grid_icon;
+        let sorted = adopt && sort != self.sort;
+        if adopt {
+            self.sort = sort;
+            self.set_view(view);
+        }
+        if (sorted || show_hidden != self.show_hidden) && self.query.is_empty() {
+            self.reload(cx);
+        }
+        cx.notify();
+    }
+
+    fn set_view(&mut self, view: View) {
+        if view != self.view {
+            self.view = view;
+            self.rebuild();
+            // The other layout put it somewhere else; the grid shows it
+            // once it knows how many fit across.
+            self.reveal_pending = self.selection.cursor().is_some();
+        }
+    }
+
+    /// ⌘1 and ⌘2: this pane's view, and where the next tab starts.
+    fn choose_view(&mut self, view: View, cx: &mut Context<Self>) {
+        self.set_view(view);
+        preferences::update(cx, |p| p.view = view);
+        cx.notify();
+    }
+
+    /// A Sort by command or a column title: this pane's order, and where the
+    /// next tab starts.
+    fn choose_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
+        if sort != self.sort {
+            self.sort = sort;
+            preferences::update(cx, |p| p.sort = sort);
+            if self.query.is_empty() {
+                self.reload(cx);
+            }
+        }
+    }
+
+    /// A Sort by command picks a column in its natural direction; choosing the
+    /// sort in use again leaves it, as a checked menu item should. Reverse
+    /// Sort Order flips it.
+    fn sort_by(&mut self, by: SortBy, cx: &mut Context<Self>) {
+        if self.sort.by != by {
+            self.choose_sort(sorted_by(self.sort, by), cx);
+        }
     }
 
     fn tidy_folders(&self, cx: &App) -> Vec<PathBuf> {
@@ -366,12 +442,12 @@ impl Pane {
         let recents = self
             .showing_recents()
             .then(|| cx.try_global::<Places>().map(|places| places.store.clone()));
-        let (show_hidden, sort) = {
-            let prefs = cx.global::<Preferences>();
-            (prefs.show_hidden, prefs.sort)
-        };
+        if !self.shown {
+            return;
+        }
+        let show_hidden = cx.global::<Preferences>().show_hidden;
         self.show_hidden = show_hidden;
-        self.sort = sort;
+        let sort = self.sort;
         let tidy = self.tidy_folders(cx);
         let peek = self.peek_hidden;
         // This listing covers the expanded folders too.
@@ -1584,7 +1660,7 @@ impl Pane {
     /// ↩, or clicking away: renames through the owner. A name that can't be
     /// used keeps the field open with the reason; the same name just closes
     /// it.
-    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(renaming) = self.renaming.as_ref().filter(|r| !r.sending) else {
             return;
         };
@@ -2145,9 +2221,19 @@ pub(super) struct Renaming {
 }
 
 /// A place in the history: a folder, or Recents in front of one.
+#[derive(Clone)]
 pub(super) struct Stop {
     pub(super) folder: PathBuf,
     pub(super) recents: bool,
+}
+
+impl Stop {
+    pub(super) fn folder(folder: PathBuf) -> Self {
+        Self {
+            folder,
+            recents: false,
+        }
+    }
 }
 
 /// A grid cell's name in at most two lines, as Finder sets it: the first
@@ -2252,10 +2338,11 @@ pub(super) fn hidden_levels(widths: &[f32], ellipsis: f32, room: f32) -> usize {
 }
 
 /// A column title that sorts by its column; the sorted one shows which way.
-pub(super) fn sort_header(
+fn sort_header(
     by: SortBy,
     title: &'static str,
     sort: Option<Sort>,
+    cx: &mut Context<Pane>,
 ) -> gpui::Stateful<gpui::Div> {
     let active = sort.filter(|sort| sort.by == by);
     div()
@@ -2272,9 +2359,11 @@ pub(super) fn sort_header(
         .when(sort.is_some(), |d| {
             d.cursor_pointer()
                 .hover(|s| s.text_color(content(1.)))
-                .on_click(move |_, _, cx| {
-                    preferences::update(cx, |p| p.sort = sorted_by(p.sort, by))
-                })
+                .on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.choose_sort(sorted_by(this.sort, by), cx)
+                    }),
+                )
         })
         .child(div().truncate().child(title))
         .children(active.map(|sort| {
@@ -2601,6 +2690,21 @@ impl Pane {
                     }))
                 })
         })
+        .on_action(cx.listener(|this, _: &ViewAsList, _, cx| this.choose_view(View::List, cx)))
+        .on_action(cx.listener(|this, _: &ViewAsGrid, _, cx| this.choose_view(View::Grid, cx)))
+        .on_action(cx.listener(|this, _: &SortByName, _, cx| this.sort_by(SortBy::Name, cx)))
+        .on_action(
+            cx.listener(|this, _: &SortByModified, _, cx| this.sort_by(SortBy::Modified, cx)),
+        )
+        .on_action(cx.listener(|this, _: &SortBySize, _, cx| this.sort_by(SortBy::Size, cx)))
+        .on_action(cx.listener(|this, _: &SortByKind, _, cx| this.sort_by(SortBy::Kind, cx)))
+        .on_action(cx.listener(|this, _: &ReverseSort, _, cx| {
+            let sort = Sort {
+                descending: !this.sort.descending,
+                ..this.sort
+            };
+            this.choose_sort(sort, cx);
+        }))
         // While a name is edited, its field has the keys, and nothing else
         // changes files.
         .when(!sheet && !renaming, |d| {
@@ -2856,7 +2960,7 @@ impl Render for Pane {
         let prefs = cx.global::<Preferences>();
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
         // Search results stay in relevance order, so no column shows a sort.
-        let sort_shown = self.showing_folder().then_some(prefs.sort);
+        let sort_shown = self.showing_folder().then_some(self.sort);
         let empty = self.root.is_empty() && self.error.is_none();
         let look = prefs.background.clone().map(|path| Look {
             path,
@@ -2888,16 +2992,17 @@ impl Render for Pane {
                         .text_size(px(theme::TEXT_SMALL))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(content(0.65))
-                        .child(sort_header(SortBy::Name, "Name", sort_shown).flex_1())
+                        .child(sort_header(SortBy::Name, "Name", sort_shown, cx).flex_1())
                         .child(
-                            sort_header(SortBy::Modified, "Date Modified", sort_shown).w(px(180.)),
+                            sort_header(SortBy::Modified, "Date Modified", sort_shown, cx)
+                                .w(px(180.)),
                         )
                         .child(
-                            sort_header(SortBy::Size, "Size", sort_shown)
+                            sort_header(SortBy::Size, "Size", sort_shown, cx)
                                 .w(px(80.))
                                 .justify_end(),
                         )
-                        .child(sort_header(SortBy::Kind, "Kind", sort_shown).w(px(110.))),
+                        .child(sort_header(SortBy::Kind, "Kind", sort_shown, cx).w(px(110.))),
                 )
             })
             .child(list)

@@ -45,7 +45,9 @@ A sheet with keys of its own has a 32 pt footer under a hairline, with its text 
 
 ### Top bar and path bar
 
-The top bar has one job: where am I, among which tabs. It holds Back and Forward, the current folder's name in semibold, and the jobs ring at the right. Nothing else goes there. The name is where the first tab will go, so it doesn't move when tabs arrive.
+The top bar has one job: where am I, among which tabs. It holds Back and Forward, the current folder's name in semibold, and the jobs ring at the right. Nothing else goes there. The name is the first tab, so it doesn't move when tabs arrive.
+
+With two or more tabs, each is a 24 pt pill named for its folder, 180 pt wide: 0.14 fill and semibold ink for the active one, none and 0.65 ink for the rest, with the usual hover. A press selects it, a drag reorders it, and hovering shows a 20 pt ✕ over the name's end, which moves nothing. A + follows the last pill. Too many to fit, they shrink to 96 pt, truncating their names, and then the strip scrolls sideways; the active one scrolls into view. The bar always leaves 24 pt to drag the window by.
 
 The path bar is 28 pt, under the files, and part of the pane, so each pane gets its own. ⌥⌘P or Settings hides it, and it's on by default. On the left, in a folder, are the path crumbs. On the right is the status: `1 of 7 selected, 6 bytes · 49.6 GB free`, or `2 items` for search results and Recents. Toasts sit above it.
 

@@ -8,14 +8,14 @@
 //! as in AppKit: a text field acts on its text, the file list on its files.
 
 use crate::browser::{
-    AddToSidebar, Back, ClearRecents, ConnectToServer, CopyPath, DeselectAll, Duplicate,
+    AddToSidebar, Back, ClearRecents, CloseTab, ConnectToServer, CopyPath, DeselectAll, Duplicate,
     EditFavorites, Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GoApplications,
     GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents, GoToFolder, GoTrash,
-    MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenInTerminal,
-    OpenSelected, OpenSettings, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom,
-    RevealInFinder, ReverseSort, ShowCopiesAndMoves, ShowPackageContents, SortByKind,
-    SortByModified, SortByName, SortBySize, ToggleHiddenFiles, TogglePathBar, Undo, ViewAsGrid,
-    ViewAsList, ZoomIn, ZoomOut,
+    MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab,
+    OpenInNewTab, OpenInTerminal, OpenSelected, OpenSettings, PreviousTab, PutBack, QuickLook,
+    Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort, ShowCopiesAndMoves,
+    ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
+    TogglePathBar, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{browser, connect, empty_trash, goto, jobs, menu, palette, settings, text_field};
@@ -192,12 +192,16 @@ pub fn all() -> Vec<Command> {
         separated(command("Quit Monodrive", App, &["cmd-q"], None, || {
             Box::new(Quit)
         })),
-        on(
+        command("New Tab", File, &["cmd-t"], BROWSER, || Box::new(NewTab)),
+        separated(command("Close Tab", File, &["cmd-w"], BROWSER, || {
+            Box::new(CloseTab)
+        })),
+        separated(on(
             FOLDER,
             command("New Folder", File, &["cmd-shift-n"], BROWSER, || {
                 Box::new(NewFolder)
             }),
-        ),
+        )),
         on(
             FOLDER,
             command("New File", File, &[], BROWSER, || Box::new(NewFile)),
@@ -211,6 +215,13 @@ pub fn all() -> Vec<Command> {
                 BROWSER,
                 || Box::new(OpenSelected),
             )),
+        ),
+        // ⌃⌘O, as Finder's.
+        on(
+            &[Scope::Selection, Scope::Sidebar],
+            command("Open in New Tab", File, &["ctrl-cmd-o"], BROWSER, || {
+                Box::new(OpenInNewTab)
+            }),
         ),
         on(
             &[Scope::Package],
@@ -462,9 +473,23 @@ pub fn all() -> Vec<Command> {
             Box::new(ResetZoom)
         }),
         command("Minimize", Window, &["cmd-m"], None, || Box::new(Minimize)),
-        command("Close Window", Window, &["cmd-w"], None, || {
+        command("Close Window", Window, &["cmd-shift-w"], None, || {
             Box::new(CloseWindow)
         }),
+        separated(command(
+            "Show Next Tab",
+            Window,
+            &["ctrl-tab"],
+            BROWSER,
+            || Box::new(NextTab),
+        )),
+        command(
+            "Show Previous Tab",
+            Window,
+            &["ctrl-shift-tab"],
+            BROWSER,
+            || Box::new(PreviousTab),
+        ),
         separated(command(
             "Copies and Moves",
             Window,
@@ -918,6 +943,7 @@ mod tests {
             shown(&[Scope::Selection, Scope::Package], &prefs, &all),
             [
                 "Open ⌘↓",
+                "Open in New Tab ⌃⌘O",
                 "Show Package Contents",
                 "Reveal in Finder",
                 "Open in Terminal",
@@ -950,6 +976,7 @@ mod tests {
             shown(&[Scope::Sidebar], &prefs, &all),
             [
                 "Open ⌘↓",
+                "Open in New Tab ⌃⌘O",
                 "| Remove from Sidebar ⌘⌫",
                 "Eject ⌘E",
                 "Clear Recents"
@@ -958,7 +985,7 @@ mod tests {
         // New Folder with Selection is for several, after the ways to open.
         let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
         assert_eq!(
-            several[4..6],
+            several[5..7],
             ["| New Folder with Selection ⌃⌘N", "Rename ↩"]
         );
         // What wouldn't run now is left out, and so is a separator with

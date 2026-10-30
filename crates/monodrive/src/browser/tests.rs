@@ -1,8 +1,9 @@
 use super::pane::*;
 use super::*;
 use crate::pasteboard::Pasteboard;
+use crate::preferences::View;
 use gpui::{Keystroke, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point};
-use monodrive_core::entries::{Entry, Kind, Sort};
+use monodrive_core::entries::{Entry, Kind, Sort, SortBy};
 use monodrive_core::ops::Origin;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1175,7 +1176,7 @@ fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut Test
     press(cx, "alt-up down");
     assert_eq!(shown(&browser, cx).1, ["Kit.app"]);
     assert!(offered(cx));
-    press(cx, "shift-f10 down down");
+    press(cx, "shift-f10 down down down");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Show Package Contents"));
     press(cx, "enter");
     let inside = in_pane(&browser, cx, |browser, _| browser.folder().to_path_buf());
@@ -1244,4 +1245,137 @@ fn the_empty_trash_card_counts_hidden_items_and_says_so(cx: &mut TestAppContext)
     );
     press(cx, "escape");
     release(owned, cx);
+}
+
+/// The tab count and which is on screen.
+fn tabs(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> (usize, usize) {
+    browser.read_with(cx, |b, _| (b.tabs.len(), b.active))
+}
+
+fn location(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> PathBuf {
+    in_pane(browser, cx, |pane, _| pane.folder().to_path_buf())
+}
+
+#[gpui::test]
+fn each_tab_has_its_own_folder_history_selection_view_and_sort(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "down cmd-down");
+    assert_eq!(location(&browser, cx), project.join("docs"));
+    // ⌘T: the same folder, with nothing to go back to.
+    press(cx, "cmd-t");
+    assert_eq!(tabs(&browser, cx), (2, 1));
+    assert_eq!(location(&browser, cx), project.join("docs"));
+    assert_eq!(in_pane(&browser, cx, |pane, _| pane.history.len()), 1);
+    press(cx, "cmd-up");
+    assert_eq!(location(&browser, cx), project);
+    press(cx, "alt-down cmd-2 ctrl-alt-cmd-3");
+    let in_tab =
+        |cx: &mut VisualTestContext| in_pane(&browser, cx, |pane, _| (pane.view, pane.sort.by));
+    assert_eq!(in_tab(cx), (View::Grid, SortBy::Size));
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    // ⌃Tab comes round; the first tab is as it was, and Back still works.
+    press(cx, "ctrl-tab");
+    assert_eq!(tabs(&browser, cx), (2, 0));
+    assert_eq!(location(&browser, cx), project.join("docs"));
+    assert_eq!(in_tab(cx), (View::List, SortBy::Name));
+    assert!(shown(&browser, cx).1.is_empty());
+    // Preferences follow what's on screen, for the menu bar's checkmarks.
+    let prefs = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let prefs = cx.global::<Preferences>();
+            (prefs.view, prefs.sort.by)
+        })
+    };
+    assert_eq!(prefs(cx), (View::List, SortBy::Name));
+    press(cx, "cmd-[");
+    assert_eq!(location(&browser, cx), project);
+    press(cx, "ctrl-shift-tab");
+    assert_eq!(tabs(&browser, cx), (2, 1));
+    assert_eq!(in_tab(cx), (View::Grid, SortBy::Size));
+    assert_eq!(prefs(cx), (View::Grid, SortBy::Size));
+}
+
+#[gpui::test]
+fn closing_a_tab_shows_a_neighbor_and_the_last_closes_the_window(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-t cmd-t");
+    assert_eq!(tabs(&browser, cx), (3, 2));
+    press(cx, "cmd-w");
+    assert_eq!(tabs(&browser, cx), (2, 1));
+    // The keys are on what's left.
+    press(cx, "down");
+    assert_eq!(shown(&browser, cx).1, ["docs"]);
+    press(cx, "cmd-w");
+    assert_eq!(tabs(&browser, cx), (1, 0));
+    press(cx, "cmd-w");
+    assert!(cx.windows().is_empty());
+}
+
+#[gpui::test]
+fn a_hidden_tab_lists_nothing_until_it_is_shown(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let first = pane_of(&browser, cx);
+    press(cx, "cmd-t");
+    // Hidden, a change on disk and the hidden-files setting leave it alone.
+    std::fs::write(project.join("new.txt"), "").unwrap();
+    press(cx, "cmd->");
+    assert_eq!(shown(&browser, cx).0.len(), 5);
+    let rows = |cx: &mut VisualTestContext| {
+        first.read_with(cx, |pane, _| (pane.entries.len(), pane.listing))
+    };
+    assert_eq!(rows(cx), (3, false));
+    first.update(cx, |pane, cx| pane.list(true, cx));
+    assert_eq!(rows(cx), (3, false));
+    // Shown, it reads the disk again, the setting and the new file included.
+    press(cx, "ctrl-tab");
+    assert_eq!(rows(cx), (5, false));
+}
+
+#[gpui::test]
+fn the_tab_strip_keeps_the_name_in_place_and_reorders(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let at = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.debug_bounds(selector).unwrap()
+    };
+    let alone = at("tab-0", cx);
+    press(cx, "cmd-t");
+    // Nothing jumps when the name becomes the first tab.
+    assert_eq!(at("tab-0", cx).origin, alone.origin);
+    press(cx, "cmd-t cmd-up");
+    let titles = |cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, cx| {
+            b.tabs
+                .iter()
+                .map(|tab| tab.focused().read(cx).title(cx))
+                .collect::<Vec<_>>()
+        })
+    };
+    let parent = project.parent().unwrap().file_name().unwrap();
+    let parent = parent.to_string_lossy().into_owned();
+    assert_eq!(titles(cx), ["project", "project", parent.as_str()]);
+    browser.update(cx, |b, cx| b.move_tab(2, 0, cx));
+    assert_eq!(titles(cx), [parent.as_str(), "project", "project"]);
+    // What's on screen stays on screen.
+    assert_eq!(tabs(&browser, cx), (3, 0));
+    // A press selects a tab, and its ✕ closes it.
+    let second = at("tab-1", cx).center();
+    cx.simulate_click(second, with(""));
+    assert_eq!(tabs(&browser, cx), (3, 1));
+    cx.simulate_mouse_move(second, None, with(""));
+    let close = at("tab-close-1", cx).center();
+    cx.simulate_click(close, with(""));
+    assert_eq!(tabs(&browser, cx).0, 2);
+    // Too many to fit, they stop shrinking and scroll, and the strip leaves
+    // room to drag the window by.
+    for _ in 0..30 {
+        press(cx, "cmd-t");
+    }
+    let pill = at("tab-0", cx);
+    assert!(pill.size.width >= px(96.), "{pill:?}");
 }

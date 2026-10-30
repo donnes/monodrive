@@ -3,6 +3,7 @@
 
 mod pane;
 mod sidebar;
+mod tabs;
 mod trash;
 
 #[cfg(test)]
@@ -22,24 +23,25 @@ use crate::goto::{GotoEvent, GotoView};
 use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
 use crate::palette::{Now, PaletteEvent, PaletteView};
-use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, View, WorkspaceStyle};
+use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
 use crate::quick_look::{self, Preview};
 use crate::settings::{self, SettingsView};
 use crate::text_field;
-use crate::theme::{self, ButtonLook, Elevation, accent, content, danger, icon_button};
+use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
 use crate::traffic_lights;
 use gpui::{
     App, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight, Global,
     KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Task, Window, WindowAppearance, WindowControlArea, actions, canvas, div, prelude::*, px,
+    Point, ScrollHandle, Task, Window, WindowAppearance, WindowControlArea, actions, canvas, div,
+    prelude::*, px,
 };
-use monodrive_core::entries::SortBy;
 use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Request};
-use pane::{Chrome, Pane, PaneEvent, sorted_by};
+use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
+use tabs::Tab;
 
 actions!(
     browser,
@@ -120,6 +122,11 @@ actions!(
         EditFavorites,
         FavoriteUp,
         FavoriteDown,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        OpenInNewTab,
     ]
 );
 
@@ -202,7 +209,14 @@ pub struct Browser {
     after_sheet: Option<AfterSheet>,
     /// What commands would act on as the palette opened.
     palette_target: Option<PaletteTarget>,
-    pane: Entity<Pane>,
+    /// At least one, always.
+    tabs: Vec<Tab>,
+    /// Which of `tabs` is on screen.
+    active: usize,
+    /// The strip's scroll position, when tabs don't fit.
+    tab_scroll: ScrollHandle,
+    /// The tab under the pointer, which shows its ✕.
+    hovered_tab: Option<usize>,
     /// Started with the window; searches wait on it.
     index: Arc<OnceLock<Result<Index, String>>>,
     /// Saves the window's frame once a move or resize settles.
@@ -260,13 +274,19 @@ impl Browser {
         // Whatever moves the selection repaints, so Quick Look follows it here.
         cx.observe_self(|this, cx| this.follow_selection(cx))
             .detach();
+        // Preferences reach what's on screen; a hidden tab reads them when
+        // it's shown. Settings' own changes to the view and the sort go to
+        // the pane the commands act on, and nothing else changes those.
+        cx.observe_global::<Preferences>(|this, cx| {
+            let adopt = matches!(this.sheet, Some(Sheet::Settings(_)));
+            let focused = this.pane().clone();
+            for pane in this.shown_panes() {
+                let adopt = adopt && pane == focused;
+                pane.update(cx, |pane, cx| pane.preferences_changed(adopt, cx));
+            }
+        })
+        .detach();
         let index: Arc<OnceLock<Result<Index, String>>> = Arc::default();
-        let pane = {
-            let index = index.clone();
-            cx.new(|cx| Pane::new(folder, index, cx))
-        };
-        cx.subscribe(&pane, Self::pane_event).detach();
-        cx.observe(&pane, |_, _, cx| cx.notify()).detach();
         let mut browser = Self {
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle().tab_stop(true),
@@ -275,7 +295,10 @@ impl Browser {
             focus_before_sheet: None,
             after_sheet: None,
             palette_target: None,
-            pane,
+            tabs: Vec::new(),
+            active: 0,
+            tab_scroll: ScrollHandle::new(),
+            hovered_tab: None,
             index,
             frame_save: Task::ready(()),
             _changes: Task::ready(()),
@@ -295,13 +318,42 @@ impl Browser {
             quick_look: None,
             sidebar: sidebar::Sidebar::default(),
         };
+        let (view, sort) = {
+            let prefs = cx.global::<Preferences>();
+            (prefs.view, prefs.sort)
+        };
+        let opening = Opening::at(Stop::folder(folder), view, sort);
+        let pane = browser.add_pane(opening, cx);
+        pane.update(cx, |pane, cx| {
+            pane.set_shown(true);
+            pane.reload(cx);
+        });
+        browser.tabs.push(Tab { pane });
         browser.load_volumes(cx);
         browser
     }
 
     /// The pane commands act on.
     fn pane(&self) -> &Entity<Pane> {
-        &self.pane
+        self.tabs[self.active].focused()
+    }
+
+    /// The panes on screen.
+    fn shown_panes(&self) -> Vec<Entity<Pane>> {
+        self.tabs[self.active].panes().cloned().collect()
+    }
+
+    /// Preferences keep the view and sort of the pane commands act on: the
+    /// menu bar's checkmarks read them, and a new window starts from them.
+    fn mirror_pane(&self, cx: &mut Context<Self>) {
+        let (view, sort) = {
+            let pane = self.pane().read(cx);
+            (pane.view, pane.sort)
+        };
+        preferences::update(cx, |p| {
+            p.view = view;
+            p.sort = sort;
+        });
     }
 
     /// What the window tells `pane` this frame.
@@ -326,14 +378,14 @@ impl Browser {
     }
 
     /// What a pane asks of its window.
-    fn pane_event(&mut self, _: Entity<Pane>, event: &PaneEvent, cx: &mut Context<Self>) {
+    fn pane_event(&mut self, pane: Entity<Pane>, event: &PaneEvent, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Toast { text, failed, undo } => self.toast(text.clone(), *failed, *undo, cx),
             PaneEvent::ClearToast => self.toast = None,
             PaneEvent::Follow(job) => self.jobs.update(cx, |jobs, cx| jobs.follow(*job, cx)),
             PaneEvent::VolumesChanged => self.load_volumes(cx),
             PaneEvent::Menu { scopes, at } => {
-                let origin = self.pane().read(cx).list_focus.clone();
+                let origin = pane.read(cx).list_focus.clone();
                 self.request_menu(scopes.clone(), *at, origin, cx);
             }
             PaneEvent::Eject(mount) => self.eject(mount.clone(), cx),
@@ -447,11 +499,13 @@ impl Browser {
                     if this.index_status != Some(status) {
                         this.index_status = Some(status);
                         if ready {
-                            this.pane().update(cx, |pane, cx| {
-                                if !pane.query.is_empty() {
-                                    pane.reload(cx);
-                                }
-                            });
+                            for pane in this.shown_panes() {
+                                pane.update(cx, |pane, cx| {
+                                    if !pane.query.is_empty() {
+                                        pane.reload(cx);
+                                    }
+                                });
+                            }
                         }
                         cx.notify();
                     }
@@ -886,20 +940,27 @@ impl Browser {
         self.toast(jobs::title(&job), false, undo, cx);
         // A job's bytes may have moved between volumes.
         self.load_volumes(cx);
-        self.pane().update(cx, |pane, cx| {
-            if pane.showing_folder() && job.into == pane.folder() {
-                let made = job
-                    .tasks
-                    .into_iter()
-                    .filter_map(|task| match task.done {
-                        Some(Done::To(path)) => Some(path),
-                        _ => None,
-                    })
-                    .collect();
-                pane.select_on_listing(made);
-                pane.list(false, cx);
-            }
-        });
+        let made: Vec<PathBuf> = job
+            .tasks
+            .into_iter()
+            .filter_map(|task| match task.done {
+                Some(Done::To(path)) => Some(path),
+                _ => None,
+            })
+            .collect();
+        for pane in self.shown_panes() {
+            pane.update(cx, |pane, cx| {
+                if !pane.showing_folder() {
+                    return;
+                }
+                // A move also left the folder it came from.
+                let landed = job.into == pane.folder();
+                if landed {
+                    pane.select_on_listing(made.clone());
+                }
+                pane.list(!landed, cx);
+            });
+        }
     }
 
     /// Empty Trash: erases what's in the Trash for good, once a person has
@@ -987,49 +1048,6 @@ impl Browser {
         )
         .absolute()
         .size_0()
-    }
-
-    /// One job: where am I, among which tabs. The folder's name is where the
-    /// first tab will go, so it stays put when tabs arrive.
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let pane = self.pane().read(cx);
-        let title = pane.title(cx);
-        let (back, forward) = (pane.at > 0, pane.at + 1 < pane.history.len());
-        div()
-            .h(px(theme::TITLE_BAR_HEIGHT))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_1()
-            .pr_3()
-            .child(
-                icon_button("back", "Back", "chevron-left", back).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.pane().update(cx, |pane, cx| pane.step_history(-1, cx));
-                    },
-                )),
-            )
-            .child(
-                icon_button("forward", "Forward", "chevron-right", forward).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.pane().update(cx, |pane, cx| pane.step_history(1, cx));
-                    },
-                )),
-            )
-            .child(
-                div()
-                    .ml_1()
-                    .px(px(6.))
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(theme::TEXT_BODY))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title),
-            )
-            .child(drag_area().flex_1().h_full())
-            .children(self.jobs.read(cx).ring().map(|ring| {
-                ring.on_click(cx.listener(|this, _, window, cx| this.toggle_jobs(window, cx)))
-            }))
     }
 
     /// The toast at the bottom of the files, with its Undo.
@@ -1184,7 +1202,7 @@ impl Render for Browser {
         self.settings_focus.clone().tab_stop(regions);
         let width = pane_room(window, cx);
         let chrome = self.chrome_for(self.pane().clone(), width, cx);
-        let (lone_folder, renaming, selected) = self.pane().update(cx, |pane, cx| {
+        let (lone_folder, renaming, selected) = self.pane().clone().update(cx, |pane, cx| {
             pane.chrome = chrome;
             pane.search.focus_handle(cx).tab_stop(regions);
             pane.list_focus.clone().tab_stop(regions);
@@ -1234,12 +1252,30 @@ impl Render for Browser {
                 .on_action(
                     cx.listener(|this, _: &EmptyTrash, window, cx| this.empty_trash(window, cx)),
                 )
+                .on_action(
+                    cx.listener(|this, _: &NewTab, window, cx| this.open_tab_here(window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                    this.close_tab(this.active, window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &NextTab, window, cx| this.step_tab(1, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &PreviousTab, window, cx| this.step_tab(-1, window, cx)),
+                )
             })
             .when(!sheet && !renaming, |d| {
                 d.when_some(lone_folder, |d, path| {
+                    let tab = path.clone();
                     d.on_action(cx.listener(move |this, _: &AddToSidebar, _, cx| {
                         this.add_to_sidebar(path.clone(), cx)
                     }))
+                    .on_action(cx.listener(
+                        move |this, _: &OpenInNewTab, window, cx| {
+                            this.open_in_new_tab(tab.clone(), window, cx)
+                        },
+                    ))
                 })
             })
             .on_action(
@@ -1267,15 +1303,6 @@ impl Render for Browser {
             })
             .on_action(|_: &TogglePathBar, _, cx| {
                 preferences::update(cx, |p| p.show_path_bar = !p.show_path_bar)
-            })
-            .on_action(|_: &ViewAsList, _, cx| preferences::update(cx, |p| p.view = View::List))
-            .on_action(|_: &ViewAsGrid, _, cx| preferences::update(cx, |p| p.view = View::Grid))
-            .on_action(|_: &SortByName, _, cx| sort_by(SortBy::Name, cx))
-            .on_action(|_: &SortByModified, _, cx| sort_by(SortBy::Modified, cx))
-            .on_action(|_: &SortBySize, _, cx| sort_by(SortBy::Size, cx))
-            .on_action(|_: &SortByKind, _, cx| sort_by(SortBy::Kind, cx))
-            .on_action(|_: &ReverseSort, _, cx| {
-                preferences::update(cx, |p| p.sort.descending = !p.sort.descending)
             })
             .on_action(|_: &ZoomIn, _, cx| preferences::update(cx, |p| p.step_ui_scale(1)))
             .on_action(|_: &ZoomOut, _, cx| preferences::update(cx, |p| p.step_ui_scale(-1)))
@@ -1377,17 +1404,6 @@ fn with_owner<V: 'static, T: Send + 'static>(
     })
     .detach();
     true
-}
-
-/// A Sort by command picks a column in its natural direction; choosing the
-/// sort in use again leaves it, as a checked menu item should. Reverse Sort
-/// Order flips it.
-fn sort_by(by: SortBy, cx: &mut App) {
-    preferences::update(cx, |p| {
-        if p.sort.by != by {
-            p.sort = sorted_by(p.sort, by);
-        }
-    });
 }
 
 /// The context menu, and what had the keys before it, where its commands
