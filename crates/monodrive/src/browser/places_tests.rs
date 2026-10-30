@@ -1664,3 +1664,16 @@ fn going_to_a_dotfile_does_not_open_the_trash_or_applications_to_hidden_files(
     assert!(rows.contains(&"  app.app".to_string()), "{rows:?}");
     assert!(!rows.contains(&"  .DS_Store".to_string()), "{rows:?}");
 }
+
+#[test]
+fn every_applications_folder_is_tidy_through_links_too() {
+    let roots = super::application_roots(Path::new("/Users/someone"));
+    let system = Path::new("/System/Applications");
+    assert!(roots.iter().any(|root| root == system));
+    assert!(!sidebar::lists_hidden(system, true, &roots));
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("to-apps");
+    std::os::unix::fs::symlink(system, &link).unwrap();
+    assert!(!sidebar::lists_hidden(&link, true, &roots));
+    assert!(sidebar::lists_hidden(dir.path(), true, &roots));
+}

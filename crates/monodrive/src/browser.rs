@@ -1735,6 +1735,16 @@ fn drag_area() -> gpui::Div {
         })
 }
 
+/// The folders of apps that a person doesn't keep dotfiles in, for a home
+/// folder at `home`.
+pub fn application_roots(home: &Path) -> Vec<PathBuf> {
+    vec![
+        "/Applications".into(),
+        "/System/Applications".into(),
+        home.join("Applications"),
+    ]
+}
+
 pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)

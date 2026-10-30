@@ -111,10 +111,7 @@ pub fn run(folder: Option<PathBuf>) {
                     store,
                     trash: paths.trash,
                     drives: Arc::new(browser::System),
-                    applications: vec![
-                        "/Applications".into(),
-                        browser::home().join("Applications"),
-                    ],
+                    applications: browser::application_roots(&browser::home()),
                 });
             }
             cx.set_global(Shared {
