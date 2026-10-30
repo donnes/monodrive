@@ -38,12 +38,67 @@ fi
 
 dist=target/release/dist
 rm -rf "$dist"
-mkdir -p "$dist/stage"
+mkdir -p "$dist/stage/.background"
+cp assets/prod/dmg-background.tiff "$dist/stage/.background/background.tiff"
 cp -R "$app" "$dist/stage/"
 ln -s /Applications "$dist/stage/Applications"
 dmg=$dist/Monodrive-$version-arm64.dmg
-hdiutil create -quiet -volname Monodrive -srcfolder "$dist/stage" -format UDZO -fs APFS "$dmg"
+
+# Finder can only lay out a writable image, and it needs room for .DS_Store.
+writable=$dist/layout.dmg
+size=$(($(du -sm "$dist/stage" | cut -f1) + 64))
+hdiutil create -quiet -volname Monodrive -srcfolder "$dist/stage" -format UDRW -fs APFS -size "${size}m" "$writable"
 rm -rf "$dist/stage"
+# Finder's reference to the background keeps this path, so use the one every
+# Mac mounts the finished image at.
+mount=/Volumes/Monodrive
+if [[ -e "$mount" ]]; then
+  echo "$mount is already mounted; eject it first" >&2
+  exit 1
+fi
+hdiutil attach -quiet "$writable" -readwrite -noverify -noautoopen
+trap 'hdiutil detach -quiet "$mount" -force' EXIT
+# Finder saves the window's background, size and icon positions in the volume's
+# .DS_Store. Reopening the window is what makes it save them.
+osascript - "$mount" <<'APPLESCRIPT'
+on run argv
+  set dmgVolume to POSIX file (item 1 of argv) as alias
+  tell application "Finder"
+    open dmgVolume
+    set win to container window of dmgVolume
+    set current view of win to icon view
+    set toolbar visible of win to false
+    set statusbar visible of win to false
+    set bounds of win to {200, 120, 860, 588}
+    set opts to icon view options of win
+    set arrangement of opts to not arranged
+    set shows item info of opts to false
+    set icon size of opts to 112
+    set text size of opts to 13
+    set background picture of opts to file ".background:background.tiff" of dmgVolume
+    set position of item "Monodrive.app" of dmgVolume to {170, 200}
+    set position of item "Applications" of dmgVolume to {490, 200}
+    close win
+    open dmgVolume
+    delay 1
+    close container window of dmgVolume
+  end tell
+end run
+APPLESCRIPT
+# It writes the file after the window closes. Without it the image would ship as
+# a bare Finder window, so fail instead.
+for _ in {1..20}; do
+  [[ -f "$mount/.DS_Store" ]] && break
+  sleep 0.5
+done
+if [[ ! -f "$mount/.DS_Store" ]]; then
+  echo "Finder didn't save the installer window's layout" >&2
+  exit 1
+fi
+hdiutil detach -quiet "$mount"
+trap - EXIT
+hdiutil convert -quiet "$writable" -format UDZO -o "$dmg"
+rm "$writable"
 
 if [[ "$identity" != - ]]; then
   codesign --force --timestamp --sign "$identity" "$dmg"
