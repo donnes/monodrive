@@ -1,8 +1,8 @@
 name: Release
 
-# Nightly runs daily from main, skipping a commit that already has a nightly,
-# and on demand from the Actions tab. Stable runs when a vX.Y.Z tag that matches
-# Cargo.toml's version is pushed, and needs the signing secrets.
+# Nightly runs daily from main, skipping a commit that already has a nightly.
+# Both channels run on demand from the Actions tab.
+# Stable creates the vX.Y.Z tag on the commit it built, and needs the signing secrets.
 #
 # Signing and notarizing use these secrets. Without them a nightly is ad hoc signed.
 #   CSC_LINK           base64 of the Developer ID Application .p12
@@ -10,15 +10,23 @@ name: Release
 #   APPLE_API_KEY      contents of the App Store Connect .p8
 #   APPLE_API_KEY_ID   its key ID
 #   APPLE_API_ISSUER   its issuer ID
+#
+# ANTHROPIC_API_KEY, optional, has Claude summarize the changes in the notes.
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
   schedule:
     # Avoid minute zero, when GitHub's scheduled jobs are busiest.
     - cron: "17 6 * * *"
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Channel
+        type: choice
+        options: [nightly, stable]
+        default: nightly
+      version:
+        description: Stable version, like 0.2.0. Empty is one patch past the last stable.
+        type: string
 
 permissions:
   contents: read
@@ -43,28 +51,42 @@ jobs:
       - id: plan
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
+          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          STABLE_VERSION: ${{ inputs.version }}
         run: |
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Releases build from main, not $GITHUB_REF."
+            exit 1
+          fi
           cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          latest=$(git tag --list 'v*' --sort=-v:refname | grep -v -x -e 'v.*-nightly\..*' | head -1 || true)
+          # Cargo.toml only names the first release. Nightlies count from the
+          # next patch, so one always sorts after the stable before it.
+          next=$cargo_version
+          if [[ -n "$latest" ]]; then
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            next=$major.$minor.$((patch + 1))
+          fi
           due=true
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+          if [[ "$CHANNEL" == stable ]]; then
             channel=stable
-            version=${GITHUB_REF_NAME#v}
-            if [[ "$version" != "$cargo_version" ]]; then
-              echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $cargo_version."
+            version=${STABLE_VERSION:-$next}
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::\"$version\" isn't a version like 0.2.0."
+              exit 1
+            fi
+            if git rev-parse --quiet --verify "refs/tags/v$version" >/dev/null; then
+              echo "::error::v$version is already released."
               exit 1
             fi
             if [[ -z "$CSC_LINK" ]]; then
               echo "::error::A stable release must be signed and notarized, and the signing secrets aren't set."
               exit 1
             fi
-            previous=$(git tag --list 'v*' --sort=-v:refname | grep -v -x -e "$GITHUB_REF_NAME" -e 'v.*-nightly\..*' | head -1 || true)
+            previous=$latest
           else
-            if [[ "$GITHUB_REF" != refs/heads/main ]]; then
-              echo "::error::Nightlies build from main, not $GITHUB_REF."
-              exit 1
-            fi
             channel=nightly
-            version=$cargo_version-nightly.$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER
+            version=$next-nightly.$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER
             previous=$(git tag --list 'v*-nightly.*' --sort=-v:refname | head -1 || true)
             if [[ "$GITHUB_EVENT_NAME" == schedule && -n "$(git tag --points-at HEAD --list 'v*-nightly.*')" ]]; then
               echo "This commit already has a nightly."
@@ -161,6 +183,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          # The notes read the commits back to the previous tag.
+          fetch-depth: 0
+          persist-credentials: false
+      # Without notes the release falls back to GitHub's generated ones.
+      - name: Write release notes
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+        run: scripts/release-notes "$VERSION" "$PREVIOUS_TAG" "$GITHUB_SHA" "$RUNNER_TEMP/notes.md"
       - uses: actions/download-artifact@v4
         with:
           name: release
@@ -172,16 +208,23 @@ jobs:
           PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
           SIGNED: ${{ needs.build.outputs.signed }}
         run: |
-          args=("v$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --title "Monodrive $VERSION" --generate-notes)
-          if [[ -n "$PREVIOUS_TAG" ]]; then
-            args+=(--notes-start-tag "$PREVIOUS_TAG")
+          notes=$RUNNER_TEMP/notes.md
+          args=("v$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Monodrive $VERSION")
+          if [[ -f "$notes" ]]; then
+            if [[ "$SIGNED" != true ]]; then
+              warning="This build isn't notarized, so macOS blocks it. After copying it to Applications, run \`xattr -d com.apple.quarantine /Applications/Monodrive.app\`."
+              printf '%s\n\n%s\n' "$warning" "$(cat "$notes")" > "$notes"
+            fi
+            args+=(--notes-file "$notes")
+          else
+            args+=(--generate-notes)
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              args+=(--notes-start-tag "$PREVIOUS_TAG")
+            fi
           fi
           if [[ "$CHANNEL" == nightly ]]; then
-            args+=(--prerelease --latest=false --target "$GITHUB_SHA")
+            args+=(--prerelease --latest=false)
           else
-            args+=(--latest --verify-tag)
-          fi
-          if [[ "$SIGNED" != true ]]; then
-            args+=(--notes "This build isn't notarized, so macOS blocks it. After copying it to Applications, run \`xattr -d com.apple.quarantine /Applications/Monodrive.app\`.")
+            args+=(--latest)
           fi
           gh release create "${args[@]}"

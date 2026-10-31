@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Writes a release's notes: a header, a short summary, and every commit folded
+# under it. The updater reads everything before <details>. Commits land on main
+# without PRs, so GitHub's generated notes would be empty.
+#
+#   scripts/release-notes <version> <previous tag or ""> <commit> <output>
+#
+# With ANTHROPIC_API_KEY, Claude writes the summary. Without it, or when the
+# call fails, the feat and fix subjects do.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [[ $# -ne 4 ]]; then
+  echo "usage: scripts/release-notes <version> <previous tag or \"\"> <commit> <output>" >&2
+  exit 2
+fi
+version=$1 previous=$2 commit=$3 output=$4
+range=${previous:+$previous..}$commit
+
+read -r -d '' instructions <<'PROMPT' || true
+You write release notes for Monodrive, a fast file manager for macOS that replaces Finder, searches the whole disk, and gives coding agents the same index over MCP.
+
+You get the commits since the last release, oldest first. Output Markdown in exactly this shape and nothing else:
+
+## Highlights
+Up to 4 short sentences. Name only the new features a user would care about most. If none matter to users, write one sentence about the most useful change.
+
+## Fixes
+- Up to 10 bullets, one fix each, under 10 words. Fewer is fine. Never pad. Leave out this section if no fix matters to users.
+- Each bullet names what was broken and says it works now. A user who hit the bug should recognize it.
+- Only list fixes from fix commits.
+
+Pick only significant, user-facing changes. Leave out visual polish, refactors, tests, CI, build, docs and plans. Say what the user gets, as short as possible. No internal names, file paths or code terms. No em dashes. No hype words. Do not invent anything that is not in the input.
+PROMPT
+
+# Claude's summary, or nothing if it can't be had.
+summarize() {
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || return 0
+  local request response
+  request=$(jq -n --arg system "$instructions" --arg commits "$1" '{
+    model: "claude-opus-5-5",
+    max_tokens: 16000,
+    output_config: {effort: "low"},
+    fallbacks: "default",
+    system: $system,
+    messages: [{role: "user", content: ("Commits:\n" + $commits)}]
+  }')
+  response=$(curl --fail-with-body --silent --show-error --max-time 180 \
+    https://api.anthropic.com/v1/messages \
+    --header "Content-Type: application/json" \
+    --header "x-api-key: $ANTHROPIC_API_KEY" \
+    --header "anthropic-version: 2026-10-21" \
+    --header "anthropic-beta: server-side-fallback-2026-07-01" \
+    --data "$request") || {
+    echo "::warning::Couldn't write the summary: $response" >&2
+    return 0
+  }
+  # A response that stopped early would cut the notes short.
+  jq -r 'select(.stop_reason == "end_turn") | [.content[] | select(.type == "text") | .text] | join("")' <<<"$response" || true
+}
+
+sentence() { awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }'; }
+
+# The same shape from the subjects alone.
+from_subjects() {
+  local features fixes
+  features=$(git log --reverse --format=%s "$range" | sed -nE 's/^feat(\([^)]*\))?!?: //p')
+  fixes=$(git log --reverse --format=%s "$range" | sed -nE 's/^fix(\([^)]*\))?!?: //p')
+  if [[ -n "$features" ]]; then
+    printf '## Highlights\n'
+    sentence <<<"$features" | sed 's/$/./' | paste -sd ' ' -
+    printf '\n'
+  fi
+  if [[ -n "$fixes" ]]; then
+    printf '## Fixes\n'
+    sentence <<<"$fixes" | sed 's/^/- /'
+  fi
+}
+
+plural() { if [[ $1 == 1 ]]; then echo "$1 $2"; else echo "$1 ${2}s"; fi; }
+
+changes=$(git rev-list --count "$range")
+contributors=$(git log --format=%an "$range" | { grep -v '\[bot\]$' || true; } | sort -u | wc -l | tr -d ' ')
+commits=$(git log --reverse --format='%s%n%w(0,2,2)%b' "$range")
+summary=$(summarize "$commits")
+if [[ -z "$summary" ]]; then
+  summary=$(from_subjects)
+fi
+
+# Publishing uses the file when it exists, so never leave half of one.
+{
+  printf '**v%s** · %s from %s\n\n' "$version" "$(plural "$changes" change)" "$(plural "$contributors" contributor)"
+  if [[ -n "$summary" ]]; then
+    printf '%s\n\n' "$summary"
+  fi
+  printf '<details>\n<summary>Full changelog</summary>\n\n'
+  git log --reverse --format='- %s (%h)' "$range"
+  printf '\n</details>\n'
+} >"$output.tmp"
+mv "$output.tmp" "$output"
