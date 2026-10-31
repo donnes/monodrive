@@ -541,7 +541,10 @@ impl Browser {
             .gap_1()
             .pr_3()
             // The traffic lights, where the sidebar would have them.
-            .when(closed, |d| d.child(drag_area().w(px(lights)).h_full()))
+            .when(closed, |d| {
+                d.child(drag_area().w(px(lights)).h_full())
+                    .child(self.sidebar_button(cx))
+            })
             .child(
                 icon_button("back", "Back", "chevron-left", back).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -556,7 +559,6 @@ impl Browser {
                     },
                 )),
             )
-            .when(closed, |d| d.child(self.sidebar_button(cx)))
             .child(
                 div()
                     .id("tabs")

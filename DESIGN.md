@@ -57,7 +57,7 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 ### Closing the sidebar
 
-⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits at the sidebar's top right, then after Forward in the top bar. The traffic lights stay, with Back and Forward right after them. The sidebar opens and closes at once, with no animation: a width that moves lays out the whole window each frame. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
+⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits at the sidebar's top right, so it stays just before Back and Forward: closing the sidebar only takes away what's between them. The traffic lights stay, with the button right after them. The sidebar opens and closes at once, with no animation: a width that moves lays out the whole window each frame. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
 
 ### Search
 
