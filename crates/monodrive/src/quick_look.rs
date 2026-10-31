@@ -2,7 +2,10 @@
 //! whatever the first responder accepting control of it hands over. A small
 //! responder after the window does that: it gives the panel the files' URLs,
 //! and passes back the keys the panel doesn't use, so ↑ and ↓ still move
-//! the selection. The panel loads previews itself, off the main thread.
+//! the selection. The panel loads previews itself, off the main thread, but
+//! opening spins a nested run loop until the first preview loads, and GPUI's
+//! tasks run in it. So it opens from a task of its own: inside an action or a
+//! draw the app is already borrowed, and the first task to run panics.
 
 use crate::selection::Selection;
 use crate::traffic_lights;
@@ -15,7 +18,7 @@ use objc2_foundation::{NSInteger, NSString, NSURL};
 use objc2_quick_look_ui::{
     QLPreviewItem, QLPreviewPanel, QLPreviewPanelDataSource, QLPreviewPanelDelegate,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 
 /// What the panel shows: the selection in the order shown, each path with
@@ -77,7 +80,7 @@ impl Panel {
     }
 
     /// Shows `preview`, opening the panel if it's closed.
-    pub fn show(&self, preview: &Preview) {
+    pub fn show(&self, preview: &Preview, cx: &gpui::App) {
         let urls = preview
             .items
             .iter()
@@ -88,31 +91,33 @@ impl Panel {
             })
             .collect();
         *self.controller.ivars().urls.borrow_mut() = urls;
-        let open = self.is_open();
-        // SAFETY: the controller is in the main window's chain, so it's the
-        // one the panel finds, and it sets itself as data source and delegate.
-        let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(self.mtm) }) else {
-            return;
-        };
-        unsafe {
-            if !open {
-                panel.updateController();
+        let ivars = self.controller.ivars();
+        ivars.index.set(preview.index as NSInteger);
+        if let Some(panel) = self.shown() {
+            // SAFETY: the panel is up on this controller.
+            unsafe {
+                panel.reloadData();
+                panel.setCurrentPreviewItemIndex(preview.index as NSInteger);
             }
-            panel.reloadData();
-            panel.setCurrentPreviewItemIndex(preview.index as NSInteger);
+            return;
         }
-        if !open {
-            panel.makeKeyAndOrderFront(None);
+        if ivars.opening.replace(true) {
+            return;
         }
+        let (controller, mtm) = (self.controller.clone(), self.mtm);
+        cx.foreground_executor()
+            .spawn(async move { controller.open(mtm) })
+            .detach();
     }
 
-    /// Whether the panel is up on this window's files. It also closes
-    /// itself, on Esc or its close button.
+    /// Whether the panel is up on this window's files, or on its way. It also
+    /// closes itself, on Esc or its close button.
     pub fn is_open(&self) -> bool {
-        self.shown().is_some()
+        self.controller.ivars().opening.get() || self.shown().is_some()
     }
 
     pub fn close(&self) {
+        self.controller.ivars().opening.set(false);
         if let Some(panel) = self.shown() {
             panel.orderOut(None);
         }
@@ -157,6 +162,10 @@ impl Drop for Panel {
 
 struct Ivars {
     urls: RefCell<Vec<Retained<NSURL>>>,
+    /// The one in front.
+    index: Cell<NSInteger>,
+    /// Asked to open and not up yet; `close` clears it to call that off.
+    opening: Cell<bool>,
     window: Weak<NSWindow>,
 }
 
@@ -238,10 +247,41 @@ impl Controller {
     fn new(window: &NSWindow, mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(Ivars {
             urls: RefCell::default(),
+            index: Cell::default(),
+            opening: Cell::default(),
             window: Weak::from(window),
         });
         // SAFETY: NSResponder's designated initializer.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Opens the panel on what `Panel::show` left, unless it was called off.
+    fn open(&self, mtm: MainThreadMarker) {
+        let ivars = self.ivars();
+        // The keys may have moved on since it was asked for. The panel takes
+        // its controller from the key window's chain, so only that one opens it.
+        let key = ivars
+            .window
+            .load()
+            .is_some_and(|window| window.isKeyWindow());
+        if !ivars.opening.get() || !key {
+            ivars.opening.set(false);
+            return;
+        }
+        // SAFETY: the controller is in the main window's chain, so it's the
+        // one the panel finds, and it sets itself as data source and delegate.
+        if let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
+            unsafe {
+                panel.updateController();
+                panel.reloadData();
+                panel.setCurrentPreviewItemIndex(ivars.index.get());
+            }
+            panel.makeKeyAndOrderFront(None);
+            if !ivars.opening.get() {
+                panel.orderOut(None);
+            }
+        }
+        ivars.opening.set(false);
     }
 
     fn item(&self, index: NSInteger) -> Option<Retained<ProtocolObject<dyn QLPreviewItem>>> {

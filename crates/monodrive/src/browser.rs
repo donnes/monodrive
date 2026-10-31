@@ -902,7 +902,7 @@ impl Browser {
             self.quick_look = quick_look::Panel::new(window);
         }
         if let Some(panel) = &self.quick_look {
-            panel.show(&preview);
+            panel.show(&preview, cx);
         }
         self.preview = Some(preview);
     }
@@ -934,7 +934,7 @@ impl Browser {
         match preview.filter(|_| open) {
             Some(preview) => {
                 if let Some(panel) = &self.quick_look {
-                    panel.show(&preview);
+                    panel.show(&preview, cx);
                 }
                 self.preview = Some(preview);
             }
