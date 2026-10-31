@@ -1,6 +1,6 @@
 # Filesystem speed
 
-Status: planned. Needs the runner from [plan 24](24-benchmarks-and-reports.md) for before and after numbers. Each section below is its own PR.
+Status: ready to start once [plan 24](24-benchmarks-and-reports.md) reaches its step 3. Each section below is its own PR, judged with `scripts/bench --against <the commit before it>`.
 
 ## The constraint
 
@@ -21,7 +21,7 @@ These are not product numbers. The prototype builds no `Entry`, and neither Linu
 
 Try `clonefile(from, to, CLONE_NOFOLLOW)` first, at the same hidden `.monodrive-<job>-<item>` path, and fall back to `copyfile` on `EXDEV` or `ENOTSUP`. The rest of the job stays: placeholder refusal, tally and stamp checks, rename into place, journal records. On any other failure, trash the partial clone as a failed copy does today, then retry through `copyfile`, so a single unreadable file still gets its usual error.
 
-**Cancel and progress.** One call can't report progress or stop early. Start with the single call, and have the job report a done or not-done state for that item. Measure the largest realistic tree first. If one call passes about a second, clone each top-level child separately, checking cancel between them and applying the root's metadata last. Don't build the chunked version unless the numbers ask for it.
+**Cancel and progress.** One call can't report progress or stop early. Start with the single call, and have the job report a done or not-done state for that item. Before writing this, time `clonefile` in plan 24's platform suite on the largest realistic tree, a big `node_modules`. If one call passes about a second, clone each top-level child separately, checking cancel between them and applying the root's metadata last. Don't build the chunked version unless the numbers ask for it.
 
 **Compare these against `copyfile` in tests:** extended attributes, ACLs, modification and creation times, symlinks left unfollowed, hard links within the tree, ownership, unreadable files, sockets and pipes. A difference we can't accept means falling back for that case, and `docs/operations.md` must say so.
 
@@ -52,7 +52,7 @@ Past 4 to 5 threads, metadata throughput falls on APFS and also on btrfs. Going 
 Each of these gets a number and a decision, not code, until then:
 
 - **Cold listing.** `purge` needs sudo, so this waits for plan 24's quiet Mac. Only if it's slow, consider drawing a remembered listing and refreshing it.
-- **Trash at scale.** `NSFileManager` runs per item, untimed for thousands of items.
+- **Trash at scale.** `NSFileManager` runs per item, untimed for thousands of items. Plan 24 measures it on a disk image, not the user's Trash.
 - **`fseventsd` load.** It used 34 hours of CPU in 7.3 days and sat near 97% in most samples. Compare it with Monodrive running and quit, with a person doing the quitting. Find out whether the index's subscription adds to it before changing anything.
 - **The cause of slow fresh launches.** Compare with Terminal's Developer Tools permission on and off. If it matters, Settings or onboarding can tell developers about it.
 
@@ -72,4 +72,4 @@ Trashing is one rename per item, so `trash` should also beat `rm -rf` on large f
 
 ## Done means
 
-Plan 24's report shows the new path beating today's on the same machine. `docs/performance.md`'s budgets tighten to the measured results: the target for no-sort listing is the PC's 150 ms per 100,000 entries, with sort budgeted separately, since today's 376 ms baseline includes the sort. `docs/operations.md` describes the new copy path. Walk AGENTS.md's "Hit every surface" list in each PR.
+A `--against` report shows the new path beating the commit before it, on whole jobs and listings, with a verdict of faster. `docs/performance.md`'s budgets tighten to the measured results: the target for no-sort listing is the PC's 150 ms per 100,000 entries, with sort budgeted separately, since today's 376 ms baseline includes the sort. `docs/operations.md` describes the new copy path. Walk AGENTS.md's "Hit every surface" list in each PR.

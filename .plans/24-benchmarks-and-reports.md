@@ -10,7 +10,7 @@ One command runs the benchmarks and writes a self-contained HTML report. Every n
 
 - **Raw samples are the record.** The runner writes every sample to JSON. The report only reads that file, so no chart can show a number the run didn't produce.
 - **Every run records its conditions.** Commit, build profile, machine, macOS build, volume format, FileVault, power source, thermal state, and load before and after each suite.
-- **Compare by alternating.** A and B run in turns within one process tree (A B B A), so drift hits both. Compare only samples from the same run.
+- **Compare by alternating.** A and B run in turns (A B B A), so drift hits both, and the first round of each is thrown away so both start warm. Compare only samples from the same run. A and B are usually two builds: see `--against` below.
 - **Each comparison gets a verdict.** Faster, slower or no clear difference, from a bootstrap interval on the ratio of medians. A report never prints a multiplier for "no clear difference".
 - **A noisy run says so.** Past a set load or spread, the report marks the run as noisy at the top and budgets don't pass or fail on it.
 - **Show the spread.** Median, minimum and p90 beside each result, with the sample count. Bars never hide the range.
@@ -27,18 +27,34 @@ Each suite records wall time, CPU time, and the process's instructions and cycle
 | Suite | Runs on | Measures |
 |---|---|---|
 | Platform | Mac, PC | create, stat, open and read, symlink, hard link, clone, copy, delete at 1 to 24 threads; spawn of the same and of a fresh binary; each flush type |
-| Monodrive core | Mac | `list_dir`, sort by column, `tally`, `stamp`, `disk::copy`, whole jobs through the owner |
+| Monodrive core | Mac | `list_dir`, `sort` by column, and whole copy, duplicate, move and trash jobs through the owner |
+| Search | Mac | name search on a generated index of 3 million entries, by query type |
 | MCP | Mac | `monodrive mcp` start to first reply, `tools/list` bytes, `find_files`, `grep`, `list_dir` and `copy` round trips over stdio |
 | Real workload | Mac, PC | a pinned lockfile's `pnpm install` from an offline store, `git worktree add`, deleting the result |
 | Existing | Mac | the scrolling benchmark and launch profile, imported as samples |
 
-Fixtures are generated from a seed and checked-in size and depth distributions, taken from a real `node_modules` and a real Downloads folder. Every fixture lives in a temp folder. Nothing calls `Index::start` against the live index: search suites build their own index in a temp folder, or are skipped until fsearch allows that. The clippy and no-sleep rules still apply to tests. The runner itself may need `#[expect]` for deleting its own fixtures.
+Fixtures are generated from a seed and checked-in size and depth distributions, taken from a real `node_modules` and a real Downloads folder. Every fixture lives in a temp folder. The owner runs on its own `ops::Paths` in that folder, so it never joins the user's owner or journal. Trash suites run only on a disk image the runner attaches and detaches, because trashing on the startup disk would fill the user's Trash. The clippy and no-sleep rules still apply to tests. The runner itself may need `#[expect]` for deleting its own fixtures.
+
+## Measuring search without a crawl
+
+Search needs no crawl and never opens the live index. fsearch's public `walk::Listing` and `Index::build` take listings from memory, as its own `snap` example does, so the suite generates them from the seed. A prototype on 2026-10-30 built 3,001,001 entries in 1.4 s and a 154 MB `index.bin`, searched them in memory, and started an `Engine` on the saved file. The first answer came in 19 ms, and 10 seconds later the entry count hadn't changed and the overlay was empty, so nothing had been crawled.
+
+- **Two levels.** `Index::load` plus `Searcher` times the matching alone. An `Engine` on the same saved file adds what the app really goes through. It needs `event_id` 0 and an empty `skipped` file beside `index.bin`, because a missing one makes it rescan the gated folders, /Volumes among them. Don't sample until its first compaction finishes: that run spent 11.5 s of CPU in those 10 seconds, of which the log explains only the 1.45 s compaction. Find out what the rest was before trusting Engine numbers.
+- **Queries.** A fixed set, each reported separately: a rare word, a common word, a word and a number, a name with an extension, a typo, and no match.
+- **Names decide the result.** In the prototype a query matching 1 in 8 names took 6 to 7 ms, while a typo took 0.9 ms and no match 0.2 ms. Its names were crude, so these aren't product numbers, but they show one median can't stand for search. Take the name distribution from real folders. Set the search budget per query type from the first real run, and only then decide whether "about a millisecond" still holds, and for which queries.
+- **`find_files` over MCP.** The suite starts `monodrive mcp` with `HOME` set to a temp folder holding that `index.bin` and `skipped` under `Library/Application Support/FSearch`. This path is untried. Before any sample it refuses to run unless the child's `index_status` reports the generated entry count, and it stops the child by captured PID if not. `support_dir` follows `HOME`, so Monodrive's own folder moves with it.
+- **The real index, on request.** `scripts/bench search-real` copies the saved `index.bin` to a temp folder and opens the copy with `Index::load` and `Searcher` only, so no `Engine`, watcher or lock. It gives the true disk's numbers, is never in the default run or CI, and the report holds query times and hit counts, not paths. It removes the copy afterwards.
+
+fsearch's internals stay in this one file of the benchmark crate, as they stay in `index.rs` in the app. An fsearch bump can break it, and the entry-count check is what catches that.
 
 ## How it's built
 
-`crates/monodrive-bench` is a binary with no GPUI. The platform suite uses only `libc`, so it builds on Linux. Monodrive suites sit behind `cfg(target_os = "macos")`. **AGENTS.md says no `cfg` gates, so this one needs sign-off.** It covers this tool only and adds no Linux support to the app. The only alternative is keeping a separate C program for Linux, which is worse.
+`crates/monodrive-bench` is a binary with no GPUI. The platform suite uses only `libc`, so it builds on Linux. Monodrive suites sit behind `cfg(target_os = "macos")`. This is a signed-off exception to AGENTS.md's no-`cfg` rule (2026-10-30). It covers this crate only and adds no Linux support to the app.
+
+The crate calls only what `monodrive-core` already makes public: `list_dir`, `sort`, `ops` requests and the MCP server over stdio. `disk` stays `pub(crate)`, and nothing gets exported just for benchmarks. So `tally`, `stamp` and `disk::copy` have no rows of their own. Their cost shows up in the job that runs them, which is also what a person or agent waits for.
 
 - `scripts/bench [suite]` builds in release and runs, writing `target/bench/<timestamp>/results.json` and `report.html`.
+- `scripts/bench --against <commit> [suite]` compares two builds. It makes a detached worktree of that commit under `target/bench/`, builds its benchmark tool there with its own target folder, and has the current tool run each build's `run-one --suite <name>` in turns on the same fixtures, reading samples as versioned JSON. It keeps one baseline build, the most recent, and removes the others, since a build takes several GB. The commit must contain the crate, so the runner has to land before the first speed change it judges.
 - `scripts/bench report <results.json> [baseline.json]` rebuilds a report from saved data.
 - `scripts/bench linux` runs the platform suites on `donnes-pc` over ssh from a checkout there, using a temp folder it removes, then merges the results.
 - The report is one HTML file with inline CSS and SVG, no JavaScript dependencies and no network requests. It follows `dataviz`: one axis per chart, a table beside each chart, light and dark, and hover values. Log scales say so in the subtitle.
@@ -67,10 +83,10 @@ A self-hosted runner must not run code from untrusted PRs. The bench runner trig
 
 1. Runner, JSON format, conditions, counters, verdicts, and the platform suite ported from `target/fs-bench`. Mac and PC.
 2. Report generator and `scripts/bench`.
-3. Monodrive core and MCP suites, budgets file, retiring `listing.rs`.
+3. `--against`, then Monodrive core, search and MCP suites, budgets file, retiring `listing.rs`. Plan 25's work starts after this step, so its first change has a baseline.
 4. Real-workload suite and competitor comparisons.
 5. Counter gate in CI, if the counters work there. Quiet Mac and its runner.
 
 ## Verification
 
-Test what can lie: the verdict logic (a real difference, no difference, too few samples), the noisy-run decision, and the budget check, with fixed sample data. Skip layout tests, and look at the rendered report instead. Before trusting the suite, run it against a deliberately slowed build and confirm the report says slower, then against two identical builds and confirm it says no clear difference.
+Test what can lie: the verdict logic (a real difference, no difference, too few samples), the noisy-run decision, and the budget check, with fixed sample data. Skip layout tests, and look at the rendered report instead. Before trusting the suite, run it against a deliberately slowed build and confirm the report says slower, then against two identical builds and confirm it says no clear difference. Do both through `--against`. Run the search suite once while watching that the live `index.bin` and its folder don't change.
