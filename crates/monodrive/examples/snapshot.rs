@@ -8,7 +8,9 @@
 //! `rename-error.png`, `rename-error-grid.png`, `toast.png` and
 //! `empty-trash.png`.
 //! Without a folder it draws a made-up one, so the pictures show nobody's
-//! files. Rename edits the fifth name in place. The menus are the context
+//! files. A folder you pass is only read: `rename-error.png`,
+//! `rename-error-grid.png` and `toast.png` really rename a file, so they
+//! always use the made-up one. Rename edits the fifth name in place. The menus are the context
 //! menu on the second entry, in the list and the grid, and on the folder.
 //! The rest use an operation owner on a temp folder. The popover and the
 //! ring show an agent's move there, waiting at a name that's taken. Then the
@@ -95,18 +97,18 @@ fn main() -> gpui::Result<()> {
     std::fs::create_dir_all(&out)?;
     // The path bar would show the `..`s.
     let out = out.canonicalize()?;
-    let folder = match std::env::args_os().nth(1) {
-        Some(folder) => PathBuf::from(folder),
-        None => fill(&out)?,
-    };
-    shoot(&out, &folder, Theme::Dark)?;
+    let made_up = fill(&out)?;
+    let folder = std::env::args_os()
+        .nth(1)
+        .map_or_else(|| made_up.clone(), PathBuf::from);
+    shoot(&out, &folder, &made_up, Theme::Dark)?;
     let light = out.join("light");
     std::fs::create_dir_all(&light)?;
-    shoot(&light, &folder, Theme::Light)
+    shoot(&light, &folder, &made_up, Theme::Light)
 }
 
 /// Every picture, in `theme`, into `out`.
-fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
+fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Result<()> {
     let base = Preferences {
         theme,
         ..Preferences::default()
@@ -247,12 +249,12 @@ fn shoot(out: &Path, folder: &Path, theme: Theme) -> gpui::Result<()> {
     dispatch(&mut cx, window, &ShowCopiesAndMoves)?;
     save(&mut cx, window, out, "ring-waiting")?;
 
-    let window = open(&mut cx, folder)?;
+    let window = open(&mut cx, made_up)?;
     cx.run_until_parked();
     // The last entry, renamed to a name that's taken: the owner refuses it.
     dispatch(&mut cx, window, &SelectLast)?;
     dispatch(&mut cx, window, &Rename)?;
-    let taken = names(folder)
+    let taken = names(made_up)
         .into_iter()
         .find(|name| name.contains('.'))
         .unwrap_or_default();
