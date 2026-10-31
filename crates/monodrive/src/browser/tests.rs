@@ -1791,3 +1791,18 @@ fn the_no_access_notice_stays_after_indexing_and_opens_that_step(cx: &mut TestAp
     let mut onboarding = VisualTestContext::from_window(opened.unwrap(), cx);
     assert!(onboarding.debug_bounds("access-app").is_some());
 }
+
+#[test]
+fn a_cut_name_keeps_only_a_real_extension() {
+    for (name, extension) in [
+        ("Denuncia_final.pdf", Some(".pdf")),
+        ("archive.tar.gz", Some(".gz")),
+        ("Monodrive.app", Some(".app")),
+        ("README", None),
+        (".gitignore", None),
+        ("Report v1.2 for the board", None),
+        ("notes.averyveryverylongsuffix", None),
+    ] {
+        assert_eq!(kept_extension(name), extension, "{name}");
+    }
+}

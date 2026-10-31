@@ -35,8 +35,8 @@ use gpui::{
     App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollStrategy,
-    ScrollWheelEvent, Subscription, Task, UniformListScrollHandle, Window, canvas, div, point,
-    prelude::*, px, uniform_list,
+    ScrollWheelEvent, Subscription, Task, TextOverflow, UniformListScrollHandle, Window, canvas,
+    div, point, prelude::*, px, uniform_list,
 };
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::Index;
@@ -2624,11 +2624,13 @@ impl Pane {
                                 .gap_2()
                                 .when(tree, |d| d.child(self.disclosure(ix, depth, open, cx)))
                                 // As in Finder, the rest of a row that isn't
-                                // selected starts a rectangle.
+                                // selected starts a rectangle. The name gives
+                                // way only once its note or parent has none
+                                // left, since those two have no width of their own.
                                 .child(
                                     div()
                                         .id(("grab", ix))
-                                        .flex_shrink_0()
+                                        .min_w_0()
                                         .flex()
                                         .items_center()
                                         .gap_2()
@@ -2637,33 +2639,49 @@ impl Pane {
                                         .child(match rename {
                                             // The name stays put; its outline grows around it.
                                             Some(field) => field.ml(px(-7.)).into_any_element(),
-                                            None => div()
-                                                .flex_shrink_0()
-                                                .max_w(px(360.))
-                                                .truncate()
-                                                .map(|d| match &new {
-                                                    Some(new) if new.problem => {
-                                                        d.text_color(danger())
-                                                    }
-                                                    Some(new) if new.renamed => {
-                                                        d.font_weight(FontWeight::MEDIUM)
-                                                    }
-                                                    _ => d,
-                                                })
-                                                .child(new.as_ref().map_or_else(
-                                                    || entry.name.clone(),
-                                                    |new| new.name.clone(),
-                                                ))
-                                                .into_any_element(),
+                                            None => {
+                                                let name = new
+                                                    .as_ref()
+                                                    .map_or(&entry.name, |new| &new.name);
+                                                div()
+                                                    .min_w_0()
+                                                    .max_w(px(360.))
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_overflow(name_overflow(name))
+                                                    .map(|d| match &new {
+                                                        Some(new) if new.problem => {
+                                                            d.text_color(danger())
+                                                        }
+                                                        Some(new) if new.renamed => {
+                                                            d.font_weight(FontWeight::MEDIUM)
+                                                        }
+                                                        _ => d,
+                                                    })
+                                                    .child(name.clone())
+                                                    .into_any_element()
+                                            }
                                         }),
                                 )
                                 .children(new.and_then(|new| {
                                     let ink = if new.problem { danger() } else { content(0.65) };
                                     let note = new.note?;
-                                    Some(div().min_w_0().truncate().text_color(ink).child(note))
+                                    Some(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(ink)
+                                            .child(note),
+                                    )
                                 }))
                                 .children(parent.map(|parent| {
-                                    div().min_w_0().truncate().text_color(muted).child(parent)
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(muted)
+                                        .child(parent)
                                 })),
                         )
                         .when(date, |d| {
@@ -2828,6 +2846,24 @@ pub(super) fn grid_name(
         ],
         _ => vec![line(name)],
     }
+}
+
+/// The extension a cut name still shows. Past this many characters, or with
+/// a space, what follows the last dot is just more name, as in
+/// `Report v1.2 for the board`.
+pub(super) fn kept_extension(name: &str) -> Option<&str> {
+    const LONGEST: usize = 16;
+    let dot = name.rfind('.').filter(|dot| *dot > 0)?;
+    let extension = &name[dot..];
+    (extension.chars().count() <= LONGEST && !extension.contains(' ')).then_some(extension)
+}
+
+/// Cuts a name before its extension: `file-with-a-big-n….pdf`.
+fn name_overflow(name: &str) -> TextOverflow {
+    TextOverflow::Truncate(match kept_extension(name) {
+        Some(extension) => format!("…{extension}").into(),
+        None => "…".into(),
+    })
 }
 
 /// The grid's padding across: the list's and each row's, both sides.
