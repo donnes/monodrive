@@ -71,6 +71,10 @@ Rename with several selected puts a bar across the pane, above the column titles
 
 Each selected row shows its new name, medium, with the old one after it at 0.65. A name that can't be used is `danger()` with the reason after it. Selected rows stay at the 0.14 fill wherever the keys are, so that red reads, and they don't open or drag. Sorting or changing the selection counts again in the new order. With a problem on screen, ↩ in a field does nothing and the button says `Skip 2 and Apply`. Esc and Cancel change nothing, and going to another folder or search closes the bar. While Apply waits on the owner the bar says `Renaming…`, its controls are disabled, and the pane takes no keys or presses, so what was sent is what shows. Going elsewhere meanwhile closes the bar, and the toast still says how it went.
 
+### Updates
+
+A signed release checks GitHub at launch, every 6 hours and when Settings' update track changes. While a newer release is out, a button with the accent icon sits left of Settings at the sidebar's foot and opens a 360 pt `Popover` above it. It lists what's new, newest first, with Download at the end, which becomes Restart once the update is in place. Check for Updates… reaches the same popover while the sidebar is closed. A debug or ad hoc build says it can't update itself and never reaches the network.
+
 ### Inspector
 
 ⌘I, or Get Info in a menu, opens a 260 pt panel to the right of the panes, under the top bar, and it stays open from then on; ⌘I again, Hide Inspector or its ✕ closes it. It takes its width from the panes and moves nothing else, and it stays out when the list would keep under 200 pt. It's a card beside the pane's in Rounded, with the 8 pt gap, and a region with a hairline in Boxy.

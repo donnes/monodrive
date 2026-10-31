@@ -8,20 +8,21 @@
 //! as in AppKit: a text field acts on its text, the file list on its files.
 
 use crate::browser::{
-    AddToSidebar, Back, ClearRecentSearches, ClearRecents, CloseTab, ConnectToServer, CopyPath,
-    CopyToOtherPane, DeselectAll, Duplicate, EditFavorites, Eject, EmptyTrash, EnclosingFolder,
-    FocusSearch, Forward, GetInfo, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads,
-    GoHome, GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash,
-    NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInTerminal,
-    OpenSelected, OpenSettings, OpenWith, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar,
-    Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder,
-    ShowCopiesAndMoves, ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName,
-    SortBySize, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid,
-    ViewAsList, ZoomIn, ZoomOut,
+    AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab,
+    ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Duplicate, EditFavorites, Eject,
+    EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications, GoComputer,
+    GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents, GoToFolder, GoTrash, HideInspector,
+    MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab,
+    NextTab, OpenInNewTab, OpenInTerminal, OpenSelected, OpenSettings, OpenWith, PreviousTab,
+    PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort,
+    SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves, ShowPackageContents,
+    ShowSearches, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
+    TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
     browser, connect, empty_trash, goto, jobs, menu, onboarding, palette, settings, text_field,
+    updates,
 };
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
@@ -183,6 +184,9 @@ pub fn all() -> Vec<Command> {
     vec![
         command("Settings…", App, &["cmd-,"], None, || {
             Box::new(OpenSettings)
+        }),
+        command("Check for Updates…", App, &[], None, || {
+            Box::new(CheckForUpdates)
         }),
         destructive(separated(command(
             "Empty Trash…",
@@ -759,6 +763,7 @@ pub fn apply(cx: &mut App) {
     goto::bind(cx);
     connect::bind(cx);
     jobs::bind(cx);
+    updates::bind(cx);
     empty_trash::bind(cx);
     menu::bind(cx);
     onboarding::bind(cx);

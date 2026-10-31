@@ -172,6 +172,8 @@ pub struct Preferences {
     /// Agents may change files over MCP. The operation owner reads it from
     /// the saved file, by this name.
     pub agents_change_files: bool,
+    /// Which releases the updater offers.
+    pub update_channel: monodrive_core::updates::Channel,
     /// The onboarding last finished; a later version can show itself again.
     pub onboarding_version: u32,
 }
@@ -215,6 +217,7 @@ impl Default for Preferences {
             thumbnails: true,
             open_folders_while_dragging: true,
             agents_change_files: true,
+            update_channel: Default::default(),
             onboarding_version: 0,
         }
     }
@@ -241,6 +244,7 @@ impl Preferences {
         self.show_hidden = defaults.show_hidden;
         self.sort = defaults.sort;
         self.terminal = defaults.terminal;
+        self.update_channel = defaults.update_channel;
     }
 
     /// Everything on the Appearance page. What other pages own, and the
@@ -264,6 +268,7 @@ impl Preferences {
             thumbnails: self.thumbnails,
             open_folders_while_dragging: self.open_folders_while_dragging,
             agents_change_files: self.agents_change_files,
+            update_channel: self.update_channel,
             onboarding_version: self.onboarding_version,
             ..Self::default()
         };

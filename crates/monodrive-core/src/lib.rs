@@ -16,6 +16,7 @@ pub mod search;
 pub mod servers;
 pub mod sizes;
 pub mod storage;
+pub mod updates;
 pub mod user_commands;
 pub mod volumes;
 pub mod worktrees;

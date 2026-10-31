@@ -17,6 +17,7 @@ use crate::search::{Query, Scope};
 use crate::servers::{self, Prompt};
 use crate::sizes::{self, FolderSize};
 use crate::storage::{self, Cleanup, Duplicates, Match, Report, Stop, Usage};
+use crate::updates;
 use crate::user_commands::{self, Cwd, Definition, Ended, Run, Sources};
 use crate::volumes::{self, Volume, VolumeId};
 use crate::worktrees::{self, Git, Worktree};
@@ -295,6 +296,9 @@ enum ToolCall {
     },
     RemoveSearch {
         name: String,
+    },
+    UpdateCheck {
+        channel: Option<updates::Channel>,
     },
     Worktrees {
         path: String,
@@ -794,6 +798,18 @@ impl Server {
                 .places
                 .remove_search(&name)
                 .map(|()| format!("Removed the saved search {name}.\n")),
+            ToolCall::UpdateCheck { channel } => {
+                updates::pending(channel.unwrap_or_else(updates::saved_channel)).map(|pending| {
+                    if pending.is_empty() {
+                        format!("Monodrive {} is up to date.\n", crate::VERSION)
+                    } else {
+                        pending
+                            .iter()
+                            .map(|release| format!("{} {}\n", release.version, release.page))
+                            .collect()
+                    }
+                })
+            }
             ToolCall::Worktrees { path } => self
                 .git()
                 .and_then(|git| worktrees::list(&git, &expand_home(&path)))
@@ -2042,7 +2058,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 61] = [
+pub const TOOLS: [Tool; 62] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2469,6 +2485,17 @@ pub const TOOLS: [Tool; 61] = [
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"]
+            })
+        },
+    },
+    Tool {
+        name: "update_check",
+        description: "Releases newer than this Monodrive, newest first, one a line: version, then its \
+    page. channel is stable or nightly, and defaults to the one in Settings. Installs nothing.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"channel": {"type": "string", "enum": ["stable", "nightly"]}}
             })
         },
     },

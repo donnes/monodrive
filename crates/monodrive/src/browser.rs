@@ -44,6 +44,7 @@ use crate::settings::{self, SettingsView};
 use crate::text_field;
 use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
 use crate::traffic_lights;
+use crate::updates;
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
     FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -121,6 +122,7 @@ actions!(
         Undo,
         Redo,
         ShowCopiesAndMoves,
+        CheckForUpdates,
         Rename,
         CommitRename,
         CancelRename,
@@ -277,6 +279,8 @@ pub struct Browser {
     jobs: Entity<Jobs>,
     /// The popover's keys.
     jobs_focus: FocusHandle,
+    /// The updates popover's keys.
+    updates_focus: FocusHandle,
     /// A job of the window's needs an answer: the popover opens once the
     /// next frame has drawn.
     jobs_wanted: bool,
@@ -500,6 +504,7 @@ impl Browser {
             toast: None,
             jobs,
             jobs_focus: cx.focus_handle(),
+            updates_focus: cx.focus_handle(),
             jobs_wanted: false,
             sheet: None,
             glass: None,
@@ -1124,6 +1129,61 @@ impl Browser {
         self.set_sheet(Some(Sheet::Jobs), cx);
     }
 
+    /// The sidebar's button: the updates popover, above it.
+    fn toggle_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.sheet, Some(Sheet::Updates)) {
+            return self.close_sheet(window, cx);
+        }
+        self.remember_focus(window, cx);
+        window.focus(&self.updates_focus, cx);
+        self.set_sheet(Some(Sheet::Updates), cx);
+    }
+
+    /// Check for Updates…: asks now, and shows what it finds.
+    fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shared) = cx.try_global::<updates::Shared>() {
+            shared.0.clone().update(cx, |updates, cx| updates.check(cx));
+        }
+        if !matches!(self.sheet, Some(Sheet::Updates)) {
+            self.toggle_updates(window, cx);
+        }
+    }
+
+    /// The updates popover's place, and what closes it: Esc or a press
+    /// outside, which reaches nothing behind it.
+    fn updates_popover(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let updates = cx.try_global::<updates::Shared>()?.0.clone();
+        let close =
+            |this: &mut Self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>| {
+                cx.stop_propagation();
+                this.close_sheet(window, cx)
+            };
+        Some(
+            div()
+                .id("updates-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(close))
+                .on_mouse_down(MouseButton::Right, cx.listener(close))
+                .child(
+                    div()
+                        .id("updates-popover")
+                        .key_context("Updates")
+                        .track_focus(&self.updates_focus)
+                        .on_action(cx.listener(|this, _: &updates::Dismiss, window, cx| {
+                            this.close_sheet(window, cx)
+                        }))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .absolute()
+                        .bottom(px(44.))
+                        .left(px(8.))
+                        .child(updates),
+                ),
+        )
+    }
+
     /// The popover's place, and what closes it: Esc, ⌥⌘J or a press
     /// outside, which reaches nothing behind it.
     fn jobs_popover(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1717,9 +1777,12 @@ impl Render for Browser {
                         this.toggle_quick_look(window, cx)
                     }))
                 })
-                .on_action(cx.listener(
-                    |this, _: &ShowCopiesAndMoves, window, cx| this.toggle_jobs(window, cx),
-                ))
+                .on_action(cx.listener(|this, _: &ShowCopiesAndMoves, window, cx| {
+                    this.toggle_jobs(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                    this.check_for_updates(window, cx)
+                }))
             })
             .on_action(|_: &ToggleHiddenFiles, _, cx| {
                 preferences::update(cx, |p| p.show_hidden = !p.show_hidden)
@@ -1781,14 +1844,19 @@ impl Render for Browser {
                             .children(self.inspector_view(boxy, split, window, cx)),
                     ),
             )
-            .children(self.sheet.as_ref().map(|sheet| match sheet {
-                Sheet::Settings(view) => view.clone().into_any_element(),
-                Sheet::Palette(view) => view.clone().into_any_element(),
-                Sheet::Goto(view) => view.clone().into_any_element(),
-                Sheet::Jobs => self.jobs_popover(cx).into_any_element(),
-                Sheet::Searches(view) => view.clone().into_any_element(),
-                Sheet::EmptyTrash(view) => view.clone().into_any_element(),
-                Sheet::Connect(view) => view.clone().into_any_element(),
+            .children(self.sheet.as_ref().map(|sheet| {
+                match sheet {
+                    Sheet::Settings(view) => view.clone().into_any_element(),
+                    Sheet::Palette(view) => view.clone().into_any_element(),
+                    Sheet::Goto(view) => view.clone().into_any_element(),
+                    Sheet::Jobs => self.jobs_popover(cx).into_any_element(),
+                    Sheet::Updates => self
+                        .updates_popover(cx)
+                        .map_or_else(|| div().into_any_element(), |p| p.into_any_element()),
+                    Sheet::Searches(view) => view.clone().into_any_element(),
+                    Sheet::EmptyTrash(view) => view.clone().into_any_element(),
+                    Sheet::Connect(view) => view.clone().into_any_element(),
+                }
             }))
             .children(self.menu.as_ref().map(|menu| menu.view.clone()))
             .children(self.drag_pill(window))
@@ -1911,6 +1979,8 @@ enum Sheet {
     Goto(Entity<GotoView>),
     /// The copies and moves popover; `jobs` draws it.
     Jobs,
+    /// The updates popover; `updates` draws it.
+    Updates,
     /// The search field's menu.
     Searches(Entity<SearchMenu>),
     EmptyTrash(Entity<EmptyTrashView>),

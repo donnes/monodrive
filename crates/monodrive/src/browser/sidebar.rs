@@ -14,12 +14,13 @@ use super::{
 use crate::commands::{self, Scope};
 use crate::preferences::Preferences;
 use crate::theme::{
-    self, ButtonLook, accent, content, icon, icon_button, row_icon_button, section_label,
+    self, ButtonLook, accent, circle_button, content, icon, icon_button, row_icon_button,
+    section_label,
 };
 use gpui::{
-    Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, KeyDownEvent,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, Role, Stateful, Task, Window, div,
-    prelude::*, px,
+    Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, ImageSource,
+    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Role,
+    Stateful, Task, Window, div, prelude::*, px,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::Entry;
@@ -32,6 +33,7 @@ use monodrive_core::volumes::{self, Volume};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+
 
 /// What the system does for the sidebar. Views reach it through `Places`, so
 /// their tests list a made-up set of volumes and never mount or eject
@@ -968,10 +970,30 @@ impl Browser {
             )
             .children(self.index_bar(cx))
             .child(
-                icon_button("settings", "Settings", "settings", true)
-                    .track_focus(&self.settings_focus)
-                    .focus_visible(|s| s.shadow(theme::focus_ring()))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(crate::updates::available(cx), |d| {
+                        d.child(
+                            circle_button("updates", "Update Available", theme::BUTTON_HEIGHT)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(content(0.08)))
+                                .active(|s| s.bg(content(0.14)))
+                                .child(theme::icon("arrow-down-circle", 14.).text_color(accent()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_updates(window, cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        icon_button("settings", "Settings", "settings", true)
+                            .track_focus(&self.settings_focus)
+                            .focus_visible(|s| s.shadow(theme::focus_ring()))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                            ),
+                    ),
             )
     }
 

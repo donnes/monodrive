@@ -29,6 +29,8 @@ crc32fast = "1.5"
 caseless = "0.2"
 # Hashes whole files to confirm duplicates before any are offered for cleanup.
 blake3 = "1.8"
+# Orders releases, whose nightly numbers compare as numbers.
+semver = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -29,6 +29,7 @@ mod text_field;
 mod theme;
 mod thumbnails;
 mod traffic_lights;
+pub mod updates;
 mod workspace;
 
 use commands::{CloseWindow, Hide, HideOthers, Minimize, NewWindow, Quit, ShowAll, ShowWelcome};
@@ -147,6 +148,7 @@ pub fn run(folder: Option<PathBuf>) {
             });
             cx.on_action(|_: &ShowWelcome, cx| onboarding::show(onboarding::Step::Welcome, cx));
             window_commands(cx);
+            updates::start(cx);
             let explicit = folder.is_some();
             onboarding::launch(
                 explicit,

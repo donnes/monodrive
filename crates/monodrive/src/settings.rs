@@ -4,6 +4,7 @@
 
 use crate::agents::{self, Action, Harness, Setup};
 use crate::background::{self, Backdrop, Effect, Look, Scope};
+use crate::browser::CheckForUpdates;
 use crate::commands::{self, Group};
 use crate::frame;
 use crate::native::native;
@@ -25,6 +26,7 @@ use gpui::{
 };
 use monodrive_core::entries::SortBy;
 use monodrive_core::mcp::TOOLS;
+use monodrive_core::updates::Channel;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -782,99 +784,141 @@ impl SettingsView {
     }
 
     fn general(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        vec![group(
-            "Files",
+        vec![
+            group(
+                "Files",
+                None,
+                vec![
+                    row(
+                        "Show hidden files",
+                        Some("Files whose names start with a period."),
+                        self.focusable(
+                            "show-hidden",
+                            true,
+                            toggle(
+                                "show-hidden",
+                                "Show hidden files",
+                                p.show_hidden,
+                                |p, on| p.show_hidden = on,
+                            ),
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Sort by",
+                        Some("Clicking a column title sorts by it too."),
+                        self.focusable(
+                            "sort-by",
+                            true,
+                            segmented(
+                                "sort-by",
+                                "Sort by",
+                                p.sort.by,
+                                &[
+                                    (SortBy::Name, "Name"),
+                                    (SortBy::Modified, "Date"),
+                                    (SortBy::Size, "Size"),
+                                    (SortBy::Kind, "Kind"),
+                                ],
+                                |p, by| p.sort.by = by,
+                            ),
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Order",
+                        None,
+                        self.focusable(
+                            "sort-order",
+                            true,
+                            segmented(
+                                "sort-order",
+                                "Order",
+                                p.sort.descending,
+                                &[(false, "Ascending"), (true, "Descending")],
+                                |p, descending| p.sort.descending = descending,
+                            ),
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Keep folders on top",
+                        Some("Folders come before files in any order."),
+                        self.focusable(
+                            "folders-first",
+                            true,
+                            toggle(
+                                "folders-first",
+                                "Keep folders on top",
+                                p.sort.folders_first,
+                                |p, on| p.sort.folders_first = on,
+                            ),
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Terminal",
+                        Some("What Open in Terminal uses."),
+                        self.focusable(
+                            "terminal",
+                            true,
+                            segmented(
+                                "terminal",
+                                "Terminal",
+                                p.terminal,
+                                &self
+                                    .terminals
+                                    .iter()
+                                    .map(|terminal| (*terminal, terminal.name()))
+                                    .collect::<Vec<_>>(),
+                                |p, terminal| p.terminal = terminal,
+                            ),
+                            cx,
+                        ),
+                    ),
+                ],
+            ),
+            self.updates_group(p, cx),
+        ]
+    }
+
+    fn updates_group(&self, p: &Preferences, cx: &mut Context<Self>) -> AnyElement {
+        group(
+            "Updates",
             None,
             vec![
                 row(
-                    "Show hidden files",
-                    Some("Files whose names start with a period."),
+                    "Version",
+                    Some(monodrive_core::VERSION),
                     self.focusable(
-                        "show-hidden",
+                        "check-updates",
                         true,
-                        toggle(
-                            "show-hidden",
-                            "Show hidden files",
-                            p.show_hidden,
-                            |p, on| p.show_hidden = on,
-                        ),
+                        text_button("check-updates", "Check for Updates", ButtonLook::Secondary)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(CheckForUpdates), cx)
+                            }),
                         cx,
                     ),
                 ),
                 row(
-                    "Sort by",
-                    Some("Clicking a column title sorts by it too."),
+                    "Update track",
+                    Some("Which releases the updater offers. Nightly builds come daily."),
                     self.focusable(
-                        "sort-by",
+                        "update-channel",
                         true,
                         segmented(
-                            "sort-by",
-                            "Sort by",
-                            p.sort.by,
-                            &[
-                                (SortBy::Name, "Name"),
-                                (SortBy::Modified, "Date"),
-                                (SortBy::Size, "Size"),
-                                (SortBy::Kind, "Kind"),
-                            ],
-                            |p, by| p.sort.by = by,
-                        ),
-                        cx,
-                    ),
-                ),
-                row(
-                    "Order",
-                    None,
-                    self.focusable(
-                        "sort-order",
-                        true,
-                        segmented(
-                            "sort-order",
-                            "Order",
-                            p.sort.descending,
-                            &[(false, "Ascending"), (true, "Descending")],
-                            |p, descending| p.sort.descending = descending,
-                        ),
-                        cx,
-                    ),
-                ),
-                row(
-                    "Keep folders on top",
-                    Some("Folders come before files in any order."),
-                    self.focusable(
-                        "folders-first",
-                        true,
-                        toggle(
-                            "folders-first",
-                            "Keep folders on top",
-                            p.sort.folders_first,
-                            |p, on| p.sort.folders_first = on,
-                        ),
-                        cx,
-                    ),
-                ),
-                row(
-                    "Terminal",
-                    Some("What Open in Terminal uses."),
-                    self.focusable(
-                        "terminal",
-                        true,
-                        segmented(
-                            "terminal",
-                            "Terminal",
-                            p.terminal,
-                            &self
-                                .terminals
-                                .iter()
-                                .map(|terminal| (*terminal, terminal.name()))
-                                .collect::<Vec<_>>(),
-                            |p, terminal| p.terminal = terminal,
+                            "update-channel",
+                            "Update track",
+                            p.update_channel,
+                            &[(Channel::Stable, "Stable"), (Channel::Nightly, "Nightly")],
+                            |p, channel| p.update_channel = channel,
                         ),
                         cx,
                     ),
                 ),
             ],
-        )]
+        )
+        .into_any_element()
     }
 
     fn window_page(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {

@@ -20,7 +20,7 @@
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
 //! `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
-//! `recents.png`. Then `palette.png`, `palette-query.png`, the palette's pages
+//! `recents.png`, then `updates.png`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
 //! `palette-favorites.png`), `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
 //! `settings-<page>.png` for each Settings page, `background.png`, the list
@@ -65,17 +65,18 @@ use gpui::{
 };
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
-    Browser, CancelRename, CommitRename, ConnectToServer, Drives, EditFavorites, EmptyTrash,
-    EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch, GoRecents, GoToFolder,
-    GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations, Places, Rename, SaveSearch,
-    SearchContents, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves, ShowSearches,
-    ToggleSplit, Undo,
+    Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives, EditFavorites,
+    EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch, GoRecents,
+    GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations, Places, Rename,
+    SaveSearch, SearchContents, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves,
+    ShowSearches, ToggleSplit, Undo,
 };
 use monodrive::connect;
 use monodrive::native::{self, Native, SizeDone};
 use monodrive::onboarding::{Onboarding, Setup, Step};
 use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
 use monodrive::session::{PaneState, StopState, TabState, WindowState};
+use monodrive::updates::{self, Updates};
 use monodrive_core::apps::App as MacApp;
 use monodrive_core::cloud::{Availability, CloudFolder};
 use monodrive_core::entries::{Entry, Kind};
@@ -86,6 +87,7 @@ use monodrive_core::places::{Favorite, Pinned, RecentSearch, SavedSearch, Store}
 use monodrive_core::search::{Looks, Scope, Search};
 use monodrive_core::servers::Cancel;
 use monodrive_core::sizes::FolderSize;
+use monodrive_core::updates::{Channel, Notes, Release};
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -296,6 +298,29 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     save(&mut cx, window, out, "trash")?;
     dispatch(&mut cx, window, &GoRecents)?;
     save(&mut cx, window, out, "recents")?;
+
+    // A made-up release, on a copy that can't update itself, so nothing goes
+    // to the network. Only this picture shows it.
+    let release = Release {
+        version: "0.2.0".parse()?,
+        published: "2026-10-30T12:00:00Z".into(),
+        notes: Notes {
+            highlights: Some("Search inside archives. Check for updates from the sidebar.".into()),
+            changes: vec!["Eject works on network drives again".into()],
+            stats: Some("12 changes from 2 contributors".into()),
+        },
+        page: "https://github.com/donnes/monodrive/releases".into(),
+        disk_image: String::new(),
+    };
+    cx.update(|cx| {
+        let updates = cx.new(|_| Updates::new(Channel::Stable, vec![release], Some(None)));
+        cx.set_global(updates::Shared(updates));
+    });
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    dispatch(&mut cx, window, &CheckForUpdates)?;
+    save(&mut cx, window, out, "updates")?;
+    cx.update(|cx| cx.remove_global::<updates::Shared>());
 
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();
