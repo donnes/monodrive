@@ -31,6 +31,7 @@ Update a plan's row when its work lands on `main`.
 | 24 Benchmarks and reports | Planned; do first | |
 | 25 Filesystem speed | Planned; needs plan 24's runner | |
 | 26 MCP contract v1 | Planned; tool map and profiles need review | |
+| 27 Overview | UI picked, not built | |
 
 ## UI picks
 
@@ -51,6 +52,7 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - 19: columns with a preview in the last column.
 - 21: a Commands page in Settings.
 - 22: one place to manage all worktrees. The search index finds .git entries and Git confirms each repository. Delete moves the folder to the Trash, then removes Git's registration; refused if locked or the main worktree, and dirty or unpushed work needs an extra confirmation showing what's there.
+- 27: Desk. Free space and up to 3 suggestions first, then your stuff across every location, with what's happening now beside it.
 
 - Onboarding (done; granting Full Disk Access itself needs a person to check): first launch, a dedicated window with Welcome and then one checklist of Full Disk Access and coding agents. The first index crawl waits until the access is granted or onboarding closes; the app detects the grant on return and offers to reopen.
 
@@ -61,7 +63,7 @@ Saved browsing workspaces were dropped. On 2026-10-30 these were dropped too: fi
 1. [Benchmarks and reports](24-benchmarks-and-reports.md), which plans 25 and 26 use to prove their claims.
 2. [Filesystem speed](25-filesystem-speed.md).
 3. [MCP contract v1](26-mcp-contract.md), before the MCP server is promoted in a stable release.
-4. The UI for plans 13, 14, 17, 18, 19 and 22 with the picks above, following DESIGN.md. The palette (⌘K) is on main; its Remote locations and Cloud storage pages grow as plans 14 and 18 land. Choosing an SFTP server only says browsing isn't available yet, and every server reads "Not connected", until plan 14's UI connects from the window.
+4. The UI for plans 13, 14, 17, 18, 19, 22 and [27](27-overview.md) with the picks above, following DESIGN.md. The palette (⌘K) is on main; its Remote locations and Cloud storage pages grow as plans 14 and 18 land. Choosing an SFTP server only says browsing isn't available yet, and every server reads "Not connected", until plan 14's UI connects from the window.
 
 ## Current state
 
