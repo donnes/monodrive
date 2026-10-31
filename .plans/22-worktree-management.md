@@ -7,7 +7,7 @@ Terminology: "Work3" is interpreted as "worktree".
 
 Maintainer's goal, which overrides the order below where they conflict: one place to manage all worktrees. Monodrive scans for them, lists them together, and can delete them. Deleting still needs the reviewed design this plan describes: dirty files, untracked files, branches and locks are preserved or explicitly confirmed, and removal is reversible through the Trash where possible.
 
-Make Monodrive useful for managing existing Git worktrees first. Design and implement worktree creation through Monodrive MCP only after the management foundation is usable and its behavior has been reviewed. Agent launch and broader agent management follow the separate [agent features plan](23-agent-features.md). They are deferred, not excluded.
+Make Monodrive useful for managing existing Git worktrees first. Design and implement worktree creation through Monodrive MCP only after the management foundation is usable and its behavior has been reviewed. Monodrive doesn't launch agents; handing work to T3 Code or Monocode is in the [agent features plan](23-agent-features.md).
 
 Git remains authoritative for repositories, branches and worktree registration. `monodrive-core` owns worktree behavior. GPUI and MCP call the same services. Keep filesystem mutations explicit, keep disk I/O off the UI thread, and preserve worktrees created by other applications.
 
@@ -15,7 +15,7 @@ Git remains authoritative for repositories, branches and worktree registration. 
 
 Read-only inventory can proceed independently of the file-management sequence. Mutating management, creation and setup depend on [shared operation ownership and jobs](03-file-operations.md); use that owner for cross-client coordination, receipts and recovery instead of designing another queue. The creation review still decides worktree-specific locking, reservation and setup behavior.
 
-Worktree navigation reuses existing browsing. Remote file access alone does not authorize remote Git operations, setup or agent launch. Local inventory and management do not wait for cloud backends, offline catalogs or agent features.
+Worktree navigation reuses existing browsing. Remote file access alone does not authorize remote Git operations, setup or agent launch. Local inventory and management do not wait for cloud backends or agent features.
 
 ## Inventory existing worktrees
 

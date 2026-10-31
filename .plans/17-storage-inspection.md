@@ -1,12 +1,12 @@
 # Storage inspection and duplicate review
 
-Depends on Get Info sizing, operations and comparison. Offline observations may join the report after catalogs exist, but cannot prove a live copy is safe to remove.
+Depends on Get Info sizing and operations.
 
 ## Scope
 
 Inspect an explicitly selected folder or source for large files, directory usage and duplicate candidates. Reuse sizing services and report permission failures, incomplete totals and cancelled scans. Distinguish logical size from actual allocated/reclaimable storage; APFS clones and hard links make these different.
 
-Find duplicate candidates with cheap metadata and, where useful, sampled hashes. Confirm equality against live files with full content verification before offering removal. Revalidate identity and changes at execution. Never remove the only retained member of a verified group, and never count an unavailable catalog entry as proof that another usable copy exists.
+Find duplicate candidates with cheap metadata and, where useful, sampled hashes. Confirm equality against live files with full content verification before offering removal. Revalidate identity and changes at execution. Never remove the only retained member of a verified group.
 
 The user chooses which copies to retain. Preview the exact paths to Trash and use ordinary operation recovery. No automatic cleanup based on age, folder name or a claimed percentage of reclaimable space. Worktree cleanup remains under the worktree lifecycle, not generic duplicate cleanup.
 

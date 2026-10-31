@@ -22,14 +22,15 @@ Update a plan's row when its work lands on `main`.
 | 12 Batch rename | Done | 1574337, 13200b7 |
 | 13 Archives | Core on main; UI picked, not built | |
 | 14 Remote locations | Core on main; UI picked, not built | |
-| 15 File and folder comparison | Core on main; UI picked, not built | |
-| 16 Offline catalogs | Core on main; UI picked, not built | |
 | 17 Storage inspection | Core on main; UI picked, not built | |
-| 18 Cloud storage | Local slice core on main; UI picked, not built; direct providers deferred | |
-| 19 More views | UI picked, not built | |
-| 21 Extensions | User commands core on main; UI picked, not built; runtime deferred | |
+| 18 Cloud storage | Core on main; UI picked, not built | |
+| 19 Column view | UI picked, not built | |
+| 21 User commands | Core on main; UI picked, not built; parked | |
 | 22 Worktree management | Inventory on main; goal changed to one place to scan and manage all worktrees; deletion needs a design review | |
 | 23 Agent features | Later | |
+| 24 Benchmarks and reports | Planned; do first | |
+| 25 Filesystem speed | Planned; needs plan 24's runner | |
+| 26 MCP contract v1 | Planned; tool map and profiles need review | |
 
 ## UI picks
 
@@ -45,21 +46,22 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - 12: rename in the list, with a bar across it.
 - 13: browse a ZIP like a folder, with a read-only header and Extract buttons.
 - 14: servers under Locations.
-- 15: an aligned two-pane list with a status column.
-- 16: a cataloged drive keeps its sidebar row when unplugged, with its last known contents browsable read-only under a banner.
 - 17: a report of largest files and verified duplicates, with a review before anything goes to the Trash.
 - 18: a cloud badge at the end of the row or on a grid icon's corner; clicking it downloads.
-- 19: columns with a preview in the last column; gallery as a large preview above a thumbnail strip.
+- 19: columns with a preview in the last column.
 - 21: a Commands page in Settings.
 - 22: one place to manage all worktrees. The search index finds .git entries and Git confirms each repository. Delete moves the folder to the Trash, then removes Git's registration; refused if locked or the main worktree, and dirty or unpushed work needs an extra confirmation showing what's there.
 
 - Onboarding (done; granting Full Disk Access itself needs a person to check): first launch, a dedicated window with Welcome and then one checklist of Full Disk Access and coding agents. The first index crawl waits until the access is granted or onboarding closes; the app detects the grant on return and offers to reopen.
 
-Saved browsing workspaces were dropped.
+Saved browsing workspaces were dropped. On 2026-10-30 these were dropped too: file and folder comparison and offline catalogs, with their core code and MCP tools (Git history has them), plus direct cloud providers, the gallery view, the extension runtime, and Monodrive running agents itself.
 
 ## Next up, in order
 
-1. Plans 09 to 19, 21 and 22 with the picks above, following DESIGN.md. The palette (⌘K) is on main; its Remote locations and Cloud storage pages grow as plans 14 and 18 land. Choosing an SFTP server only says browsing isn't available yet, and every server reads "Not connected", until plan 14's UI connects from the window.
+1. [Benchmarks and reports](24-benchmarks-and-reports.md), which plans 25 and 26 use to prove their claims.
+2. [Filesystem speed](25-filesystem-speed.md).
+3. [MCP contract v1](26-mcp-contract.md), before the MCP server is promoted in a stable release.
+4. The UI for plans 13, 14, 17, 18, 19 and 22 with the picks above, following DESIGN.md. The palette (⌘K) is on main; its Remote locations and Cloud storage pages grow as plans 14 and 18 land. Choosing an SFTP server only says browsing isn't available yet, and every server reads "Not connected", until plan 14's UI connects from the window.
 
 ## Current state
 
@@ -75,7 +77,7 @@ Behavior lives in `monodrive-core`; the UI and MCP call the same services. Human
 
 Preserve disk contents, surface partial failures, and offer reversal where the source supports it. Check capabilities rather than promising local Trash or atomic moves on every backend. Provide a way back from navigation and a way to disconnect or forget a source without deleting its files.
 
-Keep disk I/O, network I/O, hashing and extraction off the UI thread. `docs/performance.md` is the authority for measured local budgets. Local cached search stays fast; remote results arrive progressively and offline results show their age. Connecting, cataloging and synchronizing are separate choices. Never crawl a new source merely because it was opened.
+Keep disk I/O, network I/O, hashing and extraction off the UI thread. `docs/performance.md` is the authority for measured local budgets. Local cached search stays fast; remote results arrive progressively. Connecting and synchronizing are separate choices. Never crawl a new source merely because it was opened.
 
 For each implementation, use isolated fixtures, extend existing meaningful tests, and verify UI changes with headless snapshots. Follow AGENTS.md for regression evidence, tests, permissions and process cleanup. Compare the relevant performance benchmarks when listing, sorting, rendering or launch changes; do not rerun unrelated benchmarks for every feature. Show alternatives before substantial unsettled layout work.
 
@@ -97,23 +99,22 @@ Numbers give the recommended sequence, not a requirement to finish unrelated opt
 12. [Batch rename](12-batch-rename.md).
 13. [Archives](13-archives.md).
 14. [Remote locations over SSH/SFTP](14-remote-locations.md).
-15. [File and folder comparison](15-file-and-folder-comparison.md). Local comparison can ship before remote locations.
-16. [Offline catalogs](16-offline-catalogs.md).
 17. [Storage inspection and duplicate review](17-storage-inspection.md).
-18. [Cloud storage](18-cloud-storage.md). Add direct providers only for a concrete need; handle local placeholders first.
+18. [Cloud storage](18-cloud-storage.md). Local placeholders only.
 
 ## Other features and later agent work
 
 These are separate follow-on tracks. They do not require every storage backend to ship first.
 
-- [Column and gallery views](19-more-views.md), after selection and previews.
-- [User commands and extensions](21-extensions.md), after stable commands and operation services.
+- [Column view](19-more-views.md), after selection and previews.
+- [User commands](21-extensions.md), parked until a real workflow needs them.
 - [Worktree management](22-worktree-management.md) stays separate: inspect existing worktrees first, then reviewed management and creation. Read-only inventory can proceed independently; mutations and setup reuse the shared jobs foundation.
-- [Agent handoff and agent management](23-agent-features.md), after reliable shared operations and the relevant worktree lifecycle. Agent features are planned for later, not excluded from Monodrive.
+- [Filesystem speed](25-filesystem-speed.md) absorbs the sorting miss in plan 01.
+- [Agent handoff and status](23-agent-features.md), after reliable shared operations and the relevant worktree lifecycle.
 
 ## Deferred choices
 
 - Tags remain excluded unless a concrete workflow changes that decision.
-- Automatic bidirectional sync, a distributed filesystem, virtual mounts and a broad plugin runtime are not prerequisites for remote file management.
+- Automatic bidirectional sync, a distributed filesystem and virtual mounts are not prerequisites for remote file management.
 - Keep the macOS app scope. Browsing a Linux server through SFTP does not require a Linux app. A Linux indexing helper needs a separate scope decision.
 - Do not copy Finder's per-folder view persistence or `.DS_Store` behavior.

@@ -21,4 +21,4 @@ Depends on shared operations and places. Reuse the relevant Monocode GPUI tab, r
 
 Each pane owns its location, history, selection and view. Commands act on the focused pane. Closing a pane returns focus to its sibling; closing the last pane closes its tab. Restoring a missing drive shows an unavailable location with reconnect or another-location choices. It never opens a different source that happens to reuse the old path. Closing a tab/window does not cancel a shared job implicitly.
 
-Folder comparison is a later service; two panes alone do not claim that their contents match. UI tests cover independent histories, focus and close/restore behavior.
+Two panes alone do not claim that their contents match. UI tests cover independent histories, focus and close/restore behavior.

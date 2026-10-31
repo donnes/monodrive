@@ -1,10 +1,10 @@
 # Agent handoff and agent management
 
-Status: planned for later. Agent features are part of the product direction, not excluded from Monodrive. Ordinary UI/MCP file-operation parity remains part of every earlier milestone and does not wait for this track.
+Status: planned for later. Monodrive hands work to T3 Code and Monocode and shows its status. It doesn't run agents itself: native conversations, managed launch and orchestration were dropped on 2026-10-30, because those apps already do them. Ordinary UI/MCP file-operation parity remains part of every earlier milestone and does not wait for this track.
 
 ## Dependencies and order
 
-Start after reliable shared jobs, visible operation history and stable source identity. Worktree-aware handoff uses the inventory milestone in [worktree management](22-worktree-management.md). Managed creation/setup waits for that plan's reviewed lifecycle. Neither cloud backends nor extra browser views are prerequisites.
+Start after reliable shared jobs, visible operation history and stable source identity. Worktree-aware handoff uses the inventory milestone in [worktree management](22-worktree-management.md). Neither cloud backends nor extra browser views are prerequisites.
 
 ## Handoff first
 
@@ -18,16 +18,8 @@ Core owns handoff requests/results; UI and MCP use the same contract. Return an 
 
 Show linked sessions and their known running, waiting, completed, failed or disconnected state alongside file operations. Attribute file changes only when the integration provides reliable evidence. Unknown or unreachable is not idle. Losing a connection or closing a pane does not imply a session stopped.
 
-Initially delegate conversations, model selection and execution to the companion app. This keeps the first feature useful without implementing a provider runtime. Session lists and status come from supported APIs with events or bounded refresh, never whole-machine process scans.
-
-## Managed launch and worktree tasks later
-
-After handoff and status are useful, design explicit launch, stop, cancellation and recovery for tasks on an assigned local worktree. Reuse the shared job owner and worktree creation/reservation model instead of a second pool or scheduler. Distinguish a Git lock, an agent reservation and an actually running process.
-
-Only stop processes or sessions Monodrive owns or has explicit authority to control. Preserve work from external agents and user-created worktrees. Review cleanup and ownership together with the worktree plan. Remote execution requires the remote host lifecycle and permission design; SSH browsing alone does not provide it.
-
-Native conversations, provider/model selection, scheduling and broader orchestration remain possible subsequent milestones. Define their concrete workflow, credential ownership, persistence, resource limits and differences from companion integrations before expanding implementation scope. They are deferred, not permanently ruled out.
+Conversations, model selection and execution stay in the companion app. Session lists and status come from supported APIs with events or bounded refresh, never whole-machine process scans.
 
 ## Verification
 
-Use fake integrations and temporary repositories to test exact handoff context, unsupported paths, duplicate requests, lost connections, revoked access and cancellation authority. Tests never launch real agents, contact providers, run setup hooks or modify live worktrees. UI checks cover review, activity, failure and return navigation.
+Use fake integrations and temporary repositories to test exact handoff context, unsupported paths, duplicate requests, lost connections and revoked access. Tests never launch real agents, contact providers, run setup hooks or modify live worktrees. UI checks cover review, activity, failure and return navigation.
