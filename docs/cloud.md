@@ -13,10 +13,10 @@ iCloud Drive and File Provider apps such as Dropbox, Google Drive and OneDrive k
 ## What never downloads
 
 - Listing a folder never reads its files. Opening a placeholder folder lists it, as Finder does, because there's no other way to show what it holds.
-- The walk shared by folder sizes, storage scans and comparisons counts a placeholder file at its size, on no blocks, and doesn't list a placeholder folder. Totals report how many placeholders they hold. A placeholder folder given as the folder to walk is refused.
-- Looking for duplicates never reads a placeholder. One the size of another file is listed as not downloaded, neither verified nor ruled out. Verifying a comparison leaves an entry with a placeholder side unverified, and a copy plan skips a placeholder source.
-- Listing an archive's contents and a text diff refuse a placeholder, following links as opening does.
-- The duplicate and comparison readers set fsearch's `no_materialize` policy on their threads, and the archive and diff readers set it for the read with `cloud::without_downloads`. A file evicted after the check then fails to read, and says it isn't downloaded, instead of downloading.
+- The walk shared by folder sizes and storage scans counts a placeholder file at its size, on no blocks, and doesn't list a placeholder folder. Totals report how many placeholders they hold. A placeholder folder given as the folder to walk is refused.
+- Looking for duplicates never reads a placeholder. One the size of another file is listed as not downloaded, neither verified nor ruled out.
+- Listing an archive's contents refuses a placeholder, following links as opening does.
+- The duplicate reader sets fsearch's `no_materialize` policy on its threads, and the archive reader sets it for the read with `cloud::without_downloads`. A file evicted after the check then fails to read, and says it isn't downloaded, instead of downloading.
 - Operation stamps and tallies treat a placeholder folder as empty, so trashing or moving one on its volume fetches nothing.
 
 ## Copies refuse placeholders

@@ -3,9 +3,7 @@
 
 pub mod apps;
 pub mod archives;
-pub mod catalogs;
 pub mod cloud;
-pub mod compare;
 pub mod entries;
 pub mod index;
 pub mod info;

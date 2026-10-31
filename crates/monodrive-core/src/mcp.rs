@@ -1,15 +1,11 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin/stdout, one
 //! JSON-RPC message per line. Tools only decode arguments and call one
-//! service method; the behavior lives in `archives`, `catalogs`, `cloud`,
-//! `compare`, `entries`, `index`, `info`, `ops`, `places`, `search`, `sizes`,
+//! service method; the behavior lives in `archives`, `cloud`,
+//! `entries`, `index`, `info`, `ops`, `places`, `search`, `sizes`,
 //! `storage`, `user_commands`, `volumes` and `worktrees`.
 
 use crate::archives::{self, Archive};
-use crate::catalogs::{self, Catalog, Found, Resolved, Unreadable};
 use crate::cloud::{self, Asked, CloudFolder};
-use crate::compare::{
-    self, Action, Block, Comparison, CopyPlan, Ending, LineKind, Newer, TextDiff,
-};
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, Caps, GrepMode, Index, Status};
@@ -45,17 +41,14 @@ trash, put_back, rename, rename_many, create_folder, create_folder_with, create_
 undo and redo change files through the same undo history as the Monodrive window; rename_preview \
 shows what rename_many would do. copy, move, archive_create and archive_extract run as jobs that \
 job_status follows; archive_list shows what a ZIP holds without extracting it. \
-compare compares two files or folders, diff shows two text files' differences, and compare_copy \
-copies differences one way as a job. storage_scan shows what takes up space in a folder, duplicates \
+storage_scan shows what takes up space in a folder, duplicates \
 finds identical files there, and cleanup_duplicates trashes the copies you choose. \
 list_places shows the sidebar's favorites, the mounted volumes, the cloud folders and the saved servers; pin, unpin and eject \
 manage them, connect mounts an smb:// share with credentials macOS already has, disconnect unmounts it, and \
 forget_server forgets a saved address. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches. \
 Items iCloud Drive or a cloud app hasn't downloaded show (not downloaded); nothing but download \
-fetches them, and remove_download frees a downloaded copy. catalog_create keeps a searchable list \
-of a drive's or folder's names, so catalog_search finds them while it's disconnected; catalog_list, \
-catalog_refresh and catalog_forget manage those catalogs. worktrees lists a Git repository's worktrees \
+fetches them, and remove_download frees a downloaded copy. worktrees lists a Git repository's worktrees \
 and worktree_status shows one's changes, without fetching or changing anything; repo_register, repos \
 and repo_forget manage the repositories Monodrive remembers. commands_list shows the commands the user \
 saved, command_preview prints exactly what one would run on paths, and command_run runs it, which \
@@ -69,12 +62,9 @@ interactive authentication required.";
 pub fn serve_stdio() -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
     let places = places::Store::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
-    let catalogs =
-        catalogs::Store::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
     let mut server = Server::new(
         ops::Client::new(paths, std::env::current_exe().ok()),
         places,
-        catalogs,
     );
     let mut stdout = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
@@ -103,10 +93,9 @@ pub struct Server {
     /// The name the agent's MCP client gave, to attribute its changes.
     client: Option<String>,
     places: places::Store,
-    catalogs: catalogs::Store,
     /// Found on the first Git tool, and again until one is found.
     git: Option<Git>,
-    /// What compare_copy and cleanup_duplicates previewed, oldest first,
+    /// What cleanup_duplicates previewed, oldest first,
     /// so a confirm runs only that.
     plans: Vec<Previewed>,
     /// Each opened on the first tool that needs it; each session its own.
@@ -116,12 +105,8 @@ pub struct Server {
 struct Previewed {
     token: String,
     made: Instant,
-    plan: Plan,
-}
-
-enum Plan {
-    Copy(CopyPlan),
-    Cleanup(Cleanup, String),
+    plan: Cleanup,
+    preview: String,
 }
 
 /// How many previews a session keeps, and for how long.
@@ -231,37 +216,6 @@ enum ToolCall {
         #[serde(default)]
         conflict: Conflict,
     },
-    Compare {
-        left: String,
-        right: String,
-        #[serde(default)]
-        verify: bool,
-        #[serde(default = "compare_limit")]
-        limit: usize,
-        #[serde(default = "default_timeout")]
-        timeout_seconds: u64,
-    },
-    Diff {
-        left: String,
-        right: String,
-        #[serde(default = "diff_context")]
-        context: usize,
-        #[serde(default = "diff_limit")]
-        limit: usize,
-    },
-    CompareCopy {
-        left: Option<String>,
-        right: Option<String>,
-        #[serde(default)]
-        paths: Vec<String>,
-        #[serde(default)]
-        confirm: bool,
-        plan: Option<String>,
-        #[serde(default = "compare_limit")]
-        limit: usize,
-        #[serde(default = "default_timeout")]
-        timeout_seconds: u64,
-    },
     StorageScan {
         path: String,
         #[serde(default = "largest")]
@@ -341,25 +295,6 @@ enum ToolCall {
     },
     RemoveSearch {
         name: String,
-    },
-    CatalogCreate {
-        path: String,
-        #[serde(default = "catalog_timeout")]
-        timeout_seconds: u64,
-    },
-    CatalogList {},
-    CatalogRefresh {
-        catalog: String,
-        #[serde(default = "catalog_timeout")]
-        timeout_seconds: u64,
-    },
-    CatalogForget {
-        catalog: String,
-    },
-    CatalogSearch {
-        query: String,
-        #[serde(default = "default_limit")]
-        limit: usize,
     },
     Worktrees {
         path: String,
@@ -453,10 +388,6 @@ fn archive_limit() -> usize {
     200
 }
 
-fn compare_limit() -> usize {
-    200
-}
-
 fn largest() -> usize {
     20
 }
@@ -477,14 +408,6 @@ fn scan_timeout() -> u64 {
     30
 }
 
-fn diff_context() -> usize {
-    3
-}
-
-fn diff_limit() -> usize {
-    500
-}
-
 fn remote_page() -> usize {
     200
 }
@@ -493,19 +416,14 @@ fn remote_read_limit() -> u32 {
     64 << 10
 }
 
-fn catalog_timeout() -> u64 {
-    300
-}
-
 impl Server {
-    pub fn new(ops: ops::Client, places: places::Store, catalogs: catalogs::Store) -> Self {
+    pub fn new(ops: ops::Client, places: places::Store) -> Self {
         Self {
             index: None,
             ops,
             client: None,
             remote: Connections::new(places.clone(), remote::ssh::connector()),
             places,
-            catalogs,
             plans: Vec::new(),
             git: None,
         }
@@ -723,52 +641,6 @@ impl Server {
                 into: expand_home(&into),
                 conflict,
             }),
-            ToolCall::Compare {
-                left,
-                right,
-                verify,
-                limit,
-                timeout_seconds,
-            } => {
-                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
-                let progress = compare::Progress::default();
-                compare::compare(
-                    &expand_home(&left),
-                    &expand_home(&right),
-                    &progress,
-                    deadline,
-                )
-                .map(|mut comparison| {
-                    let read =
-                        verify.then(|| comparison.verify(&[PathBuf::new()], &progress, deadline));
-                    compared(&comparison, limit, read, timeout_seconds)
-                })
-            }
-            ToolCall::Diff {
-                left,
-                right,
-                context,
-                limit,
-            } => {
-                let (left, right) = (expand_home(&left), expand_home(&right));
-                compare::diff(&left, &right, context)
-                    .map(|diff| unified(&diff, &left, &right, limit))
-            }
-            ToolCall::CompareCopy {
-                left,
-                right,
-                paths,
-                confirm,
-                plan,
-                limit,
-                timeout_seconds,
-            } => match (confirm, left, right) {
-                (true, ..) => self.run_plan(plan.as_deref(), limit),
-                (false, Some(left), Some(right)) => {
-                    self.preview_copy(&left, &right, &paths, limit, timeout_seconds)
-                }
-                (false, ..) => Err("Pass left and right to preview a copy.".into()),
-            },
             ToolCall::StorageScan {
                 path,
                 largest,
@@ -922,53 +794,6 @@ impl Server {
                 .places
                 .remove_search(&name)
                 .map(|()| format!("Removed the saved search {name}.\n")),
-            ToolCall::CatalogCreate {
-                path,
-                timeout_seconds,
-            } => {
-                let volumes = volumes::all();
-                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
-                self.catalogs
-                    .create(
-                        &expand_home(&path),
-                        &volumes,
-                        &storage::Progress::default(),
-                        deadline,
-                    )
-                    .map(|catalog| catalog_line(&catalog, &volumes, index::now()))
-            }
-            ToolCall::CatalogList {} => self.catalogs.list().map(|listing| {
-                if listing.catalogs.is_empty() && listing.unreadable.is_empty() {
-                    return "No catalogs.\n".into();
-                }
-                let volumes = volumes::all();
-                let mut out: String = listing
-                    .catalogs
-                    .iter()
-                    .map(|catalog| catalog_line(catalog, &volumes, index::now()))
-                    .collect();
-                unreadable_catalogs(&mut out, &listing.unreadable);
-                out
-            }),
-            ToolCall::CatalogRefresh {
-                catalog,
-                timeout_seconds,
-            } => {
-                let volumes = volumes::all();
-                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
-                self.catalogs
-                    .refresh(&catalog, &volumes, &storage::Progress::default(), deadline)
-                    .map(|catalog| catalog_line(&catalog, &volumes, index::now()))
-            }
-            ToolCall::CatalogForget { catalog } => self.catalogs.forget(&catalog).map(|()| {
-                format!("Forgot catalog {catalog}. Only Monodrive's catalog file went; no files changed.\n")
-            }),
-            ToolCall::CatalogSearch { query, limit } => {
-                let volumes = volumes::all();
-                Query::parse(&query)
-                    .and_then(|query| self.catalogs.search(&query, &volumes, limit))
-                    .map(|found| catalog_hits(&found, &volumes, index::now()))
-            }
             ToolCall::Worktrees { path } => self
                 .git()
                 .and_then(|git| worktrees::list(&git, &expand_home(&path)))
@@ -1241,46 +1066,8 @@ impl Server {
         }
     }
 
-    /// Compares the two folders now and previews a one-way copy of the
-    /// differences at `paths`, kept under a token for `run_plan`.
-    fn preview_copy(
-        &mut self,
-        left: &str,
-        right: &str,
-        paths: &[String],
-        limit: usize,
-        timeout: u64,
-    ) -> Result<String, String> {
-        let deadline = Instant::now().checked_add(Duration::from_secs(timeout));
-        let comparison = compare::compare(
-            &expand_home(left),
-            &expand_home(right),
-            &compare::Progress::default(),
-            deadline,
-        )?;
-        if !comparison.complete {
-            return Err(format!(
-                "{}So there's no plan; nothing was copied.\n",
-                stopped(timeout)
-            ));
-        }
-        let under: Vec<PathBuf> = match paths {
-            [] => vec![PathBuf::new()],
-            paths => paths.iter().map(PathBuf::from).collect(),
-        };
-        let plan = comparison.plan(&under);
-        let preview = copy_plan(&plan, limit);
-        if plan.request().is_none() {
-            return Ok(preview + "Nothing to copy.\n");
-        }
-        let token = self.keep(Plan::Copy(plan));
-        Ok(format!(
-            "{preview}plan: {token}\nPass confirm: true and this plan within 10 minutes to copy it.\n"
-        ))
-    }
-
     /// Keeps a previewed plan under a new token.
-    fn keep(&mut self, plan: Plan) -> String {
+    fn keep(&mut self, plan: Cleanup, preview: String) -> String {
         let token = format!("{:016x}", RandomState::new().hash_one(self.plans.len()));
         self.plans.retain(|kept| kept.made.elapsed() < PLAN_LIFE);
         if self.plans.len() >= PLANS_KEPT {
@@ -1290,46 +1077,19 @@ impl Server {
             token: token.clone(),
             made: Instant::now(),
             plan,
+            preview,
         });
         token
     }
 
-    /// Where the plan a preview kept under `token` is, if it's still kept
-    /// and `is` the kind asked for.
-    fn kept(
-        &mut self,
-        token: Option<&str>,
-        is: fn(&Plan) -> bool,
-        again: &str,
-    ) -> Result<usize, String> {
+    /// Where the plan a preview kept under `token` is, if it's still kept.
+    fn kept(&mut self, token: Option<&str>) -> Result<usize, String> {
         self.plans.retain(|kept| kept.made.elapsed() < PLAN_LIFE);
         token
-            .and_then(|token| {
-                self.plans
-                    .iter()
-                    .position(|kept| kept.token == token && is(&kept.plan))
-            })
+            .and_then(|token| self.plans.iter().position(|kept| kept.token == token))
             .ok_or_else(|| {
-                format!("No previewed plan with that token in this session. A plan runs once, within 10 minutes; preview again with {again}.")
+                "No previewed plan with that token in this session. A plan runs once, within 10 minutes; preview again with path and trash.".into()
             })
-    }
-
-    /// Queues exactly the plan a preview kept, once. The owner refuses each
-    /// item whose source or destination changed since.
-    fn run_plan(&mut self, token: Option<&str>, limit: usize) -> Result<String, String> {
-        let at = self.kept(
-            token,
-            |plan| matches!(plan, Plan::Copy(_)),
-            "left and right",
-        )?;
-        let Plan::Copy(plan) = &self.plans[at].plan else {
-            return Err("Not a copy plan.".into());
-        };
-        let preview = copy_plan(plan, limit);
-        let request = plan.request().ok_or("Nothing to copy.")?;
-        let queued = self.queue(request)?;
-        self.plans.remove(at);
-        Ok(preview + &queued)
     }
 
     /// Scans `path` again, verifies the copies of `trash` there, and
@@ -1364,7 +1124,7 @@ impl Server {
             None => why,
         })?;
         let preview = cleanup_plan(&plan);
-        let token = self.keep(Plan::Cleanup(plan, preview.clone()));
+        let token = self.keep(plan, preview.clone());
         Ok(format!(
             "{preview}plan: {token}\nPass confirm: true and this plan within 10 minutes to trash them.\n"
         ))
@@ -1373,15 +1133,11 @@ impl Server {
     /// Trashes exactly what a preview kept, once, as one change undo
     /// reverses. The owner refuses each copy that changed since.
     fn run_cleanup(&mut self, token: Option<&str>) -> Result<String, String> {
-        let at = self.kept(
-            token,
-            |plan| matches!(plan, Plan::Cleanup(..)),
-            "path and trash",
-        )?;
-        let Plan::Cleanup(plan, preview) = &self.plans[at].plan else {
-            return Err("Not a cleanup plan.".into());
-        };
-        let (request, preview) = (plan.request(), preview.clone());
+        let at = self.kept(token)?;
+        let (request, preview) = (
+            self.plans[at].plan.request(),
+            self.plans[at].preview.clone(),
+        );
         // Kept when the owner refuses it whole, such as while agents may
         // not change files, so it can be confirmed again.
         let outcome = self.submit(request)?;
@@ -1748,112 +1504,6 @@ fn worktree_status(status: &worktrees::Status) -> String {
     out
 }
 
-/// A catalog's source where it is now or was last seen, then what's worth
-/// knowing about it in brackets, and a line for anything it's missing.
-fn catalog_line(catalog: &Catalog, volumes: &[Volume], now: i64) -> String {
-    let now = u64::try_from(now).unwrap_or(0);
-    let (path, state) = match catalog.source.locate(volumes) {
-        Availability::Available(path) => (path, "connected"),
-        Availability::Unavailable(_) => (catalog.source.path.clone(), "offline"),
-    };
-    let mut out = format!(
-        "{} (catalog {}, {}, {state}, refreshed {}, {} entries, {} on disk)\n",
-        path.display(),
-        catalog.id,
-        catalog.source.volume.name,
-        ago(catalog.refreshed, now),
-        index::thousands(catalog.entries as usize),
-        small_bytes(catalog.bytes),
-    );
-    if catalog.unreadable > 0 {
-        let _ = writeln!(
-            out,
-            "  incomplete: {} folders couldn't be read, and what's in them is missing",
-            catalog.unreadable
-        );
-    }
-    if catalog.truncated {
-        let _ = writeln!(
-            out,
-            "  incomplete: stopped at {} entries",
-            index::thousands(catalogs::MAX_ENTRIES)
-        );
-    }
-    if let Some(failed) = &catalog.failed {
-        let _ = writeln!(
-            out,
-            "  last refresh failed {}: {} The entries are from the refresh before.",
-            ago(failed.at, now),
-            failed.why
-        );
-    }
-    out
-}
-
-/// Each catalog a line, saying how old it is and whether its source is
-/// connected, then its hits a path a line: as cataloged when it's offline,
-/// and where they are now, checked, when it's connected.
-fn catalog_hits(found: &Found, volumes: &[Volume], now: i64) -> String {
-    let now = u64::try_from(now).unwrap_or(0);
-    let mut out = String::new();
-    for (at, searched) in found.catalogs.iter().enumerate() {
-        let catalog = &searched.catalog;
-        let state = match &searched.source {
-            Availability::Available(path) => format!("connected at {}", path.display()),
-            Availability::Unavailable(why) => format!("offline: {why}"),
-        };
-        let _ = writeln!(
-            out,
-            "{} (catalog {}): cataloged {}, {state}",
-            catalog.source.volume.name,
-            catalog.id,
-            ago(catalog.refreshed, now)
-        );
-        for hit in found.hits.iter().filter(|hit| hit.catalog == at) {
-            let mark = suffix(hit.entry.kind);
-            let _ = match catalog.resolve(hit, volumes) {
-                Resolved::Current(path) => writeln!(out, "{}{mark}", path.display()),
-                Resolved::Changed(path, why) => writeln!(out, "{}{mark} ({why})", path.display()),
-                Resolved::Offline(_) => writeln!(out, "{}{mark}", hit.entry.path.display()),
-            };
-        }
-    }
-    unreadable_catalogs(&mut out, &found.unreadable);
-    out
-}
-
-/// A line for each catalog file that doesn't read, saying how to remove it.
-fn unreadable_catalogs(out: &mut String, unreadable: &[Unreadable]) {
-    for broken in unreadable {
-        let _ = writeln!(
-            out,
-            "catalog {} can't be read: {}. catalog_forget removes it.",
-            broken.id, broken.why
-        );
-    }
-}
-
-/// How long before `now` a moment in seconds from the epoch was.
-fn ago(then: u64, now: u64) -> String {
-    let seconds = now.saturating_sub(then);
-    let (n, unit) = match seconds {
-        0..60 => return "just now".into(),
-        60..3600 => (seconds / 60, "minute"),
-        3600..86_400 => (seconds / 3600, "hour"),
-        _ => (seconds / 86_400, "day"),
-    };
-    let s = if n == 1 { "" } else { "s" };
-    format!("{n} {unit}{s} ago")
-}
-
-/// Finder's decimal units, for files that may be small.
-fn small_bytes(n: u64) -> String {
-    match n {
-        ..1_000_000 => format!("{} KB", n.div_ceil(1000)),
-        _ => format!("{:.1} MB", n as f64 / 1e6),
-    }
-}
-
 /// Finder's decimal units, to a size worth reading for a disk.
 fn bytes(n: u64) -> String {
     let n = n as f64;
@@ -2123,206 +1773,6 @@ fn archive_list(archive: &Archive, folder: &str, limit: usize) -> String {
     out
 }
 
-/// Both roots, the counts, then each difference a line, by its path
-/// relative to both. Equal and same-looking entries are only counted.
-fn compared(comparison: &Comparison, limit: usize, read: Option<bool>, timeout: u64) -> String {
-    use compare::Status;
-    let label = |status: &Status| match status {
-        Status::OnlyLeft => "only left",
-        Status::OnlyRight => "only right",
-        Status::TypeConflict => "type conflict",
-        Status::SameMetadata => "same size and date",
-        Status::MetadataDiffers => "dates differ",
-        Status::Equal => "equal",
-        Status::Differs => "differs",
-        Status::Unknown(_) => "unknown",
-    };
-    let mut out = format!(
-        "left: {}\nright: {}\n",
-        comparison.left.display(),
-        comparison.right.display()
-    );
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    for entry in &comparison.entries {
-        match counts
-            .iter_mut()
-            .find(|(name, _)| *name == label(&entry.status))
-        {
-            Some((_, n)) => *n += 1,
-            None => counts.push((label(&entry.status), 1)),
-        }
-    }
-    counts.sort_by_key(|(name, _)| {
-        [
-            "only left",
-            "only right",
-            "type conflict",
-            "dates differ",
-            "differs",
-            "unknown",
-            "same size and date",
-            "equal",
-        ]
-        .iter()
-        .position(|n| n == name)
-    });
-    let counts: Vec<String> = counts
-        .iter()
-        .map(|(name, n)| format!("{n} {name}"))
-        .collect();
-    let _ = writeln!(
-        out,
-        "{}",
-        if counts.is_empty() {
-            "Both are empty.".into()
-        } else {
-            counts.join(", ")
-        }
-    );
-    let one = comparison.entries.len() == 1 && comparison.entries[0].path.as_os_str().is_empty();
-    let shown: Vec<&compare::Entry> = comparison
-        .entries
-        .iter()
-        .filter(|entry| one || !matches!(entry.status, Status::Equal | Status::SameMetadata))
-        .collect();
-    for entry in shown.iter().take(limit) {
-        out.push_str(label(&entry.status));
-        if !one {
-            let kind = entry
-                .left
-                .as_ref()
-                .or(entry.right.as_ref())
-                .map(|side| side.kind);
-            let _ = write!(out, ": {}{}", entry.path.display(), kind.map_or("", suffix));
-        }
-        let detail = match (&entry.status, &entry.left, &entry.right) {
-            (Status::TypeConflict, Some(l), Some(r)) => format!(
-                " ({} on the left, {} on the right)",
-                compare::kind_name(l.kind),
-                compare::kind_name(r.kind)
-            ),
-            (Status::Unknown(why), ..) => format!(" ({why})"),
-            _ => match entry.newer() {
-                Some(Newer::Left) => " (left newer)".into(),
-                Some(Newer::Right) => " (right newer)".into(),
-                None => String::new(),
-            },
-        };
-        let cloud = |side: &Option<compare::Side>| {
-            side.as_ref()
-                .is_some_and(|side| !side.availability.is_local())
-        };
-        let cloud = match (cloud(&entry.left), cloud(&entry.right)) {
-            (true, true) => " (not downloaded)",
-            (true, false) => " (left not downloaded)",
-            (false, true) => " (right not downloaded)",
-            (false, false) => "",
-        };
-        let _ = writeln!(out, "{detail}{cloud}");
-    }
-    if shown.len() > limit {
-        let _ = writeln!(out, "({} more; pass a larger limit)", shown.len() - limit);
-    }
-    let cloud = comparison
-        .entries
-        .iter()
-        .filter(|entry| entry.not_downloaded())
-        .count();
-    if cloud > 0 {
-        let _ = writeln!(
-            out,
-            "({cloud} not downloaded on a side, so verify doesn't read them; download them first.)"
-        );
-    }
-    if comparison
-        .entries
-        .iter()
-        .any(|entry| entry.status == Status::SameMetadata)
-    {
-        out.push_str(
-            "(Same size and date doesn't prove equal contents; verify: true reads them.)\n",
-        );
-    }
-    if read == Some(false) {
-        let _ = writeln!(
-            out,
-            "(Reading stopped after {timeout}s; what it didn't read is still unverified.)"
-        );
-    }
-    if !comparison.complete {
-        out.push_str(&stopped(timeout));
-    }
-    out
-}
-
-/// Why a comparison isn't whole. Either limit can stop it.
-fn stopped(timeout: u64) -> String {
-    format!(
-        "(Stopped before comparing everything, after {timeout}s or {} items; raise timeout_seconds or compare smaller folders.)\n",
-        compare::MAX_ITEMS
-    )
-}
-
-/// A unified diff: `@@ -start,count +start,count @@` before each hunk, and
-/// `\\ No newline at end of file` after a last line without one. When the
-/// changed lines end differently, ␍ marks those ending in CRLF.
-fn unified(diff: &TextDiff, left: &Path, right: &Path, limit: usize) -> String {
-    if diff.additions + diff.deletions == 0 {
-        return "No differences in the text.\n".into();
-    }
-    let mut out = format!("--- {}\n+++ {}\n", left.display(), right.display());
-    let mut endings = diff
-        .lines
-        .iter()
-        .filter(|l| l.kind != LineKind::Context)
-        .map(|l| l.ending);
-    let first = endings.next();
-    let mixed = endings.any(|ending| Some(ending) != first);
-    let mut marked = false;
-    let mut lines = Vec::new();
-    for block in &diff.blocks {
-        let Block::Hunk(range) = block else { continue };
-        let side = |kind: LineKind, before: &[compare::Line], hunk: &[compare::Line]| {
-            let count = hunk.iter().filter(|l| l.kind != kind).count();
-            let start = before.iter().filter(|l| l.kind != kind).count();
-            (start + usize::from(count > 0), count)
-        };
-        let (before, hunk) = (&diff.lines[..range.start], &diff.lines[range.clone()]);
-        let (old, new) = (
-            side(LineKind::Add, before, hunk),
-            side(LineKind::Del, before, hunk),
-        );
-        lines.push(format!("@@ -{},{} +{},{} @@", old.0, old.1, new.0, new.1));
-        for line in hunk {
-            let mark = match line.kind {
-                LineKind::Add => '+',
-                LineKind::Del => '-',
-                LineKind::Context => ' ',
-            };
-            let cr = mixed && line.kind != LineKind::Context && line.ending == Ending::CrLf;
-            marked |= cr;
-            lines.push(format!("{mark}{}{}", line.text, if cr { "␍" } else { "" }));
-            if line.ending == Ending::None {
-                lines.push("\\ No newline at end of file".into());
-            }
-        }
-    }
-    for line in lines.iter().take(limit) {
-        let _ = writeln!(out, "{line}");
-    }
-    if lines.len() > limit {
-        let _ = writeln!(
-            out,
-            "({} more lines; pass a larger limit)",
-            lines.len() - limit
-        );
-    }
-    if marked {
-        out.push_str("(␍ marks a line that ends in CRLF.)\n");
-    }
-    out
-}
-
 /// A scan's totals, its unreadable folders, the largest files, then its
 /// biggest folders as a tree, `depth` levels and `limit` a level.
 fn storage_report(
@@ -2550,59 +2000,6 @@ fn cleanup_plan(plan: &Cleanup) -> String {
     out
 }
 
-/// What a one-way copy does, a line an item, then the totals.
-fn copy_plan(plan: &CopyPlan, limit: usize) -> String {
-    let mut out = format!(
-        "from: {}\ninto: {}\n",
-        plan.from.display(),
-        plan.into.display()
-    );
-    if plan.rows.is_empty() {
-        out.push_str("No differences to copy there.\n");
-        return out;
-    }
-    let (mut copies, mut replaces, mut skips) = (0, 0, 0);
-    for (i, row) in plan.rows.iter().enumerate() {
-        let line = match &row.action {
-            Action::Copy => {
-                copies += 1;
-                format!(
-                    "copy: {} → {}",
-                    row.source.display(),
-                    row.destination.display()
-                )
-            }
-            Action::Replace => {
-                replaces += 1;
-                format!(
-                    "replace: {} → {}",
-                    row.source.display(),
-                    row.destination.display()
-                )
-            }
-            Action::Skip(why) => {
-                skips += 1;
-                format!("skip: {} ({why})", row.path.display())
-            }
-        };
-        if i < limit {
-            let _ = writeln!(out, "{line}");
-        }
-    }
-    if plan.rows.len() > limit {
-        let _ = writeln!(
-            out,
-            "({} more; pass a larger limit)",
-            plan.rows.len() - limit
-        );
-    }
-    let _ = writeln!(
-        out,
-        "{copies} to copy, {replaces} to replace, {skips} skipped. What's replaced goes to the Trash; nothing is deleted."
-    );
-    out
-}
-
 /// `old path → new name` a line, with the status unless it's ok.
 fn rename_table(plan: &rename::Plan) -> String {
     plan.rows.iter().fold(String::new(), |mut out, row| {
@@ -2645,7 +2042,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 69] = [
+pub const TOOLS: [Tool; 61] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2871,65 +2268,6 @@ pub const TOOLS: [Tool; 69] = [
         },
     },
     Tool {
-        name: "compare",
-        description: "Compare two files, or two folders whole, by size and modification time, never \
-    following links. Prints counts, then each difference by its path in both: only left, only right, \
-    type conflict, dates differ, differs, or unknown with why. Same size and date isn't proof; verify: \
-    true reads files to settle them as equal or differs, except cloud placeholders. Stops at timeout_seconds.",
-        input_schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "left": {"type": "string", "description": "A file or folder. Absolute; ~ is your home."},
-                    "right": {"type": "string", "description": "The same kind of item to compare it with."},
-                    "verify": {"type": "boolean", "default": false},
-                    "limit": {"type": "integer", "minimum": 1, "default": 200},
-                    "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}
-                },
-                "required": ["left", "right"]
-            })
-        },
-    },
-    Tool {
-        name: "diff",
-        description: "A unified line diff of two text files, with context lines around each change. \
-    Refuses binary files and files over 1 MB.",
-        input_schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "left": {"type": "string", "description": "The old file. Absolute; ~ is your home."},
-                    "right": {"type": "string", "description": "The new file."},
-                    "context": {"type": "integer", "minimum": 0, "default": 3},
-                    "limit": {"type": "integer", "minimum": 1, "default": 500, "description": "Most lines to print."}
-                },
-                "required": ["left", "right"]
-            })
-        },
-    },
-    Tool {
-        name: "compare_copy",
-        description: "Copy differences one way, from the left folder into the right: what's only on \
-    the left, and files that differ where the left one is newer, whose older copy goes to the Trash. \
-    Never deletes what's only on the right. A preview with left and right prints a plan token; \
-    confirm: true with that plan runs exactly that preview, once, within 10 minutes, and returns a \
-    job id; undo reverses it. Items that changed since the preview are refused.",
-        input_schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "left": {"type": "string", "description": "The folder to copy from. Absolute; ~ is your home."},
-                    "right": {"type": "string", "description": "The folder to copy into."},
-                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Entries as compare prints them, or folders holding them; all differences by default."},
-                    "confirm": {"type": "boolean", "default": false},
-                    "plan": {"type": "string", "description": "The token a preview printed; needed with confirm."},
-                    "limit": {"type": "integer", "minimum": 1, "default": 200},
-                    "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}
-                }
-            })
-        },
-    },
-    Tool {
         name: "storage_scan",
         description: "What takes up space in a folder: totals, the largest files, and the folders \
     holding the most, as a tree. Never follows links and counts hard links once. on disk is the blocks \
@@ -3131,73 +2469,6 @@ pub const TOOLS: [Tool; 69] = [
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"]
-            })
-        },
-    },
-    Tool {
-        name: "catalog_create",
-        description: "Catalog a volume or a folder on one: walk it once and keep its names, \
-    kinds, sizes and dates in Monodrive, so catalog_search finds them after it's disconnected. \
-    Reads no contents and downloads nothing. Refuses the startup disk. Cataloging a source again \
-    refreshes it. Prints the catalog as catalog_list does.",
-        input_schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "The volume or folder. Absolute; ~ is your home."},
-                    "timeout_seconds": {"type": "integer", "minimum": 0, "default": 300, "description": "A walk that runs out of time keeps nothing."}
-                },
-                "required": ["path"]
-            })
-        },
-    },
-    Tool {
-        name: "catalog_list",
-        description: "Each catalog a line: its source's path, where it is now when connected, its id, \
-    volume, connected or offline, age, entries and size on disk, then what it's missing and \
-    whether its last refresh failed.",
-        input_schema: || json!({"type": "object", "properties": {}}),
-    },
-    Tool {
-        name: "catalog_refresh",
-        description: "Walk a catalog's source again, found by its volume's identity wherever it's \
-    mounted now. A refresh that fails or runs out of time keeps the last good catalog.",
-        input_schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "catalog": {"type": "string", "description": "Its id, as catalog_list prints it."},
-                    "timeout_seconds": {"type": "integer", "minimum": 0, "default": 300}
-                },
-                "required": ["catalog"]
-            })
-        },
-    },
-    Tool {
-        name: "catalog_forget",
-        description: "Delete a catalog from Monodrive. Only Monodrive's catalog file goes; the \
-    source's files are untouched.",
-        input_schema: || {
-            json!({
-                "type": "object",
-                "properties": {"catalog": {"type": "string", "description": "Its id, as catalog_list prints it."}},
-                "required": ["catalog"]
-            })
-        },
-    },
-    Tool {
-        name: "catalog_search",
-        description: "Search the catalogs by name, in find_files syntax, connected or not. Prints \
-    each catalog's age and whether its source is offline, then its matches a path a line: as \
-    cataloged while offline, or checked where they are now, marked when they've changed.",
-        input_schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "default": 50}
-                },
-                "required": ["query"]
             })
         },
     },
@@ -3591,9 +2862,6 @@ mod tests {
         Server::new(
             ops::Client::new(paths, None),
             places("/nonexistent/monodrive-test".as_ref()),
-            catalogs::Store {
-                dir: "/nonexistent/monodrive-test/catalogs".into(),
-            },
         )
     }
 
@@ -3601,12 +2869,6 @@ mod tests {
         places::Store {
             places: dir.join("places.json"),
             recents: dir.join("recents.json"),
-        }
-    }
-
-    fn catalog_store(dir: &std::path::Path) -> catalogs::Store {
-        catalogs::Store {
-            dir: dir.join("catalogs"),
         }
     }
 
@@ -3654,7 +2916,7 @@ mod tests {
             .unwrap();
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(ops::Client::new(paths, None), store, catalog_store(&dir));
+        let mut server = Server::new(ops::Client::new(paths, None), store);
 
         let reply = call(&mut server, json!({"name": "commands_list"}));
         let template = serde_json::to_string(&[wait.to_str().unwrap(), "--", "{paths}"]).unwrap();
@@ -3793,11 +3055,7 @@ mod tests {
         let serve = || {
             let owner = ops::Owner::bind_with(paths.clone(), connector()).unwrap();
             let serving = std::thread::spawn(move || owner.serve());
-            let mut server = Server::new(
-                ops::Client::new(paths.clone(), None),
-                store.clone(),
-                catalog_store(&root),
-            );
+            let mut server = Server::new(ops::Client::new(paths.clone(), None), store.clone());
             server.remote = Connections::new(store.clone(), connector());
             (serving, server)
         };
@@ -4249,37 +3507,6 @@ mod tests {
             folder_size(dir.path(), &size, 10)
         );
 
-        let (left, right) = (dir.path().join("left"), dir.path().join("right"));
-        for (side, name, text) in [
-            (&left, "only.txt", "a"),
-            (&left, "sizes.txt", "a"),
-            (&right, "sizes.txt", "abc"),
-            (&left, "clash", "a"),
-        ] {
-            std::fs::create_dir_all(side).unwrap();
-            std::fs::write(side.join(name), text).unwrap();
-        }
-        std::fs::create_dir(right.join("clash")).unwrap();
-        let mut comparison =
-            compare::compare(&left, &right, &compare::Progress::default(), None).unwrap();
-        for entry in &mut comparison.entries {
-            match entry.path.to_str() {
-                Some("only.txt" | "sizes.txt") => &mut entry.left,
-                _ => &mut entry.right,
-            }
-            .as_mut()
-            .unwrap()
-            .availability = cloud::Availability::Placeholder;
-        }
-        let shown = compared(&comparison, 10, None, 10);
-        for line in [
-            "type conflict: clash (file on the left, folder on the right) (right not downloaded)",
-            "only left: only.txt (left not downloaded)",
-            "differs: sizes.txt (left not downloaded)",
-        ] {
-            assert!(shown.lines().any(|shown| shown == line), "{shown}");
-        }
-
         let mut server = server();
         let reply = call(
             &mut server,
@@ -4321,11 +3548,7 @@ mod tests {
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(
-            ops::Client::new(paths, None),
-            places(dir.path()),
-            catalog_store(dir.path()),
-        );
+        let mut server = Server::new(ops::Client::new(paths, None), places(dir.path()));
         let (made, renamed) = (dir.path().join("made"), dir.path().join("renamed"));
         let shown = |path: &std::path::Path| format!("{}\n", path.display());
         let reply = call(
@@ -4412,11 +3635,7 @@ mod tests {
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(
-            ops::Client::new(paths, None),
-            places(dir.path()),
-            catalog_store(dir.path()),
-        );
+        let mut server = Server::new(ops::Client::new(paths, None), places(dir.path()));
         let files = dir.path().join("files");
         std::fs::create_dir(&files).unwrap();
         for name in ["IMG_1.jpg", "IMG_2.jpg", "Trip 2.jpg", "x"] {
@@ -4489,11 +3708,7 @@ mod tests {
             let serving = std::thread::spawn(move || owner.serve());
             (
                 serving,
-                Server::new(
-                    ops::Client::new(paths.clone(), None),
-                    places(dir.path()),
-                    catalog_store(dir.path()),
-                ),
+                Server::new(ops::Client::new(paths.clone(), None), places(dir.path())),
             )
         };
         let (serving, mut server) = serve();
@@ -4573,11 +3788,7 @@ mod tests {
             let serving = std::thread::spawn(move || owner.serve());
             (
                 serving,
-                Server::new(
-                    ops::Client::new(paths.clone(), None),
-                    places(dir.path()),
-                    catalog_store(dir.path()),
-                ),
+                Server::new(ops::Client::new(paths.clone(), None), places(dir.path())),
             )
         };
         let (proj, out) = (dir.path().join("proj"), dir.path().join("out"));
@@ -4767,187 +3978,6 @@ mod tests {
     }
 
     #[test]
-    fn compare_diff_and_compare_copy_preview_then_copy_only_on_confirm() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let paths = ops::Paths {
-            state: root.join("state"),
-            settings: root.join("settings.json"),
-            trash: root.join("Trash"),
-        };
-        let owner = ops::Owner::bind(paths.clone()).unwrap();
-        let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(
-            ops::Client::new(paths, None),
-            places(&root),
-            catalog_store(&root),
-        );
-        let (left, right) = (root.join("left"), root.join("right"));
-        let then = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        for (path, text, at) in [
-            (left.join("a.txt"), "one\nnew\n", 3600),
-            (left.join("same.txt"), "same", 0),
-            (left.join("docs/only.md"), "only", 0),
-            (left.join("docs/new.md"), "new", 0),
-            (right.join("a.txt"), "one\nold\n", 0),
-            (right.join("same.txt"), "same", 0),
-            (right.join("docs/extra.md"), "extra", 0),
-        ] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, text).unwrap();
-            std::fs::File::options()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(then + Duration::from_secs(at))
-                .unwrap();
-        }
-        let both = json!({"left": left, "right": right});
-        let reply = call(&mut server, json!({"name": "compare", "arguments": both}));
-        let roots = format!("left: {}\nright: {}\n", left.display(), right.display());
-        assert_eq!(
-            text(&reply),
-            roots.clone()
-                + "2 only left, 1 only right, 1 dates differ, 1 same size and date\n\
-                   dates differ: a.txt (left newer)\n\
-                   only right: docs/extra.md\n\
-                   only left: docs/new.md\n\
-                   only left: docs/only.md\n\
-                   (Same size and date doesn't prove equal contents; verify: true reads them.)\n"
-        );
-        let mut verified = both.clone();
-        verified["verify"] = json!(true);
-        verified["limit"] = json!(1);
-        let reply = call(
-            &mut server,
-            json!({"name": "compare", "arguments": verified}),
-        );
-        assert_eq!(
-            text(&reply),
-            roots
-                + "2 only left, 1 only right, 1 differs, 1 equal\n\
-                   differs: a.txt (left newer)\n\
-                   (3 more; pass a larger limit)\n"
-        );
-
-        let reply = call(
-            &mut server,
-            json!({"name": "diff", "arguments": {"left": right.join("a.txt"), "right": left.join("a.txt")}}),
-        );
-        assert_eq!(
-            text(&reply),
-            format!(
-                "--- {}\n+++ {}\n@@ -1,2 +1,2 @@\n one\n-old\n+new\n",
-                right.join("a.txt").display(),
-                left.join("a.txt").display()
-            )
-        );
-        let reply = call(
-            &mut server,
-            json!({"name": "diff", "arguments": {"left": left.join("same.txt"), "right": right.join("same.txt")}}),
-        );
-        assert_eq!(text(&reply), "No differences in the text.\n");
-
-        let token = |reply: &Value| {
-            text(reply)
-                .lines()
-                .find_map(|line| line.strip_prefix("plan: "))
-                .unwrap_or_default()
-                .to_string()
-        };
-        let reply = call(
-            &mut server,
-            json!({"name": "compare_copy", "arguments": both}),
-        );
-        let shown = |path: &str| {
-            (
-                left.join(path).display().to_string(),
-                right.join(path).display().to_string(),
-            )
-        };
-        let ((la, ra), (ln, rn), (lo, ro)) =
-            (shown("a.txt"), shown("docs/new.md"), shown("docs/only.md"));
-        assert_eq!(
-            text(&reply),
-            format!(
-                "from: {}\ninto: {}\n\
-                 replace: {la} → {ra}\n\
-                 skip: docs/extra.md (Only on the right; Monodrive never deletes it.)\n\
-                 copy: {ln} → {rn}\n\
-                 copy: {lo} → {ro}\n\
-                 2 to copy, 1 to replace, 1 skipped. What's replaced goes to the Trash; nothing is deleted.\n\
-                 plan: {}\n\
-                 Pass confirm: true and this plan within 10 minutes to copy it.\n",
-                left.display(),
-                right.display(),
-                token(&reply),
-            )
-        );
-        assert!(!right.join("docs/only.md").exists());
-
-        let mut docs = both.clone();
-        docs["paths"] = json!(["docs/"]);
-        let reply = call(
-            &mut server,
-            json!({"name": "compare_copy", "arguments": docs}),
-        );
-        assert!(
-            text(&reply).contains(&format!("copy: {lo} → {ro}\n")),
-            "{reply}"
-        );
-        // Appearing after the preview, older and another size: a plan made
-        // again now would replace it.
-        std::fs::write(right.join("docs/only.md"), "stale").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(right.join("docs/only.md"))
-            .unwrap()
-            .set_modified(then - Duration::from_secs(3600))
-            .unwrap();
-        let mut confirmed = docs.clone();
-        confirmed["confirm"] = json!(true);
-        confirmed["plan"] = json!(token(&reply));
-        let settings = root.join("settings.json");
-        std::fs::write(&settings, r#"{"agents_change_files": false}"#).unwrap();
-        let reply = call(
-            &mut server,
-            json!({"name": "compare_copy", "arguments": confirmed}),
-        );
-        assert_eq!(reply["result"]["isError"], true);
-        assert!(text(&reply).ends_with("Agents can't change files: Let agents change files is off in Monodrive's Agents settings."), "{reply}");
-        std::fs::write(&settings, r#"{"agents_change_files": true}"#).unwrap();
-        let reply = call(
-            &mut server,
-            json!({"name": "compare_copy", "arguments": confirmed}),
-        );
-        assert!(text(&reply).ends_with("2 to copy, 0 to replace, 1 skipped. What's replaced goes to the Trash; nothing is deleted.\njob 1 queued\n"), "{reply}");
-        let mut unknown = confirmed.clone();
-        unknown["plan"] = json!("0");
-        for refused in [confirmed, unknown] {
-            let reply = call(
-                &mut server,
-                json!({"name": "compare_copy", "arguments": refused}),
-            );
-            assert_eq!(reply["result"]["isError"], true);
-            assert!(text(&reply).starts_with("No previewed plan"), "{reply}");
-        }
-        for bad in [
-            json!({"name": "compare", "arguments": {"left": left}}),
-            json!({"name": "compare_copy", "arguments": {"left": left, "right": right, "confirm": "yes"}}),
-            json!({"name": "diff", "arguments": {"left": left, "right": right, "context": -1}}),
-        ] {
-            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
-        }
-        drop(server);
-        serving.join().unwrap().unwrap();
-        let read = |path: &str| std::fs::read_to_string(right.join(path)).unwrap();
-        assert_eq!(read("docs/new.md"), "new");
-        assert_eq!(read("docs/only.md"), "stale");
-        assert_eq!(read("a.txt"), "one\nold\n");
-        assert!(right.join("docs/extra.md").exists());
-    }
-
-    #[test]
     fn storage_tools_scan_find_duplicates_and_trash_chosen_copies_only_on_confirm() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -4958,11 +3988,7 @@ mod tests {
         };
         let owner = ops::Owner::bind(paths.clone()).unwrap();
         let serving = std::thread::spawn(move || owner.serve());
-        let mut server = Server::new(
-            ops::Client::new(paths, None),
-            places(&root),
-            catalog_store(&root),
-        );
+        let mut server = Server::new(ops::Client::new(paths, None), places(&root));
         let photos = root.join("photos");
         let photo: Vec<u8> = (0..300_000u32).map(|n| (n % 253) as u8).collect();
         let mut other = photo.clone();
@@ -5100,35 +4126,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_shows_a_missing_last_newline_and_line_endings_that_differ() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut server = server();
-        let mut diff = |old: &str, new: &str| {
-            let (left, right) = (dir.path().join("old"), dir.path().join("new"));
-            std::fs::write(&left, old).unwrap();
-            std::fs::write(&right, new).unwrap();
-            let reply = call(
-                &mut server,
-                json!({"name": "diff", "arguments": {"left": left, "right": right}}),
-            );
-            let head = format!("--- {}\n+++ {}\n", left.display(), right.display());
-            text(&reply).strip_prefix(&head).unwrap().to_string()
-        };
-        assert_eq!(
-            diff("foo\n", "foo"),
-            "@@ -1,1 +1,1 @@\n-foo\n+foo\n\\ No newline at end of file\n"
-        );
-        assert_eq!(
-            diff("a\r\nb\n", "a\nb\n"),
-            "@@ -1,2 +1,2 @@\n-a␍\n+a\n b\n(␍ marks a line that ends in CRLF.)\n"
-        );
-        assert_eq!(
-            diff("foo\r\r\n", "foo\r\n"),
-            "@@ -1,1 +1,1 @@\n-foo\r\n+foo\n"
-        );
-    }
-
-    #[test]
     fn a_bad_filter_is_a_tool_error_that_never_starts_the_index() {
         let mut server = server();
         for (call_args, error) in [
@@ -5235,123 +4232,6 @@ mod tests {
             "job 7 Move into /dest: waiting, 2 of 3 items, 10 of 30 bytes, by agent claude-code\n\
              /dest/a\n/dest/b already exists.\n"
         );
-    }
-
-    #[test]
-    fn catalog_tools_search_an_offline_catalog_with_its_age_and_forget_only_its_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let drive = root.join("Drive");
-        std::fs::create_dir_all(drive.join("Photos")).unwrap();
-        std::fs::write(drive.join("Photos/report.pdf"), "x").unwrap();
-        // No mounted volume has this identity, so it's offline here.
-        let unplugged = Volume {
-            name: "Drive".into(),
-            mount: drive.clone(),
-            disk: None,
-            id: Some(VolumeId::Uuid("MONODRIVE-TEST-DRIVE".into())),
-            total: 0,
-            free: 0,
-            read_only: false,
-            network: false,
-            ejectable: true,
-            removable: true,
-            startup: false,
-        };
-        let store = catalog_store(&root);
-        let made = store
-            .create(&drive, &[unplugged], &storage::Progress::default(), None)
-            .unwrap();
-        let mut server = server();
-        server.catalogs = store.clone();
-        let id = &made.id;
-
-        let reply = call(&mut server, json!({"name": "catalog_list"}));
-        assert_eq!(
-            text(&reply),
-            format!(
-                "{} (catalog {id}, Drive, offline, refreshed just now, 2 entries, 1 KB on disk)\n",
-                drive.display()
-            )
-        );
-        let search = json!({"name": "catalog_search", "arguments": {"query": "report"}});
-        let reply = call(&mut server, search);
-        let report = drive.join("Photos/report.pdf");
-        assert_eq!(
-            text(&reply),
-            format!(
-                "Drive (catalog {id}): cataloged just now, offline: Drive isn't connected.\n{}\n",
-                report.display()
-            )
-        );
-        let found = store
-            .search(&Query::parse("photos").unwrap(), &[], 50)
-            .unwrap();
-        let later = i64::try_from(made.refreshed).unwrap() + 3 * 86_400;
-        assert_eq!(
-            catalog_hits(&found, &[], later),
-            format!(
-                "Drive (catalog {id}): cataloged 3 days ago, offline: Drive isn't connected.\n{}/\n",
-                drive.join("Photos").display()
-            )
-        );
-
-        let refresh = json!({"name": "catalog_refresh", "arguments": {"catalog": id}});
-        let reply = call(&mut server, refresh);
-        assert_eq!(reply["result"]["isError"], true);
-        assert_eq!(
-            text(&reply),
-            "Drive isn't connected. The last good catalog is kept."
-        );
-        let reply = call(&mut server, json!({"name": "catalog_list"}));
-        assert!(
-            text(&reply).ends_with(
-                "\n  last refresh failed just now: Drive isn't connected. The entries are from the refresh before.\n"
-            ),
-            "{}",
-            text(&reply)
-        );
-        // A temporary folder is on the startup disk.
-        let create = json!({"name": "catalog_create", "arguments": {"path": root}});
-        let reply = call(&mut server, create);
-        assert!(text(&reply).contains("is on the startup disk"), "{reply}");
-        for bad in [
-            json!({"name": "catalog_search", "arguments": {}}),
-            json!({"name": "catalog_refresh", "arguments": {"catalog": id, "timeout_seconds": -1}}),
-            json!({"name": "catalog_forget"}),
-        ] {
-            assert_eq!(call(&mut server, bad)["error"]["code"], -32602);
-        }
-
-        // A damaged file is listed, so it can be forgotten.
-        let broken = store.dir.join("aaaaaaaaaaaa.catalog");
-        std::fs::write(&broken, "MDCATLG1").unwrap();
-        let reply = call(&mut server, json!({"name": "catalog_list"}));
-        assert!(
-            text(&reply).ends_with(&format!(
-                "catalog aaaaaaaaaaaa can't be read: {}: damaged catalog: it's too short. catalog_forget removes it.\n",
-                broken.display()
-            )),
-            "{}",
-            text(&reply)
-        );
-        let reply = call(
-            &mut server,
-            json!({"name": "catalog_forget", "arguments": {"catalog": "aaaaaaaaaaaa"}}),
-        );
-        assert_eq!(reply["result"]["isError"], false);
-
-        let forget = json!({"name": "catalog_forget", "arguments": {"catalog": id}});
-        let reply = call(&mut server, forget.clone());
-        assert_eq!(
-            text(&reply),
-            format!("Forgot catalog {id}. Only Monodrive's catalog file went; no files changed.\n")
-        );
-        assert!(report.is_file());
-        let reply = call(&mut server, json!({"name": "catalog_list"}));
-        assert_eq!(text(&reply), "No catalogs.\n");
-        let reply = call(&mut server, forget);
-        assert_eq!(text(&reply), format!("No catalog {id}."));
     }
 
     #[test]

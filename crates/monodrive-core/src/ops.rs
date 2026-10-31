@@ -105,14 +105,6 @@ pub enum Request {
         #[serde(default)]
         conflict: Conflict,
     },
-    /// Copies each item to its own path, as one copy job, as a comparison's
-    /// plan says. An item whose source, or what's at its path, isn't as
-    /// `found` and `replaces` say is refused rather than copied.
-    CopyPlanned {
-        /// The folder the paths are in, which the job shows.
-        into: PathBuf,
-        items: Vec<Planned>,
-    },
     /// Compresses the items, all in one folder, into a new ZIP archive
     /// beside them, as a job: "name.zip" for one item, "Archive.zip" for
     /// more, numbered as Finder does when the name is taken.
@@ -189,18 +181,6 @@ pub enum Request {
     },
 }
 
-/// One copy of a planned job, and how its source and destination were when
-/// the plan was made.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Planned {
-    pub source: PathBuf,
-    pub to: PathBuf,
-    pub found: (FileId, Stamp),
-    /// What's at `to`, which goes to the Trash first. With `None`, nothing
-    /// may be there.
-    pub replaces: Option<(FileId, Stamp)>,
-}
-
 /// A file as a scan verified it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Seen {
@@ -233,7 +213,7 @@ impl Request {
             Request::NewFile { .. } => "New File",
             Request::NewFolderWith { .. } => "New Folder with Selection",
             Request::Duplicate { .. } => "Duplicate",
-            Request::Copy { .. } | Request::CopyPlanned { .. } => "Copy",
+            Request::Copy { .. } => "Copy",
             Request::Move { .. } => "Move",
             Request::Compress { .. } => "Compress",
             Request::Extract { .. } => "Extract",
@@ -860,7 +840,6 @@ impl Engine {
             Request::UndoOf { op } => self.reverse(submission, false, Some(op)),
             Request::Redo => self.reverse(submission, true, None),
             Request::Copy { .. }
-            | Request::CopyPlanned { .. }
             | Request::Move { .. }
             | Request::Compress { .. }
             | Request::Extract { .. }

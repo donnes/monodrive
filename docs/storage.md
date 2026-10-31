@@ -16,7 +16,7 @@ Unshared adds up per file, so a folder's total is a floor: two clones inside one
 
 A scan stops after 500,000 files and folders, at its deadline, or when cancelled, and says which. It keeps about 100 bytes a file, so a full scan holds about 50 MB. What it couldn't read is listed with macOS's reason and left out of the totals.
 
-Opening a consent-gated folder without Full Disk Access shows a privacy prompt and blocks until it's answered, which no deadline interrupts. So when the process lacks it, the walk shared by scans, folder sizes and comparisons never opens fsearch's gated folders (`fsearch::gated`: Desktop, Documents, Downloads, the containers and cloud folders in the home folder, and /Volumes). It reports each as unreadable, "needs Full Disk Access", and refuses one given as the folder to scan or compare, resolving a link given there first.
+Opening a consent-gated folder without Full Disk Access shows a privacy prompt and blocks until it's answered, which no deadline interrupts. So when the process lacks it, the walk shared by scans and folder sizes never opens fsearch's gated folders (`fsearch::gated`: Desktop, Documents, Downloads, the containers and cloud folders in the home folder, and /Volumes). It reports each as unreadable, "needs Full Disk Access", and refuses one given as the folder to scan or compare, resolving a link given there first.
 
 `Progress` carries the cancel flag and the counts, and calls its `notify` on the scanning thread every 4,096 items or 64 MB read, so a view redraws when told rather than polling.
 

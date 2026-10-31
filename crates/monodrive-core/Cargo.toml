@@ -27,8 +27,6 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 crc32fast = "1.5"
 # Unicode case folding, to tell when two archive entries are one name.
 caseless = "0.2"
-# Line diffs for comparing two text files, as Monocode's review does.
-similar = { version = "2", default-features = false, features = ["text"] }
 # Hashes whole files to confirm duplicates before any are offered for cleanup.
 blake3 = "1.8"
 
