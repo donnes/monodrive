@@ -22,6 +22,14 @@ cargo build -p monodrive ${build[@]+"${build[@]}"}
 
 version=${MONODRIVE_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)}
 app="target/$profile/Monodrive.app"
+# A nightly looks and reads differently in the Dock. It keeps the bundle ID, so
+# Full Disk Access and settings carry over when the updater switches tracks.
+art=assets/prod
+name=Monodrive
+if [[ "$version" == *-nightly* ]]; then
+  art=assets/nightly
+  name="Monodrive (Nightly)"
+fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # Replace the binary's inode, so macOS doesn't reuse an older signature cache.
 cp "target/$profile/monodrive" "$app/Contents/MacOS/monodrive.next"
@@ -31,7 +39,7 @@ mv -f "$app/Contents/MacOS/monodrive.next" "$app/Contents/MacOS/monodrive"
 # older releases. Both compile from the Icon Composer project.
 icon=$(mktemp -d "target/bundle-icon.XXXXXX")
 trap 'rm -r "$icon"' EXIT
-xcrun actool assets/prod/app-icon.icon \
+xcrun actool "$art/app-icon.icon" \
   --compile "$icon" \
   --platform macosx \
   --minimum-deployment-target 14.0 \
@@ -50,8 +58,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>monodrive</string>
 <key>CFBundleIdentifier</key><string>dev.donnes.monodrive</string>
-<key>CFBundleName</key><string>Monodrive</string>
-<key>CFBundleDisplayName</key><string>Monodrive</string>
+<key>CFBundleName</key><string>$name</string>
+<key>CFBundleDisplayName</key><string>$name</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${version%%-*}</string>
 <key>CFBundleVersion</key><string>${version/-nightly./.}</string>

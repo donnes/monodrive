@@ -11,16 +11,17 @@ use super::{
     OpenSelected, Operations, PlaceNext, PlacePrevious, Sheet, drag_area, home, lock,
     sidebar_width,
 };
+use crate::assets::NIGHT_SKY;
 use crate::commands::{self, Scope};
-use crate::preferences::Preferences;
+use crate::preferences::{Preferences, SIDEBAR_WIDTHS};
 use crate::theme::{
     self, ButtonLook, accent, circle_button, content, icon, icon_button, row_icon_button,
     section_label,
 };
 use gpui::{
     Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, ImageSource,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Role,
-    Stateful, Task, Window, div, prelude::*, px,
+    KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point, Render, Resource, Role,
+    Stateful, Task, Window, div, img, prelude::*, px,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::Entry;
@@ -29,11 +30,14 @@ use monodrive_core::ops::{self, Origin};
 use monodrive_core::places::{Availability, Place, Store};
 use monodrive_core::search::{Looks, Search};
 use monodrive_core::servers::{self, Cancel, Prompt};
+use monodrive_core::updates::Channel;
 use monodrive_core::volumes::{self, Volume};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+/// The sky behind a nightly's sidebar, as drawn in its SVG.
+const NIGHT_SKY_HEIGHT: f32 = 150.;
 
 /// What the system does for the sidebar. Views reach it through `Places`, so
 /// their tests list a made-up set of volumes and never mount or eject
@@ -1085,6 +1089,32 @@ impl Browser {
             .flex()
             .flex_col()
             .px_2()
+            // Its ink is for a dark sidebar, and it's a dark picture.
+            .when(
+                Channel::default() == Channel::Nightly && !theme::is_light(),
+                |d| {
+                    // Pinned to the right, where its own edge fades out, and as
+                    // wide as the sidebar gets, so dragging only uncovers more.
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w_full()
+                            .h(px(NIGHT_SKY_HEIGHT))
+                            .overflow_hidden()
+                            .child(
+                                img(ImageSource::Resource(Resource::Embedded(NIGHT_SKY.into())))
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .w(px(*SIDEBAR_WIDTHS.end()))
+                                    .h(px(NIGHT_SKY_HEIGHT))
+                                    .object_fit(ObjectFit::Fill),
+                            ),
+                    )
+                },
+            )
             .child(
                 div()
                     .h(px(theme::TITLE_BAR_HEIGHT))

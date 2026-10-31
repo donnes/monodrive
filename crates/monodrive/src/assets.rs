@@ -57,12 +57,19 @@ icons!(
 
 /// The app's mark in full color, for `img`.
 pub const LOGO: &str = "logo";
+/// The sky behind a nightly's sidebar, for `img`.
+pub const NIGHT_SKY: &str = "night-sky";
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path == LOGO {
             return Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../../assets/prod/logo.svg"
+            ))));
+        }
+        if path == NIGHT_SKY {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../../assets/nightly/sidebar-sky.svg"
             ))));
         }
         Ok(ICONS

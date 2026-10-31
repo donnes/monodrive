@@ -1,0 +1,20 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="night" x1="60" y1="20" x2="940" y2="1010" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#050B24"/><stop offset="0.45" stop-color="#14124A"/><stop offset="1" stop-color="#3A1668"/>
+    </linearGradient>
+    <radialGradient id="upper" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(790 170) rotate(135) scale(640 460)">
+      <stop stop-color="#5B7BFF" stop-opacity="0.62"/><stop offset="0.5" stop-color="#3B3FB5" stop-opacity="0.24"/><stop offset="1" stop-color="#14124A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="lower" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(220 960) rotate(-60) scale(620 720)">
+      <stop stop-color="#B14FE0" stop-opacity="0.55"/><stop offset="0.55" stop-color="#6A2BA8" stop-opacity="0.2"/><stop offset="1" stop-color="#3A1668" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="band" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(560 500) rotate(-32) scale(760 150)">
+      <stop stop-color="#8FA6FF" stop-opacity="0.2"/><stop offset="1" stop-color="#8FA6FF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#night)"/>
+  <rect width="1024" height="1024" fill="url(#upper)"/>
+  <rect width="1024" height="1024" fill="url(#lower)"/>
+  <rect width="1024" height="1024" fill="url(#band)"/>
+</svg>

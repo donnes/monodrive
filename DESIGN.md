@@ -59,6 +59,10 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 ⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits at the sidebar's top right, so it stays just before Back and Forward: closing the sidebar only takes away what's between them. The traffic lights stay, with the button right after them. The sidebar opens and closes at once, with no animation: a width that moves lays out the whole window each frame. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
 
+### Nightly builds
+
+A nightly has a night sky behind the top of its sidebar in a dark theme, `assets/nightly/sidebar-sky.svg`, one still picture whose right and bottom edges fade through a soft rounded corner, pinned to the sidebar's right edge. Its name and icon change in the Dock. Stable and debug builds have none of this.
+
 ### Search
 
 The field's leading icon button opens its menu (⇧⌘S), a 360 pt `Popover` under the field. From the top: what a search looks at (Search Names, Search File Contents ⌥⌘F), Search Only and the folder, then Saved, each 40 pt with its query as the subtitle and row icon buttons to rename (R) and remove (⌫), then Save Search… while something's typed, then Recent and Clear Recent Searches. A name is typed in place of the row. Saving never runs anything, and removing asks nothing, because a saved search is only words. The ✕ at the field's end or Esc leaves a search, and leaving goes back to names and everywhere; with nothing typed, the first Esc does that alone. The icon turns to primary ink while the mode isn't plain, and to a file while it looks at contents, and the prompt says the mode.
