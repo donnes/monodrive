@@ -1,8 +1,9 @@
 //! The inspector: a panel to the right of the panes about what's selected in
-//! the pane commands act on, or its folder. What the listing knows shows at
-//! once; the rest is read off the UI thread once the selection has settled,
-//! and a read or folder total for what's no longer selected is dropped. While
-//! it's closed, nothing here reads or runs.
+//! the pane commands act on, or its folder. When the selection moves to one
+//! item, the panel keeps showing the last until that item's read and picture
+//! are ready, then swaps them in one frame. Past `PATIENCE` it shows what's
+//! known and fills in the rest. A read or folder total for what's no longer
+//! selected is dropped. While it's closed, nothing here reads or runs.
 
 use super::pane::{Pane, format_date, format_size, level_name, real};
 use super::tabs::{CARD_GAP, NARROWEST_PANE};
@@ -35,6 +36,9 @@ pub(super) const WIDTH: f32 = 260.;
 pub(super) const READ_DELAY: Duration = Duration::from_millis(100);
 /// How long the disk must settle before what's shown is read again.
 pub(super) const REFRESH_DELAY: Duration = Duration::from_millis(250);
+/// How long a selection waits for its read and picture before showing anyway,
+/// so a slow volume or a picture that won't decode can't leave the old item up.
+pub(super) const PATIENCE: Duration = Duration::from_millis(250);
 /// The picture at its top.
 const ICON_SIDE: f32 = 96.;
 /// The file list keeps at least this much of the room, or it stays closed.
@@ -133,9 +137,26 @@ struct Measuring {
     _land: Task<()>,
 }
 
+/// The item selected next, until it swaps in for what's shown.
+struct Pending {
+    key: Key,
+    subject: Subject,
+    /// Its read and any kept folder total, once they've landed.
+    read: Option<(Read, Option<FolderSize>)>,
+    /// Its picture, held and decoding once the read says it may be read.
+    thumb: Option<(Thumb, Option<Arc<RenderImage>>)>,
+    /// Out of patience: it swaps in as it is.
+    late: bool,
+    _patience: Task<()>,
+}
+
 #[derive(Default)]
 pub struct Inspector {
     key: Option<Key>,
+    pending: Option<Pending>,
+    /// While the next item waits, what's shown has changed or had its work
+    /// stopped, so selecting back to it reads it again.
+    stale: bool,
     pub(super) subject: Subject,
     pub(super) read: Read,
     pub(super) total: Total,
@@ -143,13 +164,14 @@ pub struct Inspector {
     reading: Option<Task<()>>,
     refresh: Option<Task<()>>,
     /// The picture at the top, once its file has been read as allowed.
-    thumb: Option<(Thumb, Option<Arc<RenderImage>>)>,
+    pub(super) thumb: Option<(Thumb, Option<Arc<RenderImage>>)>,
     scroll: ScrollHandle,
 }
 
 impl Inspector {
     /// Forgets what's shown and gives back its picture.
     fn clear(&mut self, window: Option<&mut Window>, cx: &mut App) {
+        self.stale = false;
         self.read = Read::Waiting;
         self.total = Total::Unknown;
         self.measuring = None;
@@ -158,10 +180,27 @@ impl Inspector {
         self.release(window, cx);
     }
 
-    pub(super) fn release(&mut self, window: Option<&mut Window>, cx: &mut App) {
-        if let Some((thumb, image)) = self.thumb.take() {
-            thumbnails::release(&thumb, image, window, cx);
+    /// Gives back both pictures, and stops waiting for the next item.
+    pub(super) fn release(&mut self, mut window: Option<&mut Window>, cx: &mut App) {
+        self.drop_pending(window.as_deref_mut(), cx);
+        give_back(self.thumb.take(), window, cx);
+    }
+
+    /// Stops waiting for the next item, and gives back its picture.
+    fn drop_pending(&mut self, window: Option<&mut Window>, cx: &mut App) {
+        if let Some(pending) = self.pending.take() {
+            give_back(pending.thumb, window, cx);
         }
+    }
+}
+
+fn give_back(
+    thumb: Option<(Thumb, Option<Arc<RenderImage>>)>,
+    window: Option<&mut Window>,
+    cx: &mut App,
+) {
+    if let Some((thumb, image)) = thumb {
+        thumbnails::release(&thumb, image, window, cx);
     }
 }
 
@@ -283,7 +322,18 @@ impl Browser {
         if let Some(key) = &self.inspector.key
             && key.matches(id, pane)
         {
+            if self.inspector.pending.is_some() {
+                self.back_to_whats_shown(window, cx);
+            }
             return;
+        }
+        if self
+            .inspector
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.key.matches(id, pane))
+        {
+            return self.swap_when_ready(window, cx);
         }
         // What a rename or a job selected isn't listed yet; its listing is on
         // its way, and this asks again until it lands.
@@ -296,13 +346,122 @@ impl Browser {
         if opening {
             native(cx).forget_sizes();
         }
-        self.inspector.key = Some(key);
-        self.inspector.clear(Some(window), cx);
-        self.inspector.subject = subject;
+        // What's shown stays only while it's still there to show. A rename or
+        // a move in this folder has taken it away.
+        let same_folder = self
+            .inspector
+            .key
+            .as_ref()
+            .is_some_and(|shown| shown.pane == key.pane && shown.folder == key.folder);
+        let gone = same_folder
+            && matches!(
+                &self.inspector.subject,
+                Subject::One { entry, selected: true }
+                    if !pane.entries.iter().any(|e| e.path == entry.path)
+            );
+        let was_waiting = self.inspector.pending.is_some();
+        self.inspector.drop_pending(Some(window), cx);
+        let holds = !opening && !gone && matches!(subject, Subject::One { selected: true, .. });
+        if !holds {
+            self.inspector.key = Some(key);
+            self.inspector.clear(Some(window), cx);
+            self.inspector.subject = subject;
+            self.inspector
+                .scroll
+                .set_offset(gpui::point(px(0.), px(0.)));
+            return self.schedule_read(READ_DELAY, cx);
+        }
+        // Nothing more is asked about what's shown, and its rows stay. While
+        // another waited, what's running was that one's.
+        if !was_waiting {
+            self.inspector.stale = self.inspector.reading.is_some()
+                || self.inspector.refresh.is_some()
+                || self.inspector.measuring.is_some();
+        }
+        self.inspector.measuring = None;
+        self.inspector.reading = None;
+        self.inspector.refresh = None;
+        let patience = cx.background_executor().timer(PATIENCE);
+        self.inspector.pending = Some(Pending {
+            key,
+            subject,
+            read: None,
+            thumb: None,
+            late: false,
+            _patience: cx.spawn(async move |this, cx| {
+                patience.await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(pending) = &mut this.inspector.pending {
+                        pending.late = true;
+                    }
+                    cx.notify();
+                });
+            }),
+        });
+        self.schedule_read(READ_DELAY, cx);
+    }
+
+    /// The selection came back to what's shown before the next item swapped
+    /// in. Nothing new draws, but what went stale meanwhile is read again.
+    fn back_to_whats_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.inspector.drop_pending(Some(window), cx);
+        self.inspector.reading = None;
+        if std::mem::take(&mut self.inspector.stale) {
+            self.schedule_read(READ_DELAY, cx);
+        }
+    }
+
+    /// Swaps the next item in once its read has landed and any picture it
+    /// wants is decoded, or once patience runs out. Its picture starts
+    /// decoding only after the read, so nothing unread or gated gets opened.
+    fn swap_when_ready(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let thumbs_on = cx.global::<Preferences>().thumbnails;
+        let Some(pending) = &mut self.inspector.pending else {
+            return;
+        };
+        let ready = match (&pending.read, &pending.subject) {
+            (None, _) => false,
+            (Some((Read::Known { .. }, _)), Subject::One { entry, .. })
+                if thumbs_on && thumbnails::wanted(entry) =>
+            {
+                let thumb = Thumb {
+                    path: entry.path.clone(),
+                    side: (ICON_SIDE * window.scale_factor()).ceil() as u32,
+                    modified: entry.modified,
+                };
+                if pending.thumb.is_none() {
+                    thumbnails::hold(&thumb, cx);
+                    pending.thumb = Some((thumb.clone(), None));
+                }
+                let image = thumbnails::get(&thumb, window, cx);
+                let ready = image.is_some();
+                if let Some(held) = &mut pending.thumb {
+                    held.1 = image;
+                }
+                ready
+            }
+            _ => true,
+        };
+        if !ready && !pending.late {
+            return;
+        }
+        let Some(next) = self.inspector.pending.take() else {
+            return;
+        };
+        self.inspector.stale = false;
+        give_back(self.inspector.thumb.take(), Some(window), cx);
+        self.inspector.key = Some(next.key);
+        self.inspector.subject = next.subject;
+        self.inspector.thumb = next.thumb;
+        self.inspector.read = Read::Waiting;
+        self.inspector.total = Total::Unknown;
         self.inspector
             .scroll
             .set_offset(gpui::point(px(0.), px(0.)));
-        self.schedule_read(READ_DELAY, cx);
+        // Later, a read still on its way fills in, as `reading` runs on.
+        if let Some((read, known)) = next.read {
+            self.apply_read(read, known, cx);
+        }
     }
 
     /// Whether it's on screen: asked for, and with room for the list beside it.
@@ -311,9 +470,14 @@ impl Browser {
         cx.global::<Preferences>().show_inspector && super::inspector_fits(window, split, cx)
     }
 
-    /// Reads the one item after `delay`, unless what's shown changes first.
+    /// Reads the next item, or else the one shown, after `delay`, unless the
+    /// selection moves first.
     fn schedule_read(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        let Subject::One { entry, .. } = &self.inspector.subject else {
+        let subject = match &self.inspector.pending {
+            Some(pending) => &pending.subject,
+            None => &self.inspector.subject,
+        };
+        let Subject::One { entry, .. } = subject else {
             return;
         };
         let path = entry.path.clone();
@@ -345,6 +509,15 @@ impl Browser {
 
     fn land_read(&mut self, read: Read, known: Option<FolderSize>, cx: &mut Context<Self>) {
         self.inspector.reading = None;
+        match &mut self.inspector.pending {
+            Some(pending) => pending.read = Some((read, known)),
+            None => self.apply_read(read, known, cx),
+        }
+        cx.notify();
+    }
+
+    /// What's shown takes this read.
+    fn apply_read(&mut self, read: Read, known: Option<FolderSize>, cx: &mut Context<Self>) {
         if let Read::Known { info, real } = &read
             && info.kind == Kind::Dir
         {
@@ -357,7 +530,12 @@ impl Browser {
             self.inspector.total = Total::Failed("Needs Full Disk Access".into());
         }
         self.inspector.read = read;
-        cx.notify();
+    }
+
+    /// Whether `path` is what's shown, with nothing waiting to replace it.
+    fn shows(&self, path: &Path) -> bool {
+        self.inspector.pending.is_none()
+            && matches!(&self.inspector.subject, Subject::One { entry, .. } if entry.path == path)
     }
 
     fn subject_is_folder(&self) -> bool {
@@ -426,7 +604,21 @@ impl Browser {
                 }
             })
             .detach();
-        let Read::Known { real, .. } = &self.inspector.read else {
+        // While the next item waits, what's shown only notes the change, in case
+        // the selection comes back, and a landed read of the next one can go stale.
+        if self.inspector.pending.is_some()
+            && let Read::Known { real, .. } = &self.inspector.read
+            && batch
+                .iter()
+                .any(|(changed, below)| touches(real, changed, *below))
+        {
+            self.inspector.stale = true;
+        }
+        let read = match &self.inspector.pending {
+            Some(pending) => pending.read.as_ref().map(|(read, _)| read),
+            None => Some(&self.inspector.read),
+        };
+        let Some(Read::Known { real, .. }) = read else {
             return;
         };
         if self.inspector.refresh.is_some()
@@ -441,7 +633,9 @@ impl Browser {
             wait.await;
             let _ = this.update(cx, |this, cx| {
                 this.inspector.refresh = None;
-                this.schedule_read(Duration::ZERO, cx);
+                if this.inspector.pending.is_none() {
+                    this.schedule_read(Duration::ZERO, cx);
+                }
             });
         }));
     }
@@ -617,7 +811,7 @@ impl Browser {
             modified: entry.modified,
         };
         if self.inspector.thumb.as_ref().map(|(t, _)| t) != Some(&thumb) {
-            self.inspector.release(Some(window), cx);
+            give_back(self.inspector.thumb.take(), Some(window), cx);
             thumbnails::hold(&thumb, cx);
             self.inspector.thumb = Some((thumb.clone(), None));
         }
@@ -735,13 +929,14 @@ impl Browser {
             return label.into_any_element();
         }
         let pane = pane.clone();
+        let path = entry.path.clone();
         label
             .role(Role::Button)
             .aria_label("Rename")
             .cursor(CursorStyle::IBeam)
             .hover(|d| d.bg(content(0.08)))
             .on_click(cx.listener(move |_, _, window, cx| {
-                pane.update(cx, |pane, cx| pane.rename_in_inspector(window, cx));
+                pane.update(cx, |pane, cx| pane.rename_in_inspector(&path, window, cx));
             }))
             .into_any_element()
     }
@@ -833,6 +1028,7 @@ impl Browser {
         }
         if info.availability == Availability::Placeholder {
             let path = info.path.clone();
+            let asked = path.clone();
             rows.push(
                 div()
                     .flex()
@@ -847,9 +1043,15 @@ impl Browser {
                                     window,
                                     cx,
                                     move |owner| cloud::download(&path, &Origin::Window, owner),
-                                    |this, asked, _, cx| match asked {
-                                        Ok(_) => this.schedule_read(Duration::ZERO, cx),
-                                        Err(why) => this.toast(why, true, None, cx),
+                                    {
+                                        let asked = asked.clone();
+                                        move |this: &mut Self, done, _, cx| match done {
+                                            Ok(_) if this.shows(&asked) => {
+                                                this.schedule_read(Duration::ZERO, cx)
+                                            }
+                                            Ok(_) => {}
+                                            Err(why) => this.toast(why, true, None, cx),
+                                        }
                                     },
                                 );
                             })),

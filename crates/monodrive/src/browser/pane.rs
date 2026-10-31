@@ -2018,7 +2018,16 @@ impl Pane {
 
     /// The lone selected item's name, edited where the inspector shows it
     /// and not in its row. Its field can draw in one place at a time.
-    pub(super) fn rename_in_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn rename_in_inspector(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The panel can still show the last item while the selection has moved.
+        if self.selection.only() != Some(path) {
+            return;
+        }
         self.rename_selected(window, cx);
         if let Some(renaming) = &mut self.renaming {
             renaming.in_inspector = true;

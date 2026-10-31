@@ -2,13 +2,14 @@
 //! folder, with `Native` made up: nothing walks a real folder or launches an
 //! app, and each read and total lands when the test says.
 
-use super::inspector::{READ_DELAY, REFRESH_DELAY, Read, Subject, Total, kinds_summary};
+use super::inspector::{PATIENCE, READ_DELAY, REFRESH_DELAY, Read, Subject, Total, kinds_summary};
 use super::pane::Pane;
 use super::places_tests::world;
 use super::tests::{browse, folder, in_pane, on_pane, own, press, release, shown};
 use super::*;
 use crate::menu::{Choice, ContextMenu};
 use crate::native::{MadeUp, Native, SizeDone};
+use crate::thumbnails::{Thumb, Thumbnail};
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use monodrive_core::apps::App as MacApp;
 use monodrive_core::entries::{Entry, Kind};
@@ -186,6 +187,30 @@ fn subject_name(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option
     })
 }
 
+/// Whose facts the panel's rows are showing.
+fn read_name(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<String> {
+    browser.read_with(cx, |browser, _| match &browser.inspector.read {
+        Read::Known { info, .. } => Some(info.name.clone()),
+        _ => None,
+    })
+}
+
+/// The panel on a.txt, read, with these files beside it.
+fn on_a_file<'a>(
+    beside: &[(&str, &[u8])],
+    project: &Path,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Browser>, &'a mut VisualTestContext, Arc<Fake>) {
+    for (name, bytes) in beside {
+        std::fs::write(project.join(name), bytes).unwrap();
+    }
+    let (browser, cx, fake) = set_up(project, cx);
+    press(cx, "alt-up down down cmd-i");
+    rest(cx);
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("a.txt"));
+    (browser, cx, fake)
+}
+
 fn total(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<u64> {
     browser.read_with(cx, |browser, _| match &browser.inspector.total {
         Total::Done(total) => Some(total.bytes),
@@ -276,14 +301,21 @@ fn it_follows_the_selection_and_the_pane_with_the_keys(cx: &mut TestAppContext) 
     press(cx, "cmd-i");
     // Nothing selected: the folder itself, which can't be renamed from here.
     assert_eq!(subject_name(&browser, cx).as_deref(), Some("project"));
-    press(cx, "down");
-    assert_eq!(subject_name(&browser, cx).as_deref(), Some("docs"));
     rest(cx);
-    assert_eq!(fake.reads(), ["docs"]);
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("project"));
+    // One item: the rows stay until its read lands, then all change together.
+    press(cx, "down");
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("project"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("project"));
+    rest(cx);
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("docs"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("docs"));
+    assert_eq!(fake.reads(), ["project", "docs"]);
     press(cx, "cmd-alt-s");
-    // The new pane has the keys and nothing selected.
+    // The new pane has the keys and nothing selected, which shows at once.
     assert_eq!(subject_name(&browser, cx).as_deref(), Some("project"));
     press(cx, "down down down");
+    rest(cx);
     assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
     let left = browser.read_with(cx, |browser, _| browser.tabs[browser.active].pane.clone());
     cx.update(|window, cx| {
@@ -291,7 +323,151 @@ fn it_follows_the_selection_and_the_pane_with_the_keys(cx: &mut TestAppContext) 
         window.focus(&focus, cx);
     });
     cx.run_until_parked();
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
+    rest(cx);
     assert_eq!(subject_name(&browser, cx).as_deref(), Some("docs"));
+}
+
+#[gpui::test]
+fn a_picture_swaps_in_with_its_facts(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let picture = project.join("pic.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+        .save(&picture)
+        .unwrap();
+    let (browser, cx, _fake) = on_a_file(&[], &project, cx);
+    press(cx, "down");
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("a.txt"));
+    rest(cx);
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("pic.png"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("pic.png"));
+    browser.read_with(cx, |browser, _| {
+        let (thumb, image) = browser.inspector.thumb.as_ref().unwrap();
+        assert_eq!(thumb.path, picture);
+        assert!(image.is_some(), "decoded before the swap");
+    });
+}
+
+#[gpui::test]
+fn past_its_patience_an_item_shows_without_its_picture(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx, fake) = on_a_file(&[("bad.png", b"not a picture")], &project, cx);
+    press(cx, "alt-up down down down");
+    rest(cx);
+    // The read has landed, and the picture will never decode.
+    assert_eq!(fake.reads().last().map(String::as_str), Some("bad.png"));
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("a.txt"));
+    cx.executor().advance_clock(PATIENCE - READ_DELAY);
+    cx.run_until_parked();
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("bad.png"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("bad.png"));
+}
+
+#[gpui::test]
+fn a_newer_selection_lets_go_of_the_one_waiting(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx, _fake) = on_a_file(&[("bad.png", b"not a picture")], &project, cx);
+    let thumb = cx.update(|window, cx| {
+        let pane = browser.read(cx).pane().read(cx);
+        let entry = pane.entries.iter().find(|e| e.name == "bad.png").unwrap();
+        Thumb {
+            path: entry.path.clone(),
+            side: (96. * window.scale_factor()).ceil() as u32,
+            modified: entry.modified,
+        }
+    });
+    let held = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.has_asset::<Thumbnail>(&thumb));
+    press(cx, "alt-up down down down");
+    rest(cx);
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
+    assert!(held(cx), "its picture decodes before it shows");
+    // Another comes along: the picture goes, and nothing of it ever shows.
+    press(cx, "up up");
+    assert!(!held(cx));
+    rest(cx);
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("zeta"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("zeta"));
+    cx.executor().advance_clock(PATIENCE);
+    cx.run_until_parked();
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("zeta"));
+}
+
+#[gpui::test]
+fn selecting_back_keeps_what_is_shown_without_asking_again(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx, fake) = on_a_file(&[], &project, cx);
+    fake.reads.lock().unwrap().clear();
+    // Back from one, and from one that replaced another.
+    press(cx, "up");
+    press(cx, "down");
+    press(cx, "up up");
+    press(cx, "down down");
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("a.txt"));
+    cx.executor().advance_clock(PATIENCE);
+    cx.run_until_parked();
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("a.txt"));
+    assert!(fake.reads().is_empty(), "{:?}", fake.reads());
+}
+
+#[gpui::test]
+fn selecting_back_catches_up_on_what_changed_or_stopped_meanwhile(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let docs = project.canonicalize().unwrap().join("docs");
+    let (browser, cx, fake) = set_up(&project, cx);
+    press(cx, "cmd-i");
+    press(cx, "down");
+    rest(cx);
+    fake.finish_walk(42);
+    cx.run_until_parked();
+    assert_eq!(total(&browser, cx), Some(42));
+
+    // It changes while the next item waits: its total comes again on return.
+    press(cx, "down");
+    browser.update(cx, |browser, cx| {
+        browser.disk_changed(&[(docs.join("sub"), true)], cx);
+    });
+    cx.run_until_parked();
+    press(cx, "up");
+    assert_eq!(total(&browser, cx), Some(42));
+    rest(cx);
+    assert_eq!(*fake.walked.lock().unwrap(), 2);
+    fake.finish_walk(100);
+    cx.run_until_parked();
+    assert_eq!(total(&browser, cx), Some(100));
+
+    // A refresh that was due when the next item came along isn't lost.
+    browser.update(cx, |browser, cx| {
+        browser.disk_changed(&[(docs.join("sub"), true)], cx);
+    });
+    cx.run_until_parked();
+    press(cx, "down");
+    press(cx, "up");
+    cx.executor().advance_clock(REFRESH_DELAY);
+    cx.run_until_parked();
+    assert_eq!(*fake.walked.lock().unwrap(), 3);
+
+    // Nor is a walk that the next item stopped.
+    press(cx, "down");
+    press(cx, "up");
+    rest(cx);
+    assert_eq!(*fake.walked.lock().unwrap(), 4);
+    fake.finish_walk(7);
+    cx.run_until_parked();
+    assert_eq!(total(&browser, cx), Some(7));
+}
+
+#[gpui::test]
+fn clicking_the_old_name_doesnt_rename_the_new_selection(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx, _fake) = on_a_file(&[], &project, cx);
+    press(cx, "up");
+    let name = cx.debug_bounds("inspector-name").unwrap().center();
+    cx.simulate_click(name, Modifiers::none());
+    cx.run_until_parked();
+    assert!(in_pane(&browser, cx, |pane, _| pane.renaming.is_none()));
 }
 
 #[gpui::test]
@@ -304,21 +480,22 @@ fn arrowing_past_rows_asks_nothing_about_them_and_late_answers_are_dropped(
     rest(cx);
     fake.reads.lock().unwrap().clear();
     press(cx, "down down down");
-    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("project"));
     rest(cx);
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
     assert_eq!(fake.reads(), ["a.txt"], "only where it came to rest");
-    // A read that's underway when the selection moves lands on nothing.
+    // A read still waiting when the selection moves never runs.
     press(cx, "up");
-    cx.executor().advance_clock(READ_DELAY);
-    while fake.reads().last().is_none_or(|last| last != "zeta") {
-        assert!(cx.executor().tick(), "the read should run");
-    }
+    cx.executor().advance_clock(READ_DELAY / 2);
     on_pane(&browser, cx, |pane, cx| pane.select_row(0, cx));
+    cx.executor().advance_clock(READ_DELAY / 2);
     cx.run_until_parked();
+    assert_eq!(fake.reads(), ["a.txt"]);
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("a.txt"));
+    rest(cx);
     assert_eq!(subject_name(&browser, cx).as_deref(), Some("docs"));
-    browser.read_with(cx, |browser, _| {
-        assert!(matches!(browser.inspector.read, Read::Waiting));
-    });
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("docs"));
 }
 
 #[gpui::test]
@@ -376,6 +553,7 @@ fn a_change_in_the_folder_measures_it_again(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(*fake.walked.lock().unwrap(), 2);
     assert_eq!(total(&browser, cx), Some(42));
+    assert_eq!(read_name(&browser, cx).as_deref(), Some("docs"));
 
     // More changes meanwhile don't restart the walk, or it might never end;
     // one more follows it.
@@ -479,8 +657,8 @@ fn clicking_the_name_renames_through_the_same_service(cx: &mut TestAppContext) {
     assert!(in_pane(&browser, cx, |pane, _| pane.renaming.is_none()));
 
     press(cx, "alt-up down down");
-    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
     rest(cx);
+    assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));
     let name = cx.debug_bounds("inspector-name").unwrap().center();
     cx.simulate_click(name, Modifiers::none());
     cx.run_until_parked();

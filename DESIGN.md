@@ -77,7 +77,7 @@ Each selected row shows its new name, medium, with the old one after it at 0.65.
 
 It's about the pane commands act on: the selection, or with none its folder. From the top: a 96 pt icon or picture, the name in `TEXT_TITLE` medium, centered, the kind at 0.65, then sections. A section is a 14 pt icon at 0.55 and a `TEXT_SMALL` medium label at 0.65, 16 pt below the last, in sentence case, with no color of its own. Under it are 24 pt rows: an 84 pt label at 0.65, and the value at the right in primary ink. What's unknown has no row, not a dash; only what the disk can answer late says so, as `Calculating…`. A press in the panel leaves the keys where they were.
 
-What the listing knows shows at once. The disk is read 100 ms after the selection rests, and a read or a folder's total for what's no longer selected is dropped. Behind a privacy prompt it reads nothing and says so.
+When the selection moves to one item, the panel stays on the last until the new item's read and picture are ready, then swaps them in one frame, with no fade. The disk is read 100 ms after the selection rests, and a read or a folder's total for what's no longer selected is dropped. Past 250 ms the new item shows what the listing knows and fills in as the rest lands. Several items, nothing selected, and opening the panel show at once. Behind a privacy prompt it reads nothing and says so.
 
 ### Submenus
 
