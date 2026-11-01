@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Compares Monodrive's search with Spotlight, find and fd on a generated
+# corpus, on a disk image of its own. See docs/performance.md.
+#
+#   scripts/bench prepare [entries] [seed]   makes the image, the corpus and Spotlight's index of it
+#   scripts/bench wait                       waits again for Spotlight, if prepare gave up
+#   scripts/bench search [rounds]            measures, and writes results.json, report.html, post.html and post.png to target/bench/<time>
+#   scripts/bench report <results.json>      rewrites that run's report.html, post.html and post.png beside it
+#   scripts/bench clean                      detaches the image and deletes it
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+volume=/Volumes/MonodriveBench
+image=target/bench/corpus.sparseimage
+tool=target/release/monodrive-bench
+
+build() {
+    cargo build --release --locked -p monodrive-bench
+}
+
+wait_for_spotlight() {
+    local entries count last=-1 started=$SECONDS quiet_since=$SECONDS
+    entries=$(wc -l <"$volume/manifest.tsv")
+    echo "Waiting for Spotlight."
+    while :; do
+        count=$("$tool" spotlight-count "$volume" 2>/dev/null || echo 0)
+        [ "$count" -ge "$entries" ] && break
+        if [ "$count" != "$last" ]; then
+            echo "  $count of $((entries)) after $((SECONDS - started)) s"
+            last=$count
+            quiet_since=$SECONDS
+        # Long, so a pause in Spotlight doesn't end an overnight run.
+        elif [ $((SECONDS - quiet_since)) -ge 3600 ]; then
+            echo "Spotlight stopped at $count of $((entries))." >&2
+            exit 1
+        fi
+        sleep 15
+    done
+    echo "Spotlight indexed $count entries in $((SECONDS - started)) s."
+}
+
+# 1200 by 675 is X's 16:9 image; the script draws it at twice that.
+post_image() {
+    swift scripts/html-to-png.swift "$1/post.html" "$1/post.png" 1200 675
+}
+
+case "${1:-}" in
+prepare)
+    entries=${2:-100000}
+    seed=${3:-1}
+    if [ -e "$volume" ] || [ -e "$image" ]; then
+        echo "$volume or $image exists. Run scripts/bench clean first." >&2
+        exit 1
+    fi
+    build
+    mkdir -p target/bench
+    hdiutil create -quiet -size 64g -fs APFS -type SPARSE -volname MonodriveBench "$image"
+    # Mounted normally: Spotlight leaves a nobrowse volume unindexed.
+    hdiutil attach -quiet "$image"
+    mdutil -i on "$volume" >/dev/null
+    echo "Writing $entries entries, seed $seed."
+    written=$SECONDS
+    time "$tool" corpus "$volume" --entries "$entries" --seed "$seed"
+    wait_for_spotlight
+    echo "$((SECONDS - written))" >"$volume/spotlight-seconds"
+    ;;
+wait)
+    build
+    wait_for_spotlight
+    ;;
+search)
+    build
+    # So fsearch's first build doesn't find the volume's files already in memory.
+    hdiutil detach -quiet "$volume"
+    hdiutil attach -quiet "$image"
+    wait_for_spotlight
+    out="target/bench/$(date +%Y%m%d-%H%M%S)"
+    "$tool" search "$volume" --rounds "${2:-30}" --out "$out"
+    post_image "$out"
+    ;;
+report)
+    build
+    "$tool" report "$2"
+    post_image "$(dirname "$2")"
+    ;;
+clean)
+    [ -e "$volume" ] && hdiutil detach -quiet "$volume"
+    rm -f "$image"
+    ;;
+*)
+    sed -n 2,9p "$0" >&2
+    exit 1
+    ;;
+esac

@@ -3056,6 +3056,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "monodrive-bench"
+version = "0.1.0"
+dependencies = [
+ "fsearch",
+ "libc",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "monodrive-core"
 version = "0.1.0"
 dependencies = [
