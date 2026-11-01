@@ -1848,3 +1848,24 @@ fn launch_shows_the_window_without_a_listing_that_hangs(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert!(shown.get());
 }
+
+#[gpui::test]
+fn launch_waits_for_the_pane_without_focus_too(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-alt-s");
+    let left = browser.read_with(cx, |b, _| b.tabs[b.active].pane.clone());
+    left.update(cx, |pane, _| pane.listing = true);
+    let shown = Rc::new(Cell::new(false));
+    let flag = shown.clone();
+    let views = vec![browser.clone()];
+    cx.update(|_, cx| crate::when_listed(views, move |_| flag.set(true), cx));
+    cx.run_until_parked();
+    assert!(!shown.get());
+    left.update(cx, |pane, cx| {
+        pane.listing = false;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(shown.get());
+}
