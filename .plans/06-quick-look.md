@@ -10,5 +10,5 @@ Space previews the selection, as Finder does. It uses macOS's own Quick Look, wh
 
 ## Later
 
-- An inline preview pane (⇧⌘P is taken by the palette, so this needs its own shortcut) using `QLPreviewView` for the selected file. It stays off by default.
+- [Built-in previews](28-previews.md) replaces the panel and embeds `QLPreviewView` for the kinds it doesn't draw itself.
 - MCP doesn't need Quick Look. Agents read files directly.
