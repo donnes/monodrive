@@ -291,7 +291,7 @@ fn a_folder_on_the_command_line_skips_onboarding(cx: &mut TestAppContext) {
     );
 }
 
-/// A window on a temp folder, starting the index as `open_window` does.
+/// A window on a temp folder, starting the index as `browser_for` does.
 fn browser_starting_the_index(folder: &Path, cx: &mut TestAppContext) -> WindowHandle<Browser> {
     let folder = folder.to_path_buf();
     let window = cx.add_window(|_, cx| {

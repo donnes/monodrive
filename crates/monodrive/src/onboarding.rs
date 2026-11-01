@@ -225,8 +225,14 @@ struct Flow {
 
 impl Global for Flow {}
 
+/// Whether a launch starts with onboarding. A launch on a folder never does,
+/// and nor does a finished Mac.
+pub fn due(explicit_folder: bool, cx: &App) -> bool {
+    !explicit_folder && cx.global::<Preferences>().onboarding_version < VERSION
+}
+
 /// Starts the app: onboarding if it's due, which `then` follows, or `then` at
-/// once. A launch on a `folder` never onboards, and nor does a finished Mac.
+/// once.
 pub fn launch(
     explicit_folder: bool,
     setup: Arc<dyn Setup>,
@@ -235,8 +241,7 @@ pub fn launch(
     cx: &mut App,
 ) {
     cx.set_global(Reopen(Rc::new(reopen)));
-    let due = !explicit_folder && cx.global::<Preferences>().onboarding_version < VERSION;
-    if !due {
+    if !due(explicit_folder, cx) {
         cx.set_global(IndexGate::new(setup, false));
         return then(cx);
     }

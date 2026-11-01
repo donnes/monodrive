@@ -1,6 +1,6 @@
 use crate::cloud::Availability;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -97,61 +97,47 @@ impl Default for Sort {
 /// numbers by value, so "file2" comes before "file10". Ties fall back to the
 /// name, so a sort by size or date is stable and predictable.
 pub fn sort(entries: &mut [Entry], sort: Sort) {
-    entries.sort_by(|a, b| {
-        let folders = if sort.folders_first {
-            (b.kind == Kind::Dir).cmp(&(a.kind == Kind::Dir))
-        } else {
-            Ordering::Equal
+    let column = |entry: &Entry| {
+        let (number, label) = match sort.by {
+            SortBy::Name => (0, String::new()),
+            SortBy::Modified => (entry.modified, String::new()),
+            SortBy::Size => (entry.listed_size(), String::new()),
+            SortBy::Kind => (0, entry.kind_label()),
         };
-        let order = match sort.by {
-            SortBy::Name => Ordering::Equal,
-            SortBy::Modified => a.modified.cmp(&b.modified),
-            SortBy::Size => a.listed_size().cmp(&b.listed_size()),
-            SortBy::Kind => a.kind_label().cmp(&b.kind_label()),
-        }
-        .then_with(|| natural(&a.name, &b.name));
-        folders.then(if sort.descending {
-            order.reverse()
-        } else {
-            order
-        })
-    });
+        (number, label, natural_key(&entry.name))
+    };
+    let after_folders = |entry: &Entry| sort.folders_first && entry.kind != Kind::Dir;
+    if sort.descending {
+        entries.sort_by_cached_key(|entry| (after_folders(entry), Reverse(column(entry))));
+    } else {
+        entries.sort_by_cached_key(|entry| (after_folders(entry), column(entry)));
+    }
 }
 
-/// Compares names as Finder does: ignoring case, with runs of digits by value.
-fn natural(a: &str, b: &str) -> Ordering {
-    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
-    loop {
-        match (a.peek().copied(), b.peek().copied()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
-                let number = |chars: &mut std::iter::Peekable<std::str::Chars>| {
-                    let mut digits = String::new();
-                    while let Some(c) = chars.peek().copied().filter(char::is_ascii_digit) {
-                        digits.push(c);
-                        chars.next();
-                    }
-                    digits
-                };
-                let (x, y) = (number(&mut a), number(&mut b));
-                let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
-                let order = x.len().cmp(&y.len()).then_with(|| x.cmp(y));
-                if order != Ordering::Equal {
-                    return order;
-                }
-            }
-            (Some(x), Some(y)) => {
-                let order = x.to_lowercase().cmp(y.to_lowercase());
-                if order != Ordering::Equal {
-                    return order;
-                }
-                a.next();
-                b.next();
-            }
+/// A name as bytes that order as Finder does: ignoring case, with runs of
+/// digits by value. A run becomes its length then its digits, without leading
+/// zeros, so a longer number sorts after a shorter one. Each starts with `0`,
+/// which sits among other characters where any digit would.
+fn natural_key(name: &str) -> Vec<u8> {
+    let name = name.to_lowercase();
+    let mut key = Vec::with_capacity(name.len());
+    let mut rest = name.as_bytes();
+    while let Some((&byte, after)) = rest.split_first() {
+        if !byte.is_ascii_digit() {
+            key.push(byte);
+            rest = after;
+            continue;
         }
+        let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        let (run, after) = rest.split_at(digits);
+        let zeros = run.iter().take_while(|&&b| b == b'0').count();
+        let value = &run[zeros..];
+        key.push(b'0');
+        key.extend_from_slice(&value.len().to_be_bytes());
+        key.extend_from_slice(value);
+        rest = after;
     }
+    key
 }
 
 /// A folder's entries in `order`. Entries that vanish or can't be read
@@ -219,12 +205,40 @@ mod tests {
 
     #[test]
     fn names_sort_as_people_read_them() {
-        let mut entries = ["file10.txt", "File2.txt", "file1.txt", "a", "B"]
-            .map(|name| entry(name, Kind::File, 0, 0));
+        let mut entries = [
+            "file10.txt",
+            "File2.txt",
+            "file1.txt",
+            "file02.txt",
+            "file0.txt",
+            "file 3.txt",
+            "file_1.txt",
+            "a",
+            "B",
+            "Écran 2",
+            "écran 10",
+            "photo99",
+            "photo100",
+        ]
+        .map(|name| entry(name, Kind::File, 0, 0));
         sort(&mut entries, Sort::default());
         assert_eq!(
             names(&entries),
-            ["a", "B", "file1.txt", "File2.txt", "file10.txt"]
+            [
+                "a",
+                "B",
+                "file 3.txt",
+                "file0.txt",
+                "file1.txt",
+                "File2.txt",
+                "file02.txt",
+                "file10.txt",
+                "file_1.txt",
+                "photo99",
+                "photo100",
+                "Écran 2",
+                "écran 10",
+            ]
         );
     }
 

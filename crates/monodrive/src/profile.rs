@@ -43,8 +43,13 @@ pub fn start(cx: &mut App) {
 }
 
 /// Prints how long launch took once the window shows the folder's contents:
-/// to the first frame, and to the first frame after the listing landed.
+/// to the first frame, to the first frame after the listing landed, and to the
+/// frame signal after that one, by when it has been presented. Launch usually
+/// lists before the window opens, so the first frame has them.
 pub fn on_launch(browser: &Entity<Browser>, window: &mut Window, cx: &mut App) {
+    if !browser.read(cx).is_listing(cx) {
+        return report_after_next_frame(Instant::now(), window);
+    }
     let mut landed = false;
     window
         .observe(browser, cx, move |browser, window, cx| {
@@ -52,16 +57,20 @@ pub fn on_launch(browser: &Entity<Browser>, window: &mut Window, cx: &mut App) {
                 return;
             }
             landed = true;
-            let at = Instant::now();
-            // The next frame draws the listing; the one after can report it.
-            window.on_next_frame(move |window, _| {
-                window.on_next_frame(move |_, cx| print_launch(at, cx))
-            });
+            report_after_next_frame(Instant::now(), window);
         })
         .detach();
 }
 
+/// The next frame signal presents the listing; the one after can report it.
+fn report_after_next_frame(landed: Instant, window: &mut Window) {
+    window.on_next_frame(move |window, _| {
+        window.on_next_frame(move |_, cx| print_launch(landed, cx))
+    });
+}
+
 fn print_launch(landed: Instant, cx: &mut App) {
+    let shown = since_process_start();
     let draws = cx.global_mut::<Profile>().collect();
     let since_start = |at: Instant| since_process_start()?.checked_sub(at.elapsed());
     let first = draws.first().and_then(|t| since_start(t.draw_end));
@@ -69,9 +78,9 @@ fn print_launch(landed: Instant, cx: &mut App) {
         .iter()
         .find(|t| t.draw_start >= landed)
         .and_then(|t| since_start(t.draw_end));
-    match (first, contents) {
-        (Some(first), Some(contents)) => eprintln!(
-            "launch: first frame drawn {first:.1?}, the folder's contents {contents:.1?} after the process started"
+    match (first, contents, shown) {
+        (Some(first), Some(contents), Some(shown)) => eprintln!(
+            "launch: first frame drawn {first:.1?}, the folder's contents {contents:.1?}, on the display by {shown:.1?} after the process started"
         ),
         _ => eprintln!("launch: unknown"),
     }

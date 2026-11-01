@@ -6,8 +6,10 @@ use crate::thumbnails::{Thumb, Thumbnail};
 use gpui::{Keystroke, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point};
 use monodrive_core::entries::{Entry, Kind, Sort, SortBy};
 use monodrive_core::ops::Origin;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// A browser on `folder` with the app's keys and default preferences,
 /// active and focused on its list. Type navigation keys only: a printable key
@@ -1805,4 +1807,44 @@ fn a_cut_name_keeps_only_a_real_extension() {
     ] {
         assert_eq!(kept_extension(name), extension, "{name}");
     }
+}
+
+/// A browser whose listing never lands, as on a volume that hangs, and a flag
+/// for whether launch went ahead and showed it.
+fn waiting_to_show<'a>(
+    folder: &Path,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Browser>, Rc<Cell<bool>>, &'a mut VisualTestContext) {
+    let (browser, cx) = browse(folder, cx);
+    let pane = pane_of(&browser, cx);
+    pane.update(cx, |pane, _| pane.listing = true);
+    let shown = Rc::new(Cell::new(false));
+    let flag = shown.clone();
+    let views = vec![browser.clone()];
+    cx.update(|_, cx| crate::when_listed(views, move |_| flag.set(true), cx));
+    cx.run_until_parked();
+    assert!(!shown.get());
+    (browser, shown, cx)
+}
+
+#[gpui::test]
+fn launch_shows_the_window_once_its_listing_lands(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, shown, cx) = waiting_to_show(&project, cx);
+    let pane = pane_of(&browser, cx);
+    pane.update(cx, |pane, cx| {
+        pane.listing = false;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(shown.get());
+}
+
+#[gpui::test]
+fn launch_shows_the_window_without_a_listing_that_hangs(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (_browser, shown, cx) = waiting_to_show(&project, cx);
+    cx.executor().advance_clock(crate::LISTING_WAIT);
+    cx.run_until_parked();
+    assert!(shown.get());
 }
