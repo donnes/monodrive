@@ -141,13 +141,16 @@ fn natural_key(name: &str) -> Vec<u8> {
 }
 
 /// A folder's entries in `order`. Entries that vanish or can't be read
-/// mid-listing are skipped, so one bad item never hides the rest.
+/// mid-listing are skipped, so one bad item never hides the rest. macOS's own
+/// `.DS_Store` and `.localized` stay out even with `show_hidden`.
 pub fn list_dir(dir: &Path, show_hidden: bool, order: Sort) -> std::io::Result<Vec<Entry>> {
     let mut entries: Vec<Entry> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .filter_map(|item| {
             let name = item.file_name().to_string_lossy().into_owned();
-            if !show_hidden && name.starts_with('.') {
+            if matches!(name.as_str(), ".DS_Store" | ".localized")
+                || (!show_hidden && name.starts_with('.'))
+            {
                 return None;
             }
             // DirEntry::metadata doesn't follow symlinks, so links stay links.
@@ -201,6 +204,17 @@ mod tests {
 
     fn names(entries: &[Entry]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn showing_hidden_files_leaves_out_the_ones_macos_keeps_for_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [".DS_Store", ".localized", ".env", "a.txt"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let listed = |show_hidden| list_dir(dir.path(), show_hidden, Sort::default()).unwrap();
+        assert_eq!(names(&listed(true)), [".env", "a.txt"]);
+        assert_eq!(names(&listed(false)), ["a.txt"]);
     }
 
     #[test]
