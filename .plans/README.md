@@ -32,6 +32,7 @@ Update a plan's row when its work lands on `main`.
 | 25 Filesystem speed | Planned; needs plan 24's runner | |
 | 26 MCP contract v1 | Planned; tool map and profiles need review | |
 | 27 Overview | UI picked, not built | |
+| 28 Packages | UI picked, not built | |
 
 ## UI picks
 
@@ -53,6 +54,7 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - 21: a Commands page in Settings.
 - 22: one place to manage all worktrees. The search index finds .git entries and Git confirms each repository. Delete moves the folder to the Trash, then removes Git's registration; refused if locked or the main worktree, and dirty or unpushed work needs an extra confirmation showing what's there.
 - 27: Desk. Free space and up to 3 suggestions first, then your stuff across every location, with what's happening now beside it.
+- 28: a read-only list in the pane, opened by an icon button beside Trash, with source filters as pills and the usual inspector. No row in Favorites.
 
 - Onboarding (done; granting Full Disk Access itself needs a person to check): first launch, a dedicated window with Welcome and then one checklist of Full Disk Access and coding agents. The first index crawl waits until the access is granted or onboarding closes; the app detects the grant on return and offers to reopen.
 
@@ -113,6 +115,7 @@ These are separate follow-on tracks. They do not require every storage backend t
 - [Worktree management](22-worktree-management.md) stays separate: inspect existing worktrees first, then reviewed management and creation. Read-only inventory can proceed independently; mutations and setup reuse the shared jobs foundation.
 - [Filesystem speed](25-filesystem-speed.md) absorbs the sorting miss in plan 01.
 - [Agent handoff and status](23-agent-features.md), after reliable shared operations and the relevant worktree lifecycle.
+- [Packages](28-packages.md), read-only first. Changing packages needs its own decisions.
 
 ## Deferred choices
 
