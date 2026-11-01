@@ -34,13 +34,14 @@ mod workspace;
 
 use commands::{CloseWindow, Hide, HideOthers, Minimize, NewWindow, Quit, ShowAll, ShowWelcome};
 use gpui::{
-    App, Focusable, Global, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, point, prelude::*, px, size,
+    App, Entity, Focusable, Global, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, point, prelude::*, px, size,
 };
 use preferences::Preferences;
 use session::WindowState;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 /// Who hears what the app's one watch on something says: each window.
 #[derive(Clone, Default)]
@@ -78,6 +79,10 @@ enum Opening {
     Folder(PathBuf),
     Restored(WindowState),
 }
+
+/// How long launch holds its windows back for their listings: a 10,000 entry
+/// folder's budget. A slower folder, or a volume that hangs, opens without one.
+const LISTING_WAIT: Duration = Duration::from_millis(40);
 
 /// Opens the app: onboarding if it's due, else the windows. With a `folder`,
 /// only the window, and the session stays as it was for the next launch
@@ -142,7 +147,7 @@ pub fn run(folder: Option<PathBuf>) {
             cx.on_action(|_: &NewWindow, cx| {
                 // During first launch, the windows onboarding is holding back.
                 if !onboarding::open_windows_now(cx) {
-                    open_window(Opening::Folder(browser::home()), false, cx);
+                    open_window(Opening::Folder(browser::home()), cx);
                 }
                 cx.activate(true);
             });
@@ -150,10 +155,13 @@ pub fn run(folder: Option<PathBuf>) {
             window_commands(cx);
             updates::start(cx);
             let explicit = folder.is_some();
+            // Closing onboarding opens the windows at once: the app quits when
+            // its last window closes and none has replaced it.
+            let wait_for_listing = !onboarding::due(explicit, cx);
             onboarding::launch(
                 explicit,
                 setup,
-                move |cx| open_windows(folder, cx),
+                move |cx| open_windows(folder, wait_for_listing, cx),
                 open_main_window,
                 cx,
             );
@@ -162,7 +170,7 @@ pub fn run(folder: Option<PathBuf>) {
 
 /// Opens `folder`, or the windows of the last session. The session starts
 /// saving only here, so quitting during onboarding leaves the last one alone.
-fn open_windows(folder: Option<PathBuf>, cx: &mut App) {
+fn open_windows(folder: Option<PathBuf>, wait_for_listing: bool, cx: &mut App) {
     let openings = match folder {
         Some(folder) => vec![Opening::Folder(folder)],
         None => {
@@ -178,10 +186,71 @@ fn open_windows(folder: Option<PathBuf>, cx: &mut App) {
         }
     };
     let several = openings.len() > 1;
-    for opening in openings {
-        open_window(opening, several, cx);
+    let windows: Vec<_> = openings
+        .into_iter()
+        .map(|opening| {
+            let frame = match &opening {
+                Opening::Restored(state) if several => state.frame,
+                _ => None,
+            };
+            (browser_for(opening, cx), frame)
+        })
+        .collect();
+    let views = windows.iter().map(|(view, _)| view.clone()).collect();
+    let show = move |cx: &mut App| {
+        for (view, frame) in windows {
+            show_window(view, frame, cx);
+        }
+        cx.activate(true);
+    };
+    if wait_for_listing {
+        when_listed(views, show, cx);
+    } else {
+        show(cx);
     }
-    cx.activate(true);
+}
+
+/// Runs `then` once `views` have listed their folders, or after `LISTING_WAIT`.
+/// A window opened first draws empty, and the listing that was ready as it
+/// drew then waits behind AppKit activating the app. Nothing here blocks: the
+/// main thread stays free, and no window is showing yet.
+fn when_listed(
+    views: Vec<Entity<browser::Browser>>,
+    then: impl FnOnce(&mut App) + 'static,
+    cx: &mut App,
+) {
+    let listed = |views: &[Entity<browser::Browser>], cx: &App| {
+        views.iter().all(|view| !view.read(cx).is_listing(cx))
+    };
+    if listed(&views, cx) {
+        return then(cx);
+    }
+    let (done, finished) = async_channel::bounded(1);
+    let timer = cx.background_executor().timer(LISTING_WAIT);
+    let timed_out = done.clone();
+    cx.background_executor()
+        .spawn(async move {
+            timer.await;
+            let _ = timed_out.try_send(());
+        })
+        .detach();
+    let watches: Vec<_> = views
+        .iter()
+        .map(|view| {
+            let (views, done) = (views.clone(), done.clone());
+            cx.observe(view, move |_, cx| {
+                if listed(&views, cx) {
+                    let _ = done.try_send(());
+                }
+            })
+        })
+        .collect();
+    cx.spawn(async move |cx| {
+        let _ = finished.recv().await;
+        drop(watches);
+        cx.update(then);
+    })
+    .detach();
 }
 
 /// Opens a main window where the last one was, for when the app has none left
@@ -189,7 +258,7 @@ fn open_windows(folder: Option<PathBuf>, cx: &mut App) {
 fn open_main_window(cx: &mut App) {
     let opening = session::last_closed(cx)
         .map_or_else(|| Opening::Folder(browser::home()), Opening::Restored);
-    open_window(opening, false, cx);
+    open_window(opening, cx);
     cx.activate(true);
 }
 
@@ -218,19 +287,48 @@ fn window_commands(cx: &mut App) {
     .detach();
 }
 
-/// Opens a window, moved along from the ones already showing. Restoring
-/// `several`, each goes back where it was, or they'd all land on the same spot.
-fn open_window(opening: Opening, several: bool, cx: &mut App) {
+/// Opens a window straight away, for an app that's already running.
+fn open_window(opening: Opening, cx: &mut App) {
+    let view = browser_for(opening, cx);
+    show_window(view, None, cx);
+}
+
+/// A browser on `opening`, its listing on the way, with no window yet.
+fn browser_for(opening: Opening, cx: &mut App) -> Entity<browser::Browser> {
+    cx.new(|cx| {
+        let mut browser = match opening {
+            Opening::Folder(folder) => browser::Browser::new(folder, cx),
+            Opening::Restored(state) => browser::Browser::restored(state, cx),
+        };
+        browser.start_index(cx);
+        let (jobs, volumes, lists) = {
+            let shared = cx.global::<Shared>();
+            (
+                shared.jobs.listen(),
+                shared.volumes.listen(),
+                shared.lists.listen(),
+            )
+        };
+        browser.hear_jobs(jobs, cx);
+        browser.hear_places((), volumes, lists, cx);
+        browser
+    })
+}
+
+/// Opens a window on `view`, moved along from the ones already showing. Given
+/// `saved_frame`, it goes back there, or restored windows would all land on
+/// the same spot.
+fn show_window(
+    view: Entity<browser::Browser>,
+    saved_frame: Option<preferences::Frame>,
+    cx: &mut App,
+) {
     let screens: Vec<_> = cx
         .displays()
         .iter()
         .map(|display| display.bounds())
         .collect();
     let others = cx.windows().len();
-    let saved_frame = match &opening {
-        Opening::Restored(state) if several => state.frame,
-        _ => None,
-    };
     // The part clear of the menu bar and the Dock, as `frame::apply` uses.
     let screen = cx.primary_display().map(|display| display.visible_bounds());
     let bounds = screen.map(|screen| {
@@ -268,25 +366,7 @@ fn open_window(opening: Opening, several: bool, cx: &mut App) {
         },
         |window, cx| {
             let key = window.window_handle().window_id().as_u64();
-            let view = cx.new(|cx| {
-                let mut browser = match opening {
-                    Opening::Folder(folder) => browser::Browser::new(folder, cx),
-                    Opening::Restored(state) => browser::Browser::restored(state, cx),
-                };
-                browser.start_index(cx);
-                let (jobs, volumes, lists) = {
-                    let shared = cx.global::<Shared>();
-                    (
-                        shared.jobs.listen(),
-                        shared.volumes.listen(),
-                        shared.lists.listen(),
-                    )
-                };
-                browser.hear_jobs(jobs, cx);
-                browser.hear_places((), volumes, lists, cx);
-                browser.keep_session(key, cx);
-                browser
-            });
+            view.update(cx, |browser, cx| browser.keep_session(key, cx));
             window.focus(&view.focus_handle(cx), cx);
             traffic_lights::pin(window, theme::TITLE_BAR_HEIGHT * window.content_zoom());
             // AppKit rebuilds the buttons on some titlebar changes.
@@ -307,9 +387,13 @@ fn open_window(opening: Opening, several: bool, cx: &mut App) {
             // Kept always, so choosing Last Used works at once.
             view.update(cx, |browser, cx| browser.track_frame(window, cx));
             window.activate_window();
-            window.on_next_frame(|_, cx| commands::menus_ready(cx));
             #[cfg(feature = "profile")]
             profile::on_launch(&view, window, cx);
+            // Building the menus takes over 10 ms: not before the first frame
+            // has reached the display.
+            window.on_next_frame(|window, _| {
+                window.on_next_frame(|_, cx| commands::menus_ready(cx));
+            });
             view
         },
     );

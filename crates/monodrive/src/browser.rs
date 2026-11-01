@@ -636,9 +636,11 @@ impl Browser {
         }
     }
 
-    /// A listing or search is on its way.
+    /// A listing or search is on its way to a pane on screen.
     pub fn is_listing(&self, cx: &App) -> bool {
-        self.pane().read(cx).listing
+        self.tabs[self.active]
+            .panes()
+            .any(|pane| pane.read(cx).listing)
     }
 
     /// Asks for a context menu at `at` in the window, whose commands run as
