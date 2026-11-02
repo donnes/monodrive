@@ -29,6 +29,12 @@ debug = "line-tables-only"
 opt-level = 1
 debug = false
 
+# fsearch shifts a u8 by eight on an eight-word search over many names, which
+# panics with overflow checks. Without them dev builds act as release builds
+# do. Remove this once a fsearch with `all` fixed in `score_names` is pinned.
+[profile.dev.package.fsearch]
+overflow-checks = false
+
 # Our own crates too, so holding an arrow key never outruns rendering.
 [profile.dev.package.monodrive]
 opt-level = 1
