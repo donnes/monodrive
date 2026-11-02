@@ -6,7 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The name agents know the server by.
-const NAME: &str = "monodrive";
+/// A dev build registers under its own name, so adding or removing it leaves
+/// the installed app's entry alone.
+const NAME: &str = if monodrive_core::DEV {
+    "monodrive-dev"
+} else {
+    "monodrive"
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Harness {
@@ -403,18 +409,18 @@ mod tests {
         write(
             home,
             ".claude.json",
-            r#"{"projects": {}, "mcpServers": {"monodrive": {"command": "monodrive"}}}"#,
+            &format!(r#"{{"projects": {{}}, "mcpServers": {{"{NAME}": {{"command": "m"}}}}}}"#),
         );
         write(home, ".cursor/mcp.json", r#"{"mcpServers": {"other": {}}}"#);
         write(
             home,
             ".config/amp/settings.json",
-            r#"{"amp.mcpServers": {"monodrive": {}}}"#,
+            &format!(r#"{{"amp.mcpServers": {{"{NAME}": {{}}}}}}"#),
         );
         write(
             home,
             ".codex/config.toml",
-            "[mcp_servers.monodrive_old]\n\n  [mcp_servers.monodrive]\ncommand = \"monodrive\"\n",
+            &format!("[mcp_servers.{NAME}_old]\n\n  [mcp_servers.{NAME}]\ncommand = \"m\"\n"),
         );
         write(home, ".gemini/settings.json", "{ not json");
         let added: Vec<_> = Harness::ALL
@@ -445,7 +451,9 @@ mod tests {
     fn add_and_remove_keep_the_rest_of_a_json_config() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
-        let before = r#"{"theme": "dark", "mcpServers": {"zeta": {"command": "z"}}, "alpha": 1}"#;
+        // A dev build's add and remove leave the installed app's entry alone.
+        let before =
+            r#"{"theme": "dark", "mcpServers": {"monodrive": {"command": "z"}}, "alpha": 1}"#;
         write(home, ".cursor/mcp.json", before);
         let cursor = Harness::Cursor;
         cursor.apply(Action::Add, "/bin/monodrive", home).unwrap();
@@ -455,7 +463,7 @@ mod tests {
             .unwrap();
         assert!(!cursor.added_in(home));
         let after = std::fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
-        let expected = "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"zeta\": {\n      \"command\": \"z\"\n    }\n  },\n  \"alpha\": 1\n}\n";
+        let expected = "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"monodrive\": {\n      \"command\": \"z\"\n    }\n  },\n  \"alpha\": 1\n}\n";
         assert_eq!(after, expected);
 
         // A config that isn't there yet is created.

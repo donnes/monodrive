@@ -6,7 +6,7 @@ The window and each `monodrive mcp` server are separate processes, and an agent'
 
 `monodrive ops` is a hidden subcommand of the same binary. A client that can't connect starts it detached, in its own process group with `/` as its folder, waits for it to print `ready`, and connects. A `starting.lock` flock keeps two clients from starting two owners at once.
 
-- **State.** `~/Library/Application Support/Monodrive/ops/`, mode 0700, holds the socket, the journal and the locks.
+- **State.** `~/Library/Application Support/Monodrive/ops/`, mode 0700, holds the socket, the journal and the locks. A dev build uses `Monodrive (Dev)/ops/` and starts its own owner.
 - **Ownership.** The owner holds an exclusive flock on `owner.lock` for its whole life. A second owner fails to take it and exits.
 - **Authentication.** Clients connect over the Unix socket `owner.sock`. The owner checks each peer's uid with `getpeereid` and drops connections from other users.
 - **Protocol.** One JSON line each way: a `Submission` (request id, origin, typed `Request`) and a `Result<Outcome, String>`. An error means nothing changed.

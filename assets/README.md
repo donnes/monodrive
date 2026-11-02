@@ -10,6 +10,10 @@ Don't edit the PNGs by hand.
 
 `nightly/app-icon.icon` is the same folder on a night sky, in the same project format, and `nightly/sidebar-sky.svg` is the art behind the top of a nightly's sidebar in a dark theme. `scripts/bundle` uses the nightly icon and the name "Monodrive (Nightly)" for a version containing `-nightly`, and the app shows the sky by the same test.
 
+## Dev
+
+`dev/app-icon.icon` is the same folder drawn in outline on a blueprint grid. `scripts/bundle` uses it and the name "Monodrive (Dev)" for any build `scripts/release` didn't start. The Dock titles an app by its bundle's file name, so that bundle is `Monodrive (Dev).app`.
+
 ## The macOS icon
 
 The app needs no exported image: `scripts/bundle` compiles `prod/app-icon.icon` with `actool` into the bundle's `Assets.car`, which macOS 26 draws as Liquid Glass, and an `.icns` for older releases.

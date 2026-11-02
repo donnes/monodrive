@@ -2,8 +2,10 @@
 # Builds Monodrive and wraps it in Monodrive.app with the app icon, so macOS
 # shows it in the Dock and Finder. Doesn't launch it.
 #
-#   scripts/bundle             target/debug/Monodrive.app
-#   scripts/bundle --release   target/release/Monodrive.app
+#   scripts/bundle             target/debug/Monodrive (Dev).app
+#   scripts/bundle --release   target/release/Monodrive (Dev).app
+#
+# scripts/release sets MONODRIVE_VERSION, which makes target/release/Monodrive.app.
 #
 # Run Contents/MacOS/monodrive directly to keep its PID, so you stop only
 # the process you started.
@@ -21,15 +23,26 @@ esac
 cargo build -p monodrive ${build[@]+"${build[@]}"}
 
 version=${MONODRIVE_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)}
-app="target/$profile/Monodrive.app"
 # A nightly looks and reads differently in the Dock. It keeps the bundle ID, so
 # Full Disk Access and settings carry over when the updater switches tracks.
 art=assets/prod
 name=Monodrive
+id=dev.donnes.monodrive
+bundle=Monodrive
 if [[ "$version" == *-nightly* ]]; then
   art=assets/nightly
   name="Monodrive (Nightly)"
 fi
+# Only scripts/release sets the version. Anything else is a dev build, with its
+# own name and bundle ID, so macOS keeps its permissions apart from the app's.
+if [[ -z ${MONODRIVE_VERSION:-} ]]; then
+  art=assets/dev
+  name="Monodrive (Dev)"
+  id=dev.donnes.monodrive.dev
+  bundle=$name
+fi
+# The Dock titles an app by its bundle's file name, not its Info.plist.
+app="target/$profile/$bundle.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # Replace the binary's inode, so macOS doesn't reuse an older signature cache.
 cp "target/$profile/monodrive" "$app/Contents/MacOS/monodrive.next"
@@ -57,7 +70,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>monodrive</string>
-<key>CFBundleIdentifier</key><string>dev.donnes.monodrive</string>
+<key>CFBundleIdentifier</key><string>$id</string>
 <key>CFBundleName</key><string>$name</string>
 <key>CFBundleDisplayName</key><string>$name</string>
 <key>CFBundlePackageType</key><string>APPL</string>
