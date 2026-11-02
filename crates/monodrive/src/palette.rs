@@ -1113,10 +1113,11 @@ const SFTP: &str = "SFTP servers";
 const SMB: &str = "SMB servers";
 
 /// The commands on a selection, in the order worth offering them.
-const SELECTION_ORDER: [&str; 16] = [
+const SELECTION_ORDER: [&str; 17] = [
     "Open",
     "Open With",
     "Quick Look",
+    "Open in Quick Look",
     "Get Info",
     "Rename",
     "Suggest Names",

@@ -39,6 +39,7 @@ use crate::menu::{ContextMenu, MenuEvent};
 use crate::onboarding::{self, IndexGate, Step};
 use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
+use crate::preview::PreviewView;
 use crate::quick_look::{self, Preview};
 use crate::session::{self, TabState, WindowState};
 use crate::settings::{self, SettingsView};
@@ -140,6 +141,7 @@ actions!(
         RevealInFinder,
         OpenInTerminal,
         QuickLook,
+        OpenInQuickLook,
         ShowContextMenu,
         AddToSidebar,
         RemoveFromSidebar,
@@ -311,6 +313,10 @@ pub struct Browser {
     preview: Option<Preview>,
     /// The Quick Look panel, from the first time it opens.
     quick_look: Option<quick_look::Panel>,
+    /// `preview` is in Apple's panel, and not in the pane.
+    in_panel: bool,
+    /// `preview` is in this pane.
+    previewing: Option<(gpui::WeakEntity<Pane>, Entity<PreviewView>)>,
     /// What the sidebar lists.
     sidebar: sidebar::Sidebar,
     /// The window's frame, as last settled.
@@ -521,6 +527,8 @@ impl Browser {
             menu_request: None,
             preview: None,
             quick_look: None,
+            in_panel: false,
+            previewing: None,
             sidebar: sidebar::Sidebar::default(),
             frame: None,
             session_key: None,
@@ -899,11 +907,22 @@ impl Browser {
         }
     }
 
-    /// Space and ⌘Y: Quick Look on the selection, or closes it.
-    fn toggle_quick_look(&mut self, window: &mut Window, cx: &App) {
-        if self.close_quick_look() {
+    /// Space and ⌘Y: the selection's preview in the pane, or closes it.
+    fn toggle_preview(&mut self, cx: &mut Context<Self>) {
+        if self.close_preview(cx) {
             return;
         }
+        let pane = self.pane().read(cx);
+        let Some(preview) = Preview::of(&pane.selection, &pane.entries) else {
+            return;
+        };
+        self.show_in_pane(&preview, cx);
+        self.preview = Some(preview);
+    }
+
+    /// Apple's panel, for what the pane's preview doesn't draw well.
+    fn open_in_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_preview(cx);
         let pane = self.pane().read(cx);
         let Some(preview) = Preview::of(&pane.selection, &pane.entries) else {
             return;
@@ -914,42 +933,85 @@ impl Browser {
         if let Some(panel) = &self.quick_look {
             panel.show(&preview, cx);
         }
+        self.in_panel = true;
         self.preview = Some(preview);
     }
 
-    /// Closes Quick Look, saying whether it was open.
-    fn close_quick_look(&mut self) -> bool {
+    fn show_in_pane(&mut self, preview: &Preview, cx: &mut Context<Self>) {
+        let Some((path, folder)) = preview.items.get(preview.index).cloned() else {
+            return;
+        };
+        let pane = self.pane().clone();
+        let view = match self
+            .previewing
+            .as_ref()
+            .filter(|(on, _)| on.entity_id() == pane.entity_id())
+        {
+            Some((_, view)) => view.clone(),
+            None => {
+                let view = cx.new(|_| PreviewView::new());
+                pane.update(cx, |pane, cx| {
+                    pane.preview = Some(view.clone());
+                    cx.notify();
+                });
+                self.previewing = Some((pane.downgrade(), view.clone()));
+                view
+            }
+        };
+        let position = (preview.index, preview.items.len());
+        view.update(cx, |view, cx| view.show(&path, folder, position, cx));
+    }
+
+    /// Closes the preview, saying whether it was open.
+    fn close_preview(&mut self, cx: &mut Context<Self>) -> bool {
         // The panel also closes itself, on Esc or its close button.
+        let in_panel = std::mem::take(&mut self.in_panel);
         let open = self.preview.take().is_some()
-            && self.quick_look.as_ref().is_none_or(|panel| panel.is_open());
-        if open && let Some(panel) = &self.quick_look {
+            && (!in_panel || self.quick_look.as_ref().is_none_or(|panel| panel.is_open()));
+        if in_panel && let Some(panel) = &self.quick_look {
             panel.close();
+        }
+        if let Some((pane, view)) = self.previewing.take() {
+            view.update(cx, |view, cx| view.release(cx));
+            let _ = pane.update(cx, |pane, cx| {
+                pane.preview = None;
+                cx.notify();
+            });
         }
         open
     }
 
-    /// While Quick Look is open it shows what's selected now, and closes
-    /// when nothing is, as on going into another folder.
-    fn follow_selection(&mut self, cx: &App) {
+    /// While a preview is open it shows what's selected now, and closes when
+    /// nothing is, as on going into another folder, or the keys move to the
+    /// other pane.
+    fn follow_selection(&mut self, cx: &mut Context<Self>) {
         let Some(shown) = &self.preview else {
             return;
         };
         let pane = self.pane().read(cx);
         let preview = Preview::of(&pane.selection, &pane.entries);
-        if preview.as_ref() == Some(shown) {
+        let moved_pane = self
+            .previewing
+            .as_ref()
+            .is_some_and(|(on, _)| on.entity_id() != self.pane().entity_id());
+        if preview.as_ref() == Some(shown) && !moved_pane {
             return;
         }
         // Not if the panel closed itself meanwhile.
-        let open = self.quick_look.as_ref().is_none_or(|panel| panel.is_open());
-        match preview.filter(|_| open) {
+        let open = !self.in_panel || self.quick_look.as_ref().is_none_or(|panel| panel.is_open());
+        match preview.filter(|_| open && !moved_pane) {
             Some(preview) => {
-                if let Some(panel) = &self.quick_look {
-                    panel.show(&preview, cx);
+                if self.in_panel {
+                    if let Some(panel) = &self.quick_look {
+                        panel.show(&preview, cx);
+                    }
+                } else {
+                    self.show_in_pane(&preview, cx);
                 }
                 self.preview = Some(preview);
             }
             None => {
-                self.close_quick_look();
+                self.close_preview(cx);
             }
         }
     }
@@ -1711,7 +1773,7 @@ impl Render for Browser {
                         return this.spring_back(back, window, cx);
                     }
                     this.toast = None;
-                    if this.close_quick_look() {
+                    if this.close_preview(cx) {
                         return;
                     }
                     if this.sidebar.editing {
@@ -1779,8 +1841,11 @@ impl Render for Browser {
                         if this.drag.active() {
                             return this.spring_now(window, cx);
                         }
-                        this.toggle_quick_look(window, cx)
+                        this.toggle_preview(cx)
                     }))
+                    .on_action(cx.listener(
+                        |this, _: &OpenInQuickLook, window, cx| this.open_in_quick_look(window, cx),
+                    ))
                 })
                 .on_action(cx.listener(|this, _: &ShowCopiesAndMoves, window, cx| {
                     this.toggle_jobs(window, cx)

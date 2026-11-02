@@ -186,6 +186,41 @@ fn space_previews_the_selection_and_quick_look_follows_it(cx: &mut TestAppContex
     assert_eq!(previewed(&browser, cx), None);
 }
 
+/// What the pane's preview is showing: its selector on screen.
+fn drawn(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.debug_bounds(selector).is_some()
+}
+
+#[gpui::test]
+fn the_preview_takes_the_panes_list_and_gives_it_back(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::write(project.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(project.join("b.md"), "# Title\n\nBody.\n").unwrap();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down");
+    assert_eq!(shown(&browser, cx).1, ["b.md"]);
+    press(cx, "space");
+    assert!(drawn(cx, "preview-markdown"));
+    assert!(cx.debug_bounds("preview-text").is_none());
+    // The keys stayed on the list, so the arrows move what it shows.
+    press(cx, "up");
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    assert!(drawn(cx, "preview-text"));
+    // A click in it isn't a click on the list, which would let go of the file.
+    let at = cx.debug_bounds("preview-text").unwrap().center();
+    cx.simulate_click(at, with(""));
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    press(cx, "escape");
+    assert!(!drawn(cx, "preview"));
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    // A folder lists what's in it.
+    press(cx, "alt-up space");
+    assert!(drawn(cx, "preview-rows"));
+    press(cx, "escape");
+}
+
 #[gpui::test]
 fn arrows_walk_a_folder_open_in_place_and_out_of_it(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
@@ -1072,7 +1107,7 @@ pub(super) fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
     cx.simulate_mouse_up(at, MouseButton::Right, with(""));
 }
 
-const ON_A_FILE: [&str; 12] = [
+const ON_A_FILE: [&str; 13] = [
     "Open",
     "Open With",
     "Reveal in Finder",
@@ -1082,6 +1117,7 @@ const ON_A_FILE: [&str; 12] = [
     "Suggest Names",
     "Duplicate",
     "Quick Look",
+    "Open in Quick Look",
     "Move to Trash",
     "Copy",
     "Copy Path",

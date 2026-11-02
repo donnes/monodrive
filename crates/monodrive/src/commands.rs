@@ -13,9 +13,9 @@ use crate::browser::{
     EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications, GoComputer,
     GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents, GoToFolder, GoTrash, HideInspector,
     MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab,
-    NextTab, OpenInNewTab, OpenInTerminal, OpenSelected, OpenSettings, OpenWith, OrganizeFolder,
-    PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder,
-    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
+    NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
+    OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom,
+    RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
     ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
     SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid,
     ViewAsList, ZoomIn, ZoomOut,
@@ -333,6 +333,12 @@ pub fn all() -> Vec<Command> {
             SELECTION,
             command("Quick Look", File, &["cmd-y", "space"], LIST, || {
                 Box::new(QuickLook)
+            }),
+        ),
+        on(
+            SELECTION,
+            command("Open in Quick Look", File, &[], LIST, || {
+                Box::new(OpenInQuickLook)
             }),
         ),
         // Function keys, as two-pane file managers have long used them.
@@ -1038,6 +1044,7 @@ mod tests {
                 "Suggest Names",
                 "Duplicate ⌘D",
                 "Quick Look ⌘Y",
+                "Open in Quick Look",
                 "| Copy to Other Pane ⌥F5",
                 "Move to Other Pane ⌥F6",
                 "| Move to Trash ⌘⌫",
