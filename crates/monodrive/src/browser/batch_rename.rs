@@ -250,13 +250,13 @@ impl BatchRename {
 }
 
 impl Pane {
-    /// Whether a name or a batch is being edited, when nothing else may
-    /// change files or take the list's keys.
+    /// Whether a name or a batch is being edited, or a folder reviewed, when
+    /// nothing else may change files or take the list's keys.
     pub(super) fn changing_names(&self) -> bool {
-        self.renaming.is_some() || self.batch.is_some()
+        self.renaming.is_some() || self.batch.is_some() || self.organizing.is_some()
     }
 
-    fn place_now(&self) -> (PathBuf, bool, String) {
+    pub(super) fn place_now(&self) -> (PathBuf, bool, String) {
         let stop = self.stop();
         (stop.folder.clone(), stop.recents, self.query.clone())
     }

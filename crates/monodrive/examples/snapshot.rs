@@ -54,7 +54,8 @@
 //! text, `batch-rename-number.png` numbering them, `batch-rename-problem.png`
 //! a name that's taken, `batch-rename-grid.png` the bar from a grid and
 //! `batch-rename-narrow.png` in a narrow pane, and `batch-rename-suggest.png`
-//! names read from the files. Nothing is applied.
+//! names read from the files. Nothing is applied. `organize.png` is Organize's
+//! review of the folder.
 //!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
@@ -68,9 +69,9 @@ use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives, EditFavorites,
     EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch, GoRecents,
-    GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations, Places, Rename,
-    SaveSearch, SearchContents, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves,
-    ShowSearches, SuggestNames, ToggleSplit, Undo,
+    GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations, OrganizeFolder,
+    Places, Rename, SaveSearch, SearchContents, SelectLast, SelectNext, ShowContextMenu,
+    ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo,
 };
 use monodrive::connect;
 use monodrive::native::{self, Native, SizeDone};
@@ -492,6 +493,12 @@ fn shoot_batch_rename(
     dispatch(cx, window, &SuggestNames)?;
     cx.run_until_parked();
     save(cx, window, out, "batch-rename-suggest")?;
+
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    dispatch(cx, window, &OrganizeFolder)?;
+    cx.run_until_parked();
+    save(cx, window, out, "organize")?;
 
     cx.update(|cx| {
         cx.set_global(Preferences {

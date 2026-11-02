@@ -1,6 +1,6 @@
 # Name and organize files
 
-Status: Suggest Names built, for text-based files only; the 200-document score below hasn't been run. Rules-based sorting planned. Running a model is held behind the speed gate below. Organize's review page still needs a UI pick.
+Status: Suggest Names built, for text-based files only; the 200-document score below hasn't been run. Organize is built with the rules below, the review page as option A, and MCP's preview and token. Not built: matching text against a vocabulary, a download's site as a reason, duplicates, and agents submitting their own groups. Running a model is held behind the speed gate below. The review page was picked without drawn options, under a full send on 2026-11-02, so the maintainer may still want to compare them.
 
 ## Goal
 

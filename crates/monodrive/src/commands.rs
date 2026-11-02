@@ -13,12 +13,12 @@ use crate::browser::{
     EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications, GoComputer,
     GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents, GoToFolder, GoTrash, HideInspector,
     MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab,
-    NextTab, OpenInNewTab, OpenInTerminal, OpenSelected, OpenSettings, OpenWith, PreviousTab,
-    PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort,
-    SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves, ShowPackageContents,
-    ShowSearches, SortByKind, SortByModified, SortByName, SortBySize, SuggestNames,
-    ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
-    ZoomIn, ZoomOut,
+    NextTab, OpenInNewTab, OpenInTerminal, OpenSelected, OpenSettings, OpenWith, OrganizeFolder,
+    PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder,
+    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
+    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
+    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid,
+    ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -272,6 +272,12 @@ pub fn all() -> Vec<Command> {
                 BROWSER,
                 || Box::new(AddToSidebar),
             )),
+        ),
+        on(
+            FOLDER,
+            command("Organize Folder…", File, &[], LIST, || {
+                Box::new(OrganizeFolder)
+            }),
         ),
         on(
             &[Scope::Selection, Scope::Folder],
@@ -1045,7 +1051,8 @@ mod tests {
             [
                 "New Folder ⇧⌘N",
                 "New File",
-                "| Get Info ⌘I",
+                "| Organize Folder…",
+                "Get Info ⌘I",
                 "| Paste ⌘V",
                 "| ✓ as List ⌘1",
                 "as Grid ⌘2",
