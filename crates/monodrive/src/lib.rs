@@ -105,7 +105,7 @@ pub fn run(folder: Option<PathBuf>) {
             // owner if needed. The watch on its journal connects to nothing.
             let mut job_watch = None;
             if let Some(paths) = monodrive_core::ops::Paths::user() {
-                let client = monodrive_core::ops::Client::new(paths, std::env::current_exe().ok());
+                let client = monodrive_core::ops::Client::new(paths, frame::owner_exe());
                 let heard = jobs.clone();
                 job_watch = client.watch(move || heard.say()).ok();
                 cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));
@@ -151,7 +151,7 @@ pub fn run(folder: Option<PathBuf>) {
                 if !onboarding::open_windows_now(cx) {
                     open_window(Opening::Folder(browser::home()), cx);
                 }
-                cx.activate(true);
+                frame::bring_forward(cx);
             });
             cx.on_action(|_: &ShowWelcome, cx| onboarding::show(onboarding::Step::Welcome, cx));
             window_commands(cx);
@@ -203,7 +203,7 @@ fn open_windows(folder: Option<PathBuf>, wait_for_listing: bool, cx: &mut App) {
         for (view, frame) in windows {
             show_window(view, frame, cx);
         }
-        cx.activate(true);
+        frame::bring_forward(cx);
     };
     if wait_for_listing {
         when_listed(views, show, cx);
@@ -261,7 +261,7 @@ fn open_main_window(cx: &mut App) {
     let opening = session::last_closed(cx)
         .map_or_else(|| Opening::Folder(browser::home()), Opening::Restored);
     open_window(opening, cx);
-    cx.activate(true);
+    frame::bring_forward(cx);
 }
 
 /// Runs `act` on the window in front, once the command that asked has returned:
@@ -342,7 +342,9 @@ fn show_window(
         };
         let last = saved_frame.or(prefs.window_frame);
         let bounds = frame::opening(size, last, screen, &screens);
-        WindowBounds::Windowed(if saved_frame.is_some() {
+        WindowBounds::Windowed(if frame::unattended() {
+            frame::out_of_the_way(bounds, &screens)
+        } else if saved_frame.is_some() {
             bounds
         } else {
             frame::cascaded(bounds, others)

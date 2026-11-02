@@ -2527,6 +2527,9 @@ impl Pane {
                         let grabs = !missing && rename.is_none();
                         div()
                             .id(ix)
+                            .role(gpui::Role::ListItem)
+                            .aria_label(entry.name.clone())
+                            .aria_selected(selected)
                             .w(px(cell))
                             .h(px(height))
                             .when(missing, |d| d.opacity(0.5))
@@ -2647,6 +2650,9 @@ impl Pane {
                 Some(
                     div()
                         .id(row)
+                        .role(gpui::Role::ListItem)
+                        .aria_label(entry.name.clone())
+                        .aria_selected(selected)
                         .w_full()
                         .h(px(row_height))
                         .px_3()

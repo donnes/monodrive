@@ -28,6 +28,7 @@ These are good defaults, not hard rules. If one fights the task in front of you,
 2. **Damaging the live index.** `~/Library/Application Support/FSearch` is shared by the installed Monodrive, its `monodrive mcp` and the fsearch CLI. Never delete it, edit its files, or point a test at it. Only `scripts/release` builds open it. Every other build is a dev build and keeps its index in `Monodrive (Dev)/FSearch`, cloned from the live one on first run. Stop what you started.
 3. **Crawling the disk by accident.** Starting the index on a machine without one crawls the whole disk: minutes of CPU and several hundred MB of disk and memory. The app starts it at launch, as Spacedrive does, so every window you open loads or builds it; only onboarding holds it back, on a Mac with no saved index and no Full Disk Access, until the access is granted or onboarding closes. Run the app only when you need it, and stop it by PID. Tests must never call `Index::start`, and the MCP server starts it on its first search, since each agent session runs its own server.
 4. **Editing `vendor/`.** `vendor/gpui-pre*` is Monocode's patched GPUI. Sync it from Monocode when bumping GPUI; don't fix things in place.
+5. **Driving the user's copy.** `agent-desktop --app Monodrive` can match the app the user has open. Only target the name `scripts/agent-app start` prints, and never pass `--headed`, or use `focus-window`, `launch --activate` or `close-app`: they take the user's focus or quit their app. The app's Copy and agent-desktop's clipboard commands change the user's real clipboard.
 
 ## Hit every surface
 
@@ -61,6 +62,7 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 - `scripts/dev [folder]` rebuilds the app and relaunches it on the same folder whenever a source file changes, through watchexec. A failed build leaves the last app running, and Ctrl-C stops both. It relaunches into the foreground, so it's for a person at the keyboard, not for agents. `mise.toml` pins the watchexec it needs; run `mise install` in the repo.
 - `scripts/bundle` builds `target/debug/Monodrive (Dev).app` with the dev icon, so the Dock and Finder show it. Run `"target/debug/Monodrive (Dev).app/Contents/MacOS/monodrive"` to launch it and keep its PID.
 - `scripts/release <version>` builds the signed disk image `.github/workflows/release.yml` publishes, and publishes nothing itself. `scripts/release-notes` writes the release's notes, which the updater reads.
+- `scripts/agent-app start <folder>` builds the app and runs it for you to drive with agent-desktop, and `scripts/agent-app stop` stops it. See Verifying.
 - `cargo run -p monodrive -- mcp` runs the MCP server on stdio. To try it with an agent, build first and register the binary, for example `claude mcp add monodrive-dev -- <repo>/target/debug/monodrive mcp`.
 - Opening the window starts the index. See rule 3 before running the app on a machine without one.
 
@@ -75,7 +77,15 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 - No sleeps, polling loops or wall-clock assertions in tests.
 - `clippy.toml` enforces what it can of the rules above: no sleeps, no deleting files, and `Index::start` only where an `#[expect]` says why. CI also runs cargo-deny (`deny.toml`), so a new dependency's license must be on its allowlist.
 - Speed has budgets in `docs/performance.md`. Run the benchmarks it lists when a change touches listing, sorting, the browser's rendering or launch, and compare against the last run.
-- Visual changes get a look. `cargo run -p monodrive --example snapshot -- [folder]` draws every surface, dark and light, to `target/snapshots/` through GPUI's headless renderer: no window, no screen capture, no index. Run it before and after a change. Ask before using computer use or screen capture of the real app.
+- Visual changes get a look. `cargo run -p monodrive --example snapshot -- [folder]` draws every surface, dark and light, to `target/snapshots/` through GPUI's headless renderer: no window, no index. Run it before and after a change.
+- Behavior in the real app gets a run through [agent-desktop](https://agent-browser.dev/desktop), which `mise install` provides. It reads and drives the app through the accessibility tree while the user keeps working. Never use computer use, `scripts/dev` or a plain `cargo run` for this: they take the user's focus and screen.
+  - Run `agent-desktop status` and `agent-desktop skills get desktop` first. The first time, the app running you needs Accessibility and Screen Recording, which `agent-desktop permissions --guide` opens for the user.
+  - `scripts/agent-app start <folder>` prints the app's name. Use a fixture folder under `.scratch/`, because Move to Trash reaches the real Trash. Pass that name as `--app` to `snapshot`, `screenshot <path>`, `press` and `wait`, and pass refs to `click`. `press --window-id` sends nothing to an unfocused window.
+  - Leave the window where it opens. GPUI stops drawing a covered window, so moving it behind another app leaves `snapshot` a step behind.
+  - Check the result with `snapshot` or `is`. File rows report `selected`, and `screenshot` shows the whole window though most of it sits off screen.
+  - Type with `press`, one key at a time: `type` and `set-value` can't reach our text fields. Context menus don't open without `--headed`, so use the command palette (`press cmd+k`) instead.
+  - Run `scripts/agent-app stop` when you're done. The app takes about 260 MB while it runs.
+  - An element without a role and label is invisible to agents and VoiceOver. If you can't reach something, give it a `.role` and `.aria_label`.
 
 ## Taste
 
