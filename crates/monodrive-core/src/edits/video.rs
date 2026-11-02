@@ -334,6 +334,15 @@ pub fn export(
 
 /// The frame at `seconds`, as a picture at `into`.
 pub fn frame(source: &Path, seconds: f64, into: &Path) -> Result<(), String> {
+    encode(&*grab(source, seconds)?, into, None)
+}
+
+/// The frame at `seconds`, in memory, for cropping on.
+pub fn frame_bitmap(source: &Path, seconds: f64) -> Result<crate::thumbnails::Bitmap, String> {
+    crate::thumbnails::bitmap(&*grab(source, seconds)?)
+}
+
+fn grab(source: &Path, seconds: f64) -> Result<Retained<objc2_core_graphics::CGImage>, String> {
     crate::cloud::refuse_placeholder(source)?;
     let asset = asset(source);
     // SAFETY: valid objects, on this thread only.
@@ -346,7 +355,7 @@ pub fn frame(source: &Path, seconds: f64, into: &Path) -> Result<(), String> {
             .copyCGImageAtTime_actualTime_error(time(seconds), std::ptr::null_mut())
             .map_err(|e| e.localizedDescription().to_string())?
     };
-    encode(&image, into, None)
+    Ok(image)
 }
 
 #[cfg(test)]

@@ -1,14 +1,16 @@
 # Built-in previews and editing
 
-Status: steps 1 to 6 built (frame, system fallback, text, Markdown, pictures, video, audio, HTML, archives, folders). Replaces the `QLPreviewPanel` from [plan 06](06-quick-look.md), which stays behind "Open in Quick Look" until a person confirms parity.
+Status: all eight steps built, with the differences below. Replaces the `QLPreviewPanel` from [plan 06](06-quick-look.md), which stays behind "Open in Quick Look" until a person confirms parity.
 
 Built differently from what's below, each to keep the first version small:
 
 - Markdown is a small renderer on `pulldown-cmark`, not a port of Monocode's 1,800 lines. Tables read as plain rows.
 - Pictures come from the system's generator (`monodrive_core::thumbnails`), not ImageIO directly. It reads HEIC and RAW and stops at the side asked for. Fit and 100% exist; pinch and pan by drag don't.
-- A video's poster is drawn only until its first frame is ready. With the poster under the player layer, the first frame stayed on screen during playback, even though native views otherwise sit above GPUI's background. That wasn't explained, only avoided.
+- A video's poster is drawn only until its first frame is ready, which also gives its memory back.
 - Checked in a real window on 2026-11-02: a click inside `QLPreviewView` and inside `WKWebView`, then a real Space, reaches GPUI. A hostile page's script doesn't run. Playback advances the frame and the time.
-- An edit is written by whoever asks, the window or an agent, under a hidden name beside where it's going, and `Request::SaveEdit` only checks the original and moves that file into place. A long video export so never holds up the owner, but it also isn't a job in the title bar's ring: its progress and cancel belong to whoever started it. Undoing leaves the file under its hidden name for Redo, and nothing cleans it up later, so it keeps using disk. That is a known cost.
+- An edit is written by whoever asks, the window or an agent, under a hidden name beside where it's going, and `Request::SaveEdit` only checks the original and moves that file into place. A long video export so never holds up the owner, but it also isn't a job in the title bar's ring: its progress and cancel belong to whoever started it. Undoing sends the edited file to the Trash, as with anything else Monodrive made.
+- The crop on a video is chosen on a frozen frame, and a turn isn't shown until it's saved. Trim is Set Start and Set End at the playhead, not handles on the track. A mark can't be moved once it's drawn, only undone. Pictures' tools have four inks and no width control.
+- Pictures paint into a rectangle `fit` computes rather than through layout, as a picture taller than its box otherwise overran it, and marks would have landed in the wrong place.
 - `examples/preview_window.rs` opens one real window on a file, to look at what headless snapshots can't draw.
 
 ## Goal
@@ -29,7 +31,7 @@ The panel has three problems today. It's Apple's window, so it can't follow `DES
 
 ## The frame
 
-The maintainer picked this from drawn options on 2026-10-31; the mockups aren't in the repo. The preview takes over the pane commands act on, with a bar above and tools below. The sidebar, tabs and a second pane stay, and closing the sidebar gives more room. It appears in the next frame and needs no AppKit window.
+The maintainer picked this from drawn options on 2026-10-31; the mockups aren't in the repo. The preview takes over the pane commands act on, with a bar above, which holds the tools while editing. The sidebar, tabs and a second pane stay, and closing the sidebar gives more room. It appears in the next frame and needs no AppKit window.
 
 Build one `PreviewView` entity with no knowledge of where it sits, so plan 19's preview column can reuse it later.
 
@@ -51,7 +53,7 @@ Keys stay as they are: Space and ⌘Y open and close, Esc closes, arrows move th
 
 ## Tools
 
-Space opens a read-only view, so a stray key can't change anything. Edit (E) shows the tools. Each tool is a typed step in a `Recipe` held in memory, so undo inside the session is a list pop, and Esc with unsaved changes asks first.
+Space opens a read-only view, so a stray key can't change anything. Edit (E) puts the tools in the title row: icons, then Undo, Save and Done. Save makes a copy, and its arrow offers Replace Original and Save As. A narrow pane moves the tools behind a menu. The maintainer picked this one-row layout from drawn options on 2026-11-02. Each tool is a typed step in a `Recipe` held in memory, so undo inside the session is a list pop, and Esc with unsaved changes asks first.
 
 | Kind | Tools | Done by |
 |---|---|---|

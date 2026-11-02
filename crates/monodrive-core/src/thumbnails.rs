@@ -95,7 +95,7 @@ pub fn generate(
 }
 
 /// Draws into memory, since a `CGImage` may be in any pixel format.
-fn bitmap(image: &CGImage) -> Result<Bitmap, String> {
+pub(crate) fn bitmap(image: &CGImage) -> Result<Bitmap, String> {
     let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
     let mut bytes = vec![0u8; width * height * 4];
     let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
