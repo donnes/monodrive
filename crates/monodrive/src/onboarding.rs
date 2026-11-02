@@ -270,7 +270,7 @@ pub fn launch(
         };
         cx.update(|cx| {
             open(step, Some(then), cx);
-            cx.activate(true);
+            crate::frame::bring_forward(cx);
         });
     })
     .detach();

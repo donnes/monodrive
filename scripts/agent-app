@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Runs the real app for an agent to drive with agent-desktop, beside the user's
+# work: it never activates, its window sits past the edge of the screen with a
+# sliver showing, and its settings and session live in a throwaway home. macOS
+# still moves files to the real Trash, so point it at a fixture folder.
+#
+#   scripts/agent-app start <folder>   builds and starts it, and prints its name
+#   scripts/agent-app stop             stops only what `start` started
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+dir=$PWD/target/agent
+name="Monodrive Agent $(basename "$PWD")"
+app="$dir/$name.app"
+exe="$app/Contents/MacOS/monodrive"
+pid=$dir/pid
+home=$dir/home
+# The owner's Unix socket lives under HOME, and its path has a 104-byte limit
+# that a worktree's path can exceed.
+short_home=/tmp/monodrive-agent-$(basename "$PWD")
+
+stop() {
+  if [[ -f "$pid" ]]; then
+    # The file outlives a crash, and the PID may be someone else's by now.
+    if [[ "$(ps -o command= -p "$(cat "$pid")" || true)" == "$exe"* ]]; then
+      kill "$(cat "$pid")"
+    fi
+    rm "$pid"
+    rm -f "$short_home"
+    rm -rf "$home" "$app"
+  fi
+}
+
+start() {
+  folder=$1
+  # fsearch works out which folders would prompt from HOME, which points
+  # elsewhere here, so without this access it could prompt for the real ones.
+  if [[ ! -r "/Library/Application Support/com.apple.TCC/TCC.db" ]]; then
+    echo "The app running this needs Full Disk Access." >&2
+    exit 1
+  fi
+  support="$HOME/Library/Application Support"
+  index="$support/Monodrive (Dev)/FSearch/index.bin"
+  [[ -f "$index" ]] || index="$support/FSearch/index.bin"
+  # A home without an index would crawl the whole disk.
+  if [[ ! -f "$index" ]]; then
+    echo "No saved index at $index. Open Monodrive once to build it." >&2
+    exit 1
+  fi
+  stop
+  cargo build -p monodrive
+
+  rm -rf "$app"
+  rm -rf "$home"
+  mkdir -p "$app/Contents/MacOS" "$home/Library/Application Support/FSearch" "$home/.Trash"
+  # A clone, which the app's first run seeds its own index from.
+  cp -c "$index" "$home/Library/Application Support/FSearch/index.bin"
+  cp target/debug/monodrive "$exe"
+  cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>monodrive</string>
+<key>CFBundleIdentifier</key><string>dev.donnes.monodrive.agent</string>
+<key>CFBundleName</key><string>$name</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+PLIST
+  codesign --force --sign - "$app"
+
+  ln -sfn "$home" "$short_home"
+  HOME=$short_home MONODRIVE_UNATTENDED=1 MONODRIVE_OWNER_EXE=$PWD/target/debug/monodrive nohup "$exe" "$folder" \
+    >"$dir/app.log" 2>&1 &
+  echo $! >"$pid"
+  echo "$name"
+}
+
+case "${1:-} ${2:+folder}" in
+  "start folder") start "$2" ;;
+  "stop ") stop ;;
+  *) echo "usage: scripts/agent-app start <folder> | stop" >&2; exit 2 ;;
+esac

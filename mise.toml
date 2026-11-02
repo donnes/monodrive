@@ -2,3 +2,6 @@
 [tools]
 # scripts/dev rebuilds and relaunches the app on save through it.
 watchexec = "2.8.0"
+# Drives the real app through its accessibility tree, without taking the
+# user's focus or cursor. See "Verifying" in AGENTS.md.
+"npm:agent-desktop" = "1.0.2"
