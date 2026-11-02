@@ -1,6 +1,6 @@
 # Video thumbnails
 
-Status: planned.
+Status: built.
 
 ## Goal
 
@@ -29,6 +29,8 @@ The two decode at similar speed. The difference is what we'd have to own:
 
 The tradeoff is less control: no chosen frame, no duration, and opaque errors. A file manager matching Finder here is fine.
 
+Step 1, measured through a fresh `monodrive mcp` process per call on 720p files: the first call took 42 to 65 ms, and the next process took about 20 ms, so the system's cache outlives a process, and the generator works with no window. `mov`, `mp4`, `m4v`, `mpg` and `3gp` work; `avi`, `mkv` and `webm` fail. `ts` works too, but that extension is more often TypeScript, so it keeps its icon. A real share, a reboot and a folder behind a privacy prompt weren't measured, so a request gives up after 20 seconds and a person still needs to check the prompt.
+
 ## What to build
 
 Core gets the generation, because MCP uses it too:
@@ -42,7 +44,7 @@ pub fn generate(path: &Path, side: u32, cancel: &Cancel) -> Result<Bitmap, Strin
 
 The app's `thumbnails.rs` changes in small ways:
 
-- `wanted` also accepts `mov`, `mp4`, `m4v`, and any others step 1 confirms. `.webm` and `.mkv` stay on their icon. Kind is still decided by extension, as `docs/search.md` explains.
+- `wanted` also accepts the five extensions step 1 confirmed. `.avi`, `.webm` and `.mkv` stay on their icon. Kind is still decided by extension, as `docs/search.md` explains.
 - `decode` picks by kind. The 64 MB limit stays for pictures only.
 - Videos get their own permit pool of 2. A NAS stalled on a seek must not hold up pictures, listings or searches.
 - **Skip what's gone.** Today a thumbnail that's released while still queued is dropped only after it finishes. That's tolerable for pictures, but scrolling past 5,000 videos would queue 5,000 pending frames in order, and the row on screen would wait behind them all. Give the loader a shared set of live thumbnails, captured from the `Holders` global when `load` runs. After taking a permit, it skips the work if its thumbnail has been released. Pictures get this too, since it's the same code.

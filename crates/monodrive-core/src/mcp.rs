@@ -17,10 +17,12 @@ use crate::search::{Query, Scope};
 use crate::servers::{self, Prompt};
 use crate::sizes::{self, FolderSize};
 use crate::storage::{self, Cleanup, Duplicates, Match, Report, Stop, Usage};
+use crate::thumbnails;
 use crate::updates;
 use crate::user_commands::{self, Cwd, Definition, Ended, Run, Sources};
 use crate::volumes::{self, Volume, VolumeId};
 use crate::worktrees::{self, Git, Worktree};
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -146,6 +148,11 @@ enum ToolCall {
     IndexStatus {},
     Stat {
         paths: Vec<String>,
+    },
+    Thumbnail {
+        path: String,
+        #[serde(default = "thumbnail_side")]
+        side: u32,
     },
     FolderSize {
         path: String,
@@ -380,6 +387,10 @@ fn folders_first() -> bool {
     true
 }
 
+fn thumbnail_side() -> u32 {
+    256
+}
+
 fn default_limit() -> usize {
     50
 }
@@ -472,6 +483,7 @@ impl Server {
 
     fn call(&mut self, call: ToolCall) -> Value {
         let text = match call {
+            ToolCall::Thumbnail { path, side } => return thumbnail(&expand_home(&path), side),
             ToolCall::FindFiles { query, limit } => Query::parse(&query)
                 .and_then(|query| self.index()?.search(&query, &Scope::Everywhere, limit))
                 .map(|hits| {
@@ -1299,6 +1311,24 @@ fn stat(about: &Info) -> String {
 }
 
 /// A folder's totals, saying so when it stopped before counting everything.
+/// MCP's image content: an agent can't watch a video or read a HEIC, and this
+/// shows it one. The side is capped so a reply stays cheap for its context.
+fn thumbnail(path: &Path, side: u32) -> Value {
+    let picture = thumbnails::generate(path, side.clamp(16, 1024), &|| false)
+        .and_then(|bitmap| thumbnails::jpeg(&bitmap));
+    match picture {
+        Ok(jpeg) => json!({
+            "content": [{
+                "type": "image",
+                "data": base64::engine::general_purpose::STANDARD.encode(jpeg),
+                "mimeType": "image/jpeg",
+            }],
+            "isError": false,
+        }),
+        Err(e) => tool_text(&e, true),
+    }
+}
+
 fn folder_size(folder: &std::path::Path, size: &FolderSize, timeout: u64) -> String {
     let mut out = format!("{}/\n", folder.display());
     let _ = writeln!(
@@ -2058,7 +2088,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 62] = [
+pub const TOOLS: [Tool; 63] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2128,6 +2158,22 @@ pub const TOOLS: [Tool; 62] = [
     a link's target, and for cloud items whether they're downloaded. Dates are UTC. A folder's size \
     comes from folder_size.",
         input_schema: paths_schema,
+    },
+    Tool {
+        name: "thumbnail",
+        description: "A JPEG picture of a file: a video's frame, a HEIC or a PDF's first page, from \
+    the generator Finder uses. side is the longer edge in pixels, 16 to 1024. Refuses cloud placeholders. \
+    .avi, .mkv and .webm fail.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The file; ~ is your home."},
+                    "side": {"type": "integer", "minimum": 16, "maximum": 1024, "default": 256},
+                },
+                "required": ["path"],
+            })
+        },
     },
     Tool {
         name: "folder_size",
@@ -2890,6 +2936,29 @@ mod tests {
             ops::Client::new(paths, None),
             places("/nonexistent/monodrive-test".as_ref()),
         )
+    }
+
+    #[test]
+    fn thumbnail_replies_with_an_image_or_says_why_not() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut server = server();
+        let reply = call(
+            &mut server,
+            json!({"name": "thumbnail", "arguments": {"path": fixtures.join("rotated.mp4"), "side": 64}}),
+        );
+        let content = &reply["result"]["content"][0];
+        assert_eq!(content["type"], "image", "{reply}");
+        assert_eq!(content["mimeType"], "image/jpeg");
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(content["data"].as_str().unwrap())
+            .unwrap();
+        assert!(jpeg.starts_with(&[0xff, 0xd8]));
+        let reply = call(
+            &mut server,
+            json!({"name": "thumbnail", "arguments": {"path": fixtures.join("clip.mkv")}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(reply["result"]["content"][0]["type"], "text");
     }
 
     fn places(dir: &std::path::Path) -> places::Store {

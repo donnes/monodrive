@@ -1,5 +1,5 @@
-//! Pictures of images for the grid. Each is decoded and shrunk to the size
-//! shown, off the UI thread, and kept by GPUI's asset cache until the
+//! Pictures of images and videos for the grid. Each is decoded and shrunk to
+//! the size shown, off the UI thread, and kept by GPUI's asset cache until the
 //! browser leaves the folder and releases it.
 
 use gpui::{App, Asset, Global, RenderImage, Window};
@@ -8,7 +8,7 @@ use monodrive_core::cloud::Availability;
 use monodrive_core::entries::{Entry, Kind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// One image at one size; a newer file is a new thumbnail.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -21,38 +21,75 @@ pub struct Thumb {
 
 /// What `image` decodes in this build.
 const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"];
+/// What the system's generator opened when measured. `.avi`, `.mkv` and `.webm`
+/// fail, and `.ts` is more often TypeScript than video.
+const VIDEOS: [&str; 5] = ["mov", "mp4", "m4v", "mpg", "3gp"];
 /// Bigger files aren't worth reading for a thumbnail.
 const LARGEST: u64 = 64 * 1024 * 1024;
 
-/// Whether the grid draws `entry` as a thumbnail: a picture file whose
+fn extension(path: &Path) -> Option<String> {
+    Some(path.extension()?.to_str()?.to_lowercase())
+}
+
+fn is_video(path: &Path) -> bool {
+    extension(path).is_some_and(|ext| VIDEOS.contains(&ext.as_str()))
+}
+
+/// Whether the grid draws `entry` as a thumbnail: a picture or video whose
 /// contents are on this Mac. Reading a cloud placeholder would download it,
 /// so it, and anything whose availability isn't known, keeps its icon.
 pub fn wanted(entry: &Entry) -> bool {
     entry.kind == Kind::File
         && entry.availability == Availability::Local
-        && entry
-            .path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| PICTURES.contains(&ext.to_lowercase().as_str()))
+        && extension(&entry.path)
+            .is_some_and(|ext| PICTURES.contains(&ext.as_str()) || VIDEOS.contains(&ext.as_str()))
 }
 
 pub(crate) struct Thumbnail;
 
-/// How many thumbnails decode at once.
+/// How many pictures decode at once.
 const DECODERS: usize = 2;
+/// How many videos generate at once, apart from pictures: a share stalled on a
+/// seek mustn't hold up anything else.
+const VIDEO_DECODERS: usize = 2;
 
-/// A pool of `DECODERS` permits, as a channel holding that many tokens.
-fn decoders() -> &'static (async_channel::Sender<()>, async_channel::Receiver<()>) {
-    static POOL: std::sync::OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
-        std::sync::OnceLock::new();
-    POOL.get_or_init(|| {
-        let (give, take) = async_channel::bounded(DECODERS);
-        for _ in 0..DECODERS {
+/// A pool of permits, as a channel holding that many tokens.
+struct Pool(async_channel::Sender<()>, async_channel::Receiver<()>);
+
+impl Pool {
+    fn new(permits: usize) -> Self {
+        let (give, take) = async_channel::bounded(permits);
+        for _ in 0..permits {
             let _ = give.try_send(());
         }
-        (give, take)
-    })
+        Self(give, take)
+    }
+
+    /// Waits for a permit, then runs `work` unless it's no longer `wanted`.
+    /// Scrolling past thousands of videos queues thousands of these, and the
+    /// row on screen mustn't wait behind the ones already gone.
+    async fn run<T>(
+        &self,
+        wanted: impl FnOnce() -> bool,
+        work: impl FnOnce() -> Option<T>,
+    ) -> Option<T> {
+        let permit = self.1.recv().await;
+        let out = if wanted() { work() } else { None };
+        if let Ok(permit) = permit {
+            let _ = self.0.send(permit).await;
+        }
+        out
+    }
+}
+
+fn pool(video: bool) -> &'static Pool {
+    static PICTURES: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
+    static VIDEOS: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
+    if video {
+        VIDEOS.get_or_init(|| Pool::new(VIDEO_DECODERS))
+    } else {
+        PICTURES.get_or_init(|| Pool::new(DECODERS))
+    }
 }
 
 impl Asset for Thumbnail {
@@ -65,20 +102,32 @@ impl Asset for Thumbnail {
     #[allow(clippy::manual_async_fn)]
     fn load(
         thumb: Thumb,
-        _: &mut App,
+        cx: &mut App,
     ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        let held = cx.default_global::<Holders>().0.clone();
         async move {
             // A folder of big photos mustn't take every background thread
             // from listings and searches.
-            let (give, take) = decoders();
-            let permit = take.recv().await;
-            let image = decode(&thumb.path, thumb.side).map(Arc::new);
-            if let Ok(permit) = permit {
-                let _ = give.send(permit).await;
-            }
-            image
+            let live = || held.lock().is_ok_and(|held| held.contains_key(&thumb));
+            pool(is_video(&thumb.path))
+                .run(live, || {
+                    if is_video(&thumb.path) {
+                        generated(&thumb.path, thumb.side, &|| !live())
+                    } else {
+                        decode(&thumb.path, thumb.side)
+                    }
+                })
+                .await
+                .map(Arc::new)
         }
     }
+}
+
+/// A frame from the system's generator, which is BGRA already.
+fn generated(path: &Path, side: u32, cancelled: &dyn Fn() -> bool) -> Option<RenderImage> {
+    let bitmap = monodrive_core::thumbnails::generate(path, side, cancelled).ok()?;
+    let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)?;
+    Some(RenderImage::new(vec![image::Frame::new(pixels)]))
 }
 
 fn decode(path: &Path, side: u32) -> Option<RenderImage> {
@@ -110,15 +159,14 @@ fn decode(path: &Path, side: u32) -> Option<RenderImage> {
 /// How many panes hold each thumbnail: GPUI's cache is shared, and two panes on
 /// one folder draw the same pictures.
 #[derive(Default)]
-struct Holders(HashMap<Thumb, usize>);
+struct Holders(Arc<Mutex<HashMap<Thumb, usize>>>);
 impl Global for Holders {}
 
 /// A pane holds `thumb` until it calls `release`.
 pub fn hold(thumb: &Thumb, cx: &mut App) {
-    *cx.default_global::<Holders>()
-        .0
-        .entry(thumb.clone())
-        .or_default() += 1;
+    if let Ok(mut held) = cx.default_global::<Holders>().0.lock() {
+        *held.entry(thumb.clone()).or_default() += 1;
+    }
 }
 
 /// The thumbnail if it's ready; until then, `None`, and the view draws again
@@ -128,7 +176,8 @@ pub fn get(thumb: &Thumb, window: &mut Window, cx: &mut App) -> Option<Arc<Rende
 }
 
 /// A pane lets go of a thumbnail. Once none hold it, it's given back, in memory
-/// and on the GPU; one still decoding is dropped when it finishes. `window` is the window being
+/// and on the GPU; one still queued never decodes, and one decoding is dropped
+/// when it finishes. `window` is the window being
 /// drawn, which `App` can't reach from inside its update.
 pub fn release(
     thumb: &Thumb,
@@ -136,13 +185,14 @@ pub fn release(
     window: Option<&mut Window>,
     cx: &mut App,
 ) {
-    let holders = &mut cx.default_global::<Holders>().0;
-    if let Some(count) = holders.get_mut(thumb) {
+    if let Ok(mut held) = cx.default_global::<Holders>().0.lock()
+        && let Some(count) = held.get_mut(thumb)
+    {
         *count -= 1;
         if *count > 0 {
             return;
         }
-        holders.remove(thumb);
+        held.remove(thumb);
     }
     cx.remove_asset::<Thumbnail>(thumb);
     if let Some(image) = image {
@@ -171,6 +221,35 @@ mod tests {
         assert!(decode(&dir.path().join("fake.png"), 100).is_none());
     }
 
+    #[gpui::test]
+    async fn queued_work_that_was_released_never_runs(cx: &mut gpui::TestAppContext) {
+        // One permit, taken: three thumbnails wait, and only the last stays wanted.
+        let pool = Arc::new(Pool::new(1));
+        pool.1.recv().await.unwrap();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let waiting: Vec<_> = (0..3)
+            .map(|n| {
+                let (pool, ran) = (pool.clone(), ran.clone());
+                cx.executor().spawn(async move {
+                    pool.run(
+                        || n == 2,
+                        || {
+                            ran.lock().unwrap().push(n);
+                            Some(())
+                        },
+                    )
+                    .await
+                })
+            })
+            .collect();
+        cx.run_until_parked();
+        pool.0.send(()).await.unwrap();
+        for thumbnail in waiting {
+            thumbnail.await;
+        }
+        assert_eq!(*ran.lock().unwrap(), [2]);
+    }
+
     #[test]
     fn only_local_picture_files_get_thumbnails() {
         let entry = |name: &str, kind, availability| Entry {
@@ -182,6 +261,21 @@ mod tests {
             availability,
         };
         assert!(wanted(&entry("wide.PNG", Kind::File, Availability::Local)));
+        for video in ["clip.MOV", "clip.mp4", "clip.m4v", "clip.mpg", "clip.3gp"] {
+            assert!(wanted(&entry(video, Kind::File, Availability::Local)));
+            assert!(!wanted(&entry(
+                video,
+                Kind::File,
+                Availability::Placeholder
+            )));
+        }
+        for unsupported in ["clip.mkv", "clip.webm", "clip.avi", "types.ts"] {
+            assert!(!wanted(&entry(
+                unsupported,
+                Kind::File,
+                Availability::Local
+            )));
+        }
         for availability in [
             Availability::Placeholder,
             Availability::Downloading,
