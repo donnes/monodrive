@@ -4,13 +4,14 @@
 
 use super::pane::Pane;
 use super::{CancelRename, CommitRename, short_reason, with_owner};
-use crate::preferences::View;
+use crate::preferences::{Preferences, View};
 use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, accent, content, danger, text_button};
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, FontWeight, ScrollStrategy,
-    Stateful, Subscription, Task, Window, div, prelude::*, px,
+    App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
+    ScrollStrategy, Stateful, Subscription, Task, Window, div, prelude::*, px,
 };
+use monodrive_core::naming;
 use monodrive_core::ops::rename::{Place, Plan, Rule, Status};
 use monodrive_core::ops::{Origin, Outcome, Request};
 use std::collections::HashMap;
@@ -26,6 +27,14 @@ pub(super) struct BatchRename {
     /// Where it was opened. Going anywhere else leaves it.
     place: (PathBuf, bool, String),
     pub(super) numbering: bool,
+    /// Names read from each file, with what's been read so far.
+    pub(super) suggesting: bool,
+    /// Each path's suggested name, edited or not, or why it has none.
+    suggested: HashMap<PathBuf, Result<String, String>>,
+    /// Reading what `suggested` lacks.
+    reading: Option<Task<()>>,
+    /// The suggested name being changed by hand.
+    pub(super) editing: Option<(PathBuf, Entity<TextField>)>,
     pub(super) find: Entity<TextField>,
     pub(super) with: Entity<TextField>,
     pub(super) name: Entity<TextField>,
@@ -94,6 +103,18 @@ pub(super) struct RowPreview {
 
 impl BatchRename {
     fn rule(&self, cx: &App) -> Result<Rule, String> {
+        if self.suggesting {
+            return Ok(Rule::Names {
+                names: self
+                    .paths
+                    .iter()
+                    .map(|path| match self.suggested.get(path) {
+                        Some(Ok(name)) => name.clone(),
+                        _ => String::new(),
+                    })
+                    .collect(),
+            });
+        }
         if !self.numbering {
             return Ok(Rule::Replace {
                 find: self.find.read(cx).text().to_string(),
@@ -124,7 +145,9 @@ impl BatchRename {
 
     /// Where the keys go in the bar: the rule's first field.
     pub(super) fn first_field(&self, cx: &App) -> FocusHandle {
-        if self.sending {
+        if let Some((_, field)) = self.editing.as_ref().filter(|_| !self.sending) {
+            field.focus_handle(cx)
+        } else if self.sending || self.suggesting {
             self.keys.clone()
         } else if self.numbering {
             self.name.focus_handle(cx)
@@ -147,6 +170,10 @@ impl BatchRename {
     pub(super) fn has_keys(&self, window: &Window, cx: &App) -> bool {
         self.keys.is_focused(window)
             || self.field_has_keys(window, cx)
+            || self
+                .editing
+                .as_ref()
+                .is_some_and(|(_, field)| field.focus_handle(cx).is_focused(window))
             || self.stops.values().any(|s| s.is_focused(window))
     }
 
@@ -169,7 +196,13 @@ impl BatchRename {
         let name = if row.name.is_empty() { old } else { &row.name };
         let (renamed, problem, note) = match &row.status {
             Status::Ok => (true, false, Some(old.to_string())),
-            Status::Unchanged => (false, false, None),
+            Status::Unchanged => {
+                let why = match self.suggested.get(path).filter(|_| self.suggesting) {
+                    Some(Err(why)) => Some(why.clone()),
+                    _ => None,
+                };
+                (false, false, why)
+            }
             Status::Invalid(why) | Status::Collision(why) => {
                 (false, true, Some(short_reason(why, [folder])))
             }
@@ -199,6 +232,12 @@ impl BatchRename {
         let Some(preview) = &self.preview else {
             return (String::new(), false);
         };
+        if self.reading.is_some() {
+            return ("Reading files…".into(), false);
+        }
+        if self.editing.is_some() {
+            return ("Press Return to keep this name.".into(), false);
+        }
         let (renames, problems) = (preview.renames, preview.problems);
         let names = if renames == 1 { "name" } else { "names" };
         match problems {
@@ -229,6 +268,22 @@ impl Pane {
 
     /// Rename with several selected: the bar, with nothing changed yet.
     pub(super) fn start_batch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_batch(false, window, cx);
+    }
+
+    /// Suggest Names: the bar, with names read from each file.
+    pub(super) fn suggest_names(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(batch) = self.batch.as_mut().filter(|b| !b.sending) {
+            batch.suggesting = true;
+            self.preview_batch(cx);
+            return self.take_keys(window, cx);
+        }
+        if self.batch.is_none() && self.renaming.is_none() {
+            self.open_batch(true, window, cx);
+        }
+    }
+
+    fn open_batch(&mut self, suggesting: bool, window: &mut Window, cx: &mut Context<Self>) {
         let mut field = |label: &'static str, placeholder: &'static str| {
             let field = cx.new(|cx| TextField::new(label, placeholder, cx));
             let edits = cx.subscribe(&field, |this, _, _: &text_field::Changed, cx| {
@@ -251,6 +306,10 @@ impl Pane {
             paths: self.chosen(),
             place: self.place_now(),
             numbering: false,
+            suggesting,
+            suggested: HashMap::new(),
+            reading: None,
+            editing: None,
             find,
             with,
             name,
@@ -298,6 +357,7 @@ impl Pane {
 
     /// Works the plan out off the UI thread, as the disk may have to be walked.
     pub(super) fn preview_batch(&mut self, cx: &mut Context<Self>) {
+        self.read_suggestions(cx);
         let Some(batch) = self.batch.as_mut().filter(|b| !b.sending) else {
             return;
         };
@@ -328,6 +388,164 @@ impl Pane {
                 cx.notify();
             });
         }));
+    }
+
+    /// Reads the names a selection lacks, off the UI thread. One read runs at
+    /// a time, and when it lands the preview runs and asks for any since added.
+    fn read_suggestions(&mut self, cx: &mut Context<Self>) {
+        let style = if cx.global::<Preferences>().sentence_case_names {
+            naming::Style::Sentence
+        } else {
+            naming::Style::Hyphens
+        };
+        let Some(batch) = self
+            .batch
+            .as_mut()
+            .filter(|b| b.suggesting && b.reading.is_none())
+        else {
+            return;
+        };
+        let missing: Vec<PathBuf> = batch
+            .paths
+            .iter()
+            .filter(|path| !batch.suggested.contains_key(*path))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let work = cx.background_executor().spawn(async move {
+            missing
+                .into_iter()
+                .map(|path| {
+                    let name = naming::suggest(&path, style);
+                    (path, name)
+                })
+                .collect::<Vec<_>>()
+        });
+        batch.reading = Some(cx.spawn(async move |this, cx| {
+            let found = work.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(batch) = &mut this.batch else {
+                    return;
+                };
+                batch.reading = None;
+                // A name typed while this read keeps its place.
+                for (path, name) in found {
+                    batch.suggested.entry(path).or_insert(name);
+                }
+                this.preview_batch(cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// A click on a row's suggested name, to change it by hand.
+    fn edit_suggestion(
+        &mut self,
+        path: PathBuf,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = cx.new(|cx| {
+            let mut field = TextField::new("New Name", "New Name", cx);
+            field.set_text(&name, name.len()..name.len(), cx);
+            field
+        });
+        if let Some(batch) = self.batch.as_mut().filter(|b| b.suggesting && !b.sending) {
+            window.focus(&field.focus_handle(cx), cx);
+            // Moving on from another row keeps what was typed there.
+            if let Some((path, typed)) = batch.editing.replace((path, field)) {
+                let name = typed.read(cx).text().trim().to_string();
+                batch.suggested.insert(path, Ok(name));
+                self.preview_batch(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// ↩ keeps what was typed, and Esc what was there.
+    fn end_edit(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(batch) = &mut self.batch else {
+            return;
+        };
+        if let Some((path, field)) = batch.editing.take()
+            && keep
+        {
+            let name = field.read(cx).text().trim().to_string();
+            batch.suggested.insert(path, Ok(name));
+            batch.error = None;
+        }
+        self.take_keys(window, cx);
+        self.preview_batch(cx);
+        cx.notify();
+    }
+
+    /// The field in `path`'s row, while its suggested name is being changed.
+    pub(super) fn suggestion_field(
+        &self,
+        path: &Path,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let (_, field) = self
+            .batch
+            .as_ref()?
+            .editing
+            .as_ref()
+            .filter(|(editing, _)| editing == path)?;
+        Some(
+            theme::field(accent())
+                .debug_selector(|| "suggestion-field".into())
+                .key_context("Rename")
+                .on_action(
+                    cx.listener(|this, _: &CommitRename, window, cx| {
+                        this.end_edit(true, window, cx)
+                    }),
+                )
+                .on_action(cx.listener(|this, _: &CancelRename, window, cx| {
+                    this.end_edit(false, window, cx)
+                }))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .w(px(width))
+                .flex_shrink_0()
+                .px(px(6.))
+                .child(field.clone()),
+        )
+    }
+
+    /// While suggesting, a click on a selected row's name edits it, and isn't
+    /// a click on the row, which would shrink the selection the bar is for.
+    pub(super) fn suggested_name(
+        &self,
+        name: Div,
+        path: &Path,
+        shown: &str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if !self
+            .batch
+            .as_ref()
+            .is_some_and(|b| b.suggesting && !b.sending)
+        {
+            return name;
+        }
+        let (path, shown) = (path.to_path_buf(), shown.to_string());
+        let selector = format!(
+            "suggested-{}",
+            path.file_name().unwrap_or_default().display()
+        );
+        name.debug_selector(move || selector)
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.edit_suggestion(path.clone(), shown.clone(), window, cx);
+                }),
+            )
     }
 
     /// Each frame: going elsewhere leaves the bar, and a selection or an
@@ -364,7 +582,7 @@ impl Pane {
         let Some(batch) = self.batch.as_ref().filter(|b| !b.sending) else {
             return;
         };
-        if batch.previewing.is_some() {
+        if batch.previewing.is_some() || batch.reading.is_some() || batch.editing.is_some() {
             return;
         }
         let (Some(preview), Ok(rule)) = (&batch.preview, batch.rule(cx)) else {
@@ -494,8 +712,9 @@ impl Pane {
         let batch = self.batch.as_ref()?;
         let sending = batch.sending;
         let stops_on = !covered && !sending;
-        let (numbering, match_case, whole_name, number_first) = (
+        let (numbering, suggesting, match_case, whole_name, number_first) = (
             batch.numbering,
+            batch.suggesting,
             batch.match_case,
             batch.whole_name,
             batch.number_first,
@@ -506,7 +725,7 @@ impl Pane {
         for stop in batch.stops.values() {
             stop.clone().tab_stop(stops_on);
         }
-        let bad_start = numbering && batch.rule(cx).is_err();
+        let bad_start = numbering && !suggesting && batch.rule(cx).is_err();
         let box_for = |field: &Entity<TextField>, bad: bool| {
             let focused = field.focus_handle(cx).is_focused(window);
             theme::field(if bad {
@@ -535,7 +754,15 @@ impl Pane {
                 }
             })
         };
-        let fields = if numbering {
+        let fields = if suggesting {
+            div()
+                .flex()
+                .flex_1()
+                .min_w(px(200.))
+                .text_size(px(theme::TEXT_SMALL))
+                .text_color(content(0.65))
+                .child("Click a new name to change it.")
+        } else if numbering {
             div()
                 .flex()
                 .flex_1()
@@ -553,10 +780,9 @@ impl Pane {
                 .child(box_for(&batch.with, false).flex_1().min_w_0())
         };
         let (status, bad) = batch.status(cx);
-        let ready = batch
-            .preview
-            .as_ref()
-            .filter(|_| !bad_start && !batch.sending);
+        let ready = batch.preview.as_ref().filter(|_| {
+            !bad_start && !batch.sending && batch.reading.is_none() && batch.editing.is_none()
+        });
         let renames = ready.map_or(0, |preview| preview.renames);
         let problems = ready.map_or(0, |preview| preview.problems);
         let label = if sending {
@@ -588,18 +814,35 @@ impl Pane {
         let replace = self.batch_pill(
             "batch-replace",
             "Replace",
-            !numbering,
-            |b| b.numbering = false,
+            !numbering && !suggesting,
+            |b| {
+                b.numbering = false;
+                b.suggesting = false;
+                b.editing = None;
+            },
             cx,
         )?;
         let number = self.batch_pill(
             "batch-number",
             "Number",
-            numbering,
-            |b| b.numbering = true,
+            numbering && !suggesting,
+            |b| {
+                b.numbering = true;
+                b.suggesting = false;
+                b.editing = None;
+            },
             cx,
         )?;
-        let options: Vec<Stateful<Div>> = if numbering {
+        let suggest = self.batch_pill(
+            "batch-suggest",
+            "Suggest",
+            suggesting,
+            |b| b.suggesting = true,
+            cx,
+        )?;
+        let options: Vec<Stateful<Div>> = if suggesting {
+            Vec::new()
+        } else if numbering {
             vec![self.batch_pill(
                 "batch-number-first",
                 "Number First",
@@ -632,11 +875,9 @@ impl Pane {
                 .key_context("Rename")
                 .on_action(cx.listener(|this, _: &CommitRename, window, cx| {
                     // ↩ on a button is that button's.
-                    if this
-                        .batch
-                        .as_ref()
-                        .is_some_and(|b| b.field_has_keys(window, cx))
-                    {
+                    if this.batch.as_ref().is_some_and(|b| {
+                        b.field_has_keys(window, cx) || (b.suggesting && b.keys.is_focused(window))
+                    }) {
                         this.apply_batch(false, window, cx);
                     } else {
                         cx.propagate();
@@ -656,7 +897,14 @@ impl Pane {
                         .py(px(6.))
                         .flex_wrap()
                         .gap_2()
-                        .child(div().flex().gap_1().child(replace).child(number))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_1()
+                                .child(replace)
+                                .child(number)
+                                .child(suggest),
+                        )
                         .child(fields)
                         .child(div().flex().gap_1().children(options)),
                 )

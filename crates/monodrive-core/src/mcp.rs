@@ -10,6 +10,7 @@ use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, Caps, GrepMode, Index, Status};
 use crate::info::{self, Info};
+use crate::naming;
 use crate::ops::{self, Conflict, Done, Job, Origin, Request, rename};
 use crate::places::{self, Availability, Place, SavedSearch};
 use crate::remote::{self, Connection, Connections, RemoteEntry, RemoteError, RemotePath, Source};
@@ -168,6 +169,11 @@ enum ToolCall {
     Rename {
         path: String,
         name: String,
+    },
+    SuggestNames {
+        paths: Vec<String>,
+        #[serde(default)]
+        style: naming::Style,
     },
     RenamePreview {
         paths: Vec<String>,
@@ -591,6 +597,16 @@ impl Server {
                 path: expand_home(&path),
                 name,
             }),
+            ToolCall::SuggestNames { paths, style } => Ok(expand(&paths).iter().fold(
+                String::new(),
+                |mut out, path| {
+                    let _ = match naming::suggest(path, style) {
+                        Ok(name) => writeln!(out, "{} → {name}", path.display()),
+                        Err(why) => writeln!(out, "{} (no suggestion: {why})", path.display()),
+                    };
+                    out
+                },
+            )),
             ToolCall::RenamePreview { paths, rule } => {
                 Ok(rename_table(&rename::Plan::new(&expand(&paths), &rule)))
             }
@@ -2088,7 +2104,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 63] = [
+pub const TOOLS: [Tool; 64] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2219,10 +2235,28 @@ pub const TOOLS: [Tool; 63] = [
         },
     },
     Tool {
+        name: "suggest_names",
+        description: "Suggest names for text-based files, read from their contents: a format's own \
+    title, a line that reads as one, or the first phrase. Changes nothing, and uses no model. Prints \
+    old path → new name, or (no suggestion: why). Pass names you accept to rename_preview or rename_many \
+    with a names rule. style is hyphens (invoice-4471.pdf) or sentence (Invoice 4471.pdf).",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Files. Absolute; ~ is your home."},
+                    "style": {"type": "string", "enum": ["hyphens", "sentence"], "default": "hyphens"}
+                },
+                "required": ["paths"]
+            })
+        },
+    },
+    Tool {
         name: "rename_preview",
         description: "Show how rename_many would rename items, changing nothing. A replace rule swaps \
     text before the extension (in it too with extension: true); a format rule names items name plus a \
-    number in the order given, such as \"Trip 001.jpg\". Prints old path → new name, then any of \
+    number in the order given, such as \"Trip 001.jpg\"; a names rule gives each item's whole new name \
+    in the order given, with \"\" to keep one. Prints old path → new name, then any of \
     (unchanged), (invalid: why) or (collision: why).",
         input_schema: || rename_schema(false),
     },
@@ -2831,6 +2865,14 @@ fn rename_schema(skip: bool) -> Value {
                         "place": {"type": "string", "enum": ["after", "before"], "default": "after"}
                     },
                     "required": ["type"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": {"const": "names"},
+                        "names": {"type": "array", "items": {"type": "string"}, "description": "One per path, in the same order."}
+                    },
+                    "required": ["type", "names"]
                 }
             ]}
         },
@@ -2959,6 +3001,44 @@ mod tests {
         );
         assert_eq!(reply["result"]["isError"], true);
         assert_eq!(reply["result"]["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn suggested_names_feed_a_names_rule_that_must_match_the_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let (scan, photo) = (dir.path().join("scan0012.txt"), dir.path().join("a.jpg"));
+        std::fs::write(&scan, "Invoice 4471\nDue on receipt.\n").unwrap();
+        std::fs::write(&photo, "x").unwrap();
+        let mut server = server();
+        let reply = call(
+            &mut server,
+            json!({"name": "suggest_names", "arguments": {"paths": [scan, photo]}}),
+        );
+        let lines: Vec<&str> = text(&reply).lines().collect();
+        assert_eq!(lines[0], format!("{} → invoice-4471.txt", scan.display()));
+        assert!(lines[1].contains("(no suggestion: "), "{lines:?}");
+        assert!(scan.exists(), "suggesting changes nothing");
+        let reply = call(
+            &mut server,
+            json!({"name": "rename_preview", "arguments": {
+                "paths": [scan, photo],
+                "rule": {"type": "names", "names": ["only one"]},
+            }}),
+        );
+        assert!(
+            text(&reply).contains("1 names were given for 2 items"),
+            "{reply}"
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "rename_preview", "arguments": {
+                "paths": [scan, photo],
+                "rule": {"type": "names", "names": ["invoice-4471.txt", ""]},
+            }}),
+        );
+        let lines: Vec<&str> = text(&reply).lines().collect();
+        assert_eq!(lines[0], format!("{} → invoice-4471.txt", scan.display()));
+        assert!(lines[1].ends_with("(unchanged)"), "{lines:?}");
     }
 
     fn places(dir: &std::path::Path) -> places::Store {

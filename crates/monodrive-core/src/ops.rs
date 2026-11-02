@@ -1254,7 +1254,7 @@ fn plan_rename(path: &Path, name: &str) -> Result<Plan, String> {
 
 /// Why `name` can't name an item, if it can't. APFS and HFS+ both take 255
 /// UTF-16 units.
-fn check_name(name: &str) -> Result<(), String> {
+pub(crate) fn check_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
         return Err(format!("{name:?} can't be a name."));
     }

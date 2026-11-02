@@ -39,6 +39,9 @@ pub enum Rule {
         #[serde(default)]
         place: Place,
     },
+    /// Each item's whole new name, in the items' order. An empty one keeps
+    /// the item's name.
+    Names { names: Vec<String> },
 }
 
 fn one() -> u64 {
@@ -90,6 +93,10 @@ impl Rule {
                 };
                 named + ext
             }
+            Rule::Names { names } => match names.get(n).map(String::as_str) {
+                None | Some("") => old.to_string(),
+                Some(name) => name.to_string(),
+            },
         }
     }
 }
@@ -179,6 +186,18 @@ impl Plan {
             .enumerate()
             .map(|(n, path)| Row::new(path, rule, n))
             .collect();
+        if let Rule::Names { names } = rule
+            && names.len() != paths.len()
+        {
+            // Names matched to the wrong items would rename them wrongly.
+            for row in &mut rows {
+                row.status = Status::Invalid(format!(
+                    "{} names were given for {} items.",
+                    names.len(),
+                    paths.len()
+                ));
+            }
+        }
         let renamed: HashSet<PathBuf> = rows
             .iter()
             .filter(|row| row.status == Status::Ok)

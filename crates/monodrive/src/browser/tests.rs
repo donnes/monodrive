@@ -1072,13 +1072,14 @@ pub(super) fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
     cx.simulate_mouse_up(at, MouseButton::Right, with(""));
 }
 
-const ON_A_FILE: [&str; 11] = [
+const ON_A_FILE: [&str; 12] = [
     "Open",
     "Open With",
     "Reveal in Finder",
     "Open in Terminal",
     "Get Info",
     "Rename",
+    "Suggest Names",
     "Duplicate",
     "Quick Look",
     "Move to Trash",
@@ -1179,7 +1180,7 @@ fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut Test
     // ↑ and ↓ come round from the ends.
     press(cx, "up");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Copy Path"));
-    press(cx, "down down down down down down down");
+    press(cx, "down down down down down down down down");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Duplicate"));
     press(cx, "enter");
     assert_eq!(menu(&browser, cx), None);

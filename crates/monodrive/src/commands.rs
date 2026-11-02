@@ -16,8 +16,9 @@ use crate::browser::{
     NextTab, OpenInNewTab, OpenInTerminal, OpenSelected, OpenSettings, OpenWith, PreviousTab,
     PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort,
     SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves, ShowPackageContents,
-    ShowSearches, SortByKind, SortByModified, SortByName, SortBySize, ToggleHiddenFiles,
-    TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    ShowSearches, SortByKind, SortByModified, SortByName, SortBySize, SuggestNames,
+    ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
+    ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -311,6 +312,10 @@ pub fn all() -> Vec<Command> {
         on(
             SELECTION,
             command("Rename", File, &["enter"], LIST, || Box::new(Rename)),
+        ),
+        on(
+            SELECTION,
+            command("Suggest Names", File, &[], LIST, || Box::new(SuggestNames)),
         ),
         on(
             SELECTION,
@@ -1024,6 +1029,7 @@ mod tests {
                 "| Add to Sidebar ⌃⌘T",
                 "Get Info ⌘I",
                 "| Rename ↩",
+                "Suggest Names",
                 "Duplicate ⌘D",
                 "Quick Look ⌘Y",
                 "| Copy to Other Pane ⌥F5",
@@ -1063,8 +1069,12 @@ mod tests {
         // New Folder with Selection is for several, after the ways to open.
         let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
         assert_eq!(
-            several[7..9],
-            ["| New Folder with Selection ⌃⌘N", "Rename ↩"]
+            several[7..10],
+            [
+                "| New Folder with Selection ⌃⌘N",
+                "Rename ↩",
+                "Suggest Names"
+            ]
         );
         // What wouldn't run now is left out, and so is a separator with
         // nothing after it; shortcuts are the ones bound now.

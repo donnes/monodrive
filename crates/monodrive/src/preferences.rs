@@ -167,6 +167,8 @@ pub struct Preferences {
     pub grid_label: RowSize,
     /// Images show their pictures in the grid.
     pub thumbnails: bool,
+    /// Suggest Names writes "Invoice 4471", not "invoice-4471".
+    pub sentence_case_names: bool,
     /// A drag resting on a folder opens it.
     pub open_folders_while_dragging: bool,
     /// Agents may change files over MCP. The operation owner reads it from
@@ -215,6 +217,7 @@ impl Default for Preferences {
             grid_icon: 72,
             grid_label: RowSize::Medium,
             thumbnails: true,
+            sentence_case_names: false,
             open_folders_while_dragging: true,
             agents_change_files: true,
             update_channel: Default::default(),
@@ -236,6 +239,7 @@ impl Preferences {
         self.grid_icon = defaults.grid_icon;
         self.grid_label = defaults.grid_label;
         self.thumbnails = defaults.thumbnails;
+        self.sentence_case_names = defaults.sentence_case_names;
         self.open_folders_while_dragging = defaults.open_folders_while_dragging;
     }
 
@@ -266,6 +270,7 @@ impl Preferences {
             grid_icon: self.grid_icon,
             grid_label: self.grid_label,
             thumbnails: self.thumbnails,
+            sentence_case_names: self.sentence_case_names,
             open_folders_while_dragging: self.open_folders_while_dragging,
             agents_change_files: self.agents_change_files,
             update_channel: self.update_channel,

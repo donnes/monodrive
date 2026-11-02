@@ -535,3 +535,83 @@ fn tabbing_into_the_other_panes_bar_makes_it_the_active_pane(cx: &mut TestAppCon
         "the other pane stayed active"
     );
 }
+
+fn shown_selected(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> usize {
+    in_pane(browser, cx, |pane, _| pane.selection.len())
+}
+
+/// The way in is the command, names come from the files, a file with nothing
+/// to say keeps its name and says why, and one Undo reverses it.
+#[gpui::test]
+fn suggest_names_reads_files_and_applies_as_one_undo(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("scans");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("a.txt"), "Invoice 4471\nDue now.\n").unwrap();
+    std::fs::write(folder.join("b.md"), "# Trip Notes\n").unwrap();
+    std::fs::write(folder.join("c.jpg"), "x").unwrap();
+    let owned = own(cx);
+    let (browser, cx) = browse(&folder, cx);
+    press(cx, "cmd-a");
+    cx.dispatch_action(SuggestNames);
+    cx.run_until_parked();
+    assert_eq!(on_disk(&folder), ["a.txt", "b.md", "c.jpg"]);
+    let shown = rows(&browser, cx);
+    assert_eq!(shown[0], ("invoice-4471.txt".into(), Some("a.txt".into())));
+    assert_eq!(shown[1], ("trip-notes.md".into(), Some("b.md".into())));
+    assert_eq!(shown[2].0, "c.jpg");
+    assert!(
+        shown[2].1.as_ref().unwrap().contains("text-based"),
+        "{shown:?}"
+    );
+
+    // A click changes a name by hand, and Apply waits until the edit ends.
+    let typing = |text: &str, cx: &mut VisualTestContext| {
+        assert_eq!(
+            shown_selected(&browser, cx),
+            3,
+            "the click kept the selection"
+        );
+        let field = in_pane(&browser, cx, |pane, _| {
+            pane.batch
+                .as_ref()
+                .unwrap()
+                .editing
+                .as_ref()
+                .unwrap()
+                .1
+                .clone()
+        });
+        field.update(cx, |field, cx| {
+            field.set_text(text, text.len()..text.len(), cx)
+        });
+    };
+    click(cx, "suggested-c.jpg");
+    typing("photo.jpg", cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("batch-apply").is_none(),
+        "no Apply to press"
+    );
+    // Moving to another name keeps what was typed, and Esc leaves only this edit.
+    click(cx, "suggested-a.txt");
+    typing("ignored.txt", cx);
+    press(cx, "escape");
+    assert!(in_bar(&browser, cx), "Esc left the edit, not the bar");
+    let now = names(&browser, cx);
+    assert_eq!(
+        (now[0].as_str(), now[2].as_str()),
+        ("invoice-4471.txt", "photo.jpg")
+    );
+
+    press(cx, "enter");
+    assert_eq!(
+        on_disk(&folder),
+        ["invoice-4471.txt", "photo.jpg", "trip-notes.md"]
+    );
+    assert!(!in_bar(&browser, cx));
+    press(cx, "cmd-z");
+    assert_eq!(on_disk(&folder), ["a.txt", "b.md", "c.jpg"]);
+    release(owned, cx);
+}

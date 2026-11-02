@@ -124,6 +124,7 @@ actions!(
         ShowCopiesAndMoves,
         CheckForUpdates,
         Rename,
+        SuggestNames,
         CommitRename,
         CancelRename,
         NewFolder,
