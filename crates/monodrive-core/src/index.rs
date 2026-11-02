@@ -778,6 +778,50 @@ mod tests {
         assert_eq!(Status::not_started(true).fraction(), None);
     }
 
+    /// Eight words is as many as fsearch keeps. With more than 4096 entries
+    /// to score, its name table shifted a u8 by eight: a panic in a dev build.
+    #[test]
+    fn eight_words_over_many_entries_answer_and_all_eight_count() {
+        use fsearch::{
+            index::Index as Names,
+            live::Live,
+            query::Searcher,
+            walk::{Listing, NONE, RawEnt},
+        };
+        let matches = 4100;
+        let mut names = (0..matches)
+            .map(|i| format!("one two three four five six seven eight {i}"))
+            .collect::<Vec<_>>();
+        names.push("one two three four five six seven only".to_string());
+        let mut text = Vec::new();
+        let ents = names
+            .iter()
+            .map(|name| {
+                let name_off = u32::try_from(text.len()).unwrap();
+                text.extend_from_slice(name.as_bytes());
+                RawEnt {
+                    name_off,
+                    name_len: u16::try_from(name.len()).unwrap(),
+                    kind: KIND_FILE,
+                    size: 1,
+                    mtime: 1,
+                    child: NONE,
+                }
+            })
+            .collect();
+        let listing = Listing {
+            id: 0,
+            names: text,
+            ents,
+        };
+        let live = Live::new(Names::build(vec![listing], 0, 0, b"/h"));
+
+        let query = Query::parse("one two three four five six seven eight").unwrap();
+        let mut q = fsearch_query(&query, &Scope::Everywhere, "/h", NOW).unwrap();
+        q.limit = names.len();
+        assert_eq!(Searcher { live: &live }.search(&q).len(), matches);
+    }
+
     #[test]
     fn progress_reads_as_one_short_line() {
         let listing = Progress::Listing {
