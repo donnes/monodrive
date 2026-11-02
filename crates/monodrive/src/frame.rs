@@ -31,10 +31,11 @@ pub fn opening(
     .unwrap_or_else(|| share(screen, part, most))
 }
 
-/// Whether an agent runs this app beside the user's work, as `scripts/agent-app`
-/// starts it. The app then never activates and keeps its windows out of the way.
+/// Whether an agent runs this dev build beside the user's work, as
+/// `scripts/agent-app` starts it. The app then never activates and keeps its
+/// windows out of the way. A release build ignores this.
 pub fn unattended() -> bool {
-    std::env::var_os("MONODRIVE_UNATTENDED").is_some()
+    monodrive_core::DEV && std::env::var_os("MONODRIVE_UNATTENDED").is_some()
 }
 
 /// Activates the app, unless an agent is running it.
@@ -46,9 +47,11 @@ pub fn bring_forward(cx: &App) {
 
 /// The binary that starts the operation owner. An agent's run names one outside
 /// the bundle, or the owner shares the app's name and agent-desktop can't tell
-/// the two apart.
+/// the two apart. A release build ignores this.
 pub fn owner_exe() -> Option<std::path::PathBuf> {
-    std::env::var_os("MONODRIVE_OWNER_EXE")
+    monodrive_core::DEV
+        .then(|| std::env::var_os("MONODRIVE_OWNER_EXE"))
+        .flatten()
         .map(Into::into)
         .or_else(|| std::env::current_exe().ok())
 }
