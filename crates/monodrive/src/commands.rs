@@ -9,8 +9,8 @@
 
 use crate::browser::{
     AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab,
-    ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Duplicate, EditFavorites, Eject,
-    EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications, GoComputer,
+    ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Duplicate, EditFavorites, EditPreview,
+    Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications, GoComputer,
     GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents, GoToFolder, GoTrash, HideInspector,
     MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab,
     NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
@@ -340,6 +340,12 @@ pub fn all() -> Vec<Command> {
             command("Open in Quick Look", File, &[], LIST, || {
                 Box::new(OpenInQuickLook)
             }),
+        ),
+        // Offered only while a preview is open. Its key, E, is read as the list
+        // reads a typed letter, as a binding here would take it from search.
+        on(
+            SELECTION,
+            command("Edit in Preview", File, &[], LIST, || Box::new(EditPreview)),
         ),
         // Function keys, as two-pane file managers have long used them.
         on(
@@ -1045,6 +1051,7 @@ mod tests {
                 "Duplicate ⌘D",
                 "Quick Look ⌘Y",
                 "Open in Quick Look",
+                "Edit in Preview",
                 "| Copy to Other Pane ⌥F5",
                 "Move to Other Pane ⌥F6",
                 "| Move to Trash ⌘⌫",

@@ -1306,6 +1306,11 @@ fn a_saved_edit_numbers_around_a_taken_name_and_undoes_to_the_trash() {
     assert_eq!(read(&photo), "photo.txt");
     moved(run(&mut engine, Request::Undo));
     assert!(!numbered.exists());
+    // Nothing's left beside the file, and Redo finds it in the Trash.
+    assert_eq!(names(&files), ["photo edited.txt", "photo.txt"]);
+    moved(run(&mut engine, Request::Redo));
+    assert_eq!(read(&numbered), "new");
+    moved(run(&mut engine, Request::Undo));
 
     // Save As only takes a free name.
     let refused = run(

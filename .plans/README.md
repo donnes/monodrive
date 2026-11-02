@@ -32,7 +32,7 @@ Update a plan's row when its work lands on `main`.
 | 25 Filesystem speed | Planned; needs plan 24's runner | |
 | 26 MCP contract v1 | Planned; tool map and profiles need review | |
 | 27 Overview | UI picked, not built | |
-| 28 Built-in previews and editing | All renderers done; editing tools next; Space needs a person to check in the real app | |
+| 28 Built-in previews and editing | Done; the full app, with a real shared owner and session, needs a person to check | |
 | 29 Video thumbnails | Done; a real share and a folder behind a privacy prompt need a person to check | |
 | 30 Name and organize files | Suggest Names and rules-only Organize done, for text-based files with no model; a model is held behind a speed gate; the review page is option A, picked without drawn options | |
 
@@ -56,7 +56,7 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - 21: a Commands page in Settings.
 - 22: one place to manage all worktrees. The search index finds .git entries and Git confirms each repository. Delete moves the folder to the Trash, then removes Git's registration; refused if locked or the main worktree, and dirty or unpushed work needs an extra confirmation showing what's there.
 - 27: Desk. Free space and up to 3 suggestions first, then your stuff across every location, with what's happening now beside it.
-- 28: the preview takes over the pane, with a bar above and tools below. The sidebar, tabs and a second pane stay.
+- 28: the preview takes over the pane, with one bar above that also holds the tools while editing. The sidebar, tabs and a second pane stay.
 
 - Onboarding (done; granting Full Disk Access itself needs a person to check): first launch, a dedicated window with Welcome and then one checklist of Full Disk Access and coding agents. The first index crawl waits until the access is granted or onboarding closes; the app detects the grant on return and offers to reopen.
 

@@ -39,7 +39,7 @@ use crate::menu::{ContextMenu, MenuEvent};
 use crate::onboarding::{self, IndexGate, Step};
 use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
-use crate::preview::PreviewView;
+use crate::preview::{PreviewView, Saved};
 use crate::quick_look::{self, Preview};
 use crate::session::{self, TabState, WindowState};
 use crate::settings::{self, SettingsView};
@@ -142,6 +142,7 @@ actions!(
         OpenInTerminal,
         QuickLook,
         OpenInQuickLook,
+        EditPreview,
         ShowContextMenu,
         AddToSidebar,
         RemoveFromSidebar,
@@ -909,7 +910,7 @@ impl Browser {
 
     /// Space and ⌘Y: the selection's preview in the pane, or closes it.
     fn toggle_preview(&mut self, cx: &mut Context<Self>) {
-        if self.close_preview(cx) {
+        if self.tools_kept_it(cx) || self.close_preview(cx) {
             return;
         }
         let pane = self.pane().read(cx);
@@ -922,6 +923,9 @@ impl Browser {
 
     /// Apple's panel, for what the pane's preview doesn't draw well.
     fn open_in_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tools_kept_it(cx) {
+            return;
+        }
         self.close_preview(cx);
         let pane = self.pane().read(cx);
         let Some(preview) = Preview::of(&pane.selection, &pane.entries) else {
@@ -950,6 +954,16 @@ impl Browser {
             Some((_, view)) => view.clone(),
             None => {
                 let view = cx.new(|_| PreviewView::new());
+                // Saving reports through the pane's toast, with its Undo.
+                let saved_in = pane.downgrade();
+                cx.subscribe(&view, move |_, _, saved: &Saved, cx| {
+                    let done = saved.0.clone();
+                    let _ = saved_in.update(cx, |pane, cx| pane.settle(done, false, cx));
+                })
+                .detach();
+                // Once changes are saved or discarded, it follows again.
+                cx.observe(&view, |this, _, cx| this.follow_selection(cx))
+                    .detach();
                 pane.update(cx, |pane, cx| {
                     pane.preview = Some(view.clone());
                     cx.notify();
@@ -960,6 +974,14 @@ impl Browser {
         };
         let position = (preview.index, preview.items.len());
         view.update(cx, |view, cx| view.show(&path, folder, position, cx));
+    }
+
+    /// Leaving the preview leaves its tools first, which ask before losing
+    /// changes. Says whether that used the key.
+    fn tools_kept_it(&mut self, cx: &mut Context<Self>) -> bool {
+        self.previewing
+            .as_ref()
+            .is_some_and(|(_, view)| view.update(cx, |view, cx| view.escape(cx)))
     }
 
     /// Closes the preview, saying whether it was open.
@@ -995,6 +1017,19 @@ impl Browser {
             .as_ref()
             .is_some_and(|(on, _)| on.entity_id() != self.pane().entity_id());
         if preview.as_ref() == Some(shown) && !moved_pane {
+            return;
+        }
+        // Unsaved changes stay on screen wherever the selection or keys go, and
+        // the move lands when they're done with.
+        if self
+            .previewing
+            .as_ref()
+            .is_some_and(|(_, view)| view.read(cx).holding())
+        {
+            if let Some(preview) = preview.filter(|_| !moved_pane) {
+                self.show_in_pane(&preview, cx);
+                self.preview = Some(preview);
+            }
             return;
         }
         // Not if the panel closed itself meanwhile.
@@ -1713,10 +1748,16 @@ impl Render for Browser {
                 pane.list_focus.clone().tab_stop(stops);
             });
         }
-        let (lone_folder, renaming, selected) = self.pane().clone().update(cx, |pane, _| {
+        let (lone_folder, renaming, selected) = self.pane().clone().update(cx, |pane, cx| {
             (
                 pane.lone_folder(),
-                pane.changing_names(),
+                // Read fresh, as this runs before the pane draws: the frame that opens
+                // the text field must already leave Space to it.
+                pane.changing_names()
+                    || pane
+                        .preview
+                        .as_ref()
+                        .is_some_and(|view| view.read(cx).typing()),
                 !pane.selection.is_empty(),
             )
         });
@@ -1773,7 +1814,7 @@ impl Render for Browser {
                         return this.spring_back(back, window, cx);
                     }
                     this.toast = None;
-                    if this.close_preview(cx) {
+                    if this.tools_kept_it(cx) || this.close_preview(cx) {
                         return;
                     }
                     if this.sidebar.editing {

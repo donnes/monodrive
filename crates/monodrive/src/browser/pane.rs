@@ -8,8 +8,8 @@ use super::drag::{Drag, Spot, Target, offers};
 use super::organize::Review;
 use super::searches::{CONTENT_SETTLE, Matches};
 use super::{
-    Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, Eject,
-    EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
+    Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, EditPreview,
+    Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
     FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
     GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder,
     NewFolderWithSelection, OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places,
@@ -233,6 +233,8 @@ pub struct Pane {
     /// The preview, in place of the list. It leaves the keys on the list, so
     /// the arrows still move the selection it follows.
     pub(super) preview: Option<Entity<crate::preview::PreviewView>>,
+    /// The preview's text tool has the keys, which the list must leave alone.
+    pub(super) preview_typing: bool,
     /// How many times the bar has opened, which tells each opening apart.
     pub(super) batch_sessions: u64,
     /// What's selected stays when the next listing lands, as it was put back.
@@ -357,6 +359,7 @@ impl Pane {
             batch: None,
             organizing: None,
             preview: None,
+            preview_typing: false,
             batch_sessions: 0,
             keep_selection: false,
             select_after: Vec::new(),
@@ -1722,6 +1725,13 @@ impl Pane {
     /// Typing in the list or sidebar searches: the first character moves
     /// focus to the search field and types there. Finder selects by name
     /// instead; search is Monodrive's way in.
+    /// E in a preview, or its command: the tools.
+    fn edit_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = &self.preview {
+            view.update(cx, |view, cx| view.toggle_edit(window, cx));
+        }
+    }
+
     pub(super) fn type_to_search(
         &mut self,
         event: &KeyDownEvent,
@@ -1733,6 +1743,17 @@ impl Pane {
             return;
         };
         let text = text.to_owned();
+        if let Some(view) = &self.preview {
+            let editing = view.read(cx).editing();
+            if text == "e" {
+                self.edit_preview(window, cx);
+                return cx.stop_propagation();
+            }
+            // A stray letter mustn't start a search and lose an edit.
+            if editing {
+                return cx.stop_propagation();
+            }
+        }
         self.search.update(cx, |field, cx| {
             window.focus(&field.focus_handle(cx), cx);
             field.insert(&text, cx);
@@ -2788,6 +2809,17 @@ pub(super) fn said(request: &Request, outcome: &Outcome) -> Option<String> {
             };
             format!("Moved {what} into {}", jobs::quoted(path))
         }
+        Request::SaveEdit { .. } => {
+            let saved = outcome
+                .items
+                .iter()
+                .rev()
+                .find_map(|item| item.result.as_ref().ok());
+            match saved {
+                Some(path) => format!("Saved {}", jobs::quoted(path)),
+                None => "Saved".to_string(),
+            }
+        }
         Request::Organize { groups } => {
             let files: usize = groups.iter().map(|group| group.items.len()).sum();
             format!(
@@ -3645,6 +3677,11 @@ impl Pane {
             .on_action(
                 cx.listener(|this, _: &OrganizeFolder, window, cx| this.start_organize(window, cx)),
             )
+            .when(self.preview.is_some(), |d| {
+                d.on_action(
+                    cx.listener(|this, _: &EditPreview, window, cx| this.edit_preview(window, cx)),
+                )
+            })
             .when(self.showing_recents(), |d| {
                 d.on_action(cx.listener(|this, _: &ClearRecents, _, cx| this.clear_recents(cx)))
             })
@@ -3725,9 +3762,11 @@ impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.follow_batch(window, cx);
         self.follow_organize(window, cx);
+        self.preview_typing = false;
         if let Some(preview) = &self.preview {
             let covered = self.chrome.covered;
             preview.update(cx, |preview, cx| preview.set_covered(covered, cx));
+            self.preview_typing = preview.read(cx).typing();
         }
         let prefs = cx.global::<Preferences>();
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;

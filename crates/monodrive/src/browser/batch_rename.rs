@@ -249,11 +249,24 @@ impl BatchRename {
     }
 }
 
+/// What a read found, under any name typed while it ran.
+fn merge_suggestions(
+    suggested: &mut HashMap<PathBuf, Result<String, String>>,
+    found: Vec<(PathBuf, Result<String, String>)>,
+) {
+    for (path, name) in found {
+        suggested.entry(path).or_insert(name);
+    }
+}
+
 impl Pane {
     /// Whether a name or a batch is being edited, or a folder reviewed, when
     /// nothing else may change files or take the list's keys.
     pub(super) fn changing_names(&self) -> bool {
-        self.renaming.is_some() || self.batch.is_some() || self.organizing.is_some()
+        self.renaming.is_some()
+            || self.batch.is_some()
+            || self.organizing.is_some()
+            || self.preview_typing
     }
 
     pub(super) fn place_now(&self) -> (PathBuf, bool, String) {
@@ -430,10 +443,7 @@ impl Pane {
                     return;
                 };
                 batch.reading = None;
-                // A name typed while this read keeps its place.
-                for (path, name) in found {
-                    batch.suggested.entry(path).or_insert(name);
-                }
+                merge_suggestions(&mut batch.suggested, found);
                 this.preview_batch(cx);
                 cx.notify();
             });
@@ -931,5 +941,25 @@ impl Pane {
                         .child(apply),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_typed_during_a_read_outlives_what_the_read_finds() {
+        let (a, b) = (PathBuf::from("/a"), PathBuf::from("/b"));
+        let mut suggested = HashMap::from([(a.clone(), Ok("typed".to_string()))]);
+        merge_suggestions(
+            &mut suggested,
+            vec![
+                (a.clone(), Ok("read".to_string())),
+                (b.clone(), Ok("found".to_string())),
+            ],
+        );
+        assert_eq!(suggested[&a], Ok("typed".to_string()));
+        assert_eq!(suggested[&b], Ok("found".to_string()));
     }
 }

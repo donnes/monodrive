@@ -221,6 +221,321 @@ fn the_preview_takes_the_panes_list_and_gives_it_back(cx: &mut TestAppContext) {
     press(cx, "escape");
 }
 
+/// A preview's real path: the keys and mouse through the real `Browser`, a real
+/// recipe flattened and saved through a real owner, and one Undo.
+#[gpui::test]
+fn a_mark_drawn_in_the_preview_saves_a_copy_that_undo_removes(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let photo = project.join("zz.png");
+    image::RgbImage::from_pixel(200, 100, image::Rgb([255, 255, 255]))
+        .save(&photo)
+        .unwrap();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down");
+    assert_eq!(shown(&browser, cx).1, ["zz.png"]);
+    press(cx, "space e");
+    assert!(drawn(cx, "preview-tools"));
+    click(cx, "ink-blue");
+    click(cx, "tool-redact");
+    assert!(drawn(cx, "preview-edit-surface"));
+    // Nothing's changed yet, so there's no Save to press.
+    assert!(cx.debug_bounds("edit-save").is_none());
+
+    let surface = cx.debug_bounds("preview-edit-surface").unwrap();
+    let start = surface.center() - gpui::point(px(40.), px(20.));
+    let end = surface.center() + gpui::point(px(40.), px(20.));
+    cx.simulate_mouse_down(start, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(end, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(end, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert!(drawn(cx, "edit-save"));
+
+    // Esc asks, and Keep Editing keeps the mark.
+    press(cx, "escape");
+    assert!(drawn(cx, "edit-discard"));
+    click(cx, "edit-keep");
+    assert!(drawn(cx, "edit-save"));
+
+    let copy = project.join("zz edited.png");
+    click(cx, "edit-save");
+    cx.run_until_parked();
+    assert!(!drawn(cx, "preview-tools"), "saving leaves the tools");
+    assert_eq!(
+        toast(&browser, cx).map(|t| t.0),
+        Some("Saved \"zz edited.png\"".to_string())
+    );
+    let saved = image::open(&copy).unwrap().into_rgb8();
+    assert_eq!(saved.dimensions(), (200, 100));
+    assert_eq!(
+        saved.get_pixel(100, 50).0,
+        [0, 0, 0],
+        "the redact burned in"
+    );
+    assert_eq!(saved.get_pixel(2, 2).0, [255, 255, 255]);
+    let original = image::open(&photo).unwrap().into_rgb8();
+    assert_eq!(
+        original.get_pixel(100, 50).0,
+        [255, 255, 255],
+        "the original stays"
+    );
+
+    press(cx, "cmd-z");
+    assert!(!copy.exists());
+    press(cx, "escape");
+    release(owned, cx);
+}
+
+/// The menus sit over the row's neighbors: a press outside only closes one, and
+/// the first Esc is theirs.
+#[gpui::test]
+fn a_press_or_esc_closes_the_save_menu_and_nothing_else(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    image::RgbImage::from_pixel(50, 50, image::Rgb([255, 255, 255]))
+        .save(project.join("zz.png"))
+        .unwrap();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down space e");
+    click(cx, "tool-pen");
+    assert!(drawn(cx, "preview-edit-surface"));
+    let center = cx.debug_bounds("preview-edit-surface").unwrap().center();
+    // A stroke in the corner, far from the press below, so Save can open.
+    let corner = center - gpui::point(px(20.), px(20.));
+    cx.simulate_mouse_down(corner, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(corner, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    click(cx, "edit-more");
+    assert!(drawn(cx, "edit-replace"));
+    cx.simulate_mouse_down(center, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(center, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert!(!drawn(cx, "edit-replace"));
+    click(cx, "edit-more");
+    press(cx, "escape");
+    assert!(!drawn(cx, "edit-replace"));
+    assert!(!drawn(cx, "edit-discard"));
+    press(cx, "escape");
+    assert!(drawn(cx, "edit-discard"));
+    assert_eq!(shown(&browser, cx).1, ["zz.png"]);
+    click(cx, "edit-keep");
+    click(cx, "edit-save");
+    cx.run_until_parked();
+    let saved = image::open(project.join("zz edited.png"))
+        .unwrap()
+        .into_rgb8();
+    assert_ne!(
+        saved.get_pixel(5, 5).0,
+        [255, 255, 255],
+        "the stroke is there"
+    );
+    assert_eq!(
+        saved.get_pixel(25, 25).0,
+        [255, 255, 255],
+        "the press left no mark"
+    );
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn a_video_edited_in_the_preview_saves_and_replaces_through_the_owner(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let clip = project.join("zz.mp4");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../monodrive-core/tests/fixtures/rotated.mp4");
+    std::fs::copy(fixture, &clip).unwrap();
+    let before = std::fs::read(&clip).unwrap();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down");
+    assert_eq!(shown(&browser, cx).1, ["zz.mp4"]);
+    press(cx, "space e");
+    assert!(drawn(cx, "tool-video-rotate"));
+    // Stored to play 36 by 64; a turn comes out 64 by 36.
+    click(cx, "tool-video-rotate");
+    click(cx, "edit-save");
+    cx.run_until_parked();
+    let copy = project.join("zz edited.mp4");
+    assert_eq!(
+        monodrive_core::edits::video_size(&copy).unwrap(),
+        (64., 36.)
+    );
+    assert_eq!(std::fs::read(&clip).unwrap(), before, "the original stays");
+    assert!(!drawn(cx, "preview-tools"), "saving leaves the tools");
+    press(cx, "cmd-z");
+    assert!(!copy.exists());
+
+    press(cx, "e");
+    click(cx, "tool-video-mute");
+    click(cx, "edit-more");
+    click(cx, "edit-replace");
+    cx.run_until_parked();
+    assert_ne!(std::fs::read(&clip).unwrap(), before);
+    assert_eq!(
+        monodrive_core::edits::video_size(&clip).unwrap(),
+        (36., 64.)
+    );
+    press(cx, "cmd-z");
+    assert_eq!(std::fs::read(&clip).unwrap(), before, "Undo brings it back");
+    press(cx, "escape");
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn a_save_the_owner_refuses_keeps_the_edit_and_says_why(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let photo = project.join("zz.png");
+    image::RgbImage::new(50, 50).save(&photo).unwrap();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down space e");
+    click(cx, "tool-rotate");
+    assert!(drawn(cx, "edit-save"));
+    // The file changes underneath, as it opened the moment the tools did.
+    image::RgbImage::new(60, 60).save(&photo).unwrap();
+    click(cx, "edit-save");
+    cx.run_until_parked();
+    assert!(drawn(cx, "edit-save"), "the edit is still there to save");
+    assert!(!project.join("zz edited.png").exists());
+    let hidden: Vec<_> = std::fs::read_dir(&project)
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".monodrive-edit-")
+        })
+        .collect();
+    assert!(hidden.is_empty(), "{hidden:?}");
+    assert_eq!(toast(&browser, cx), None);
+    release(owned, cx);
+}
+
+/// A save that starts and can't finish comes back as an outcome holding the
+/// failure, not as a refusal. A locked original can't go to the Trash.
+#[gpui::test]
+fn words_typed_with_the_text_tool_land_where_it_was_clicked(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let photo = project.join("zz.png");
+    image::RgbImage::from_pixel(600, 300, image::Rgb([255, 255, 255]))
+        .save(&photo)
+        .unwrap();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down space e");
+    click(cx, "ink-black");
+    click(cx, "tool-text");
+    assert!(drawn(cx, "preview-edit-surface"));
+    // The picture is centered and not enlarged, so this is 100 by 50 inside it.
+    let center = cx.debug_bounds("preview-edit-surface").unwrap().center();
+    let at = center - gpui::point(px(200.), px(100.));
+    cx.simulate_mouse_down(at, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(at, MouseButton::Left, with(""));
+    // Letters that mean something to the list, and Space, are only words here.
+    press(cx, "space e space e enter");
+    assert!(!drawn(cx, "edit-text-field"));
+    assert!(drawn(cx, "edit-save"));
+    click(cx, "edit-save");
+    cx.run_until_parked();
+    let saved = image::open(project.join("zz edited.png"))
+        .unwrap()
+        .into_rgb8();
+    let dark =
+        |x0, x1, y0, y1| (x0..x1).any(|x| (y0..y1).any(|y| saved.get_pixel(x, y).0[0] < 128));
+    assert!(dark(100, 300, 50, 110), "the words are where the click was");
+    assert!(!dark(0, 90, 0, 300), "and nowhere left of it");
+    assert!(!dark(100, 600, 150, 300), "or below");
+    let _ = browser;
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn a_save_that_fails_partway_keeps_the_edit(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let photo = project.join("zz.png");
+    image::RgbImage::new(50, 50).save(&photo).unwrap();
+    let before = std::fs::read(&photo).unwrap();
+    let flags = |flag: &str| {
+        let done = std::process::Command::new("chflags")
+            .arg(flag)
+            .arg(&photo)
+            .status();
+        assert!(done.unwrap().success());
+    };
+    flags("uchg");
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down space e");
+    click(cx, "tool-rotate");
+    click(cx, "edit-more");
+    assert!(drawn(cx, "edit-replace"));
+    click(cx, "edit-replace");
+    cx.run_until_parked();
+    let kept = drawn(cx, "edit-save");
+    flags("nouchg");
+    assert!(kept, "the edit is still there to save");
+    assert_eq!(std::fs::read(&photo).unwrap(), before);
+    assert_eq!(toast(&browser, cx), None);
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn unsaved_edits_hold_the_preview_until_discarded(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    for name in ["xa.png", "xb.png"] {
+        image::RgbImage::new(50, 50)
+            .save(project.join(name))
+            .unwrap();
+    }
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down");
+    assert_eq!(shown(&browser, cx).1, ["xb.png"]);
+    press(cx, "space e");
+    click(cx, "tool-rotate");
+    assert!(drawn(cx, "edit-save"));
+    // The selection can move, but what's being edited stays on screen.
+    press(cx, "up");
+    assert_eq!(shown(&browser, cx).1, ["xa.png"]);
+    assert!(drawn(cx, "edit-save"));
+    let name = |cx: &mut VisualTestContext| {
+        in_pane(&browser, cx, |pane, cx| {
+            pane.preview.as_ref().map(|view| view.read(cx).path.clone())
+        })
+    };
+    assert_eq!(name(cx), Some(project.join("xb.png")));
+    // Space and Done ask, as Esc does, and nothing's lost.
+    press(cx, "space");
+    assert!(drawn(cx, "edit-discard"));
+    click(cx, "edit-keep");
+    click(cx, "edit-done");
+    assert!(drawn(cx, "edit-discard"));
+    click(cx, "edit-keep");
+    // Nor does letting go of the selection close it.
+    press(cx, "cmd-alt-a");
+    assert!(shown(&browser, cx).1.is_empty());
+    assert!(drawn(cx, "edit-save"));
+    assert_eq!(name(cx), Some(project.join("xb.png")));
+    press(cx, "down");
+    assert_eq!(shown(&browser, cx).1.len(), 1);
+    let selected = project.join(&shown(&browser, cx).1[0]);
+    // Discarding lands on what's selected now.
+    press(cx, "escape");
+    click(cx, "edit-discard");
+    assert_eq!(name(cx), Some(selected.clone()));
+    // So does undoing the only change, with nothing left to lose.
+    press(cx, "alt-down e");
+    assert_eq!(shown(&browser, cx).1, ["xb.png"]);
+    click(cx, "tool-rotate");
+    assert!(drawn(cx, "edit-save"));
+    press(cx, "up");
+    assert_eq!(name(cx), Some(project.join("xb.png")));
+    click(cx, "edit-undo");
+    assert_eq!(name(cx), Some(project.join("xa.png")));
+    assert!(!drawn(cx, "preview-tools"));
+    press(cx, "escape");
+}
+
 #[gpui::test]
 fn arrows_walk_a_folder_open_in_place_and_out_of_it(cx: &mut TestAppContext) {
     let (_dir, project) = folder();

@@ -55,7 +55,8 @@
 //! a name that's taken, `batch-rename-grid.png` the bar from a grid and
 //! `batch-rename-narrow.png` in a narrow pane, and `batch-rename-suggest.png`
 //! names read from the files. Nothing is applied. `organize.png` is Organize's
-//! review of the folder. `preview.png` is the preview of the last entry.
+//! review of the folder. `preview.png` is the preview of the last entry, and
+//! `preview-edit.png` its tools.
 //!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
@@ -68,10 +69,10 @@ use gpui::{
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives, EditFavorites,
-    EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch, GoRecents,
-    GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations, OrganizeFolder,
-    Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast, SelectNext, ShowContextMenu,
-    ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo,
+    EditPreview, EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch,
+    GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations,
+    OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast, SelectNext,
+    ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo,
 };
 use monodrive::connect;
 use monodrive::native::{self, Native, SizeDone};
@@ -506,6 +507,9 @@ fn shoot_batch_rename(
     dispatch(cx, window, &QuickLook)?;
     cx.run_until_parked();
     save(cx, window, out, "preview")?;
+    dispatch(cx, window, &EditPreview)?;
+    cx.run_until_parked();
+    save(cx, window, out, "preview-edit")?;
 
     cx.update(|cx| {
         cx.set_global(Preferences {

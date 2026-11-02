@@ -5,7 +5,9 @@
 
 mod video;
 
-pub use video::{Clip, VideoRecipe, export, frame, size as video_size, video_extension};
+pub use video::{
+    Clip, VideoRecipe, export, frame, frame_bitmap, size as video_size, video_extension,
+};
 
 use objc2::AnyThread;
 use objc2::rc::Retained;
@@ -184,6 +186,16 @@ pub fn flatten(source: &Path, steps: &[Step], into: &Path) -> Result<(usize, usi
     let redacted = steps.iter().any(|step| matches!(step, Step::Redact { .. }));
     encode(&image, into, properties.filter(|_| !redacted))?;
     Ok((CGImage::width(Some(&image)), CGImage::height(Some(&image))))
+}
+
+/// What `flatten` would write, in memory: for the window to show as it edits.
+pub fn render(source: &Path, steps: &[Step]) -> Result<crate::thumbnails::Bitmap, String> {
+    crate::cloud::refuse_placeholder(source)?;
+    let (mut image, _) = decode(source)?;
+    for step in steps {
+        image = apply(&image, step)?;
+    }
+    crate::thumbnails::bitmap(&image)
 }
 
 /// The picture the right way up, at full size, and its metadata saying so.

@@ -53,6 +53,15 @@ fn by_extension(extension: &str) -> Kind {
     }
 }
 
+/// What's decided before the name matters. Availability comes first, as listing
+/// a placeholder folder downloads it.
+fn before_reading(availability: Availability, folder: bool, package: bool) -> Option<Kind> {
+    if availability != Availability::Local {
+        return Some(Kind::NotDownloaded);
+    }
+    folder.then_some(if package { Kind::System } else { Kind::Folder })
+}
+
 /// Which renderer `path` gets. Reads its metadata only.
 pub fn classify(path: &Path) -> Kind {
     if needs_consent(path) {
@@ -61,16 +70,12 @@ pub fn classify(path: &Path) -> Kind {
     let Ok(meta) = std::fs::metadata(path) else {
         return Kind::System;
     };
-    // Before anything reads it: listing a placeholder folder downloads it.
-    if Availability::of(&meta) != Availability::Local {
-        return Kind::NotDownloaded;
-    }
-    if meta.is_dir() {
-        return if crate::info::is_package(path) {
-            Kind::System
-        } else {
-            Kind::Folder
-        };
+    if let Some(kind) = before_reading(
+        Availability::of(&meta),
+        meta.is_dir(),
+        crate::info::is_package(path),
+    ) {
+        return kind;
     }
     let extension = path
         .extension()
@@ -142,6 +147,27 @@ mod tests {
         let app = dir.path().join("Kit.app");
         std::fs::create_dir(&app).unwrap();
         assert_eq!(classify(&app), Kind::System);
+    }
+
+    #[test]
+    fn a_placeholder_never_picks_a_renderer_that_reads_it() {
+        for availability in [
+            Availability::Placeholder,
+            Availability::Downloading,
+            Availability::Unknown,
+        ] {
+            for (folder, package) in [(true, false), (true, true), (false, false)] {
+                assert_eq!(
+                    before_reading(availability, folder, package),
+                    Some(Kind::NotDownloaded)
+                );
+            }
+        }
+        assert_eq!(
+            before_reading(Availability::Local, true, false),
+            Some(Kind::Folder)
+        );
+        assert_eq!(before_reading(Availability::Local, false, false), None);
     }
 
     #[test]

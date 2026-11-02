@@ -109,7 +109,16 @@ impl Player {
 
     pub fn seek(&self, seconds: f64) {
         // SAFETY: a plain call on the main thread that made it.
-        unsafe { self.player.seekToTime(CMTime::with_seconds(seconds, 600)) };
+        // Exactly there: the default tolerance snaps to a keyframe, which can be
+        // the start of the file for the whole of a short clip.
+        unsafe {
+            let exact = CMTime::with_seconds(0., 600);
+            self.player.seekToTime_toleranceBefore_toleranceAfter(
+                CMTime::with_seconds(seconds, 600),
+                exact,
+                exact,
+            );
+        }
     }
 
     pub fn muted(&self) -> bool {

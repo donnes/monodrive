@@ -929,6 +929,12 @@ impl Engine {
             let result = plan.and_then(|plan| match plan {
                 Plan::Move(mut step) => {
                     let to = step.shift(true)?;
+                    // An edit in place is like anything else made: Undo sends it to
+                    // the Trash, and leaves no hidden file behind. The journal
+                    // already holds the hidden name, for a crash before this.
+                    if matches!(&step.undone, Spot::Path(from) if is_prepared(from)) {
+                        step.undone = Spot::Trash(None);
+                    }
                     steps.push(step);
                     Ok(to)
                 }
@@ -1511,6 +1517,12 @@ fn movable(step: Step) -> Result<Plan, String> {
     Ok(Plan::Move(step))
 }
 
+fn is_prepared(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(crate::edits::PREPARED_PREFIX))
+}
+
 /// `photo edited.jpg`, or the next free name after it.
 fn edited_name(path: &Path, extension: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     let stem = path.file_stem()?.to_string_lossy();
@@ -1532,16 +1544,11 @@ fn plan_save_edit(
     if disk::stamp(path).ok() != Some((source.id, source.stamp)) {
         return refuse(format!("{} changed since it was opened.", path.display()));
     }
-    let named = prepared
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with(crate::edits::PREPARED_PREFIX));
-    if !named || disk::id(prepared).is_none() {
+    if !is_prepared(prepared) || disk::id(prepared).is_none() {
         return refuse(format!("{} isn't a prepared edit.", prepared.display()));
     }
     // An ordinary move, so the journal knows the file's identity and both of its
-    // places, and a crash partway can still be undone. Undo puts it back under
-    // its hidden name, where Redo finds it.
+    // places, and a crash partway can still be undone.
     let placed = |target: &Path| -> Result<Plan, String> {
         let (id, stamp) = existing(prepared)?;
         Ok(Plan::Move(Step {

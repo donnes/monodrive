@@ -5,6 +5,9 @@
 mod html;
 mod markdown;
 mod media;
+mod tools;
+
+pub use tools::Saved;
 
 use crate::browser::{OpenSelected, QuickLook};
 use crate::native_view::Host;
@@ -100,7 +103,7 @@ enum Body {
 type SystemView = (Host<QLPreviewView>, PathBuf);
 
 pub struct PreviewView {
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     folder: bool,
     /// Where it is among what's selected: "3 of 12".
     position: (usize, usize),
@@ -110,10 +113,16 @@ pub struct PreviewView {
     zoomed: bool,
     /// A sheet or menu is up, which a native view would draw over.
     covered: bool,
+    /// The tools and what they've done so far.
+    edit: Option<tools::Edit>,
+    /// What the selection moved to while an edit held this file on screen.
+    wanted: Option<(PathBuf, bool, (usize, usize))>,
     held: Option<(Sharp, Option<Arc<RenderImage>>)>,
     scroll: UniformListScrollHandle,
     /// The Markdown's scrolling, which can't cross threads with `Body`.
     blocks: Option<ListState>,
+    /// The edit row's width, which decides what fits in it.
+    row_width: Rc<Cell<f32>>,
     /// The system's view, and the file it's on.
     native: Rc<RefCell<Option<SystemView>>>,
     player: Rc<RefCell<Option<Player>>>,
@@ -145,9 +154,12 @@ impl PreviewView {
             show_source: false,
             zoomed: false,
             covered: false,
+            edit: None,
+            wanted: None,
             held: None,
             scroll: UniformListScrollHandle::new(),
             blocks: None,
+            row_width: Rc::new(Cell::new(0.)),
             native: Rc::new(RefCell::new(None)),
             player: Rc::new(RefCell::new(None)),
             page: Rc::new(RefCell::new(None)),
@@ -166,6 +178,12 @@ impl PreviewView {
         position: (usize, usize),
         cx: &mut Context<Self>,
     ) {
+        // Unsaved changes hold this file; the move lands when they're done with.
+        if self.holding() && self.path != path {
+            self.wanted = Some((path.to_path_buf(), folder, position));
+            return;
+        }
+        self.wanted = None;
         self.position = position;
         if self.path == path {
             return cx.notify();
@@ -173,6 +191,7 @@ impl PreviewView {
         self.path = path.to_path_buf();
         self.folder = folder;
         self.generation += 1;
+        self.edit = None;
         self.loading_ticks = 40;
         self.show_source = false;
         self.zoomed = false;
@@ -236,6 +255,7 @@ impl PreviewView {
         self.player.borrow_mut().take();
         self.page.borrow_mut().take();
         self._ticking = None;
+        self.edit = None;
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -262,18 +282,34 @@ impl PreviewView {
                 )
             }
             Body::Picture { .. } => {
-                let label = if self.zoomed { "Fit" } else { "100%" };
+                let label = if self.zoomed { "Fit" } else { "Actual Size" };
                 Some(
-                    text_button("preview-zoom", label, ButtonLook::Ghost)
-                        .debug_selector(|| "preview-zoom".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.zoomed = !this.zoomed;
-                            cx.notify();
-                        })),
+                    tools::tip(
+                        theme::icon_button("preview-zoom", label, "tool-zoom", true),
+                        label,
+                    )
+                    .debug_selector(|| "preview-zoom".into())
+                    .when(self.zoomed, |d| d.bg(content(0.14)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.zoomed = !this.zoomed;
+                        cx.notify();
+                    })),
                 )
             }
             _ => None,
         };
+        let can_edit = matches!(
+            self.body,
+            Body::Picture { .. } | Body::Media { video: true, .. }
+        );
+        let edit_button = can_edit.then(|| {
+            tools::tip(
+                theme::icon_button("preview-edit", "Edit", "pencil", true),
+                "Edit (E)",
+            )
+            .debug_selector(|| "preview-edit".into())
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_edit(window, cx)))
+        });
         theme::pane_bar(theme::TITLE_BAR_HEIGHT)
             .gap_2()
             .flex_shrink_0()
@@ -299,15 +335,19 @@ impl PreviewView {
             })
             .child(div().flex_1())
             .children(toggle)
+            .children(edit_button)
             .child(
                 text_button("preview-open", "Open", ButtonLook::Secondary)
                     .debug_selector(|| "preview-open".into())
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSelected), cx)),
             )
             .child(
-                text_button("preview-close", "Close", ButtonLook::Ghost)
-                    .debug_selector(|| "preview-close".into())
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(QuickLook), cx)),
+                tools::tip(
+                    theme::icon_button("preview-close", "Close", "cancel-01", true),
+                    "Close (Esc)",
+                )
+                .debug_selector(|| "preview-close".into())
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(QuickLook), cx)),
             )
     }
 
@@ -353,10 +393,7 @@ impl PreviewView {
                 )
                 .into_any_element()
         } else {
-            gpui::img(image)
-                .size_full()
-                .object_fit(gpui::ObjectFit::Contain)
-                .into_any_element()
+            fitted(image).into_any_element()
         }
     }
 
@@ -397,10 +434,17 @@ impl PreviewView {
             .borrow()
             .as_ref()
             .is_some_and(Player::frame_ready);
-        let poster = (!framed).then(|| self.picture(modified, window, cx));
+        // The player steps aside for an open menu, and this stands in for it.
+        let poster = (!framed || self.menu_open()).then(|| self.picture(modified, window, cx));
         let player = self.player.clone();
         let path = self.path.clone();
-        let covered = self.covered;
+        // Nothing GPUI draws can sit over the player, so it steps aside for a menu.
+        let covered = self.covered || self.menu_open();
+        if self.menu_open()
+            && let Some(player) = self.player.borrow().as_ref()
+        {
+            player.hide();
+        }
         let surface = canvas(
             |_, _, _| {},
             move |bounds: Bounds<Pixels>, _, window, _| {
@@ -417,6 +461,8 @@ impl PreviewView {
             },
         )
         .absolute()
+        .top_0()
+        .left_0()
         .size_full();
         let strip = self.strip(cx);
         div()
@@ -429,7 +475,14 @@ impl PreviewView {
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .children(poster)
+                    // Laid out in the box, as a picture's own height would run
+                    // over the strip below.
+                    .overflow_hidden()
+                    .children(
+                        poster.map(|poster| {
+                            div().absolute().top_0().left_0().size_full().child(poster)
+                        }),
+                    )
                     .child(surface),
             )
             .child(strip)
@@ -533,6 +586,8 @@ impl PreviewView {
                             .child(
                                 canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
                                     .absolute()
+                                    .top_0()
+                                    .left_0()
                                     .size_full(),
                             ),
                     ),
@@ -590,6 +645,33 @@ impl PreviewView {
         .size_full()
         .into_any_element()
     }
+}
+
+/// A picture centered in the space it has and never enlarged, painted where
+/// `fit` says, so what's drawn and where a mark lands can't disagree. Left to
+/// layout, a picture's own height overruns a box shorter than it is.
+pub(crate) fn fitted(image: Arc<RenderImage>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds: Bounds<Pixels>, _, window, _| {
+            let source = image.size(0);
+            let source = (source.width.0 as f32, source.height.0 as f32);
+            let (origin, scale) = tools::fit(bounds, source);
+            let frame = Bounds::new(
+                origin,
+                gpui::size(px(source.0 * scale), px(source.1 * scale)),
+            );
+            let _ = window.paint_image(
+                frame,
+                frame,
+                gpui::Corners::default(),
+                image.clone(),
+                0,
+                false,
+            );
+        },
+    )
+    .size_full()
 }
 
 /// `None` without a window on the main thread, as in tests.
@@ -930,7 +1012,12 @@ fn block(ix: usize, block: &Block) -> gpui::AnyElement {
 
 impl Render for PreviewView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = self.header(cx);
+        // Editing, the title row itself holds the tools.
+        let header = match self.edit_row(cx) {
+            Some(row) => row,
+            None => self.header(cx).into_any_element(),
+        };
+        let edit_error = self.edit_error();
         if !matches!(self.body, Body::System) {
             self.native.borrow_mut().take();
         }
@@ -1001,13 +1088,25 @@ impl Render for PreviewView {
                         .into_any_element()
                 }
             }
+            Body::Picture { .. } if self.editing_image() => self.edit_surface(cx),
             Body::Picture { modified } => {
                 let modified = *modified;
                 self.picture(modified, window, cx)
             }
-            Body::Animated => gpui::img(self.path.clone())
+            // Out of flow, as a tall picture's height would otherwise run out of
+            // the box.
+            Body::Animated => div()
+                .relative()
                 .size_full()
-                .object_fit(gpui::ObjectFit::Contain)
+                .overflow_hidden()
+                .child(
+                    gpui::img(self.path.clone())
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::Contain),
+                )
                 .into_any_element(),
             Body::Rows(names, said) => {
                 let names = names.clone();
@@ -1046,6 +1145,13 @@ impl Render for PreviewView {
             }
             Body::System => self.system(),
             Body::Html => self.html(),
+            Body::Media { .. } if self.editing_image() => {
+                // Under the crop's handles, in place of the player.
+                if let Some(player) = self.player.borrow().as_ref() {
+                    player.hide();
+                }
+                self.edit_surface(cx)
+            }
             Body::Media { video, modified } => {
                 let (video, modified) = (*video, *modified);
                 self.media(video, modified, window, cx)
@@ -1062,6 +1168,7 @@ impl Render for PreviewView {
             .flex()
             .flex_col()
             .child(header)
+            .children(edit_error)
             .child(div().flex_1().min_h_0().child(content_view))
     }
 }
