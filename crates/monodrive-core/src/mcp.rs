@@ -6,6 +6,7 @@
 
 use crate::archives::{self, Archive};
 use crate::cloud::{self, Asked, CloudFolder};
+use crate::edits;
 use crate::entries::{self, Kind};
 use crate::expand_home;
 use crate::index::{self, Caps, GrepMode, Index, Status};
@@ -171,6 +172,18 @@ enum ToolCall {
     Rename {
         path: String,
         name: String,
+    },
+    EditImage {
+        path: String,
+        steps: Vec<edits::Step>,
+        #[serde(default)]
+        replace: bool,
+    },
+    EditVideo {
+        path: String,
+        steps: edits::VideoRecipe,
+        #[serde(default)]
+        replace: bool,
     },
     Organize {
         path: Option<String>,
@@ -604,6 +617,28 @@ impl Server {
                 path: expand_home(&path),
                 name,
             }),
+            ToolCall::EditImage {
+                path,
+                steps,
+                replace,
+            } => {
+                let path = expand_home(&path);
+                let extension = edits::picture_extension(&path);
+                self.save_edit(&path, &extension, replace, |source, into| {
+                    edits::flatten(source, &steps, into).map(|_| ())
+                })
+            }
+            ToolCall::EditVideo {
+                path,
+                steps,
+                replace,
+            } => {
+                let path = expand_home(&path);
+                let extension = edits::video_extension(&path);
+                self.save_edit(&path, &extension, replace, |source, into| {
+                    edits::export(source, &steps, into, &|| false)
+                })
+            }
             ToolCall::Organize { path, confirm } => match (path, confirm) {
                 (_, Some(token)) => self.run_organize(&token),
                 (Some(path), None) => self.preview_organize(&expand_home(&path)),
@@ -1210,6 +1245,35 @@ impl Server {
         } else {
             Ok(out)
         }
+    }
+
+    /// Writes the edit under a hidden name, then has the owner put it in place.
+    /// Refused first if agents may not change files, so nothing's written.
+    fn save_edit(
+        &mut self,
+        source: &Path,
+        extension: &str,
+        replace: bool,
+        write: impl FnOnce(&Path, &Path) -> Result<(), String>,
+    ) -> Result<String, String> {
+        self.can_change()?;
+        let opened = ops::Opened::read(source)?;
+        let folder = source.parent().ok_or("That file has no folder.")?;
+        let prepared = edits::prepared_path(folder, extension);
+        let saved = write(source, &prepared).and_then(|()| {
+            self.change(Request::SaveEdit {
+                source: opened,
+                prepared: prepared.clone(),
+                save: if replace {
+                    ops::SaveTo::Replace
+                } else {
+                    ops::SaveTo::Copy
+                },
+            })
+        });
+        // Already moved when it worked, so this only clears a failed one.
+        edits::discard(&prepared);
+        saved
     }
 
     /// What sorting `folder` would do, kept under a token for `run_organize`.
@@ -2152,7 +2216,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 65] = [
+pub const TOOLS: [Tool; 67] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2279,6 +2343,64 @@ pub const TOOLS: [Tool; 65] = [
                     "name": {"type": "string"}
                 },
                 "required": ["path", "name"]
+            })
+        },
+    },
+    Tool {
+        name: "edit_image",
+        description: "Edit a picture by a list of steps, each applied to what the last left, in pixels \
+    from the top left. Writes `name edited.ext` beside it unless replace is true, which moves the original \
+    to the Trash and takes its name. Undo reverses either. Never overwrites. A format macOS can't write \
+    back, such as WebP, saves as PNG and refuses replace. A redact fills solid black and \
+    strips the file's metadata. Prints the new path.",
+        input_schema: || {
+            let rect = json!({"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"}}, "required": ["x", "y", "width", "height"]});
+            let point =
+                json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2});
+            let color = json!({"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "Red, green, blue, alpha, each 0 to 1."});
+            let points = json!({"type": "array", "items": point});
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The picture; ~ is your home."},
+                    "steps": {"type": "array", "items": {"oneOf": [
+                        {"type": "object", "properties": {"type": {"const": "crop"}, "rect": rect}, "required": ["type", "rect"]},
+                        {"type": "object", "properties": {"type": {"const": "rotate"}, "quarter_turns": {"type": "integer", "description": "Clockwise."}}, "required": ["type", "quarter_turns"]},
+                        {"type": "object", "properties": {"type": {"const": "flip"}, "vertical": {"type": "boolean", "default": false}}, "required": ["type"]},
+                        {"type": "object", "properties": {"type": {"const": "pen"}, "points": points, "color": color, "width": {"type": "number", "default": 6}}, "required": ["type", "points"]},
+                        {"type": "object", "properties": {"type": {"const": "highlighter"}, "points": points, "color": color, "width": {"type": "number", "default": 24}}, "required": ["type", "points"]},
+                        {"type": "object", "properties": {"type": {"const": "arrow"}, "from": point, "to": point, "color": color, "width": {"type": "number", "default": 6}}, "required": ["type", "from", "to"]},
+                        {"type": "object", "properties": {"type": {"const": "rectangle"}, "rect": rect, "color": color, "width": {"type": "number", "default": 6}}, "required": ["type", "rect"]},
+                        {"type": "object", "properties": {"type": {"const": "ellipse"}, "rect": rect, "color": color, "width": {"type": "number", "default": 6}}, "required": ["type", "rect"]},
+                        {"type": "object", "properties": {"type": {"const": "text"}, "at": point, "text": {"type": "string"}, "size": {"type": "number", "default": 36}, "color": color}, "required": ["type", "at", "text"]},
+                        {"type": "object", "properties": {"type": {"const": "redact"}, "rect": rect}, "required": ["type", "rect"]}
+                    ]}},
+                    "replace": {"type": "boolean", "default": false}
+                },
+                "required": ["path", "steps"]
+            })
+        },
+    },
+    Tool {
+        name: "edit_video",
+        description: "Edit a video by a list of steps. trim alone or with mute needs no re-encode, so \
+    cuts snap to keyframes; crop and rotate re-encode and can take minutes. Writes `name edited.ext` beside \
+    it unless replace is true, which moves the original to the Trash and takes its name. Undo reverses either. \
+    .mkv and .webm fail. Prints the new path.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The video; ~ is your home."},
+                    "steps": {"type": "array", "items": {"oneOf": [
+                        {"type": "object", "properties": {"type": {"const": "trim"}, "start": {"type": "number"}, "end": {"type": "number"}}, "required": ["type", "start", "end"]},
+                        {"type": "object", "properties": {"type": {"const": "crop"}, "rect": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"}}, "required": ["x", "y", "width", "height"]}}, "required": ["type", "rect"]},
+                        {"type": "object", "properties": {"type": {"const": "rotate"}, "quarter_turns": {"type": "integer", "description": "Clockwise."}}, "required": ["type", "quarter_turns"]},
+                        {"type": "object", "properties": {"type": {"const": "mute"}}, "required": ["type"]}
+                    ]}},
+                    "replace": {"type": "boolean", "default": false}
+                },
+                "required": ["path", "steps"]
             })
         },
     },
@@ -3162,6 +3284,52 @@ mod tests {
         );
         assert_eq!(reply["result"]["isError"], false, "{reply}");
         assert!(folder.join("Images/a.png").exists());
+        drop(server);
+        serving.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn edit_tools_write_beside_the_original_and_replace_goes_through_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ops::Paths {
+            state: dir.path().join("state"),
+            settings: dir.path().join("settings.json"),
+            trash: dir.path().join("Trash"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let folder = dir.path().canonicalize().unwrap().join("pics");
+        std::fs::create_dir(&folder).unwrap();
+        let photo = folder.join("a.png");
+        image::RgbImage::new(40, 20).save(&photo).unwrap();
+        let mut server = Server::new(ops::Client::new(paths, None), places(dir.path()));
+        let reply = call(
+            &mut server,
+            json!({"name": "edit_image", "arguments": {
+                "path": photo,
+                "steps": [{"type": "rotate", "quarter_turns": 1}],
+            }}),
+        );
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        let edited = folder.join("a edited.png");
+        assert_eq!(text(&reply).trim(), edited.display().to_string());
+        assert_eq!(image::open(&edited).unwrap().width(), 20);
+        assert_eq!(image::open(&photo).unwrap().width(), 40);
+        // A bad step leaves nothing behind, not even a hidden file.
+        let reply = call(
+            &mut server,
+            json!({"name": "edit_image", "arguments": {
+                "path": photo,
+                "steps": [{"type": "crop", "rect": {"x": 500, "y": 500, "width": 5, "height": 5}}],
+            }}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        let names: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
         drop(server);
         serving.join().unwrap().unwrap();
     }

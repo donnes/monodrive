@@ -4,6 +4,7 @@
 pub mod apps;
 pub mod archives;
 pub mod cloud;
+pub mod edits;
 pub mod entries;
 pub mod index;
 pub mod info;

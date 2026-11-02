@@ -94,6 +94,14 @@ pub enum Request {
     Organize {
         groups: Vec<organize::Group>,
     },
+    /// Puts an edit's prepared file in place, refusing if the file it was made
+    /// from has changed. It never overwrites, and one Undo reverses it.
+    SaveEdit {
+        source: Opened,
+        /// Under `edits::PREPARED_PREFIX`, beside where it's going.
+        prepared: PathBuf,
+        save: SaveTo,
+    },
     /// Copies each item beside itself, named as Finder does.
     Duplicate {
         paths: Vec<PathBuf>,
@@ -220,6 +228,7 @@ impl Request {
             Request::NewFile { .. } => "New File",
             Request::NewFolderWith { .. } => "New Folder with Selection",
             Request::Organize { .. } => "Organize",
+            Request::SaveEdit { .. } => "Save Edit",
             Request::Duplicate { .. } => "Duplicate",
             Request::Copy { .. } => "Copy",
             Request::Move { .. } => "Move",
@@ -236,6 +245,37 @@ impl Request {
             Request::TrashDuplicates { .. } => "Trash Duplicates",
         }
     }
+}
+
+/// A file as it was when an edit began, so a save can tell it's still that file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Opened {
+    pub path: PathBuf,
+    id: FileId,
+    stamp: Stamp,
+}
+
+impl Opened {
+    pub fn read(path: &Path) -> Result<Self, String> {
+        let (id, stamp) = existing(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            id,
+            stamp,
+        })
+    }
+}
+
+/// Where a saved edit goes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SaveTo {
+    /// Beside the original as `name edited.ext`, numbered if that's taken.
+    Copy,
+    /// The original goes to the Trash and this takes its name.
+    Replace,
+    /// A name that must be free.
+    As { path: PathBuf },
 }
 
 /// Who asked. An agent is known by the name its MCP client gives, not by
@@ -865,7 +905,7 @@ impl Engine {
         // A folder made with items is all or nothing.
         let whole = matches!(
             submission.request,
-            Request::NewFolderWith { .. } | Request::Organize { .. }
+            Request::NewFolderWith { .. } | Request::Organize { .. } | Request::SaveEdit { .. }
         );
         if plans.iter().all(|(_, plan)| plan.is_err())
             || (whole && plans.iter().any(|(_, plan)| plan.is_err()))
@@ -954,6 +994,11 @@ impl Engine {
                 plans
             }
             Request::Organize { groups } => groups.iter().flat_map(organize::plan_group).collect(),
+            Request::SaveEdit {
+                source,
+                prepared,
+                save,
+            } => plan_save_edit(source, prepared, save),
             Request::Duplicate { paths } => each(paths, &|path| {
                 existing(path).map(|_| Plan::Create(Make::Copy))
             }),
@@ -1464,6 +1509,93 @@ fn unpark(steps: &mut [Step], start: &[bool], temp: &Temp) -> bool {
 fn movable(step: Step) -> Result<Plan, String> {
     step.ready(true, &[])?;
     Ok(Plan::Move(step))
+}
+
+/// `photo edited.jpg`, or the next free name after it.
+fn edited_name(path: &Path, extension: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_string_lossy();
+    let mut name = format!("{stem} edited");
+    if let Some(extension) = extension {
+        name.push('.');
+        name.push_str(&extension.to_string_lossy());
+    }
+    Some(free_name(&path.with_file_name(name)))
+}
+
+fn plan_save_edit(
+    source: &Opened,
+    prepared: &Path,
+    save: &SaveTo,
+) -> Vec<(PathBuf, Result<Plan, String>)> {
+    let path = &source.path;
+    let refuse = |why: String| vec![(path.clone(), Err(why))];
+    if disk::stamp(path).ok() != Some((source.id, source.stamp)) {
+        return refuse(format!("{} changed since it was opened.", path.display()));
+    }
+    let named = prepared
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(crate::edits::PREPARED_PREFIX));
+    if !named || disk::id(prepared).is_none() {
+        return refuse(format!("{} isn't a prepared edit.", prepared.display()));
+    }
+    // An ordinary move, so the journal knows the file's identity and both of its
+    // places, and a crash partway can still be undone. Undo puts it back under
+    // its hidden name, where Redo finds it.
+    let placed = |target: &Path| -> Result<Plan, String> {
+        let (id, stamp) = existing(prepared)?;
+        Ok(Plan::Move(Step {
+            id,
+            undone: Spot::Path(prepared.to_path_buf()),
+            done: Spot::Path(target.to_path_buf()),
+            applied: false,
+            stamp,
+            keep: None,
+        }))
+    };
+    let beside = |target: &Path| target.parent() == prepared.parent();
+    match save {
+        SaveTo::Copy => match edited_name(path, prepared.extension()) {
+            Some(target) if beside(&target) => {
+                let plan = placed(&target);
+                vec![(target, plan)]
+            }
+            _ => refuse(format!("{}: can't name a copy of this.", path.display())),
+        },
+        SaveTo::Replace => {
+            if !beside(path) {
+                return refuse(format!("{} isn't beside its original.", prepared.display()));
+            }
+            let same_format = match (path.extension(), prepared.extension()) {
+                (Some(old), Some(new)) => old.eq_ignore_ascii_case(new),
+                _ => false,
+            };
+            if !same_format {
+                return refuse(format!(
+                    "{} can't be saved in its own format. Save a copy instead.",
+                    path.display()
+                ));
+            }
+            // In order: the move's own check finds the name free by then.
+            vec![
+                (path.clone(), plan_trash(path)),
+                (path.clone(), placed(path)),
+            ]
+        }
+        SaveTo::As { path: target } => {
+            if !beside(target) {
+                return refuse(format!(
+                    "{} isn't beside {}.",
+                    prepared.display(),
+                    target.display()
+                ));
+            }
+            if disk::id(target).is_some() {
+                return refuse(format!("{} already exists.", target.display()));
+            }
+            vec![(target.clone(), placed(target))]
+        }
+    }
 }
 
 /// Moving `item` into the folder `folder` is about to make, beside it on
