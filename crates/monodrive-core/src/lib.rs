@@ -31,10 +31,53 @@ pub const VERSION: &str = match option_env!("MONODRIVE_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-/// `~/Library/Application Support/Monodrive`.
+/// Whether this build came from anywhere but `scripts/release`, the only thing
+/// that sets `MONODRIVE_VERSION`. A dev build keeps its own support folder,
+/// operation owner and index, so it can run beside the installed app.
+pub const DEV: bool = option_env!("MONODRIVE_VERSION").is_none();
+
+/// `~/Library/Application Support/Monodrive`, or `Monodrive (Dev)` in a dev build.
 pub fn support_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(std::path::PathBuf::from(home).join("Library/Application Support/Monodrive"))
+    let name = if DEV { "Monodrive (Dev)" } else { "Monodrive" };
+    Some(
+        std::path::PathBuf::from(home)
+            .join("Library/Application Support")
+            .join(name),
+    )
+}
+
+/// Gives a new dev support folder the installed app's settings and a clone of
+/// its saved index, so the first run skips onboarding and the disk crawl. Only
+/// reads the installed app's files, and fsearch saves `index.bin` by renaming,
+/// so a copy is always a whole index; events since then replay when it loads.
+pub fn seed_dev_support() {
+    let (true, Some(support), Some(home)) = (DEV, support_dir(), std::env::var_os("HOME")) else {
+        return;
+    };
+    let library = std::path::Path::new(&home).join("Library/Application Support");
+    let seed = |from: std::path::PathBuf, to: std::path::PathBuf| {
+        if to.exists() || !from.is_file() {
+            return;
+        }
+        let next = to.with_extension("seeding");
+        let copied = to
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::copy(&from, &next))
+            .and_then(|_| std::fs::rename(&next, &to));
+        if let Err(e) = copied {
+            eprintln!("monodrive: couldn't copy {}: {e}", from.display());
+        }
+    };
+    seed(
+        library.join("Monodrive/settings.json"),
+        support.join("settings.json"),
+    );
+    seed(
+        library.join("FSearch/index.bin"),
+        support.join("FSearch/index.bin"),
+    );
 }
 
 /// `~` and `~/rest` resolved against `$HOME`; other paths unchanged.

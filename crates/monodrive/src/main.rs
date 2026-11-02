@@ -1,4 +1,5 @@
 fn main() {
+    monodrive_core::seed_dev_support();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("mcp") => {

@@ -211,9 +211,18 @@ pub(crate) fn thousands(n: usize) -> String {
     out
 }
 
+/// Where the index lives: fsearch's shared folder, or the support folder in a
+/// dev build, whose fsearch may read and write another format.
+fn dir(home: &str) -> PathBuf {
+    match crate::support_dir() {
+        Some(support) if crate::DEV => support.join("FSearch"),
+        _ => fsearch::default_dir(home),
+    }
+}
+
 /// Whether an index is saved on disk. Doesn't load or start it.
 pub fn saved() -> bool {
-    std::env::var("HOME").is_ok_and(|home| fsearch::default_dir(&home).join("index.bin").is_file())
+    std::env::var("HOME").is_ok_and(|home| dir(&home).join("index.bin").is_file())
 }
 
 /// Whether this process has Full Disk Access. Fails at once where it doesn't,
@@ -241,7 +250,7 @@ impl Index {
     pub fn start() -> Result<Self, String> {
         let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
         let engine = fsearch::Engine::start(fsearch::Options {
-            dir: fsearch::default_dir(&home),
+            dir: dir(&home),
             home,
             skip: None,
         })?;

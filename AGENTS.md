@@ -25,7 +25,7 @@ These are good defaults, not hard rules. If one fights the task in front of you,
 ## Ways to hurt yourself
 
 1. **Killing by pattern.** Never `pkill -f`, `killall monodrive`, or kill a PID you found by matching a name or path. The user may be running Monodrive, Monocode or fsearch while you work. Kill only a PID you captured when you started the process.
-2. **Damaging the live index.** `~/Library/Application Support/FSearch` is shared by Monodrive, `monodrive mcp` and the fsearch CLI. Never delete it, edit its files, or point a test at it. The first process to start owns the index and the rest follow, so a stray debug build can become the owner. Stop what you started.
+2. **Damaging the live index.** `~/Library/Application Support/FSearch` is shared by the installed Monodrive, its `monodrive mcp` and the fsearch CLI. Never delete it, edit its files, or point a test at it. Only `scripts/release` builds open it. Every other build is a dev build and keeps its index in `Monodrive (Dev)/FSearch`, cloned from the live one on first run. Stop what you started.
 3. **Crawling the disk by accident.** Starting the index on a machine without one crawls the whole disk: minutes of CPU and several hundred MB of disk and memory. The app starts it at launch, as Spacedrive does, so every window you open loads or builds it; only onboarding holds it back, on a Mac with no saved index and no Full Disk Access, until the access is granted or onboarding closes. Run the app only when you need it, and stop it by PID. Tests must never call `Index::start`, and the MCP server starts it on its first search, since each agent session runs its own server.
 4. **Editing `vendor/`.** `vendor/gpui-pre*` is Monocode's patched GPUI. Sync it from Monocode when bumping GPUI; don't fix things in place.
 
@@ -57,10 +57,11 @@ The look comes from Monocode's GPUI app, `crates/monocode-gpui` on the `mc/migra
 ## Running
 
 - `cargo run -p monodrive` opens the window on your home folder; `cargo run -p monodrive -- <folder>` opens another.
+- Any build not made by `scripts/release` is a dev build, debug or release, and runs beside the installed app. It keeps its settings, session, journal, owner and index in `~/Library/Application Support/Monodrive (Dev)`, and its first run copies the installed app's settings and saved index there. It still changes real files and the real Trash, so point it at a scratch folder. Worktrees share that one folder, so stop one dev build before starting a different one.
 - `scripts/dev [folder]` rebuilds the app and relaunches it on the same folder whenever a source file changes, through watchexec. A failed build leaves the last app running, and Ctrl-C stops both. It relaunches into the foreground, so it's for a person at the keyboard, not for agents. `mise.toml` pins the watchexec it needs; run `mise install` in the repo.
-- `scripts/bundle` builds `target/debug/Monodrive.app` with the app icon, so the Dock and Finder show it. Run `target/debug/Monodrive.app/Contents/MacOS/monodrive` to launch it and keep its PID.
+- `scripts/bundle` builds `target/debug/Monodrive (Dev).app` with the dev icon, so the Dock and Finder show it. Run `"target/debug/Monodrive (Dev).app/Contents/MacOS/monodrive"` to launch it and keep its PID.
 - `scripts/release <version>` builds the signed disk image `.github/workflows/release.yml` publishes, and publishes nothing itself. `scripts/release-notes` writes the release's notes, which the updater reads.
-- `cargo run -p monodrive -- mcp` runs the MCP server on stdio. To try it with an agent, build first and register the binary, for example `claude mcp add monodrive -- <repo>/target/debug/monodrive mcp`.
+- `cargo run -p monodrive -- mcp` runs the MCP server on stdio. To try it with an agent, build first and register the binary, for example `claude mcp add monodrive-dev -- <repo>/target/debug/monodrive mcp`.
 - Opening the window starts the index. See rule 3 before running the app on a machine without one.
 
 ## Verifying
