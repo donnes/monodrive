@@ -1,11 +1,13 @@
 # Built-in previews and editing
 
-Status: steps 1 to 3 and 6 built (frame, system fallback, text, Markdown, pictures, archives, folders). Replaces the `QLPreviewPanel` from [plan 06](06-quick-look.md), which stays behind "Open in Quick Look" until a person confirms parity.
+Status: steps 1 to 6 built (frame, system fallback, text, Markdown, pictures, video, audio, HTML, archives, folders). Replaces the `QLPreviewPanel` from [plan 06](06-quick-look.md), which stays behind "Open in Quick Look" until a person confirms parity.
 
 Built differently from what's below, each to keep the first version small:
 
 - Markdown is a small renderer on `pulldown-cmark`, not a port of Monocode's 1,800 lines. Tables read as plain rows.
 - Pictures come from the system's generator (`monodrive_core::thumbnails`), not ImageIO directly. It reads HEIC and RAW and stops at the side asked for. Fit and 100% exist; pinch and pan by drag don't.
+- A video's poster is drawn only until its first frame is ready. With the poster under the player layer, the first frame stayed on screen during playback, even though native views otherwise sit above GPUI's background. That wasn't explained, only avoided.
+- Checked in a real window on 2026-11-02: a click inside `QLPreviewView` and inside `WKWebView`, then a real Space, reaches GPUI. A hostile page's script doesn't run. Playback advances the frame and the time.
 - `examples/preview_window.rs` opens one real window on a file, to look at what headless snapshots can't draw.
 
 ## Goal
