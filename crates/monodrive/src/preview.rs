@@ -2,7 +2,9 @@
 //! nothing of where it sits, so a preview column can use it later. Every read
 //! runs off the UI thread under a generation, so moving on drops a stale result.
 
+mod html;
 mod markdown;
+mod media;
 
 use crate::browser::{OpenSelected, QuickLook};
 use crate::native_view::Host;
@@ -12,7 +14,9 @@ use gpui::{
     ListState, MouseButton, Pixels, RenderImage, SharedString, StyledText, Task,
     UniformListScrollHandle, Window, canvas, div, list, prelude::*, px, uniform_list,
 };
+use html::Page;
 use markdown::{Block, Inline};
+use media::{Player, clock};
 use monodrive_core::archives::Archive;
 use monodrive_core::cloud;
 use monodrive_core::preview::{self, Kind, TEXT_LIMIT};
@@ -22,7 +26,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSRect, NSString, NSURL};
 use objc2_quick_look_ui::QLPreviewView;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -86,6 +90,11 @@ enum Body {
     Animated,
     Rows(Arc<Vec<String>>, Option<String>),
     System,
+    Media {
+        video: bool,
+        modified: u64,
+    },
+    Html,
 }
 
 type SystemView = (Host<QLPreviewView>, PathBuf);
@@ -107,6 +116,15 @@ pub struct PreviewView {
     blocks: Option<ListState>,
     /// The system's view, and the file it's on.
     native: Rc<RefCell<Option<SystemView>>>,
+    player: Rc<RefCell<Option<Player>>>,
+    page: Rc<RefCell<Option<Page>>>,
+    /// Where the scrub track was drawn, to turn a press into a time.
+    track: Rc<Cell<Bounds<Pixels>>>,
+    /// Redraws the strip while it plays.
+    _ticking: Option<Task<()>>,
+    /// How many more redraws to wait for a file's length. A broken file never
+    /// has one, and mustn't repaint forever.
+    loading_ticks: u32,
     _reading: Option<Task<()>>,
 }
 
@@ -131,6 +149,11 @@ impl PreviewView {
             scroll: UniformListScrollHandle::new(),
             blocks: None,
             native: Rc::new(RefCell::new(None)),
+            player: Rc::new(RefCell::new(None)),
+            page: Rc::new(RefCell::new(None)),
+            track: Rc::new(Cell::new(Bounds::default())),
+            _ticking: None,
+            loading_ticks: 0,
             _reading: None,
         }
     }
@@ -150,6 +173,7 @@ impl PreviewView {
         self.path = path.to_path_buf();
         self.folder = folder;
         self.generation += 1;
+        self.loading_ticks = 40;
         self.show_source = false;
         self.zoomed = false;
         self.body = Body::Loading;
@@ -184,8 +208,16 @@ impl PreviewView {
     pub fn set_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
         if self.covered != covered {
             self.covered = covered;
-            if covered && let Some((host, _)) = self.native.borrow().as_ref() {
-                host.hide();
+            if covered {
+                if let Some((host, _)) = self.native.borrow().as_ref() {
+                    host.hide();
+                }
+                if let Some(player) = self.player.borrow().as_ref() {
+                    player.hide();
+                }
+                if let Some(page) = self.page.borrow().as_ref() {
+                    page.host.hide();
+                }
             }
             cx.notify();
         }
@@ -201,6 +233,9 @@ impl PreviewView {
             }
         }
         self.native.borrow_mut().take();
+        self.player.borrow_mut().take();
+        self.page.borrow_mut().take();
+        self._ticking = None;
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -325,6 +360,208 @@ impl PreviewView {
         }
     }
 
+    fn html(&self) -> gpui::AnyElement {
+        let page = self.page.clone();
+        let path = self.path.clone();
+        let covered = self.covered;
+        canvas(
+            |_, _, _| {},
+            move |bounds: Bounds<Pixels>, _, window, _| {
+                if covered {
+                    return;
+                }
+                let mut page = page.borrow_mut();
+                if page.is_none() {
+                    *page = Page::new(&path, window);
+                }
+                if let Some(page) = page.as_ref() {
+                    page.host.place(bounds, window);
+                }
+            },
+        )
+        .size_full()
+        .into_any_element()
+    }
+
+    /// The picture, with the poster under it until its first frame, and the
+    /// strip below. Audio has its artwork there instead.
+    fn media(
+        &mut self,
+        video: bool,
+        modified: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let framed = self
+            .player
+            .borrow()
+            .as_ref()
+            .is_some_and(Player::frame_ready);
+        let poster = (!framed).then(|| self.picture(modified, window, cx));
+        let player = self.player.clone();
+        let path = self.path.clone();
+        let covered = self.covered;
+        let surface = canvas(
+            |_, _, _| {},
+            move |bounds: Bounds<Pixels>, _, window, _| {
+                if covered {
+                    return;
+                }
+                let mut player = player.borrow_mut();
+                if player.is_none() {
+                    *player = Player::new(&path, video, window);
+                }
+                if let Some(player) = player.as_ref() {
+                    player.place(bounds, window);
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+        let strip = self.strip(cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector(|| "preview-media".into())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .children(poster)
+                    .child(surface),
+            )
+            .child(strip)
+            .into_any_element()
+    }
+
+    /// Play, the scrub track, the time and mute, redrawn about 4 times a second
+    /// while it plays and not at all otherwise.
+    fn strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let held = self.player.borrow();
+        let playing = held.as_ref().is_some_and(Player::playing);
+        let muted = held.as_ref().is_some_and(Player::muted);
+        let position = held.as_ref().map_or(0., Player::position);
+        let duration = held.as_ref().and_then(Player::duration);
+        drop(held);
+        // Also while a file loads, as nothing else says when its length is known.
+        let loaded = self
+            .player
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.duration().is_some() && (p.frame_ready() || !p.is_video()));
+        if self._ticking.is_none() && (playing || (!loaded && self.loading_ticks > 0)) {
+            self._ticking = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    let going = this.update(cx, |this, cx| {
+                        cx.notify();
+                        let player = this.player.borrow();
+                        let playing = player.as_ref().is_some_and(Player::playing);
+                        let known = player.as_ref().is_some_and(|p| {
+                            p.duration().is_some() && (p.frame_ready() || !p.is_video())
+                        });
+                        drop(player);
+                        this.loading_ticks = this.loading_ticks.saturating_sub(1);
+                        let going = playing || (!known && this.loading_ticks > 0);
+                        if !going {
+                            this._ticking = None;
+                        }
+                        going
+                    });
+                    if !matches!(going, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
+        }
+        let fraction = duration.map_or(0., |total| (position / total).clamp(0., 1.)) as f32;
+        let track = self.track.clone();
+        let measured = self.track.clone();
+        theme::pane_bar(theme::TITLE_BAR_HEIGHT)
+            .gap_3()
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(content(0.06))
+            .child(
+                text_button(
+                    "preview-play",
+                    if playing { "Pause" } else { "Play" },
+                    ButtonLook::Secondary,
+                )
+                .debug_selector(|| "preview-play".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(player) = this.player.borrow().as_ref() {
+                        player.toggle();
+                    }
+                    cx.notify();
+                })),
+            )
+            .child(
+                div()
+                    .id("preview-track")
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(theme::BUTTON_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            let bounds = track.get();
+                            let width = bounds.size.width.as_f32();
+                            if width <= 0. {
+                                return;
+                            }
+                            let at = (event.position.x - bounds.origin.x).as_f32() / width;
+                            if let Some(player) = this.player.borrow().as_ref()
+                                && let Some(total) = player.duration()
+                            {
+                                player.seek(f64::from(at.clamp(0., 1.)) * total);
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        theme::progress_track()
+                            .w_full()
+                            .child(theme::progress_fill(fraction))
+                            .child(
+                                canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
+                                    .absolute()
+                                    .size_full(),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(theme::TEXT_SMALL))
+                    .text_color(content(0.65))
+                    .child(match duration {
+                        Some(total) => format!("{} / {}", clock(position), clock(total)),
+                        None => clock(position),
+                    }),
+            )
+            .child(
+                text_button(
+                    "preview-mute",
+                    if muted { "Unmute" } else { "Mute" },
+                    ButtonLook::Ghost,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(player) = this.player.borrow().as_ref() {
+                        player.toggle_muted();
+                    }
+                    cx.notify();
+                })),
+            )
+    }
+
     fn system(&self) -> gpui::AnyElement {
         let native = self.native.clone();
         let covered = self.covered;
@@ -379,15 +616,19 @@ fn read(path: &Path, light: bool) -> Body {
         Kind::NotDownloaded => notice("This file isn't downloaded. Download it to preview it."),
         Kind::NeedsAccess => notice("Needs Full Disk Access to preview."),
         Kind::Unplayable => notice("macOS can't play this format. Use Open With."),
-        // Plan 28's next steps draw these themselves.
-        Kind::Video | Kind::Audio | Kind::Html | Kind::System => Body::System,
+        Kind::System => Body::System,
+        Kind::Html => Body::Html,
+        Kind::Video => Body::Media {
+            video: true,
+            modified: modified(path),
+        },
+        Kind::Audio => Body::Media {
+            video: false,
+            modified: modified(path),
+        },
         Kind::Animated => Body::Animated,
         Kind::Picture => Body::Picture {
-            modified: std::fs::metadata(path)
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |at| at.as_secs()),
+            modified: modified(path),
         },
         Kind::Folder => folder_rows(path),
         Kind::Zip => zip_rows(path),
@@ -421,6 +662,14 @@ fn read(path: &Path, light: bool) -> Body {
             Err(why) => Body::Notice(why),
         },
     }
+}
+
+fn modified(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |at| at.as_secs())
 }
 
 fn folder_rows(path: &Path) -> Body {
@@ -685,6 +934,12 @@ impl Render for PreviewView {
         if !matches!(self.body, Body::System) {
             self.native.borrow_mut().take();
         }
+        if !matches!(self.body, Body::Media { .. }) {
+            self.player.borrow_mut().take();
+        }
+        if !matches!(self.body, Body::Html) {
+            self.page.borrow_mut().take();
+        }
         let content_view: gpui::AnyElement = match &self.body {
             Body::Loading => div().size_full().into_any_element(),
             Body::Notice(why) => div()
@@ -790,6 +1045,11 @@ impl Render for PreviewView {
                     .into_any_element()
             }
             Body::System => self.system(),
+            Body::Html => self.html(),
+            Body::Media { video, modified } => {
+                let (video, modified) = (*video, *modified);
+                self.media(video, modified, window, cx)
+            }
         };
         div()
             .debug_selector(|| "preview".into())
