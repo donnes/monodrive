@@ -12,6 +12,7 @@ pub mod naming;
 pub mod ops;
 pub mod paths;
 pub mod places;
+pub mod preview;
 pub mod remote;
 pub mod search;
 pub mod servers;

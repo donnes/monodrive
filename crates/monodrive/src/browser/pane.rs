@@ -230,6 +230,9 @@ pub struct Pane {
     pub(super) batch: Option<BatchRename>,
     /// Organize's review, in place of the list.
     pub(super) organizing: Option<Review>,
+    /// The preview, in place of the list. It leaves the keys on the list, so
+    /// the arrows still move the selection it follows.
+    pub(super) preview: Option<Entity<crate::preview::PreviewView>>,
     /// How many times the bar has opened, which tells each opening apart.
     pub(super) batch_sessions: u64,
     /// What's selected stays when the next listing lands, as it was put back.
@@ -353,6 +356,7 @@ impl Pane {
             renaming: None,
             batch: None,
             organizing: None,
+            preview: None,
             batch_sessions: 0,
             keep_selection: false,
             select_after: Vec::new(),
@@ -3691,7 +3695,15 @@ impl Pane {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.organize_page(cx).unwrap_or(list))
+            .child(
+                self.organize_page(cx)
+                    .or_else(|| {
+                        self.preview
+                            .clone()
+                            .map(gpui::IntoElement::into_any_element)
+                    })
+                    .unwrap_or(list),
+            )
             .child({
                 let bounds = self.list_bounds.clone();
                 canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
@@ -3713,6 +3725,10 @@ impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.follow_batch(window, cx);
         self.follow_organize(window, cx);
+        if let Some(preview) = &self.preview {
+            let covered = self.chrome.covered;
+            preview.update(cx, |preview, cx| preview.set_covered(covered, cx));
+        }
         let prefs = cx.global::<Preferences>();
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
         // Search results stay in relevance order, so no column shows a sort.
@@ -3753,7 +3769,8 @@ impl Render for Pane {
             .when(
                 self.layout() == View::List
                     && self.unavailable.is_none()
-                    && self.organizing.is_none(),
+                    && self.organizing.is_none()
+                    && self.preview.is_none(),
                 |d| {
                     d.child(
                         theme::pane_bar(theme::ROW_HEIGHT)

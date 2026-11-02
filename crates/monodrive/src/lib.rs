@@ -14,11 +14,13 @@ mod goto;
 mod jobs;
 mod menu;
 pub mod native;
+mod native_view;
 pub mod onboarding;
 mod palette;
 mod palettes;
 mod pasteboard;
 pub mod preferences;
+pub mod preview;
 #[cfg(feature = "profile")]
 mod profile;
 mod quick_look;
