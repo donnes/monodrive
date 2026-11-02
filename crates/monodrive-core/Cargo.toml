@@ -16,6 +16,13 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # Open With, through NSWorkspace.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSRunningApplication", "NSWorkspace"] }
 block2 = "0.6"
+# Video and other thumbnails, from the generator Finder uses, and their JPEGs
+# for agents.
+objc2-quick-look-thumbnailing = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "QLThumbnailGenerationRequest", "QLThumbnailGenerator", "QLThumbnailRepresentation", "bitflags"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
 # Compares names the way APFS does, which ignores Unicode normalization.
 unicode-normalization = "0.1"
 # No crates.io release yet, so it's pinned to a commit. Bump deliberately.
