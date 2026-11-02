@@ -53,7 +53,8 @@
 //! `batch-rename.png` is rename in the list with several selected, replacing
 //! text, `batch-rename-number.png` numbering them, `batch-rename-problem.png`
 //! a name that's taken, `batch-rename-grid.png` the bar from a grid and
-//! `batch-rename-narrow.png` in a narrow pane. Nothing is applied.
+//! `batch-rename-narrow.png` in a narrow pane, and `batch-rename-suggest.png`
+//! names read from the files. Nothing is applied.
 //!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
@@ -69,7 +70,7 @@ use monodrive::browser::{
     EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch, GoRecents,
     GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations, Places, Rename,
     SaveSearch, SearchContents, SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves,
-    ShowSearches, ToggleSplit, Undo,
+    ShowSearches, SuggestNames, ToggleSplit, Undo,
 };
 use monodrive::connect;
 use monodrive::native::{self, Native, SizeDone};
@@ -118,7 +119,9 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
         Arc::new(monodrive::assets::Assets),
         gpui_platform::current_headless_renderer,
     );
-    let scratch = tempfile::tempdir_in(out)?;
+    // The system's temp folder: the owner's socket path has a short limit,
+    // and a worktree's `out` runs past it.
+    let scratch = tempfile::tempdir()?;
     let trash = scratch.path().join("Trash");
     std::fs::create_dir_all(&trash)?;
     let places = made_up_places(scratch.path(), &trash)?;
@@ -479,6 +482,16 @@ fn shoot_batch_rename(
     dispatch(cx, window, &FocusNext)?;
     type_text(cx, window, "Brief.pdf")?;
     save(cx, window, out, "batch-rename-problem")?;
+
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    dispatch(cx, window, &SelectLast)?;
+    for _ in 0..4 {
+        dispatch(cx, window, &ExtendPrevious)?;
+    }
+    dispatch(cx, window, &SuggestNames)?;
+    cx.run_until_parked();
+    save(cx, window, out, "batch-rename-suggest")?;
 
     cx.update(|cx| {
         cx.set_global(Preferences {

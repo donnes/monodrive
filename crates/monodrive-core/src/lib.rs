@@ -8,6 +8,7 @@ pub mod entries;
 pub mod index;
 pub mod info;
 pub mod mcp;
+pub mod naming;
 pub mod ops;
 pub mod paths;
 pub mod places;

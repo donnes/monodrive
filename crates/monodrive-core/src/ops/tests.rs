@@ -1274,6 +1274,46 @@ fn touch(folder: &Path, names: &[&str]) -> Vec<PathBuf> {
 }
 
 #[test]
+fn a_names_rule_collides_swaps_refuses_stale_previews_and_undoes_whole() {
+    let (_dir, files, mut engine) = engine();
+    let [a, b, c] = touch(&files, &["a.txt", "b.txt", "c.txt"])
+        .try_into()
+        .unwrap();
+    let names = |names: [&str; 3]| rename::Rule::Names {
+        names: names.map(String::from).to_vec(),
+    };
+    let batch = [a.as_path(), &b, &c];
+    let paths = batch.map(Path::to_path_buf);
+    let plan = rename::Plan::new(&paths, &names(["same.txt", "same.txt", ""]));
+    assert!(matches!(plan.rows[1].status, rename::Status::Collision(_)));
+    assert_eq!(plan.rows[2].status, rename::Status::Unchanged);
+
+    let stale = rename::Plan::new(&paths, &names(["x.txt", "y.txt", ""])).fingerprint();
+    std::fs::write(&b, "changed since").unwrap();
+    let refused = run(
+        &mut engine,
+        Request::RenameMany {
+            paths: paths.to_vec(),
+            rule: names(["x.txt", "y.txt", ""]),
+            preview: Some(stale),
+            skip_problems: false,
+        },
+    );
+    assert!(refused.is_err());
+
+    // A swap, which needs a hidden name on the way, and one Undo reverses all.
+    let swapped = names(["b.txt", "a.txt", "d.txt"]);
+    assert_eq!(
+        moved(run(&mut engine, rename_many(&batch, swapped))).len(),
+        3
+    );
+    assert_eq!(read(&files.join("a.txt")), "changed since");
+    moved(run(&mut engine, Request::Undo));
+    assert_eq!(read(&files.join("b.txt")), "changed since");
+    assert!(files.join("c.txt").exists() && !files.join("d.txt").exists());
+}
+
+#[test]
 fn a_batch_rename_numbers_in_the_order_given_keeps_extensions_and_undoes_whole() {
     let (_dir, files, mut engine) = engine();
     let [c, a, b, notes] = touch(&files, &["c.jpg", "a.png", "b.jpg", "txt notes.txt"])

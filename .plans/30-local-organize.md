@@ -1,6 +1,6 @@
 # Name and organize files
 
-Status: naming and rules-based sorting planned, for text-based files only. Running a model is held behind the speed gate below. Organize's review page still needs a UI pick.
+Status: Suggest Names built, for text-based files only; the 200-document score below hasn't been run. Rules-based sorting planned. Running a model is held behind the speed gate below. Organize's review page still needs a UI pick.
 
 ## Goal
 

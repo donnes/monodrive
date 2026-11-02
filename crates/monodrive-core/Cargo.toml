@@ -23,6 +23,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 base64 = "0.22"
+# A PDF's title and first page, for suggested names.
+objc2-pdf-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "PDFDocument", "PDFPage"] }
 # Compares names the way APFS does, which ignores Unicode normalization.
 unicode-normalization = "0.1"
 # No crates.io release yet, so it's pinned to a commit. Bump deliberately.
@@ -45,4 +47,8 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 
 [[bench]]
 name = "listing"
+harness = false
+
+[[bench]]
+name = "naming"
 harness = false

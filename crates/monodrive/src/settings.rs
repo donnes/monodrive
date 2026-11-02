@@ -1040,13 +1040,28 @@ impl SettingsView {
                     ),
                     row(
                         "Show thumbnails",
-                        Some("Images show their pictures instead of an icon."),
+                        Some("Images and videos show a picture instead of an icon."),
                         self.focusable(
                             "thumbnails",
                             true,
                             toggle("thumbnails", "Show thumbnails", p.thumbnails, |p, on| {
                                 p.thumbnails = on
                             }),
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Suggest names in sentence case",
+                        Some("Invoice 4471.pdf instead of invoice-4471.pdf."),
+                        self.focusable(
+                            "sentence-case-names",
+                            true,
+                            toggle(
+                                "sentence-case-names",
+                                "Suggest names in sentence case",
+                                p.sentence_case_names,
+                                |p, on| p.sentence_case_names = on,
+                            ),
                             cx,
                         ),
                     ),

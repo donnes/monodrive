@@ -14,8 +14,8 @@ use super::{
     NewFolderWithSelection, OpenInTerminal, OpenSelected, PageDown, PageUp, Places, PutBack, Redo,
     Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SearchContents,
     SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious, ShowContextMenu,
-    ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, Undo, ViewAsGrid,
-    ViewAsList, home, short_reason, sidebar, trash, with_owner,
+    ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, Undo,
+    ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -2597,7 +2597,9 @@ impl Pane {
                 } else {
                     content(0.65)
                 };
-                let rename = self.rename_field(&entry.path, 260., cx);
+                let rename = self
+                    .rename_field(&entry.path, 260., cx)
+                    .or_else(|| self.suggestion_field(&entry.path, 260., cx));
                 let grabs = !missing && rename.is_none() && self.batch.is_none();
                 let new = self
                     .batch
@@ -2668,6 +2670,15 @@ impl Pane {
                                                         _ => d,
                                                     })
                                                     .child(name.clone())
+                                                    .map(|d| match selected && new.is_some() {
+                                                        true => self.suggested_name(
+                                                            d,
+                                                            &entry.path,
+                                                            name,
+                                                            cx,
+                                                        ),
+                                                        false => d,
+                                                    })
                                                     .into_any_element()
                                             }
                                         }),
@@ -3597,6 +3608,11 @@ impl Pane {
             .when(self.renaming.is_none() && !self.selection.is_empty(), |d| {
                 d.on_action(
                     cx.listener(|this, _: &Rename, window, cx| this.rename_selected(window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &SuggestNames, window, cx| {
+                        this.suggest_names(window, cx)
+                    }),
                 )
             })
             .when(self.showing_recents(), |d| {
