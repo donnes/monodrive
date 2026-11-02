@@ -1108,6 +1108,9 @@ impl PreviewView {
         } else {
             text_button("edit-save", "Save", ButtonLook::Disabled)
         };
+        // One button split in two: only the outer ends are round.
+        // design: the inner corners of a split button meet square.
+        let save = save.rounded_r_none().pr(px(8.));
         let more = theme::button(
             "edit-more",
             if changed {
@@ -1116,8 +1119,10 @@ impl PreviewView {
                 ButtonLook::Disabled
             },
         )
-        .px(px(4.))
-        .child(theme::icon("chevron-down-hi", 12.).text_color(if changed {
+        // design: the inner corners of a split button meet square.
+        .rounded_l_none()
+        .px(px(5.))
+        .child(theme::icon("chevron-down-hi", 14.).text_color(if changed {
             theme::on_accent()
         } else {
             content(0.3)
