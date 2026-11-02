@@ -8,6 +8,7 @@ Built differently from what's below, each to keep the first version small:
 - Pictures come from the system's generator (`monodrive_core::thumbnails`), not ImageIO directly. It reads HEIC and RAW and stops at the side asked for. Fit and 100% exist; pinch and pan by drag don't.
 - A video's poster is drawn only until its first frame is ready. With the poster under the player layer, the first frame stayed on screen during playback, even though native views otherwise sit above GPUI's background. That wasn't explained, only avoided.
 - Checked in a real window on 2026-11-02: a click inside `QLPreviewView` and inside `WKWebView`, then a real Space, reaches GPUI. A hostile page's script doesn't run. Playback advances the frame and the time.
+- An edit is written by whoever asks, the window or an agent, under a hidden name beside where it's going, and `Request::SaveEdit` only checks the original and moves that file into place. A long video export so never holds up the owner, but it also isn't a job in the title bar's ring: its progress and cancel belong to whoever started it. Undoing leaves the file under its hidden name for Redo, and nothing cleans it up later, so it keeps using disk. That is a known cost.
 - `examples/preview_window.rs` opens one real window on a file, to look at what headless snapshots can't draw.
 
 ## Goal

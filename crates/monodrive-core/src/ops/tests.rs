@@ -1273,6 +1273,170 @@ fn touch(folder: &Path, names: &[&str]) -> Vec<PathBuf> {
         .collect()
 }
 
+fn prepared_edit(folder: &Path, text: &str) -> PathBuf {
+    let prepared = crate::edits::prepared_path(folder, "txt");
+    std::fs::write(&prepared, text).unwrap();
+    prepared
+}
+
+#[test]
+fn a_saved_edit_numbers_around_a_taken_name_and_undoes_to_the_trash() {
+    let (_dir, files, mut engine) = engine();
+    let [photo, taken] = touch(&files, &["photo.txt", "photo edited.txt"])
+        .try_into()
+        .unwrap();
+    let source = Opened::read(&photo).unwrap();
+    let save = |prepared: PathBuf, save: SaveTo| Request::SaveEdit {
+        source: source.clone(),
+        prepared,
+        save,
+    };
+    let made = moved(run(
+        &mut engine,
+        save(prepared_edit(&files, "new"), SaveTo::Copy),
+    ));
+    let numbered = files.join("photo edited 2.txt");
+    assert_eq!(made, std::slice::from_ref(&numbered));
+    assert_eq!(read(&numbered), "new");
+    assert_eq!(
+        read(&taken),
+        "photo edited.txt",
+        "a taken name stays as it was"
+    );
+    assert_eq!(read(&photo), "photo.txt");
+    moved(run(&mut engine, Request::Undo));
+    assert!(!numbered.exists());
+
+    // Save As only takes a free name.
+    let refused = run(
+        &mut engine,
+        save(
+            prepared_edit(&files, "x"),
+            SaveTo::As {
+                path: taken.clone(),
+            },
+        ),
+    );
+    assert!(refused.is_err());
+    assert_eq!(read(&taken), "photo edited.txt");
+}
+
+#[test]
+fn replacing_keeps_the_original_in_the_trash_and_undo_restores_that_same_file() {
+    let (_dir, files, mut engine) = engine();
+    let [photo] = touch(&files, &["photo.txt"]).try_into().unwrap();
+    let inode = disk::id(&photo).unwrap();
+    let request = Request::SaveEdit {
+        source: Opened::read(&photo).unwrap(),
+        prepared: prepared_edit(&files, "edited"),
+        save: SaveTo::Replace,
+    };
+    moved(run(&mut engine, request));
+    assert_eq!(read(&photo), "edited");
+    assert_ne!(disk::id(&photo), Some(inode));
+    moved(run(&mut engine, Request::Undo));
+    assert_eq!(read(&photo), "photo.txt");
+    assert_eq!(disk::id(&photo), Some(inode), "the same file, not a copy");
+    moved(run(&mut engine, Request::Redo));
+    assert_eq!(read(&photo), "edited");
+}
+
+#[test]
+fn a_replace_cut_short_by_a_crash_can_still_be_undone() {
+    let (dir, files, mut engine) = engine();
+    let [photo] = touch(&files, &["photo.txt"]).try_into().unwrap();
+    let source = Opened::read(&photo).unwrap();
+    let prepared = prepared_edit(&files, "edited");
+    let steps: Vec<Step> = plan_save_edit(&source, &prepared, &SaveTo::Replace)
+        .into_iter()
+        .map(|(_, plan)| match plan.unwrap() {
+            Plan::Move(step) => step,
+            _ => panic!("every part of a replace is a move"),
+        })
+        .collect();
+    let submitted = submission(
+        Origin::Window,
+        Request::SaveEdit {
+            source,
+            prepared: prepared.clone(),
+            save: SaveTo::Replace,
+        },
+    );
+    engine
+        .begin(&submitted, None, steps, Vec::new(), Vec::new())
+        .unwrap();
+    // Both happened, and the owner died before recording the end.
+    disk::trash(&photo).unwrap();
+    disk::rename_new(&prepared, &photo).unwrap();
+    drop(engine);
+
+    let mut engine = Engine::open(paths(dir.path())).unwrap();
+    assert!(engine.submit(submitted).unwrap().interrupted);
+    assert_eq!(read(&photo), "edited");
+    moved(run(&mut engine, Request::Undo));
+    assert_eq!(read(&photo), "photo.txt");
+}
+
+#[test]
+fn a_replace_that_would_change_the_format_is_refused() {
+    let (_dir, files, mut engine) = engine();
+    let [photo] = touch(&files, &["photo.webp"]).try_into().unwrap();
+    let prepared = crate::edits::prepared_path(&files, "png");
+    std::fs::write(&prepared, "x").unwrap();
+    let refused = run(
+        &mut engine,
+        Request::SaveEdit {
+            source: Opened::read(&photo).unwrap(),
+            prepared: prepared.clone(),
+            save: SaveTo::Replace,
+        },
+    );
+    assert!(refused.unwrap_err().contains("own format"));
+    assert_eq!(read(&photo), "photo.webp");
+    // A copy takes the format it was written in.
+    let made = moved(run(
+        &mut engine,
+        Request::SaveEdit {
+            source: Opened::read(&photo).unwrap(),
+            prepared,
+            save: SaveTo::Copy,
+        },
+    ));
+    assert_eq!(made, [files.join("photo edited.png")]);
+}
+
+#[test]
+fn a_file_changed_since_it_opened_refuses_the_save_and_only_prepared_files_move() {
+    let (_dir, files, mut engine) = engine();
+    let [photo, other] = touch(&files, &["photo.txt", "other.txt"])
+        .try_into()
+        .unwrap();
+    let source = Opened::read(&photo).unwrap();
+    std::fs::write(&photo, "changed underneath").unwrap();
+    let prepared = prepared_edit(&files, "edited");
+    let refused = run(
+        &mut engine,
+        Request::SaveEdit {
+            source,
+            prepared: prepared.clone(),
+            save: SaveTo::Replace,
+        },
+    );
+    assert!(refused.unwrap_err().contains("changed since"));
+    assert_eq!(read(&photo), "changed underneath");
+    // A file that isn't a prepared edit can't be moved this way.
+    let refused = run(
+        &mut engine,
+        Request::SaveEdit {
+            source: Opened::read(&photo).unwrap(),
+            prepared: other.clone(),
+            save: SaveTo::Copy,
+        },
+    );
+    assert!(refused.unwrap_err().contains("isn't a prepared edit"));
+    assert!(other.exists());
+}
+
 #[test]
 fn organize_moves_as_one_undo_never_overwrites_and_refuses_a_stale_plan() {
     let (_dir, files, mut engine) = engine();
