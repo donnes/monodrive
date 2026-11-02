@@ -1132,6 +1132,7 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
     let folder_menu = vec![
         "New Folder",
         "New File",
+        "Organize Folder…",
         "Get Info",
         "Paste",
         "as List",

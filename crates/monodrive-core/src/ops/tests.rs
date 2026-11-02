@@ -1274,6 +1274,70 @@ fn touch(folder: &Path, names: &[&str]) -> Vec<PathBuf> {
 }
 
 #[test]
+fn organize_moves_as_one_undo_never_overwrites_and_refuses_a_stale_plan() {
+    let (_dir, files, mut engine) = engine();
+    let folder = files.canonicalize().unwrap();
+    touch(&folder, &["a.png", "b.png", "c.pdf"]);
+    std::fs::create_dir(folder.join("Documents")).unwrap();
+    let plan = organize::propose(&folder).unwrap();
+    let groups = plan.groups.clone();
+
+    // A file changed since the review refuses it all.
+    std::fs::write(folder.join("b.png"), "changed").unwrap();
+    let refused = run(
+        &mut engine,
+        Request::Organize {
+            groups: groups.clone(),
+        },
+    );
+    assert!(refused.unwrap_err().contains("changed since"));
+    assert!(folder.join("a.png").exists() && !folder.join("Images").exists());
+
+    let groups = organize::propose(&folder).unwrap().groups;
+    // A name taken at the destination refuses it all too.
+    std::fs::write(folder.join("Documents/c.pdf"), "other").unwrap();
+    let taken = run(
+        &mut engine,
+        Request::Organize {
+            groups: groups.clone(),
+        },
+    );
+    assert!(taken.is_err());
+    assert!(folder.join("c.pdf").exists());
+    assert_eq!(read(&folder.join("Documents/c.pdf")), "other");
+    std::fs::rename(
+        folder.join("Documents/c.pdf"),
+        folder.join("Documents/d.pdf"),
+    )
+    .unwrap();
+
+    let groups = organize::propose(&folder).unwrap().groups;
+    moved(run(&mut engine, Request::Organize { groups }));
+    assert!(folder.join("Images/a.png").exists() && folder.join("Documents/c.pdf").exists());
+    moved(run(&mut engine, Request::Undo));
+    assert!(folder.join("a.png").exists() && folder.join("c.pdf").exists());
+    assert!(!folder.join("Images").exists(), "the folder it made goes");
+    assert!(
+        folder.join("Documents/d.pdf").exists(),
+        "one already there stays"
+    );
+    moved(run(&mut engine, Request::Redo));
+    assert!(folder.join("Images/b.png").exists());
+}
+
+#[test]
+fn a_group_cannot_reach_outside_its_folder() {
+    let (_dir, files, mut engine) = engine();
+    let folder = files.canonicalize().unwrap();
+    touch(&folder, &["a.png"]);
+    let mut groups = organize::propose(&folder).unwrap().groups;
+    groups[0].folder = folder.parent().unwrap().join("Elsewhere");
+    let refused = run(&mut engine, Request::Organize { groups });
+    assert!(refused.unwrap_err().contains("isn't beside"));
+    assert!(folder.join("a.png").exists());
+}
+
+#[test]
 fn a_names_rule_collides_swaps_refuses_stale_previews_and_undoes_whole() {
     let (_dir, files, mut engine) = engine();
     let [a, b, c] = touch(&files, &["a.txt", "b.txt", "c.txt"])

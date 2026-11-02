@@ -615,3 +615,44 @@ fn suggest_names_reads_files_and_applies_as_one_undo(cx: &mut TestAppContext) {
     assert_eq!(on_disk(&folder), ["a.txt", "b.md", "c.jpg"]);
     release(owned, cx);
 }
+
+/// The way in is the command, a group can be left out, Esc changes nothing, and
+/// running leaves one Undo.
+#[gpui::test]
+fn organize_reviews_then_moves_only_what_stayed_on(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().canonicalize().unwrap().join("messy");
+    std::fs::create_dir(&folder).unwrap();
+    for name in ["a.png", "b.png", "c.pdf", "d.xyz"] {
+        std::fs::write(folder.join(name), name).unwrap();
+    }
+    let owned = own(cx);
+    let (browser, cx) = browse(&folder, cx);
+    let shown = |browser: &Entity<Browser>, cx: &mut VisualTestContext| {
+        in_pane(browser, cx, |pane, _| pane.organizing.is_some())
+    };
+    cx.dispatch_action(OrganizeFolder);
+    cx.run_until_parked();
+    assert!(shown(&browser, cx));
+    press(cx, "escape");
+    assert!(!shown(&browser, cx));
+    assert_eq!(on_disk(&folder), ["a.png", "b.png", "c.pdf", "d.xyz"]);
+    // Back leaves it too, with no folder to go back to.
+    cx.dispatch_action(OrganizeFolder);
+    cx.run_until_parked();
+    cx.dispatch_action(Back);
+    cx.run_until_parked();
+    assert!(!shown(&browser, cx));
+
+    cx.dispatch_action(OrganizeFolder);
+    cx.run_until_parked();
+    click(cx, "organize-Documents");
+    click(cx, "organize-run");
+    cx.run_until_parked();
+    assert!(!shown(&browser, cx));
+    assert_eq!(on_disk(&folder), ["Images", "c.pdf", "d.xyz"]);
+    assert_eq!(on_disk(&folder.join("Images")), ["a.png", "b.png"]);
+    press(cx, "cmd-z");
+    assert_eq!(on_disk(&folder), ["a.png", "b.png", "c.pdf", "d.xyz"]);
+    release(owned, cx);
+}

@@ -518,7 +518,10 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let pane = self.pane().read(cx);
-        let (back, forward) = (pane.at > 0, pane.at + 1 < pane.history.len());
+        let (back, forward) = (
+            pane.at > 0 || pane.organizing.is_some(),
+            pane.at + 1 < pane.history.len(),
+        );
         let closed = !cx.global::<Preferences>().show_sidebar;
         // With no sidebar to hold it, the field shows while it's in use.
         let searching = closed
@@ -547,8 +550,8 @@ impl Browser {
             })
             .child(
                 icon_button("back", "Back", "chevron-left", back).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.pane().update(cx, |pane, cx| pane.step_history(-1, cx));
+                    |this, _, window, cx| {
+                        this.pane().update(cx, |pane, cx| pane.go_back(window, cx));
                     },
                 )),
             )

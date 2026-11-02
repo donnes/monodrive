@@ -34,7 +34,7 @@ Update a plan's row when its work lands on `main`.
 | 27 Overview | UI picked, not built | |
 | 28 Built-in previews and editing | Planned; UI picked | |
 | 29 Video thumbnails | Done; a real share and a folder behind a privacy prompt need a person to check | |
-| 30 Name and organize files | Planned, text-based files with no model; a model is held behind a speed gate; Organize's review needs a UI pick | |
+| 30 Name and organize files | Suggest Names and rules-only Organize done, for text-based files with no model; a model is held behind a speed gate; the review page is option A, picked without drawn options | |
 
 ## UI picks
 

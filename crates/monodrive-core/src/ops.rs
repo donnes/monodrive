@@ -7,6 +7,7 @@
 
 pub(crate) mod disk;
 mod jobs;
+pub mod organize;
 mod owner;
 pub mod rename;
 mod transfers;
@@ -86,6 +87,12 @@ pub enum Request {
     NewFolderWith {
         path: PathBuf,
         items: Vec<PathBuf>,
+    },
+    /// Sorts a folder's items into folders directly inside it, making those it
+    /// lacks, as one operation. Refused whole if any item changed since
+    /// `organize::propose` read it.
+    Organize {
+        groups: Vec<organize::Group>,
     },
     /// Copies each item beside itself, named as Finder does.
     Duplicate {
@@ -212,6 +219,7 @@ impl Request {
             Request::NewFolder { .. } => "New Folder",
             Request::NewFile { .. } => "New File",
             Request::NewFolderWith { .. } => "New Folder with Selection",
+            Request::Organize { .. } => "Organize",
             Request::Duplicate { .. } => "Duplicate",
             Request::Copy { .. } => "Copy",
             Request::Move { .. } => "Move",
@@ -855,7 +863,10 @@ impl Engine {
     fn run(&mut self, submission: Submission) -> Result<Outcome, String> {
         let plans = self.plan(&submission.request);
         // A folder made with items is all or nothing.
-        let whole = matches!(submission.request, Request::NewFolderWith { .. });
+        let whole = matches!(
+            submission.request,
+            Request::NewFolderWith { .. } | Request::Organize { .. }
+        );
         if plans.iter().all(|(_, plan)| plan.is_err())
             || (whole && plans.iter().any(|(_, plan)| plan.is_err()))
         {
@@ -942,6 +953,7 @@ impl Engine {
                 );
                 plans
             }
+            Request::Organize { groups } => groups.iter().flat_map(organize::plan_group).collect(),
             Request::Duplicate { paths } => each(paths, &|path| {
                 existing(path).map(|_| Plan::Create(Make::Copy))
             }),

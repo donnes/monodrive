@@ -11,7 +11,7 @@ use crate::expand_home;
 use crate::index::{self, Caps, GrepMode, Index, Status};
 use crate::info::{self, Info};
 use crate::naming;
-use crate::ops::{self, Conflict, Done, Job, Origin, Request, rename};
+use crate::ops::{self, Conflict, Done, Job, Origin, Request, organize, rename};
 use crate::places::{self, Availability, Place, SavedSearch};
 use crate::remote::{self, Connection, Connections, RemoteEntry, RemoteError, RemotePath, Source};
 use crate::search::{Query, Scope};
@@ -102,6 +102,8 @@ pub struct Server {
     /// What cleanup_duplicates previewed, oldest first,
     /// so a confirm runs only that.
     plans: Vec<Previewed>,
+    /// What organize previewed last: its token, when, and the plan.
+    organizing: Option<(String, Instant, organize::Proposal)>,
     /// Each opened on the first tool that needs it; each session its own.
     remote: Connections,
 }
@@ -169,6 +171,10 @@ enum ToolCall {
     Rename {
         path: String,
         name: String,
+    },
+    Organize {
+        path: Option<String>,
+        confirm: Option<String>,
     },
     SuggestNames {
         paths: Vec<String>,
@@ -446,6 +452,7 @@ impl Server {
             remote: Connections::new(places.clone(), remote::ssh::connector()),
             places,
             plans: Vec::new(),
+            organizing: None,
             git: None,
         }
     }
@@ -597,6 +604,11 @@ impl Server {
                 path: expand_home(&path),
                 name,
             }),
+            ToolCall::Organize { path, confirm } => match (path, confirm) {
+                (_, Some(token)) => self.run_organize(&token),
+                (Some(path), None) => self.preview_organize(&expand_home(&path)),
+                (None, None) => Err("Give path to preview, or confirm to run a preview.".into()),
+            },
             ToolCall::SuggestNames { paths, style } => Ok(expand(&paths).iter().fold(
                 String::new(),
                 |mut out, path| {
@@ -1198,6 +1210,42 @@ impl Server {
         } else {
             Ok(out)
         }
+    }
+
+    /// What sorting `folder` would do, kept under a token for `run_organize`.
+    /// A new preview replaces the last one.
+    fn preview_organize(&mut self, folder: &Path) -> Result<String, String> {
+        self.organizing = None;
+        let proposal = organize::propose(folder)?;
+        let mut out = String::new();
+        for group in &proposal.groups {
+            let _ = writeln!(out, "{}/ ({})", group.folder.display(), group.reason);
+            for item in &group.items {
+                let _ = writeln!(out, "  {}", item.path.display());
+            }
+        }
+        if proposal.groups.is_empty() {
+            let _ = writeln!(out, "No rule places anything in {}.", folder.display());
+            return Ok(out);
+        }
+        let _ = writeln!(out, "left where they are: {}", proposal.unplaced);
+        let token = format!("{:016x}", RandomState::new().hash_one(folder));
+        let _ = writeln!(out, "token: {token}");
+        self.organizing = Some((token, Instant::now(), proposal));
+        Ok(out)
+    }
+
+    fn run_organize(&mut self, token: &str) -> Result<String, String> {
+        let kept = self
+            .organizing
+            .as_ref()
+            .filter(|(kept, made, _)| kept == token && made.elapsed() < PLAN_LIFE)
+            .map(|(_, _, proposal)| proposal.groups.clone())
+            .ok_or("No previewed plan with that token in this session. A plan runs once, within 10 minutes; preview again with path.")?;
+        // Kept if the owner refuses it, so it can be confirmed again.
+        let done = self.change(Request::Organize { groups: kept })?;
+        self.organizing = None;
+        Ok(done)
     }
 
     /// Asks macOS to download or remove the download of each path, a line
@@ -2104,7 +2152,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 64] = [
+pub const TOOLS: [Tool; 65] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2231,6 +2279,22 @@ pub const TOOLS: [Tool; 64] = [
                     "name": {"type": "string"}
                 },
                 "required": ["path", "name"]
+            })
+        },
+    },
+    Tool {
+        name: "organize",
+        description: "Sort one folder's files into folders directly inside it, by rules: screenshots, \
+    installers, a shared name start, then kind. Folders, links and hidden files stay, and nothing is \
+    overwritten. With path it previews, changing nothing, and prints a token. With confirm: that token, \
+    it runs exactly that plan as one change undo reverses, and refuses if any file changed since.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The folder to preview. Absolute; ~ is your home."},
+                    "confirm": {"type": "string", "description": "The token from a preview."}
+                }
             })
         },
     },
@@ -3039,6 +3103,67 @@ mod tests {
         let lines: Vec<&str> = text(&reply).lines().collect();
         assert_eq!(lines[0], format!("{} → invoice-4471.txt", scan.display()));
         assert!(lines[1].ends_with("(unchanged)"), "{lines:?}");
+    }
+
+    #[test]
+    fn organize_previews_then_runs_only_what_it_showed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ops::Paths {
+            state: dir.path().join("state"),
+            settings: dir.path().join("settings.json"),
+            trash: dir.path().join("Trash"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let folder = dir.path().canonicalize().unwrap().join("messy");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("a.png"), "a").unwrap();
+        let mut server = Server::new(ops::Client::new(paths, None), places(dir.path()));
+        let reply = call(
+            &mut server,
+            json!({"name": "organize", "arguments": {"path": folder}}),
+        );
+        assert!(text(&reply).contains("Images/ ("), "{reply}");
+        assert!(folder.join("a.png").exists(), "a preview changes nothing");
+        let token = text(&reply)
+            .lines()
+            .find_map(|line| line.strip_prefix("token: "))
+            .unwrap()
+            .to_string();
+        let reply = call(
+            &mut server,
+            json!({"name": "organize", "arguments": {"confirm": "nope"}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        // A new preview, even of nothing, ends the last one's token.
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        call(
+            &mut server,
+            json!({"name": "organize", "arguments": {"path": empty}}),
+        );
+        let reply = call(
+            &mut server,
+            json!({"name": "organize", "arguments": {"confirm": token}}),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        let reply = call(
+            &mut server,
+            json!({"name": "organize", "arguments": {"path": folder}}),
+        );
+        let token = text(&reply)
+            .lines()
+            .find_map(|line| line.strip_prefix("token: "))
+            .unwrap()
+            .to_string();
+        let reply = call(
+            &mut server,
+            json!({"name": "organize", "arguments": {"confirm": token}}),
+        );
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        assert!(folder.join("Images/a.png").exists());
+        drop(server);
+        serving.join().unwrap().unwrap();
     }
 
     fn places(dir: &std::path::Path) -> places::Store {

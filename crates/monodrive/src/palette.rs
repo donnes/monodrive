@@ -1164,7 +1164,7 @@ fn glyph_for(command: &Command) -> &'static str {
         "Open" => "external-link",
         "Open With" => "app-window",
         "Quick Look" => "eye",
-        "Rename" | "Suggest Names" => "pencil",
+        "Rename" | "Suggest Names" | "Organize Folder…" => "pencil",
         "Duplicate" | "Copy" => "copy",
         "Copy Path" => "link",
         "New Folder" | "New Folder with Selection" | "Add to Sidebar" | "Go to Folder…" => {

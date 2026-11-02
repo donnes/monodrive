@@ -5,6 +5,7 @@ mod batch_rename;
 mod drag;
 mod inspector;
 mod open_with;
+mod organize;
 mod pane;
 mod searches;
 mod sidebar;
@@ -125,6 +126,7 @@ actions!(
         CheckForUpdates,
         Rename,
         SuggestNames,
+        OrganizeFolder,
         CommitRename,
         CancelRename,
         NewFolder,

@@ -5,17 +5,18 @@
 
 use super::batch_rename::BatchRename;
 use super::drag::{Drag, Spot, Target, offers};
+use super::organize::Review;
 use super::searches::{CONTENT_SETTLE, Matches};
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, Eject,
     EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
     FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
     GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder,
-    NewFolderWithSelection, OpenInTerminal, OpenSelected, PageDown, PageUp, Places, PutBack, Redo,
-    Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SearchContents,
-    SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious, ShowContextMenu,
-    ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, Undo,
-    ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
+    NewFolderWithSelection, OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places,
+    PutBack, Redo, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
+    SearchContents, SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+    ShowContextMenu, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
+    SuggestNames, Undo, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -227,6 +228,8 @@ pub struct Pane {
     pub(super) renaming: Option<Renaming>,
     /// Rename in the list: the bar, and the selected rows' new names.
     pub(super) batch: Option<BatchRename>,
+    /// Organize's review, in place of the list.
+    pub(super) organizing: Option<Review>,
     /// How many times the bar has opened, which tells each opening apart.
     pub(super) batch_sessions: u64,
     /// What's selected stays when the next listing lands, as it was put back.
@@ -349,6 +352,7 @@ impl Pane {
             consented: false,
             renaming: None,
             batch: None,
+            organizing: None,
             batch_sessions: 0,
             keep_selection: false,
             select_after: Vec::new(),
@@ -608,6 +612,15 @@ impl Pane {
             .update(cx, |field, cx| field.set_text(&query, end..end, cx));
         cx.emit(PaneEvent::Moved);
         self.reload(cx);
+    }
+
+    /// Back leaves Organize's review before it leaves the folder.
+    pub(super) fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.organizing.is_some() {
+            self.end_organize(window, cx);
+        } else {
+            self.step_history(-1, cx);
+        }
     }
 
     pub(super) fn step_history(&mut self, step: isize, cx: &mut Context<Self>) {
@@ -2771,6 +2784,13 @@ pub(super) fn said(request: &Request, outcome: &Outcome) -> Option<String> {
             };
             format!("Moved {what} into {}", jobs::quoted(path))
         }
+        Request::Organize { groups } => {
+            let files: usize = groups.iter().map(|group| group.items.len()).sum();
+            format!(
+                "Organized {files} {}",
+                if files == 1 { "file" } else { "files" }
+            )
+        }
         Request::EmptyTrash { .. } => format!("Erased {what} for good"),
         Request::PutBack { .. } => format!("Put back {what}"),
         _ => return None,
@@ -3234,6 +3254,9 @@ impl Pane {
         if self.batch.is_some() {
             return self.end_batch(window, cx);
         }
+        if self.organizing.is_some() {
+            return self.end_organize(window, cx);
+        }
         if self.query.is_empty() {
             if self.search_mode_is_plain() {
                 self.selection.clear();
@@ -3258,7 +3281,7 @@ impl Pane {
         let renaming = self.changing_names();
         // While a sheet is open, its commands (from the menu bar too) wait.
         root.when(!sheet, |d| {
-            d.on_action(cx.listener(|this, _: &Back, _, cx| this.step_history(-1, cx)))
+            d.on_action(cx.listener(|this, _: &Back, window, cx| this.go_back(window, cx)))
                 .on_action(cx.listener(|this, _: &Forward, _, cx| this.step_history(1, cx)))
                 .on_action(cx.listener(|this, _: &EnclosingFolder, _, cx| {
                     if let Some(parent) = this.folder().parent().map(Path::to_path_buf) {
@@ -3615,6 +3638,9 @@ impl Pane {
                     }),
                 )
             })
+            .on_action(
+                cx.listener(|this, _: &OrganizeFolder, window, cx| this.start_organize(window, cx)),
+            )
             .when(self.showing_recents(), |d| {
                 d.on_action(cx.listener(|this, _: &ClearRecents, _, cx| this.clear_recents(cx)))
             })
@@ -3665,7 +3691,7 @@ impl Pane {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(list)
+            .child(self.organize_page(cx).unwrap_or(list))
             .child({
                 let bounds = self.list_bounds.clone();
                 canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
@@ -3686,6 +3712,7 @@ impl Focusable for Pane {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.follow_batch(window, cx);
+        self.follow_organize(window, cx);
         let prefs = cx.global::<Preferences>();
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
         // Search results stay in relevance order, so no column shows a sort.
@@ -3724,7 +3751,9 @@ impl Render for Pane {
             .children(self.batch_bar(window, cx))
             // The grid sorts from the View menu and Settings.
             .when(
-                self.layout() == View::List && self.unavailable.is_none(),
+                self.layout() == View::List
+                    && self.unavailable.is_none()
+                    && self.organizing.is_none(),
                 |d| {
                     d.child(
                         theme::pane_bar(theme::ROW_HEIGHT)
