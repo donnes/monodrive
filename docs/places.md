@@ -24,4 +24,4 @@ Eject refuses the startup disk, and any volume that a queued, running or waiting
 
 The sidebar reads all of this off the UI thread and reads it again on events only: `volumes::watch` for mounts, `Store::watch` for `places.json` and `recents.json`, a finished job, Empty Trash, and the window becoming active, which is what keeps the capacity bars current without polling. `Drives` is the one way views reach the system, so their tests use a made-up list of volumes and never mount or eject anything real.
 
-Recents is a stop in the Back and Forward history, in front of the folder that was on screen. It lists what `Store::recents` holds, newest first. A file that's gone stays in the list, marked, until Clear Recents; opening it says it's gone.
+Recents is a stop in the Back and Forward history, in front of the folder that was on screen. It lists what `Store::recents` holds, newest first. A file that's gone stays in the list, marked, until Clear Recents, a button in the bar over the list and a command; opening it says it's gone.

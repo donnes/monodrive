@@ -3809,6 +3809,7 @@ impl Render for Pane {
             .flex_col()
             .child(self.backdrop.clone())
             .children(self.trash_bar(cx))
+            .children(self.recents_bar(cx))
             .children(self.batch_bar(window, cx))
             // The grid sorts from the View menu and Settings.
             .when(
