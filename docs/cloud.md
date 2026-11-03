@@ -4,7 +4,7 @@ iCloud Drive and File Provider apps such as Dropbox, Google Drive and OneDrive k
 
 ## Finding the folders
 
-`cloud::folders` lists iCloud Drive and each folder in `~/Library/CloudStorage`, for the palette's Cloud storage page and `list_places`. It uses one `stat` of `Mobile Documents/com~apple~CloudDocs` and one listing of `CloudStorage`, with the type from the directory entry. It never goes inside a provider's folder, since that can ask for permission or wake the provider, so a folder is named as it is on disk: `GoogleDrive-me@example.com`, not Finder's "Google Drive". What it can't see isn't listed.
+`cloud::folders` lists iCloud Drive and each folder in `~/Library/CloudStorage`, for the sidebar's Locations, the palette's Cloud storage page and `list_places`. It uses one `stat` of `Mobile Documents/com~apple~CloudDocs` and one listing of `CloudStorage`, with the type from the directory entry. It never goes inside a provider's folder, since that can ask for permission or wake the provider, so it can't ask for Finder's name. macOS names each folder `Provider-account`, so `GoogleDrive-me@example.com` goes by `GoogleDrive`, or by its whole name when another account shares the provider. What it can't see isn't listed.
 
 ## Availability
 

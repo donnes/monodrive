@@ -295,6 +295,41 @@ fn drives_show_how_full_each_is_with_marks_and_follow_the_watch(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn cloud_folders_lead_locations_and_open_with_the_drives_after_them(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let ext = tempfile::tempdir().unwrap();
+    let drive = ext.path().canonicalize().unwrap();
+    let world = world(vec![startup(), volume("Backup", &drive, "B", 100, 10)], cx);
+    *world.fake.cloud.lock().unwrap() = vec![
+        CloudFolder {
+            name: "iCloud Drive".into(),
+            path: project.join("docs"),
+        },
+        CloudFolder {
+            name: "ProtonDrive".into(),
+            path: project.join("zeta"),
+        },
+    ];
+    let owned = own(cx);
+    let (browser, cx) = open(&world, &project, cx);
+    let first = favorites(&browser, cx).len() + 1;
+    press_on(cx, &format!("place-{}", first + 1));
+    assert_eq!(here(&browser, cx), project.join("zeta"));
+    // From the cloud folder that's open, the keys go on to the drives.
+    let focus_sidebar = |cx: &mut VisualTestContext| {
+        browser.update_in(cx, |b, window, cx| window.focus(&b.sidebar_focus, cx));
+        cx.run_until_parked();
+    };
+    focus_sidebar(cx);
+    press(cx, "up enter");
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    focus_sidebar(cx);
+    press(cx, "down down down cmd-e");
+    assert_eq!(*world.fake.ejected.lock().unwrap(), vec![drive]);
+    release(owned, cx);
+}
+
+#[gpui::test]
 fn eject_shows_macos_refusal_and_leaves_a_drive_that_went(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mount = dir.path().canonicalize().unwrap();
