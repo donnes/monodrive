@@ -17,10 +17,9 @@ pub fn opening(
     screen: Bounds<Pixels>,
     screens: &[Bounds<Pixels>],
 ) -> Bounds<Pixels> {
-    if let Some((part, most)) = part(size) {
-        return share(screen, part, most);
+    if let Some(part) = part(size) {
+        return share(screen, part);
     }
-    let (part, most) = REASONABLE;
     last.map(|f| {
         Bounds::new(
             point(px(f.x), px(f.y)),
@@ -28,7 +27,7 @@ pub fn opening(
         )
     })
     .filter(|frame| screens.iter().any(|screen| frame.intersects(screen)))
-    .unwrap_or_else(|| share(screen, part, most))
+    .unwrap_or_else(|| share(screen, REASONABLE))
 }
 
 /// Whether an agent runs this dev build beside the user's work, as
@@ -80,27 +79,26 @@ pub fn cascaded(bounds: Bounds<Pixels>, open: usize) -> Bounds<Pixels> {
     Bounds::new(bounds.origin + point(step, step), bounds.size)
 }
 
-/// Tinycast's Reasonable Size: 60% of the screen, at most 1025 × 900.
-const REASONABLE: (f32, Size<Pixels>) = (0.6, gpui::size(px(1025.), px(900.)));
+/// 70% of the screen each way, with no cap, so the window keeps the
+/// display's proportions.
+const REASONABLE: Size<f32> = gpui::size(0.7, 0.7);
 
-/// The share of the screen `size` takes and the most it grows to; Last Used
-/// has none.
-fn part(size: WindowSize) -> Option<(f32, Size<Pixels>)> {
+/// The share of each side of the screen `size` takes; Last Used has none.
+fn part(size: WindowSize) -> Option<Size<f32>> {
     match size {
         WindowSize::Reasonable => Some(REASONABLE),
-        WindowSize::AlmostFull => Some((0.9, gpui::size(Pixels::MAX, Pixels::MAX))),
+        WindowSize::AlmostFull => Some(gpui::size(0.9, 0.9)),
         WindowSize::LastUsed => None,
     }
 }
 
-/// `part` of `screen` on each side up to `most`, centered, never smaller
-/// than the smallest usable window or bigger than the screen.
-fn share(screen: Bounds<Pixels>, part: f32, most: Size<Pixels>) -> Bounds<Pixels> {
-    let fit =
-        |side: Pixels, most: Pixels, least: f32| (side * part).min(most).max(px(least)).min(side);
+/// `part` of each side of `screen`, centered, never smaller than the
+/// smallest usable window or bigger than the screen.
+fn share(screen: Bounds<Pixels>, part: Size<f32>) -> Bounds<Pixels> {
+    let fit = |side: Pixels, part: f32, least: f32| (side * part).max(px(least)).min(side);
     let wanted = gpui::size(
-        fit(screen.size.width, most.width, MIN_WIDTH),
-        fit(screen.size.height, most.height, MIN_HEIGHT),
+        fit(screen.size.width, part.width, MIN_WIDTH),
+        fit(screen.size.height, part.height, MIN_HEIGHT),
     );
     Bounds::centered_at(screen.center(), wanted)
 }
@@ -108,7 +106,7 @@ fn share(screen: Bounds<Pixels>, part: f32, most: Size<Pixels>) -> Bounds<Pixels
 /// Resizes `window` to `size` on the screen it's on. Last Used and a full
 /// screen window stay as they are.
 pub fn apply(size: WindowSize, window: &Window, cx: &App) {
-    let Some((part, most)) = part(size) else {
+    let Some(part) = part(size) else {
         return;
     };
     if window.is_fullscreen() {
@@ -128,7 +126,6 @@ pub fn apply(size: WindowSize, window: &Window, cx: &App) {
             gpui::size(px(rect.size.width as f32), px(rect.size.height as f32)),
         ),
         part,
-        most,
     );
     rect.origin.x = fit.origin.x.as_f32().into();
     rect.origin.y = fit.origin.y.as_f32().into();
@@ -161,14 +158,8 @@ mod tests {
     fn windows_open_at_a_share_of_the_screen_or_where_they_were() {
         let screen = Bounds::new(point(px(0.), px(0.)), size(px(2000.), px(1000.)));
         let reasonable = opening(WindowSize::Reasonable, None, screen, &[screen]);
-        // Reasonable stops growing at 1025 × 900, as Tinycast's does.
-        assert_eq!(reasonable.size, size(px(1025.), px(600.)));
+        assert_eq!(reasonable.size, size(px(1400.), px(700.)));
         assert_eq!(reasonable.center(), screen.center());
-        let big = Bounds::new(point(px(0.), px(0.)), size(px(3000.), px(2000.)));
-        assert_eq!(
-            opening(WindowSize::Reasonable, None, big, &[big]).size,
-            size(px(1025.), px(900.))
-        );
         let full = opening(WindowSize::AlmostFull, None, screen, &[screen]);
         assert_eq!(full.size, size(px(1800.), px(900.)));
         // A small screen still gets the smallest usable window, never more
