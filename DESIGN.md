@@ -30,7 +30,7 @@ The header of a sheet with a query (palette, Go to Folder, Connect) is a bare fi
 - Every text button is 24 pt high, with 12 pt side padding, or 8 pt with no fill.
 - Every icon button is a 24 pt circle with a 14 pt icon. Inside a row it's a 20 pt circle with a 12 pt icon.
 - Every outlined text field is 28 pt high. The exception is rename, which fits inside the row it edits.
-- Rows in menus, pickers and popovers are 28 pt, or 40 pt with a muted subtitle on a second line. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt.
+- Rows in menus, pickers and popovers are 28 pt, or 40 pt with a muted subtitle on a second line. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt. The Overview's rows hold a subtitle in 34 pt, its two lines at 16 pt each, so a full disk's list fits.
 - Rows in a stacked list of highlightable rows have a 2 pt gap (`ROW_GAP`), so highlights never touch. The gap belongs to the row above it: `row_slot` holds the role and the handlers, the row inside holds the highlight, so a hover, click or drop in the gap lands on that row. Two lists differ. The file list is virtualized, its rows touch as in Finder, and a change to its row height touches `uniform_list`, marquee math and the scrolling budget. Settings' page list keeps a plain gap, because each page is a Tab stop whose focus ring has to fit the row.
 - The top bar, a sheet's header, the Trash and Recents bars and the sidebar's foot are 40 pt. The path bar and the column titles are 28 pt. A toast is 36 pt. A Settings row is at least 44 pt.
 
@@ -127,7 +127,7 @@ The system font. Menlo only for code, paths in code boxes, tool names and a file
 | 13 | `TEXT_BODY` | Rows, body copy, Settings labels |
 | 14 | `TEXT_TITLE` | Sidebar rows, a card's title, typed fields |
 
-The Overview's free space is `TEXT_DISPLAY`, 28 pt semibold, the one figure in the app that's larger than a title.
+The Overview's free space is `TEXT_DISPLAY`, 22 pt semibold, the one figure in the app that's larger than a title.
 
 Weights: regular by default, medium for section labels, sidebar rows, primary buttons and what's selected, semibold for the current folder and group titles. The Row size and Label size settings choose from 12, 13 and 14.
 

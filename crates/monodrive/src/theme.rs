@@ -25,7 +25,7 @@ pub const TEXT_SMALL: f32 = 12.;
 pub const TEXT_BODY: f32 = 13.;
 pub const TEXT_TITLE: f32 = 14.;
 /// The Overview's one figure, the only text larger than a title.
-pub const TEXT_DISPLAY: f32 = 28.;
+pub const TEXT_DISPLAY: f32 = 22.;
 
 pub const TITLE_BAR_HEIGHT: f32 = 40.;
 pub const ROW_HEIGHT: f32 = 28.;
