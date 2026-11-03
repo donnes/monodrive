@@ -39,7 +39,9 @@ const CHANGES_SHOWN: usize = 5;
 /// Narrower than this, "Right now" goes under "Your stuff".
 const SIDE_BY_SIDE: f32 = 720.;
 const RIGHT_NOW_WIDTH: f32 = 300.;
-const STUFF_ROW_HEIGHT: f32 = 40.;
+const STUFF_ROW_HEIGHT: f32 = 34.;
+/// A row's title line, which a "Right now" mark centers on.
+const TITLE_LINE: f32 = 16.;
 
 /// What the page shows, as last read.
 #[derive(Default)]
@@ -488,11 +490,17 @@ impl Pane {
                     )
                     .when(trash.is_some(), |d| {
                         d.child(
-                            text_button("overview-empty-trash", "Empty Trash…", ButtonLook::Ghost)
-                                .flex_shrink_0()
-                                .on_click(cx.listener(|_, _, window, cx| {
+                            text_button(
+                                "overview-empty-trash",
+                                "Empty Trash…",
+                                ButtonLook::Caution,
+                            )
+                            .flex_shrink_0()
+                            .on_click(cx.listener(
+                                |_, _, window, cx| {
                                     window.dispatch_action(Box::new(EmptyTrash), cx);
-                                })),
+                                },
+                            )),
                         )
                     }),
             )
@@ -512,11 +520,10 @@ impl Pane {
         if !suggestion.size.complete {
             size.push('+');
         }
-        // Worktrees of one project share its name, so it says which folder.
-        let place = match suggestion.size.age(now) {
-            Some(age) => format!("{} · measured {age}", paths::abbreviate(path)),
-            None => paths::abbreviate(path),
-        };
+        let mut why = evidence.why();
+        if let Some(age) = suggestion.size.age(now) {
+            why += &format!(" Measured {age}.");
+        }
         div()
             .id(format!("overview-suggestion-{}", path.display()))
             .role(Role::Group)
@@ -543,14 +550,7 @@ impl Pane {
                 div()
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(content(0.65))
-                    .child(evidence.why()),
-            )
-            .child(
-                div()
-                    .truncate()
-                    .text_size(px(theme::TEXT_SMALL))
-                    .text_color(content(0.65))
-                    .child(place),
+                    .child(why),
             )
             .child(
                 div().pt_2().flex().child(
@@ -972,13 +972,15 @@ fn now_line(mark: impl IntoElement, title: String, detail: String) -> gpui::Div 
         .border_t_1()
         .border_color(content(0.06))
         .flex()
-        .items_center()
-        .gap_3()
+        .items_start()
+        .gap_2()
         .child(
             div()
                 .w(px(16.))
+                .h(px(TITLE_LINE))
                 .flex_shrink_0()
                 .flex()
+                .items_center()
                 .justify_center()
                 .child(mark),
         )
@@ -1070,7 +1072,7 @@ fn row_frame(height: f32) -> gpui::Div {
         .rounded(px(theme::RADIUS_ROW))
         .flex()
         .items_center()
-        .gap_3()
+        .gap_2()
 }
 
 fn two_lines(title: String, detail: String) -> impl IntoElement {
@@ -1082,12 +1084,15 @@ fn two_lines(title: String, detail: String) -> impl IntoElement {
         .child(
             div()
                 .truncate()
+                .h(px(TITLE_LINE))
+                .line_height(px(TITLE_LINE))
                 .text_size(px(theme::TEXT_BODY))
                 .child(title),
         )
         .child(
             div()
                 .truncate()
+                .line_height(px(TITLE_LINE))
                 .text_size(px(theme::TEXT_SMALL))
                 .text_color(content(0.65))
                 .child(detail),
