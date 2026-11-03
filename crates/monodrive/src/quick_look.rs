@@ -9,6 +9,7 @@
 
 use crate::selection::Selection;
 use crate::traffic_lights;
+use crate::workspace;
 use monodrive_core::entries::{Entry, Kind};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
@@ -21,8 +22,8 @@ use objc2_quick_look_ui::{
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 
-/// What the panel shows: the selection in the order shown, each path with
-/// whether it's a folder, and the one in front.
+/// What the panel shows: the selection in the order shown, without its plain
+/// folders, each path with whether it's a package, and the one in front.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preview {
     pub items: Vec<(PathBuf, bool)>,
@@ -31,18 +32,25 @@ pub struct Preview {
 
 impl Preview {
     /// The selection's preview, in front on the cursor's entry when that's
-    /// selected; `None` with nothing selected.
+    /// selected; `None` with nothing in it to preview. A folder has none, but a
+    /// package such as a Pages document or an app does.
     pub fn of(selection: &Selection, entries: &[Entry]) -> Option<Self> {
         let item = |entry: &Entry| (entry.path.clone(), entry.kind == Kind::Dir);
+        let previewable =
+            |entry: &Entry| entry.kind != Kind::Dir || workspace::is_package(&entry.path);
         // One entry is the usual case, and needn't look up every row.
         if let Some(only) = selection.only() {
-            let entry = entries.iter().find(|entry| entry.path == only)?;
+            let entry = entries
+                .iter()
+                .find(|entry| entry.path == only)
+                .filter(|entry| previewable(entry))?;
             return Some(Self {
                 items: vec![item(entry)],
                 index: 0,
             });
         }
-        let selected = selection.in_order(entries);
+        let mut selected = selection.in_order(entries);
+        selected.retain(|entry| previewable(entry));
         let index = selection
             .cursor()
             .and_then(|cursor| selected.iter().position(|entry| entry.path == cursor))
@@ -363,7 +371,18 @@ mod tests {
         let preview = |selection: &Selection| names(Preview::of(selection, &entries));
         assert_eq!(preview(&selection), None);
         selection.select(&entries[0]);
-        assert_eq!(preview(&selection), Some((vec!["docs/".into()], 0)));
+        // A folder has no preview, by itself or among others; a package does.
+        assert_eq!(preview(&selection), None);
+        selection.extend(&entries, 1);
+        assert_eq!(preview(&selection), Some((vec!["a.txt".into()], 0)));
+        let mut packages = listing(&["Kit.app"]);
+        packages[0].kind = Kind::Dir;
+        let mut package = Selection::default();
+        package.select(&packages[0]);
+        assert_eq!(
+            names(Preview::of(&package, &packages)),
+            Some((vec!["Kit.app/".into()], 0))
+        );
         // Several page in the order shown, starting where the cursor is.
         selection.select(&entries[1]);
         selection.extend(&entries, 3);

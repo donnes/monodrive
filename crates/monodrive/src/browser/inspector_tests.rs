@@ -9,7 +9,7 @@ use super::tests::{browse, folder, in_pane, on_pane, own, press, release, shown}
 use super::*;
 use crate::menu::{Choice, ContextMenu};
 use crate::native::{MadeUp, Native, SizeDone};
-use crate::thumbnails::{Thumb, Thumbnail};
+use crate::thumbnails::{Holders, Thumb};
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use monodrive_core::apps::App as MacApp;
 use monodrive_core::entries::{Entry, Kind};
@@ -378,7 +378,15 @@ fn a_newer_selection_lets_go_of_the_one_waiting(cx: &mut TestAppContext) {
             modified: entry.modified,
         }
     });
-    let held = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.has_asset::<Thumbnail>(&thumb));
+    let held = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            cx.default_global::<Holders>()
+                .held
+                .lock()
+                .unwrap()
+                .contains_key(&thumb)
+        })
+    };
     press(cx, "alt-up down down down");
     rest(cx);
     assert_eq!(subject_name(&browser, cx).as_deref(), Some("a.txt"));

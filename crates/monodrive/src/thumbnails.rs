@@ -1,12 +1,13 @@
 //! Pictures of images and videos for the grid. Each is decoded and shrunk to
-//! the size shown, off the UI thread, and kept by GPUI's asset cache until the
-//! browser leaves the folder and releases it.
+//! the size shown, off the UI thread, and kept by GPUI's asset cache. Once
+//! nothing draws it, it stays in memory up to `KEPT_BYTES`, so coming back to a
+//! folder or closing a preview draws it at once instead of decoding it again.
 
 use gpui::{App, Asset, Global, RenderImage, Window};
 use image::ImageReader;
 use monodrive_core::cloud::Availability;
 use monodrive_core::entries::{Entry, Kind};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -104,7 +105,7 @@ impl Asset for Thumbnail {
         thumb: Thumb,
         cx: &mut App,
     ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
-        let held = cx.default_global::<Holders>().0.clone();
+        let held = cx.default_global::<Holders>().held.clone();
         async move {
             // A folder of big photos mustn't take every background thread
             // from listings and searches.
@@ -157,14 +158,66 @@ fn decode(path: &Path, side: u32) -> Option<RenderImage> {
 }
 
 /// How many panes hold each thumbnail: GPUI's cache is shared, and two panes on
-/// one folder draw the same pictures.
+/// one folder draw the same pictures. `kept` has the ones nothing holds.
 #[derive(Default)]
-struct Holders(Arc<Mutex<HashMap<Thumb, usize>>>);
+pub(crate) struct Holders {
+    pub(crate) held: Arc<Mutex<HashMap<Thumb, usize>>>,
+    kept: Kept,
+}
 impl Global for Holders {}
+
+/// How much of what no pane draws stays in memory. That's about 800 thumbnails
+/// at the grid's usual size.
+const KEPT_BYTES: usize = 128 * 1024 * 1024;
+
+/// Loaded thumbnails that nothing draws, dropped oldest first past a budget.
+#[derive(Default)]
+struct Kept {
+    images: HashMap<Thumb, (u64, Arc<RenderImage>)>,
+    /// `images`' keys by when each was kept.
+    order: BTreeMap<u64, Thumb>,
+    next: u64,
+    bytes: usize,
+}
+
+fn bytes_of(image: &RenderImage) -> usize {
+    image.as_bytes(0).map_or(0, <[u8]>::len)
+}
+
+impl Kept {
+    /// Keeps `image`, and says which older ones no longer fit.
+    fn keep(&mut self, thumb: Thumb, image: Arc<RenderImage>, budget: usize) -> Vec<Thumb> {
+        self.take(&thumb);
+        self.bytes += bytes_of(&image);
+        self.order.insert(self.next, thumb.clone());
+        self.images.insert(thumb, (self.next, image));
+        self.next += 1;
+        let mut dropped = Vec::new();
+        while self.bytes > budget {
+            let Some((_, oldest)) = self.order.first_key_value() else {
+                break;
+            };
+            let oldest = oldest.clone();
+            self.take(&oldest);
+            dropped.push(oldest);
+        }
+        dropped
+    }
+
+    /// Someone draws `thumb` again, so it no longer counts against the budget.
+    fn take(&mut self, thumb: &Thumb) {
+        if let Some((at, image)) = self.images.remove(thumb) {
+            self.order.remove(&at);
+            self.bytes -= bytes_of(&image);
+        }
+    }
+}
 
 /// A pane holds `thumb` until it calls `release`.
 pub fn hold(thumb: &Thumb, cx: &mut App) {
-    if let Ok(mut held) = cx.default_global::<Holders>().0.lock() {
+    let holders = cx.default_global::<Holders>();
+    holders.kept.take(thumb);
+    if let Ok(mut held) = holders.held.lock() {
         *held.entry(thumb.clone()).or_default() += 1;
     }
 }
@@ -175,17 +228,19 @@ pub fn get(thumb: &Thumb, window: &mut Window, cx: &mut App) -> Option<Arc<Rende
     window.use_asset::<Thumbnail>(thumb, cx).flatten()
 }
 
-/// A pane lets go of a thumbnail. Once none hold it, it's given back, in memory
-/// and on the GPU; one still queued never decodes, and one decoding is dropped
-/// when it finishes. `window` is the window being
-/// drawn, which `App` can't reach from inside its update.
+/// A pane lets go of a thumbnail. Once none hold it, the GPU's copy is given
+/// back, as drawing it again uploads it in that frame, and the decoded one is
+/// kept while it fits. One still queued never decodes, and one decoding is
+/// dropped when it finishes. `window` is the window being drawn, which `App`
+/// can't reach from inside its update.
 pub fn release(
     thumb: &Thumb,
     image: Option<Arc<RenderImage>>,
     window: Option<&mut Window>,
     cx: &mut App,
 ) {
-    if let Ok(mut held) = cx.default_global::<Holders>().0.lock()
+    let holders = cx.default_global::<Holders>();
+    if let Ok(mut held) = holders.held.lock()
         && let Some(count) = held.get_mut(thumb)
     {
         *count -= 1;
@@ -194,10 +249,15 @@ pub fn release(
         }
         held.remove(thumb);
     }
-    cx.remove_asset::<Thumbnail>(thumb);
-    if let Some(image) = image {
-        cx.drop_image(image, window);
+    let Some(image) = image else {
+        cx.remove_asset::<Thumbnail>(thumb);
+        return;
+    };
+    let dropped = holders.kept.keep(thumb.clone(), image.clone(), KEPT_BYTES);
+    for old in &dropped {
+        cx.remove_asset::<Thumbnail>(old);
     }
+    cx.drop_image(image, window);
 }
 
 #[cfg(test)]
@@ -219,6 +279,34 @@ mod tests {
         assert_eq!(&bytes[..4], &[30, 20, 10, 255]);
         std::fs::write(dir.path().join("fake.png"), b"no").unwrap();
         assert!(decode(&dir.path().join("fake.png"), 100).is_none());
+    }
+
+    #[test]
+    fn kept_thumbnails_drop_oldest_first_past_the_budget() {
+        let thumb = |name: &str| Thumb {
+            path: name.into(),
+            side: 2,
+            modified: 0,
+        };
+        // Sixteen bytes each, so three fit in 48.
+        let image = || {
+            Arc::new(RenderImage::new(vec![image::Frame::new(
+                image::RgbaImage::new(2, 2),
+            )]))
+        };
+        let mut kept = Kept::default();
+        for name in ["a", "b", "c"] {
+            assert!(kept.keep(thumb(name), image(), 48).is_empty());
+        }
+        // Drawing "a" again takes it out, so it can't be what's dropped.
+        kept.take(&thumb("a"));
+        assert_eq!(kept.bytes, 32);
+        assert!(kept.keep(thumb("d"), image(), 48).is_empty());
+        assert_eq!(kept.keep(thumb("e"), image(), 48), [thumb("b")]);
+        assert_eq!(kept.bytes, 48);
+        // One too big for the budget goes at once, along with the rest.
+        assert_eq!(kept.keep(thumb("f"), image(), 0).len(), 4);
+        assert_eq!(kept.bytes, 0);
     }
 
     #[gpui::test]
