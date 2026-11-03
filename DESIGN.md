@@ -45,7 +45,7 @@ A sheet with keys of its own has a 32 pt footer under a hairline, with its text 
 
 ### Top bar and path bar
 
-The top bar has one job: where am I, among which tabs. It holds Back and Forward, the current folder's name in semibold, and the jobs ring at the right. Nothing else goes there, except the sidebar's button and the search field while the sidebar is closed. The name is the first tab, so it doesn't move when tabs arrive.
+The top bar has one job: where am I, among which tabs. It holds Back and Forward, the current folder's name in semibold, and the jobs ring at the right. Nothing else goes there, except the search field while the sidebar is closed. The sidebar's button sits after the traffic lights, over the sidebar while it's open. The name is the first tab, so it doesn't move when tabs arrive.
 
 With two or more tabs, each is a 24 pt pill named for its folder, 180 pt wide: 0.14 fill and semibold ink for the active one, none and 0.65 ink for the rest, with the usual hover. A press selects it, a drag reorders it, and hovering shows a 20 pt ✕ over the name's end, which moves nothing. A + follows the last pill. Too many to fit, they shrink to 96 pt, truncating their names, and then the strip scrolls sideways; the active one scrolls into view. The bar always leaves 24 pt to drag the window by.
 
@@ -57,7 +57,7 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 ### Closing the sidebar
 
-⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits at the sidebar's top right, so it stays just before Back and Forward: closing the sidebar only takes away what's between them. The traffic lights stay, with the button right after them. The sidebar opens and closes at once, with no animation: a width that moves lays out the whole window each frame. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
+⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits right after the traffic lights, open or closed, so it holds still under the pointer. Back and Forward sit at the sidebar's edge and follow it, stopping short of the button. The sidebar slides on a critically damped spring, as Monocode's does: it looks done in about 130 ms, settles by 280 ms and never overshoots. Pressing again partway reverses it from where it is, at its speed. The sidebar keeps its width while its edge moves over it, its contents fade with it, and the panes lay out to the edge each frame. With Reduce Motion, read at launch, it opens and closes at once. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
 
 ### Favorites' keys
 
@@ -174,7 +174,7 @@ Two levels, both from `floating`: `Popover` for menus, popovers, toasts and the 
 
 ### Motion
 
-Nothing moves continuously: it pegs the GPU on high-refresh displays. A sheet may fade in once, for 200 ms at most, and a drag's outline pulses once before a folder opens. Hover and press are instant.
+Nothing moves continuously: it pegs the GPU on high-refresh displays. A sheet may fade in once, for 200 ms at most, a drag's outline pulses once before a folder opens, and the sidebar slides open and closed. Hover and press are instant.
 
 ### Copy
 

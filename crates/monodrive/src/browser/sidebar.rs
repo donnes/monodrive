@@ -14,11 +14,13 @@ use super::{
 };
 use crate::assets::NIGHT_SKY;
 use crate::commands::{self, Scope};
+use crate::motion::Slide;
 use crate::preferences::{Preferences, SIDEBAR_WIDTHS};
 use crate::theme::{
     self, ButtonLook, accent, circle_button, content, icon, icon_button, row_icon_button,
     section_label,
 };
+use crate::traffic_lights;
 use gpui::{
     Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, ImageSource,
     KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point, Render,
@@ -36,6 +38,7 @@ use monodrive_core::volumes::{self, Volume};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 /// The sky behind a nightly's sidebar, as drawn in its SVG.
 const NIGHT_SKY_HEIGHT: f32 = 150.;
@@ -1101,12 +1104,55 @@ impl Browser {
             )
     }
 
-    /// Opens or closes the sidebar: at its top right, or in the top bar when
-    /// it's closed.
-    pub(super) fn sidebar_button(&self, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
-        icon_button("toggle-sidebar", "Show Sidebar", "sidebar-left", true)
-            .debug_selector(|| "toggle-sidebar".into())
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
+    /// Opens or closes the sidebar. It sits after the traffic lights, open or
+    /// closed, so it holds still under the pointer while the sidebar slides.
+    pub(super) fn sidebar_toggle(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .h(px(theme::TITLE_BAR_HEIGHT))
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(drag_area().w(px(lights(window))).h_full())
+            .child(
+                icon_button("toggle-sidebar", "Show Sidebar", "sidebar-left", true)
+                    .debug_selector(|| "toggle-sidebar".into())
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
+            )
+    }
+
+    /// Follows `open` with a slide, and samples how far it has got.
+    pub(super) fn step_sidebar(&mut self, open: bool, window: &mut Window, cx: &App) {
+        let now = Instant::now();
+        if open != self.sidebar_open {
+            self.sidebar_open = open;
+            let to = if open { 1. } else { 0. };
+            let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
+            self.sidebar_slide = (!cx.reduce_motion()).then(|| match self.sidebar_slide.take() {
+                Some(slide) => slide.retarget(to, now),
+                None => Slide::new(1. - to, to, width),
+            });
+        }
+        let sample = self.sidebar_slide.as_ref().map(|slide| slide.at(now));
+        self.sidebar_fraction = match sample {
+            Some((fraction, false)) => {
+                window.request_animation_frame();
+                fraction
+            }
+            Some((fraction, true)) => {
+                self.sidebar_slide = None;
+                fraction
+            }
+            None if open => 1.,
+            None => 0.,
+        };
+    }
+
+    /// How wide the sidebar is drawn this frame.
+    pub(super) fn sidebar_drawn(&self, window: &Window, cx: &App) -> f32 {
+        sidebar_width(cx.global::<Preferences>().sidebar_width, window) * self.sidebar_fraction
     }
 
     pub(super) fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1164,8 +1210,7 @@ impl Browser {
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .child(drag_area().flex_1().h_full())
-                    .child(self.sidebar_button(cx)),
+                    .child(drag_area().flex_1().h_full()),
             )
             .child(self.search_field(window, cx).mb_1())
             .child(
@@ -1351,4 +1396,18 @@ impl Browser {
         window.focus(&view.focus_handle(cx), cx);
         self.set_sheet(Some(Sheet::Connect(view)), cx);
     }
+}
+
+/// The space between the traffic lights and the sidebar's button.
+const LIGHTS_GAP: f32 = 8.;
+
+/// The blank room the traffic lights take.
+fn lights(window: &Window) -> f32 {
+    (traffic_lights::REACH + LIGHTS_GAP) / window.content_zoom()
+}
+
+/// Where Back can start in the top bar: past the traffic lights and the
+/// sidebar's button, with the gaps around it.
+pub(super) fn toggle_reach(window: &Window) -> f32 {
+    lights(window) + 4. + theme::BUTTON_HEIGHT + 8.
 }

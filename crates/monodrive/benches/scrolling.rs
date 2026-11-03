@@ -3,17 +3,18 @@
 //! distance one wheel event per frame, and reports frame and draw times.
 //! Another scrolls the list beside the open inspector. A last run carries a
 //! file over the list instead, one move per frame, with the pill and the
-//! outline drawn.
+//! outline drawn. The last close and open the sidebar over the list and the
+//! grid, so the panes relay out to its edge each frame.
 //! `cargo bench -p monodrive --bench scrolling`
 //!
 //! Benchmarks have no asset source, so the chrome's SVG icons draw nothing;
 //! file type icons come from their own table and do draw.
 
 use gpui::{
-    BenchAppContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PlatformInput,
-    ScrollDelta, ScrollWheelEvent, TouchPhase, point, px,
+    BenchAppContext, Focusable, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px,
 };
-use monodrive::browser::Browser;
+use monodrive::browser::{Browser, ToggleSidebar};
 use monodrive::preferences::{Preferences, View};
 use std::path::Path;
 use std::sync::Arc;
@@ -156,6 +157,56 @@ fn drag(cx: &mut BenchAppContext) {
     );
 }
 
+/// Loop turns between toggles, more than a slide's frames, so most slides
+/// settle and some may be caught and reversed.
+const TOGGLE_EVERY: u64 = 200;
+/// Two closes and two opens.
+const TOGGLES: u64 = 4;
+
+fn slide(view: View, cx: &mut BenchAppContext) {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    fill(dir.path());
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            view,
+            thumbnails: false,
+            ..Preferences::default()
+        });
+    });
+    cx.run_until_idle();
+    cx.bench_renderer_session(
+        Duration::from_secs(30),
+        |cx| {
+            cx.update(|cx| {
+                for window in cx.windows() {
+                    let _ = window.update(cx, |_, window, _| window.remove_window());
+                }
+            });
+            cx.run_until_idle();
+            let mut window = cx.add_empty_window();
+            let folder = dir.path().to_path_buf();
+            // The keys start in the list, as when the app opens a window, so the
+            // toggle reaches the browser.
+            window.update(|window, cx| {
+                let browser = window.replace_root(cx, |_, cx| Browser::new(folder, cx));
+                window.focus(&browser.focus_handle(cx), cx);
+            });
+            window.run_until_idle();
+            let handle = window.window_handle();
+            let stop = Arc::new(AtomicBool::new(false));
+            (stop.clone(), handle, stop)
+        },
+        |stop, frame, window, cx| {
+            if frame % TOGGLE_EVERY == 0 {
+                window.dispatch_action(Box::new(ToggleSidebar), cx);
+            }
+            if frame + 1 >= TOGGLE_EVERY * TOGGLES {
+                stop.store(true, Ordering::Release);
+            }
+        },
+    );
+}
+
 #[gpui::bench]
 fn scroll_list(cx: &mut BenchAppContext) {
     scroll(View::List, false, cx);
@@ -176,11 +227,23 @@ fn drag_over_list(cx: &mut BenchAppContext) {
     drag(cx);
 }
 
+#[gpui::bench]
+fn slide_sidebar_list(cx: &mut BenchAppContext) {
+    slide(View::List, cx);
+}
+
+#[gpui::bench]
+fn slide_sidebar_grid(cx: &mut BenchAppContext) {
+    slide(View::Grid, cx);
+}
+
 gpui::bench_group!(
     benches,
     scroll_list,
     scroll_list_with_inspector,
     scroll_grid,
-    drag_over_list
+    drag_over_list,
+    slide_sidebar_list,
+    slide_sidebar_grid
 );
 gpui::bench_main!(benches);

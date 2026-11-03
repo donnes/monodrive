@@ -3,10 +3,9 @@
 
 use super::drag::{Spot, Target, offers};
 use super::pane::{Opening, Pane, Stop};
-use super::{Browser, drag_area, pane_room};
+use super::{Browser, drag_area};
 use crate::preferences::Preferences;
 use crate::theme::{self, accent, content, icon_button, row_icon_button};
-use crate::traffic_lights;
 use gpui::{
     App, Context, CursorStyle, DispatchPhase, Entity, Focusable, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Role, Stateful, Window, canvas, div, prelude::*,
@@ -21,8 +20,6 @@ const TAB_NARROWEST: f32 = 96.;
 const DRAG_ROOM: f32 = 24.;
 /// The search field's width in the top bar, while the sidebar is closed.
 const SEARCH_WIDTH: f32 = 200.;
-/// The space between the traffic lights and Back.
-const LIGHTS_GAP: f32 = 8.;
 
 /// The narrowest a pane gets while dragging the divider.
 pub(super) const NARROWEST_PANE: f32 = 240.;
@@ -200,7 +197,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let tab = &self.tabs[self.active];
-        let room = pane_room(window, tab.second.is_some(), cx);
+        let room = self.pane_room(window, tab.second.is_some(), cx);
         let gap = if boxy { 0. } else { CARD_GAP };
         let card = |pane: &Entity<Pane>, focused: bool| {
             div()
@@ -522,13 +519,15 @@ impl Browser {
             pane.at > 0 || pane.organizing.is_some(),
             pane.at + 1 < pane.history.len(),
         );
-        let closed = !cx.global::<Preferences>().show_sidebar;
+        // Until the sidebar has slid away, its field is still the one drawn.
+        let closed = !cx.global::<Preferences>().show_sidebar && self.sidebar_fraction == 0.;
         // With no sidebar to hold it, the field shows while it's in use.
         let searching = closed
             && (!pane.query.is_empty()
                 || pane.search.focus_handle(cx).is_focused(window)
                 || self.searches_open());
-        let lights = (traffic_lights::REACH + LIGHTS_GAP) / window.content_zoom();
+        // Back and Forward sit at the sidebar's edge, but never under its button.
+        let lead = (super::sidebar::toggle_reach(window) - self.sidebar_drawn(window, cx)).max(0.);
         let titles: Vec<String> = self.tabs.iter().map(|tab| tab.title(cx)).collect();
         let several = titles.len() > 1;
         let pills: Vec<_> = titles
@@ -542,12 +541,8 @@ impl Browser {
             .flex()
             .items_center()
             .gap_1()
+            .pl(px(lead))
             .pr_3()
-            // The traffic lights, where the sidebar would have them.
-            .when(closed, |d| {
-                d.child(drag_area().w(px(lights)).h_full())
-                    .child(self.sidebar_button(cx))
-            })
             .child(
                 icon_button("back", "Back", "chevron-left", back).on_click(cx.listener(
                     |this, _, window, cx| {

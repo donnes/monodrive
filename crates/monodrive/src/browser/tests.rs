@@ -1938,6 +1938,8 @@ fn closing_the_tab_that_started_a_job_leaves_the_job_running(cx: &mut TestAppCon
 fn the_sidebar_closes_and_search_still_works_without_it(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let (_browser, cx) = browse(&project, cx);
+    // The slide runs on the clock; Reduce Motion skips it to where it ends.
+    cx.update(|_, cx| cx.set_reduce_motion(true));
     let on_screen = |selector: &'static str, cx: &mut VisualTestContext| {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
@@ -1951,10 +1953,10 @@ fn the_sidebar_closes_and_search_still_works_without_it(cx: &mut TestAppContext)
     assert!(!open(cx));
     assert!(on_screen("place-0", cx).is_none());
     assert!(on_screen("search-field", cx).is_none());
-    // Its button moves to the top bar, clear of the traffic lights.
+    // Its button holds still, clear of the traffic lights.
     let in_bar = on_screen("toggle-sidebar", cx).unwrap();
     assert!(in_bar.left() > px(crate::traffic_lights::REACH));
-    assert_ne!(in_bar, in_sidebar);
+    assert_eq!(in_bar, in_sidebar);
     // ⌘F has a field to type in, and Esc puts it away.
     press(cx, "cmd-f");
     assert!(on_screen("search-field", cx).is_some());

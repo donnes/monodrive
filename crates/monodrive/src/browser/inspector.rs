@@ -467,7 +467,7 @@ impl Browser {
     /// Whether it's on screen: asked for, and with room for the list beside it.
     fn inspector_open(&self, window: &Window, cx: &App) -> bool {
         let split = self.tabs[self.active].second.is_some();
-        cx.global::<Preferences>().show_inspector && super::inspector_fits(window, split, cx)
+        cx.global::<Preferences>().show_inspector && self.inspector_fits(window, split, cx)
     }
 
     /// Reads the next item, or else the one shown, after `delay`, unless the
