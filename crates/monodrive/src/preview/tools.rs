@@ -140,10 +140,29 @@ enum Grab {
 struct Dragged {
     under: Option<(usize, Arc<RenderImage>)>,
     under_task: Option<Task<()>>,
-    layer: Option<(Arc<RenderImage>, Rect)>,
+    /// The mark's layer, and the shape it was drawn at.
+    layer: Option<(Layer, Step)>,
     layer_task: Option<Task<()>>,
     /// The mark moved while its layer was being drawn.
     layer_stale: bool,
+}
+
+/// A landing mark is still in the steps and not yet in the picture.
+fn waiting(steps: &[Step], shown: &[Step], at: usize, step: &Step) -> bool {
+    steps.get(at) == Some(step) && shown.get(at) != Some(step)
+}
+
+/// A mark drawn alone, as saving draws it, and the part of the picture it covers.
+type Layer = (Arc<RenderImage>, Rect);
+
+fn layer_of(step: &Step, picture: (f64, f64), scale: f64) -> Result<Layer, String> {
+    let (bitmap, area) = edits::render_mark(step, picture, scale)?;
+    let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)
+        .ok_or("couldn't draw the mark")?;
+    Ok((
+        Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
+        area,
+    ))
 }
 
 /// Marks' colors, in the file and on screen.
@@ -175,6 +194,8 @@ enum Subject {
         past: Vec<Vec<Step>>,
         /// The picture as the steps leave it, in pixels.
         image: Option<Arc<RenderImage>>,
+        /// The steps `image` was flattened from, which lag `steps` while it flattens.
+        shown: Vec<Step>,
         flattening: Option<Task<()>>,
     },
     Video {
@@ -206,6 +227,9 @@ pub(super) struct Edit {
     selected: Option<usize>,
     gesture: Option<Gesture>,
     dragged: Dragged,
+    /// Marks just added, over the picture until it's flattened with them, so
+    /// a mark doesn't blink out when it's let go.
+    landing: Vec<(usize, Step, Layer)>,
     /// What the pointer would do if pressed now.
     cursor: CursorStyle,
     /// Text waiting for a place: the field, and where it goes.
@@ -324,6 +348,39 @@ impl Edit {
         if let Subject::Picture { steps, past, .. } = &mut self.subject {
             past.push(steps.clone());
         }
+    }
+
+    /// Landing marks the picture doesn't show yet.
+    fn landing(&self) -> impl Iterator<Item = &(usize, Step, Layer)> {
+        let (steps, shown) = match &self.subject {
+            Subject::Picture { steps, shown, .. } => (steps.as_slice(), shown.as_slice()),
+            Subject::Video { .. } => (&[][..], &[][..]),
+        };
+        self.landing
+            .iter()
+            .filter(move |(at, step, _)| waiting(steps, shown, *at, step))
+    }
+
+    /// The mark at `index` as the screen shows it right now, so its handles sit
+    /// on its ink while the picture catches up with the steps.
+    fn on_screen(&self, index: usize) -> Option<&Step> {
+        if let (Some(_), Some((_, step))) = (&self.dragged.under, &self.dragged.layer) {
+            return Some(step);
+        }
+        if let Some((_, step, _)) = self.landing().find(|(at, ..)| *at == index) {
+            return Some(step);
+        }
+        match &self.subject {
+            Subject::Picture { steps, shown, .. } if shown.len() == steps.len() => shown.get(index),
+            _ => self.steps().get(index),
+        }
+    }
+
+    /// How finely a mark's layer is drawn, to look sharp at the size it shows.
+    fn layer_scale(&self, window: &Window) -> Option<f64> {
+        let picture = self.picture()?;
+        let (_, fitted) = fit(self.drawn.get(), (picture.0 as f32, picture.1 as f32));
+        Some(f64::from((fitted * window.scale_factor()).min(1.)))
     }
 
     fn image(&self) -> Option<&Arc<RenderImage>> {
@@ -468,6 +525,7 @@ impl PreviewView {
                     steps: Vec::new(),
                     past: Vec::new(),
                     image: None,
+                    shown: Vec::new(),
                     flattening: None,
                 }
             } else {
@@ -488,6 +546,7 @@ impl PreviewView {
             selected: None,
             gesture: None,
             dragged: Dragged::default(),
+            landing: Vec::new(),
             cursor: CursorStyle::Arrow,
             text: None,
             rewriting: None,
@@ -572,7 +631,7 @@ impl PreviewView {
         if let Some((_, under)) = dragged.under {
             cx.drop_image(under, None);
         }
-        if let Some((layer, _)) = dragged.layer {
+        if let Some(((layer, _), _)) = dragged.layer {
             cx.drop_image(layer, None);
         }
     }
@@ -589,6 +648,7 @@ impl PreviewView {
             return;
         };
         let (path, steps) = (self.path.clone(), steps.clone());
+        let flattened = steps.clone();
         let work = cx.background_executor().spawn(async move {
             let bitmap = edits::render(&path, &steps)?;
             let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)
@@ -602,7 +662,10 @@ impl PreviewView {
                     return;
                 };
                 let Subject::Picture {
-                    image, flattening, ..
+                    image,
+                    shown,
+                    flattening,
+                    ..
                 } = &mut edit.subject
                 else {
                     return;
@@ -613,9 +676,21 @@ impl PreviewView {
                         if let Some(old) = image.replace(new) {
                             cx.drop_image(old, None);
                         }
+                        *shown = flattened;
                     }
                     Err(why) => edit.error = Some(why),
                 }
+                let landing = std::mem::take(&mut edit.landing);
+                let Subject::Picture { steps, shown, .. } = &edit.subject else {
+                    return;
+                };
+                let (waiting, landed): (Vec<_>, Vec<_>) = landing
+                    .into_iter()
+                    .partition(|(at, step, _)| waiting(steps, shown, *at, step));
+                for (_, _, (layer, _)) in landed {
+                    cx.drop_image(layer, None);
+                }
+                edit.landing = waiting;
                 // The truth is in, so the stand-ins can go unless a drag needs them.
                 if edit.gesture.is_none() {
                     this.settle(cx);
@@ -674,7 +749,6 @@ impl PreviewView {
     /// Draws the moving mark's layer off the UI thread at the size it shows.
     /// One at a time: a mark that moved meanwhile draws again when it's done.
     fn draw_layer(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let device = window.scale_factor();
         let Some(edit) = &mut self.edit else {
             return;
         };
@@ -682,23 +756,15 @@ impl PreviewView {
             edit.dragged.layer_stale = true;
             return;
         }
-        let Some(picture) = edit.picture() else {
+        let (Some(picture), Some(scale)) = (edit.picture(), edit.layer_scale(window)) else {
             return;
         };
         let Some(step) = edit.selected.and_then(|at| edit.steps().get(at)).cloned() else {
             return;
         };
-        let (_, fitted) = fit(edit.drawn.get(), (picture.0 as f32, picture.1 as f32));
-        let scale = f64::from((fitted * device).min(1.));
-        let work = cx.background_executor().spawn(async move {
-            let (bitmap, area) = edits::render_mark(&step, picture, scale)?;
-            let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)
-                .ok_or("couldn't draw the mark")?;
-            Ok::<_, String>((
-                Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
-                area,
-            ))
-        });
+        let work = cx
+            .background_executor()
+            .spawn(async move { layer_of(&step, picture, scale).map(|layer| (layer, step)) });
         edit.dragged.layer_stale = false;
         edit.dragged.layer_task = Some(cx.spawn_in(window, async move |this, cx| {
             let done = work.await;
@@ -709,7 +775,7 @@ impl PreviewView {
                 edit.dragged.layer_task = None;
                 match done {
                     Ok(new) => {
-                        if let Some((old, _)) = edit.dragged.layer.replace(new) {
+                        if let Some(((old, _), _)) = edit.dragged.layer.replace(new) {
                             cx.drop_image(old, None);
                         }
                     }
@@ -728,6 +794,14 @@ impl PreviewView {
             edit.remember_steps();
             edit.selected = None;
             edit.error = None;
+            // Drawn here at screen size, so the mark stays on screen while the
+            // whole picture flattens.
+            if let (Some(picture), Some(scale)) = (edit.picture(), edit.layer_scale(window))
+                && step.is_mark()
+                && let Ok(layer) = layer_of(&step, picture, scale)
+            {
+                edit.landing.push((edit.steps().len(), step.clone(), layer));
+            }
             if let Subject::Picture { steps, .. } = &mut edit.subject {
                 steps.push(step);
             }
@@ -1292,12 +1366,13 @@ impl PreviewView {
         };
         let note = self.note_card(source, window, cx);
         // While a mark moves: the rest of the picture, with the mark's own layer
-        // over it.
-        let (shown, layer) = match (&edit.dragged.under, &edit.dragged.layer) {
-            (Some((_, under)), Some((layer, area))) => {
-                (under.clone(), Some((layer.clone(), *area)))
-            }
-            _ => (image, None),
+        // over it. Otherwise the picture, with marks it doesn't have yet.
+        let (shown, layers): (_, Vec<Layer>) = match (&edit.dragged.under, &edit.dragged.layer) {
+            (Some((_, under)), Some((layer, _))) => (under.clone(), vec![layer.clone()]),
+            _ => (
+                image,
+                edit.landing().map(|(_, _, layer)| layer.clone()).collect(),
+            ),
         };
         let cursor = edit
             .gesture
@@ -1306,7 +1381,7 @@ impl PreviewView {
         let picture = (f64::from(source.0), f64::from(source.1));
         let chrome = edit
             .selected
-            .and_then(|at| edit.steps().get(at))
+            .and_then(|at| edit.on_screen(at))
             .filter(|_| edit.text.is_none())
             .cloned();
         div()
@@ -1346,7 +1421,7 @@ impl PreviewView {
                     move |bounds, _, _| measured.set(bounds),
                     move |bounds, _, window, _| {
                         let (origin, scale) = fit(bounds, source);
-                        if let Some((layer, area)) = &layer {
+                        for (layer, area) in &layers {
                             let frame = Bounds::new(
                                 origin
                                     + point(px(area.x as f32 * scale), px(area.y as f32 * scale)),
@@ -2265,6 +2340,7 @@ mod tests {
             selected: None,
             gesture: None,
             dragged: Dragged::default(),
+            landing: Vec::new(),
             cursor: CursorStyle::Arrow,
             text: None,
             rewriting: None,
