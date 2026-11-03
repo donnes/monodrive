@@ -1,6 +1,15 @@
 # Overview
 
-Status: direction picked (Desk, D1), not built. This plan authorizes planning only.
+Status: steps 1 to 4 done. Step 5 waits for plan 22's delete review.
+
+Decisions made while building it:
+
+- The page follows the picked Desk mockup, whose image the maintainer holds. It adds one thing the mockup lacks: the disk bar under the headline, from Monocode's charts through `theme::dither_bar`. Solid is what's taken, and the accent, dithered, is what the suggestions and the Trash could give back. It has no motion, glow or hover repaint.
+- "Your stuff" says Largest first, not the mockup's Recently active first, because nothing records activity.
+- A project on several locations lists each copy under its row on a press, in place of a page of its own.
+- Suggestions only move to the Trash. No tool's own cleanup command runs, so tools that own their cleanup, npm among them, aren't suggested.
+- A share gets no Trash button, because nothing says cheaply whether it has a Trash.
+- `storage_scan` on a volume's mount saves that scan, so an agent can do what the Scan button does.
 
 ## Goal
 
@@ -65,7 +74,7 @@ Add `crates/monodrive-core/src/overview.rs`. The view and the MCP tool call it, 
 - Add `Stop`'s third kind beside `recents`, so Back, tabs and sessions keep working. Make it an enum rather than a second bool.
 - `GoOverview` in `commands.rs` with ⌥⌘O, which is free. That gives it the menu, palette and Keyboard settings. Add a sidebar row at the top.
 - Put the new code in `browser/overview.rs`, on `theme.rs`'s controls. It has no list columns, selection or marquee, and commands that act on files don't apply there.
-- Stay on `DESIGN.md`'s type scale. The headline is `TEXT_TITLE` semibold, as a current folder's name is, with no display size.
+- The headline follows the Desk mockup: `TEXT_DISPLAY`, added to `DESIGN.md`'s type scale for this one figure.
 - Add the page and its states to the snapshot example: under and over 20% free, one drive, unscanned share, disconnected drive.
 
 ## MCP

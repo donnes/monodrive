@@ -26,6 +26,15 @@ pub fn bind(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Dismiss, Some("Jobs"))]);
 }
 
+/// One job, as a page lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JobLine {
+    pub title: String,
+    pub state: &'static str,
+    pub done: f32,
+    pub agent: bool,
+}
+
 /// How often the owner is asked while a job is going or the popover is open.
 pub const CHECK: Duration = Duration::from_secs(1);
 /// How long a finished job stays in the list.
@@ -200,6 +209,18 @@ impl Jobs {
                 State::Completed | State::Cancelled => self.leaving.contains_key(&run),
             }
         })
+    }
+
+    /// The jobs shown, for a page listing them.
+    pub fn lines(&self) -> Vec<JobLine> {
+        self.shown()
+            .map(|job| JobLine {
+                title: title(job),
+                state: job.state.label(),
+                done: progress(&[job]),
+                agent: matches!(job.origin, Origin::Agent { .. }),
+            })
+            .collect()
     }
 
     /// The title bar's ring: how far the jobs shown have got, with a dot

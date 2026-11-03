@@ -3,11 +3,12 @@
 //! nothing here mounts or ejects anything, and `Store` is a temp folder's.
 
 use super::pane::Unavailable;
+use super::sidebar::Row;
 use super::tests::*;
 use super::*;
 use crate::palette::{Page, PaletteView};
 use crate::preferences::View;
-use crate::session::{self, PaneState, Session, StopState};
+use crate::session::{self, PaneState, Session, Shows, StopState};
 use gpui::{Action, Keystroke, Modifiers, TestAppContext, VisualTestContext, point};
 use monodrive_core::cloud::CloudFolder;
 use monodrive_core::entries::Sort;
@@ -312,7 +313,7 @@ fn cloud_folders_lead_locations_and_open_with_the_drives_after_them(cx: &mut Tes
     ];
     let owned = own(cx);
     let (browser, cx) = open(&world, &project, cx);
-    let first = favorites(&browser, cx).len() + 1;
+    let first = favorites(&browser, cx).len() + 2;
     press_on(cx, &format!("place-{}", first + 1));
     assert_eq!(here(&browser, cx), project.join("zeta"));
     // From the cloud folder that's open, the keys go on to the drives.
@@ -370,7 +371,7 @@ fn edit_mode_shows_handles_and_removes_and_reorders_for_good(cx: &mut TestAppCon
     // Outside Edit mode: no handles or ✕, and a click opens the row.
     assert!(!on_screen(cx, "favorite-handle-0"));
     assert!(!on_screen(cx, "favorite-remove-0"));
-    press_on(cx, "place-1");
+    press_on(cx, "place-2");
     assert_eq!(here(&browser, cx), one);
     press(cx, "cmd-[");
 
@@ -378,14 +379,14 @@ fn edit_mode_shows_handles_and_removes_and_reorders_for_good(cx: &mut TestAppCon
     assert!(on_screen(cx, "favorite-handle-0"));
     assert!(on_screen(cx, "favorite-remove-0"));
     // In Edit mode a click on the row goes nowhere, and Recents has no ✕.
-    press_on(cx, "place-1");
+    press_on(cx, "place-2");
     assert_eq!(here(&browser, cx), project);
     let rows = favorites(&browser, cx).len();
     assert!(!on_screen(cx, &format!("favorite-remove-{rows}")));
 
     // Dragging the first handle onto the third row moves it there.
     let from = center(cx, "favorite-handle-0");
-    let to = center(cx, "place-3");
+    let to = center(cx, "place-4");
     cx.simulate_mouse_down(from, MouseButton::Left, with(""));
     cx.simulate_mouse_move(to, MouseButton::Left, with(""));
     cx.run_until_parked();
@@ -397,7 +398,7 @@ fn edit_mode_shows_handles_and_removes_and_reorders_for_good(cx: &mut TestAppCon
 
     // A drop in the gap under a row counts as a drop on that row.
     let from = center(cx, "favorite-handle-2");
-    let row = cx.debug_bounds("place-1").unwrap();
+    let row = cx.debug_bounds("place-2").unwrap();
     let to = point(row.center().x, row.bottom() + px(1.));
     cx.simulate_mouse_down(from, MouseButton::Left, with(""));
     cx.simulate_mouse_move(to, MouseButton::Left, with(""));
@@ -479,7 +480,7 @@ fn an_unavailable_favorite_says_why_and_never_opens_another_drive(cx: &mut TestA
     world.store.pin(&photos, Some(0), &drive_a).unwrap();
     let (browser, cx) = open(&world, &project, cx);
     assert_eq!(favorites(&browser, cx)[0], photos);
-    press_on(cx, "place-1");
+    press_on(cx, "place-2");
     assert_eq!(
         toast(&browser, cx),
         Some(("Backup isn't connected.".into(), true, false))
@@ -529,14 +530,15 @@ fn add_to_sidebar_takes_a_folder_and_remove_forgets_it(cx: &mut TestAppContext) 
         titles
     };
     assert_eq!(
-        menu_on(rows, cx),
+        menu_on(rows + 1, cx),
         ["Open", "Open in New Tab", "Remove from Sidebar"]
     );
-    assert_eq!(menu_on(0, cx), ["Open", "Open in New Tab", "Clear Recents"]);
-    assert_eq!(menu_on(rows + 1, cx), ["Open", "Open in New Tab"]);
+    assert_eq!(menu_on(1, cx), ["Open", "Open in New Tab", "Clear Recents"]);
+    assert_eq!(menu_on(0, cx), ["Open", "Open in New Tab"]);
+    assert_eq!(menu_on(rows + 2, cx), ["Open", "Open in New Tab"]);
 
     // The gap under a row answers as the row does.
-    let row = cx.debug_bounds("place-0").unwrap();
+    let row = cx.debug_bounds("place-1").unwrap();
     let gap = point(row.center().x, row.bottom() + px(1.));
     right_click(cx, gap);
     cx.run_until_parked();
@@ -551,7 +553,7 @@ fn add_to_sidebar_takes_a_folder_and_remove_forgets_it(cx: &mut TestAppContext) 
     press(cx, "cmd-[");
 
     // Remove from Sidebar through that menu.
-    let at = center(cx, &format!("place-{rows}"));
+    let at = center(cx, &format!("place-{}", rows + 1));
     right_click(cx, at);
     cx.run_until_parked();
     press(cx, "up enter");
@@ -685,7 +687,7 @@ fn recents_list_what_was_opened_mark_what_went_and_clear(cx: &mut TestAppContext
     assert!(in_pane(&browser, cx, |b, _| b.showing_recents()));
 
     // Clear Recents is in the Recents row's menu.
-    let at = center(cx, "place-0");
+    let at = center(cx, "place-1");
     right_click(cx, at);
     cx.run_until_parked();
     press(cx, "up enter");
@@ -859,8 +861,8 @@ fn command_backspace_in_the_sidebar_never_reaches_the_lists_selection(cx: &mut T
     let file = project.join("a.txt");
     assert_eq!(shown(&browser, cx).1, ["a.txt"]);
     let favorites = browser.read_with(cx, |b, _| b.sidebar.places.len());
-    // Recents, then each volume.
-    for row in [0, favorites + 1, favorites + 2] {
+    // The Overview, Recents, then each volume.
+    for row in [0, 1, favorites + 2, favorites + 3] {
         browser.update_in(cx, |b, window, cx| {
             b.sidebar_cursor = row;
             window.focus(&b.sidebar_focus, cx);
@@ -998,6 +1000,7 @@ fn with_nothing_typed_the_palette_shows_its_sections_and_what_would_run(cx: &mut
             "Cloud storage",
             "Drives",
             "Favorites",
+            "Overview",
             "Recents",
             "Trash"
         ]
@@ -1167,9 +1170,9 @@ fn a_drive_going_under_the_palette_stops_eject_reaching_the_next_one(cx: &mut Te
     let owned = own(cx);
     let (browser, cx) = open(&world, &project, cx);
     let favorites = browser.read_with(cx, |b, _| b.sidebar.places.len());
-    // Recents, the favorites, the startup disk, A, then B.
+    // The Overview, Recents, the favorites, the startup disk, A, then B.
     browser.update_in(cx, |b, window, cx| {
-        b.sidebar_cursor = favorites + 3;
+        b.sidebar_cursor = favorites + 4;
         window.focus(&b.sidebar_focus, cx);
         cx.notify();
     });
@@ -1495,7 +1498,7 @@ fn saved_pane(places: Vec<Favorite>) -> PaneState {
             .into_iter()
             .map(|place| StopState {
                 place,
-                recents: false,
+                shows: Shows::Folder,
             })
             .collect(),
         view: View::List,
@@ -1901,7 +1904,7 @@ fn a_favorite_takes_files_and_the_edges_between_favorites_pin_folders(cx: &mut T
     let (docs, file) = (row(&browser, 0, cx), row(&browser, 2, cx));
     let name_of = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
     // The middle of a favorite is that folder.
-    let middle = center(cx, "place-1");
+    let middle = center(cx, "place-2");
     carry(file, middle, "", cx);
     assert_eq!(
         says(&browser, cx).unwrap(),
@@ -1913,7 +1916,7 @@ fn a_favorite_takes_files_and_the_edges_between_favorites_pin_folders(cx: &mut T
     cx.run_until_parked();
     assert!(one.join("a.txt").exists());
     // A file on a favorite's edge has nowhere to pin, so it still goes in.
-    let edge = cx.debug_bounds("place-2").unwrap().top_center() + point(px(0.), px(2.));
+    let edge = cx.debug_bounds("place-3").unwrap().top_center() + point(px(0.), px(2.));
     let file = row(&browser, 2, cx);
     carry(file, edge, "", cx);
     assert_eq!(
@@ -1966,7 +1969,7 @@ fn a_drive_takes_a_copy_as_another_volume_and_a_read_only_one_takes_nothing(
     );
     let mut owned = own(cx);
     let (browser, cx) = open(&world, &project, cx);
-    let first = favorites(&browser, cx).len() + 1;
+    let first = favorites(&browser, cx).len() + 2;
     let (ext_row, locked_row) = (
         center(cx, &format!("place-{}", first + 1)),
         center(cx, &format!("place-{}", first + 2)),
@@ -2011,7 +2014,7 @@ fn pinning_folders_already_in_favorites_lands_where_the_line_showed(cx: &mut Tes
         row(&browser, ix, cx)
     };
     // One, to the line between Two and Three.
-    let edge = cx.debug_bounds("place-3").unwrap().top_center() + point(px(0.), px(2.));
+    let edge = cx.debug_bounds("place-4").unwrap().top_center() + point(px(0.), px(2.));
     let from = row_of("One", cx);
     carry(from, edge, "", cx);
     assert_eq!(browser.read_with(cx, |b, _| b.drag.pins_at()), Some(2));
@@ -2027,7 +2030,7 @@ fn pinning_folders_already_in_favorites_lands_where_the_line_showed(cx: &mut Tes
     let (from, also) = (row_of("One", cx), row_of("Three", cx));
     cx.simulate_click(from, with(""));
     cx.simulate_click(also, with("cmd"));
-    let edge = cx.debug_bounds("place-4").unwrap().top_center() + point(px(0.), px(2.));
+    let edge = cx.debug_bounds("place-5").unwrap().top_center() + point(px(0.), px(2.));
     carry(from, edge, "", cx);
     assert_eq!(browser.read_with(cx, |b, _| b.drag.pins_at()), Some(3));
     cx.simulate_mouse_up(edge, MouseButton::Left, with(""));
@@ -2048,7 +2051,7 @@ fn a_folder_through_a_link_counts_as_the_volume_it_leads_to(cx: &mut TestAppCont
     let (one, _) = two_favorites(&world);
     let (browser, cx) = open(&world, &outside, cx);
     // Its path is on the startup disk, and the file is really on the drive.
-    let middle = center(cx, "place-1");
+    let middle = center(cx, "place-2");
     let file = row(&browser, 0, cx);
     carry(file, middle, "", cx);
     let name = one.file_name().unwrap().to_string_lossy().into_owned();
@@ -2090,7 +2093,7 @@ fn a_target_is_read_once_per_drag_and_one_that_cant_be_stays_a_copy(cx: &mut Tes
     let world = world(vec![startup()], cx);
     let (one, two) = two_favorites(&world);
     let (browser, cx) = open(&world, &project, cx);
-    let (first, second) = (center(cx, "place-1"), center(cx, "place-2"));
+    let (first, second) = (center(cx, "place-2"), center(cx, "place-3"));
     let file = row(&browser, 2, cx);
     // On one volume: a move, however long it stays over the same place.
     carry(file, first, "", cx);
@@ -2135,8 +2138,8 @@ fn resting_on_a_favorite_or_a_drive_opens_it_in_the_pane_commands_act_on(cx: &mu
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
     };
-    let last = favorites(&browser, cx).len() + 2;
-    let (favorite, volume_row) = (center(cx, "place-1"), center(cx, &format!("place-{last}")));
+    let last = favorites(&browser, cx).len() + 3;
+    let (favorite, volume_row) = (center(cx, "place-2"), center(cx, &format!("place-{last}")));
     let file = row(&browser, 2, cx);
     carry(file, favorite, "", cx);
     rest(cx);
@@ -2227,4 +2230,181 @@ fn a_folder_behind_a_privacy_prompt_never_opens_under_a_drag_but_takes_a_drop(
     press(cx, "escape");
     cx.simulate_mouse_up(secret, MouseButton::Left, with(""));
     release(owned, cx);
+}
+
+/// A startup disk with `free` of 1,000,000 bytes free, for a home folder in
+/// `world`'s temp folder.
+fn disk(free: u64) -> Volume {
+    Volume {
+        total: 1_000_000,
+        free,
+        ..startup()
+    }
+}
+
+fn on_the_page(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> bool {
+    in_pane(browser, cx, |pane, _| pane.showing_overview())
+}
+
+#[gpui::test]
+fn the_overview_is_a_place_in_the_history_and_the_session(cx: &mut TestAppContext) {
+    let world = world(vec![disk(900_000)], cx);
+    let (_dir, project) = folder();
+    let (browser, cx) = open(&world, &project, cx);
+
+    press(cx, "cmd-alt-o");
+    assert!(on_screen(cx, "overview-page"));
+    assert_eq!(in_pane(&browser, cx, |pane, cx| pane.title(cx)), "Overview");
+    let shows = in_pane(&browser, cx, |pane, _| pane.stop().shows);
+    assert_eq!(shows, Shows::Overview);
+
+    // Commands that act on files don't reach what's under it.
+    assert!(!in_pane(&browser, cx, |pane, cx| pane.takes_files(cx)));
+
+    press(cx, "cmd-[");
+    assert!(!on_the_page(&browser, cx));
+    assert!(!on_screen(cx, "overview-page"));
+    assert_eq!(here(&browser, cx), project);
+    press(cx, "cmd-]");
+    assert!(on_screen(cx, "overview-page"));
+}
+
+#[gpui::test]
+fn the_sidebars_keys_reach_the_overview_above_recents(cx: &mut TestAppContext) {
+    let world = world(vec![disk(900_000)], cx);
+    let (_dir, project) = folder();
+    let (browser, cx) = open(&world, &project, cx);
+    browser.read_with(cx, |browser, _| {
+        assert_eq!(browser.row_at(0), Some(Row::Overview));
+        assert_eq!(browser.row_at(1), Some(Row::Recents));
+    });
+    press(cx, "cmd-alt-o");
+    let row = browser.read_with(cx, |browser, cx| browser.cursor_on_folder(cx));
+    assert_eq!(row, Some(0));
+}
+
+#[gpui::test]
+fn a_row_opens_its_folder_and_back_returns_to_the_page(cx: &mut TestAppContext) {
+    let world = world(vec![disk(900_000)], cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    let documents = home.join("Documents");
+    std::fs::create_dir(&documents).unwrap();
+    std::fs::write(documents.join("a.txt"), "hello").unwrap();
+    let (browser, cx) = open(&world, &home, cx);
+    press(cx, "cmd-alt-o");
+    assert!(on_screen(cx, "overview-spot-Documents"));
+    press_on(cx, "overview-spot-Documents");
+    assert_eq!(here(&browser, cx), documents);
+    assert!(!on_the_page(&browser, cx));
+    press(cx, "cmd-[");
+    assert!(on_the_page(&browser, cx));
+}
+
+#[gpui::test]
+fn suggestions_show_when_the_disk_is_low_and_their_button_can_be_undone(cx: &mut TestAppContext) {
+    let world = world(vec![disk(100_000)], cx);
+    let owned = own(cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    let cache = home.join("Library/Caches/pip");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("wheel"), vec![1; 64 * 1024]).unwrap();
+    let (browser, cx) = open(&world, &home, cx);
+    press(cx, "cmd-alt-o");
+    // The first read found it due, and measuring it brought the suggestion.
+    assert!(on_screen(cx, "overview-clean"));
+
+    // This goes to the user's own Trash, and comes back out before the test
+    // ends.
+    press_on(cx, "overview-clean");
+    assert!(!cache.exists());
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Moved \"pip\" to the Trash".into(), false, true))
+    );
+    assert!(!on_screen(cx, "overview-clean"), "its proof is gone");
+    click(cx, "toast-undo");
+    assert!(cache.join("wheel").exists());
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn no_suggestion_shows_with_room_to_spare(cx: &mut TestAppContext) {
+    let world = world(vec![disk(200_000)], cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    let cache = home.join("Library/Caches/pip");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("wheel"), vec![1; 64 * 1024]).unwrap();
+    let (_browser, cx) = open(&world, &home, cx);
+    press(cx, "cmd-alt-o");
+    assert!(on_screen(cx, "overview-page"));
+    assert!(!on_screen(cx, "overview-clean"));
+}
+
+#[gpui::test]
+fn the_button_refuses_while_cargo_builds_and_nothing_moves(cx: &mut TestAppContext) {
+    let world = world(vec![disk(100_000)], cx);
+    let owned = own(cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    let project = home.join("app");
+    let target = project.join("target");
+    std::fs::create_dir_all(target.join("debug")).unwrap();
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::write(project.join("Cargo.toml"), "").unwrap();
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    std::fs::write(target.join("debug/app"), vec![1; 64 * 1024]).unwrap();
+    std::fs::write(target.join("debug/.cargo-lock"), "").unwrap();
+    world
+        .store
+        .register_repository(monodrive_core::worktrees::Registration {
+            common_dir: project.join(".git"),
+            path: project.clone(),
+        })
+        .unwrap();
+    let lock = std::fs::File::open(target.join("debug/.cargo-lock")).unwrap();
+    lock.lock().unwrap();
+    let (browser, cx) = open(&world, &home, cx);
+    press(cx, "cmd-alt-o");
+    press_on(cx, "overview-clean");
+    assert!(target.exists());
+    assert_eq!(
+        toast(&browser, cx),
+        Some((
+            "Cargo is building in app. Try again when it finishes.".into(),
+            true,
+            false
+        ))
+    );
+    drop(lock);
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn a_drive_shows_nothing_until_someone_asks_for_a_scan(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(mount.join("Photos")).unwrap();
+    std::fs::write(mount.join("Photos/a.jpg"), vec![1; 64 * 1024]).unwrap();
+    let backup = Volume {
+        name: "Backup".into(),
+        mount: mount.clone(),
+        id: Some(VolumeId::Uuid("backup".into())),
+        startup: false,
+        ..disk(900_000)
+    };
+    let world = world(vec![disk(900_000), backup], cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    let (browser, cx) = open(&world, &home, cx);
+    press(cx, "cmd-alt-o");
+    assert!(on_screen(cx, "overview-scan"));
+    assert!(!on_screen(cx, "overview-row-Photos"));
+
+    press_on(cx, "overview-scan");
+    assert!(on_screen(cx, "overview-row-Photos"));
+    // A row opens its folder on the drive.
+    press_on(cx, "overview-row-Photos");
+    assert_eq!(here(&browser, cx), mount.join("Photos"));
 }

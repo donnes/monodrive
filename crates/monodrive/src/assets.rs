@@ -41,6 +41,7 @@ icons!(
     "eye",
     "file",
     "folder-01",
+    "folder-fill",
     "grip-vertical",
     "hard-drive",
     "keyboard",
