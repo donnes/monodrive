@@ -30,7 +30,7 @@ jobs:
         with:
           script: |
             // Files that no build, lint or test reads.
-            const docs = /(\.md$|^\.plans\/|^public\/|^assets\/|^LICENSE$|^NOTICE$)/;
+            const docs = /(^\.github\/|\.md$|^\.plans\/|^public\/|^assets\/|^LICENSE$|^NOTICE$)/;
             const files = await github.paginate(github.rest.pulls.listFiles, {
               ...context.repo,
               pull_number: context.payload.pull_request.number,
