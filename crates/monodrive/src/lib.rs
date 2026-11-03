@@ -13,6 +13,7 @@ mod frame;
 mod goto;
 mod jobs;
 mod menu;
+mod motion;
 pub mod native;
 mod native_view;
 pub mod onboarding;
@@ -97,6 +98,12 @@ pub fn run(folder: Option<PathBuf>) {
             #[cfg(feature = "profile")]
             profile::start(cx);
             preferences::init(cx);
+            // Read at launch. GPUI's animations and the sidebar's slide skip
+            // to where they end with it.
+            cx.set_reduce_motion(
+                objc2_app_kit::NSWorkspace::sharedWorkspace()
+                    .accessibilityDisplayShouldReduceMotion(),
+            );
             let index: browser::SharedIndex = browser::SharedIndex(Arc::default());
             let setup = Arc::new(onboarding::System::new(index.0.clone()));
             cx.set_global(index);

@@ -36,6 +36,7 @@ use crate::empty_trash::{self, EmptyTrashView};
 use crate::goto::{GotoEvent, GotoView};
 use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
+use crate::motion::Slide;
 use crate::onboarding::{self, IndexGate, Step};
 use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
@@ -312,6 +313,12 @@ pub struct Browser {
     /// While dragging the sidebar's edge: the sidebar's width less the
     /// pointer's x at the press, so the edge stays under the pointer.
     resizing_sidebar: Option<f32>,
+    /// Whether the sidebar was asked open when this window last drew, and
+    /// its slide there. Any window or Settings may ask.
+    sidebar_open: bool,
+    sidebar_slide: Option<Slide>,
+    /// How much of the sidebar shows this frame, from 0 to 1.
+    sidebar_fraction: f32,
     /// What the inspector shows, while it's open.
     inspector: inspector::Inspector,
     /// Where the search field was last drawn, for its menu to open under.
@@ -473,6 +480,7 @@ impl Browser {
     }
 
     fn empty(cx: &mut Context<Self>) -> Self {
+        let sidebar_open = cx.global::<Preferences>().show_sidebar;
         let jobs = cx.new(|_| Jobs::new());
         cx.subscribe(&jobs, |this, _, event: &JobsEvent, cx| match event {
             JobsEvent::Finished(job) => this.job_finished(job.clone(), cx),
@@ -532,6 +540,9 @@ impl Browser {
             _index_watch: Task::ready(()),
             index_hovered: false,
             resizing_sidebar: None,
+            sidebar_open,
+            sidebar_slide: None,
+            sidebar_fraction: if sidebar_open { 1. } else { 0. },
             inspector: inspector::Inspector::default(),
             search_anchor: Rc::default(),
             menu: None,
@@ -603,7 +614,7 @@ impl Browser {
     /// The panes on screen, each with its width inside its borders.
     fn pane_widths(&self, window: &Window, cx: &App) -> Vec<(Entity<Pane>, f32)> {
         let tab = &self.tabs[self.active];
-        let room = pane_room(window, tab.second.is_some(), cx);
+        let room = self.pane_room(window, tab.second.is_some(), cx);
         let boxy = cx.global::<Preferences>().workspace_style == WorkspaceStyle::Boxy;
         match &tab.second {
             None => vec![(tab.pane.clone(), if boxy { room } else { room - 2. })],
@@ -1695,6 +1706,7 @@ impl Render for Browser {
         self.settle_drag(window, cx);
         self.sidebar.command_held = sidebar::command_held(window);
         let prefs = cx.global::<Preferences>().clone();
+        self.step_sidebar(prefs.show_sidebar, window, cx);
         let system_light = matches!(
             window.appearance(),
             WindowAppearance::Light | WindowAppearance::VibrantLight
@@ -1932,7 +1944,18 @@ impl Render for Browser {
             .font_family(theme::UI_FONT)
             .text_color(content(1.))
             .bg(theme::shell_fill())
-            .when(prefs.show_sidebar, |d| d.child(self.sidebar(window, cx)))
+            .when(self.sidebar_fraction > 0., |d| {
+                // The sidebar keeps its width and is cut off as it slides.
+                d.child(
+                    div()
+                        .w(px(self.sidebar_drawn(window, cx)))
+                        .h_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .opacity(self.sidebar_fraction)
+                        .child(self.sidebar(window, cx)),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -1943,7 +1966,7 @@ impl Render for Browser {
                     // Boxy runs the pane the window's full height.
                     .when(boxy, |d| {
                         d.bg(theme::pane_fill())
-                            .when(prefs.show_sidebar, |d| d.border_l_1())
+                            .when(self.sidebar_fraction > 0., |d| d.border_l_1())
                             .border_color(content(0.06))
                     })
                     .child(self.title_bar(window, cx))
@@ -1958,7 +1981,7 @@ impl Render for Browser {
                                 if boxy {
                                     d.when(!split, |d| d.border_t_1())
                                 } else {
-                                    d.mr_2().mb_2().when(!prefs.show_sidebar, |d| d.ml_2())
+                                    d.mr_2().mb_2().ml(px(8. * (1. - self.sidebar_fraction)))
                                 }
                             })
                             .child(
@@ -1974,6 +1997,7 @@ impl Render for Browser {
                             .children(self.inspector_view(boxy, split, window, cx)),
                     ),
             )
+            .child(self.sidebar_toggle(window, cx))
             .children(self.sheet.as_ref().map(|sheet| {
                 match sheet {
                     Sheet::Settings(view) => view.clone().into_any_element(),
@@ -2002,34 +2026,31 @@ impl Render for Browser {
     }
 }
 
-/// How wide the panes' area is, inside the sidebar and the margin beside the
-/// cards, or Boxy's border.
-fn pane_room(window: &Window, split: bool, cx: &App) -> f32 {
-    let room = room_with_inspector(window, cx);
-    room - inspector::room(room, split, cx)
-}
+impl Browser {
+    /// How wide the panes' area is, inside the sidebar and the margin beside
+    /// the cards, or Boxy's border.
+    fn pane_room(&self, window: &Window, split: bool, cx: &App) -> f32 {
+        let room = self.room_with_inspector(window, cx);
+        room - inspector::room(room, split, cx)
+    }
 
-/// Whether the file list, or each of two panes, keeps its least beside the
-/// inspector.
-fn inspector_fits(window: &Window, split: bool, cx: &App) -> bool {
-    inspector::room(room_with_inspector(window, cx), split, cx) > 0.
-}
+    /// Whether the file list, or each of two panes, keeps its least beside
+    /// the inspector.
+    fn inspector_fits(&self, window: &Window, split: bool, cx: &App) -> bool {
+        inspector::room(self.room_with_inspector(window, cx), split, cx) > 0.
+    }
 
-/// `pane_room` before the inspector takes its share.
-fn room_with_inspector(window: &Window, cx: &App) -> f32 {
-    let prefs = cx.global::<Preferences>();
-    let sidebar = if prefs.show_sidebar {
-        sidebar_width(prefs.sidebar_width, window)
-    } else {
-        0.
-    };
-    let margin = match (prefs.workspace_style, prefs.show_sidebar) {
-        (WorkspaceStyle::Rounded, true) => 8.,
-        (WorkspaceStyle::Rounded, false) => 16.,
-        (WorkspaceStyle::Boxy, true) => 1.,
-        (WorkspaceStyle::Boxy, false) => 0.,
-    };
-    window.viewport_size().width.as_f32() - sidebar - margin
+    /// `pane_room` before the inspector takes its share.
+    fn room_with_inspector(&self, window: &Window, cx: &App) -> f32 {
+        let shown = self.sidebar_fraction;
+        let margin = match cx.global::<Preferences>().workspace_style {
+            // The cards' left margin closes as the sidebar opens.
+            WorkspaceStyle::Rounded => 8. + 8. * (1. - shown),
+            WorkspaceStyle::Boxy if shown > 0. => 1.,
+            WorkspaceStyle::Boxy => 0.,
+        };
+        window.viewport_size().width.as_f32() - self.sidebar_drawn(window, cx) - margin
+    }
 }
 
 /// Runs `work` with the operation owner off the UI thread, then `done` with
