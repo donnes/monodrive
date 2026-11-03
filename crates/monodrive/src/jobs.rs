@@ -12,8 +12,8 @@ use crate::theme::{
     row_icon_button, text_button,
 };
 use gpui::{
-    App, Context, ElementId, EventEmitter, Hsla, KeyBinding, PathBuilder, Role, Task, actions,
-    canvas, div, point, prelude::*, px,
+    App, Context, ElementId, EventEmitter, Hsla, KeyBinding, Role, Task, actions, div, prelude::*,
+    px,
 };
 use monodrive_core::ops::{Conflict, Done, Job, Origin, Request, State};
 use std::collections::{HashMap, HashSet};
@@ -219,7 +219,7 @@ impl Jobs {
                 .relative()
                 .cursor_pointer()
                 .hover(|s| s.bg(content(0.08)))
-                .child(arc(progress(&shown)))
+                .child(theme::ring(progress(&shown), 14.))
                 .children(badge.map(|color| {
                     div()
                         .absolute()
@@ -473,44 +473,6 @@ fn progress(jobs: &[&Job]) -> f32 {
         }
     };
     fraction.clamp(0., 1.)
-}
-
-/// A circle's track with `fraction` of it drawn from the top, clockwise.
-/// It's painted once per frame drawn, which happens only when jobs change.
-fn arc(fraction: f32) -> impl IntoElement {
-    let (track, ink) = (content(0.2), accent());
-    canvas(
-        |_, _, _| {},
-        move |bounds, _, window, _| {
-            let center = bounds.center();
-            let radius = bounds.size.width.min(bounds.size.height) / 2. - px(1.5);
-            let at = |turn: f32| {
-                let angle = turn * std::f32::consts::TAU;
-                point(
-                    center.x + radius * angle.sin(),
-                    center.y - radius * angle.cos(),
-                )
-            };
-            let radii = point(radius, radius);
-            let mut circle = PathBuilder::stroke(px(2.));
-            circle.move_to(at(0.));
-            circle.arc_to(radii, px(0.), false, true, at(0.5));
-            circle.arc_to(radii, px(0.), false, true, at(0.));
-            if let Ok(path) = circle.build() {
-                window.paint_path(path, track);
-            }
-            if fraction > 0. {
-                let end = fraction.min(0.999);
-                let mut done = PathBuilder::stroke(px(2.));
-                done.move_to(at(0.));
-                done.arc_to(radii, px(0.), end > 0.5, true, at(end));
-                if let Ok(path) = done.build() {
-                    window.paint_path(path, ink);
-                }
-            }
-        },
-    )
-    .size(px(14.))
 }
 
 #[cfg(test)]

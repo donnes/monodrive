@@ -5,8 +5,8 @@
 use crate::palettes;
 use crate::preferences::{Preferences, Theme};
 use gpui::{
-    BoxShadow, Div, ElementId, FontWeight, Hsla, Role, SharedString, Stateful, Svg,
-    WindowBackgroundAppearance, canvas, div, prelude::*, px, rgb, svg,
+    BoxShadow, Div, ElementId, FontWeight, Hsla, PathBuilder, Role, SharedString, Stateful, Svg,
+    WindowBackgroundAppearance, canvas, div, point, prelude::*, px, rgb, svg,
 };
 use std::cell::Cell;
 
@@ -395,6 +395,45 @@ pub fn circle_button(id: impl Into<ElementId>, label: &'static str, side: f32) -
         .justify_center()
         .size(px(side))
         .rounded_full()
+}
+
+/// A progress ring `side` across: a circle's track with `fraction` of it
+/// drawn from the top, clockwise. It's painted once per frame drawn, so it
+/// costs nothing while the progress stands still.
+pub fn ring(fraction: f32, side: f32) -> impl IntoElement {
+    let (track, ink) = (content(0.2), accent());
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let center = bounds.center();
+            let radius = bounds.size.width.min(bounds.size.height) / 2. - px(1.5);
+            let at = |turn: f32| {
+                let angle = turn * std::f32::consts::TAU;
+                point(
+                    center.x + radius * angle.sin(),
+                    center.y - radius * angle.cos(),
+                )
+            };
+            let radii = point(radius, radius);
+            let mut circle = PathBuilder::stroke(px(2.));
+            circle.move_to(at(0.));
+            circle.arc_to(radii, px(0.), false, true, at(0.5));
+            circle.arc_to(radii, px(0.), false, true, at(0.));
+            if let Ok(path) = circle.build() {
+                window.paint_path(path, track);
+            }
+            if fraction > 0. {
+                let end = fraction.min(0.999);
+                let mut done = PathBuilder::stroke(px(2.));
+                done.move_to(at(0.));
+                done.arc_to(radii, px(0.), end > 0.5, true, at(end));
+                if let Ok(path) = done.build() {
+                    window.paint_path(path, ink);
+                }
+            }
+        },
+    )
+    .size(px(side))
 }
 
 /// A 24 pt chrome button whose icon brightens on hover.

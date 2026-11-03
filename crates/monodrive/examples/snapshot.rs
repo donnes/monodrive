@@ -344,6 +344,7 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
         },
         page: "https://github.com/donnes/monodrive/releases".into(),
         disk_image: String::new(),
+        size: 0,
     };
     cx.update(|cx| {
         let updates = cx.new(|_| Updates::new(Channel::Stable, vec![release], Some(None)));

@@ -6,9 +6,11 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::ffi::{CString, OsStr};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
 const RELEASES: &str = "https://api.github.com/repos/donnes/monodrive/releases?per_page=100";
 /// The Developer ID team that signs releases.
@@ -53,6 +55,8 @@ pub struct Release {
     /// Its page on GitHub.
     pub page: String,
     pub disk_image: String,
+    /// The disk image's bytes, which the download's progress counts up to.
+    pub size: u64,
 }
 
 /// A release as GitHub lists it.
@@ -73,6 +77,8 @@ struct Listed {
 struct Asset {
     name: String,
     browser_download_url: String,
+    #[serde(default)]
+    size: u64,
 }
 
 /// The releases on `channel` newer than this build, newest first. Blocks on
@@ -106,17 +112,17 @@ fn newer(listed: Vec<Listed>, channel: Channel, current: &Version) -> Vec<Releas
                 return None;
             }
             let image = format!("Monodrive-{version}-arm64.dmg");
-            let disk_image = release
+            let asset = release
                 .assets
                 .into_iter()
-                .find(|asset| asset.name == image)?
-                .browser_download_url;
+                .find(|asset| asset.name == image)?;
             Some(Release {
                 version,
                 published: release.published_at.unwrap_or_default(),
                 notes: notes(release.body.as_deref().unwrap_or_default()),
                 page: release.html_url,
-                disk_image,
+                disk_image: asset.browser_download_url,
+                size: asset.size,
             })
         })
         .collect();
@@ -188,9 +194,11 @@ fn signed_by_us(path: &Path) -> Result<(), String> {
 }
 
 /// Downloads `release` and swaps it in for `app`, which takes effect on the
-/// next launch. Nothing changes unless every check passes. Blocks on the
-/// network and the disk, so call it off the UI thread.
-pub fn install(release: &Release, app: &Path) -> Result<(), String> {
+/// next launch. Nothing changes unless every check passes. `progress` hears
+/// how much of the download has arrived, from 0 to 1, each time that passes
+/// another percent. Blocks on the network and the disk, so call it off the
+/// UI thread.
+pub fn install(release: &Release, app: &Path, progress: impl FnMut(f32)) -> Result<(), String> {
     let work = crate::support_dir()
         .ok_or("HOME isn't set.")?
         .join("Updates");
@@ -198,19 +206,20 @@ pub fn install(release: &Release, app: &Path) -> Result<(), String> {
     clear(&work)?;
     clear(&staged)?;
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let result = stage(release, &work, &staged).and_then(|()| swap(&staged, app));
+    let result = stage(release, &work, &staged, progress).and_then(|()| swap(&staged, app));
     // After a swap, this is the old app. Monodrive made every path here.
     let cleaned = clear(&staged).and_then(|()| clear(&work));
     result.and(cleaned)
 }
 
-fn stage(release: &Release, work: &Path, staged: &Path) -> Result<(), String> {
+fn stage(
+    release: &Release,
+    work: &Path,
+    staged: &Path,
+    progress: impl FnMut(f32),
+) -> Result<(), String> {
     let image = work.join("Monodrive.dmg");
-    run(Command::new("/usr/bin/curl")
-        .args(["--fail", "--silent", "--show-error", "--location"])
-        .args(["--proto", "=https", "--output"])
-        .arg(&image)
-        .arg(&release.disk_image))?;
+    download(release, &image, progress)?;
     signed_by_us(&image)?;
     // The same check `scripts/release` ends on: Apple notarized this image.
     run(Command::new("/usr/sbin/spctl")
@@ -245,6 +254,61 @@ fn stage(release: &Release, work: &Path, staged: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Saves the disk image to `to`. curl writes it to a pipe, so the bytes can
+/// be counted as they arrive.
+fn download(release: &Release, to: &Path, mut progress: impl FnMut(f32)) -> Result<(), String> {
+    let mut curl = Command::new("/usr/bin/curl")
+        .args(["--fail", "--silent", "--show-error", "--location"])
+        .args(["--proto", "=https"])
+        .arg(&release.disk_image)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut percent = 0;
+    let copied = save(&mut curl, to, |bytes| {
+        if release.size == 0 {
+            return;
+        }
+        let now = (bytes.saturating_mul(100) / release.size).min(100);
+        if now > percent {
+            percent = now;
+            progress(now as f32 / 100.);
+        }
+    });
+    if copied.is_err() {
+        let _ = curl.kill();
+    }
+    let output = curl.wait_with_output().map_err(|e| e.to_string())?;
+    // A failed write killed curl, so its own error says nothing.
+    copied?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+/// Writes what `child` prints to `to`, telling `arrived` the bytes so far
+/// after each read.
+fn save(child: &mut Child, to: &Path, mut arrived: impl FnMut(u64)) -> Result<(), String> {
+    let mut output = child.stdout.take().ok_or("curl printed nothing.")?;
+    let mut file = File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut buffer = vec![0; 1 << 16];
+    let mut total = 0u64;
+    loop {
+        let read = match output.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        file.write_all(&buffer[..read])
+            .map_err(|e| format!("{}: {e}", to.display()))?;
+        total += read as u64;
+        arrived(total);
+    }
 }
 
 /// Swaps two paths at once, so the app is whole at every moment.
@@ -298,6 +362,7 @@ mod tests {
             assets: vec![Asset {
                 name: format!("Monodrive-{version}-arm64.dmg"),
                 browser_download_url: format!("https://example.com/{version}"),
+                size: 0,
             }],
         }
     }
