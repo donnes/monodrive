@@ -19,8 +19,8 @@
 //!
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
-//! `sidebar-keys.png`, `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
-//! `recents.png`, then `updates.png`. Then `palette.png`, `palette-query.png`, the palette's pages
+//! `sidebar-keys.png`, `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png`,
+//! `recents.png` and `recents-grid.png`, then `updates.png`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
 //! `palette-favorites.png`), `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
 //! `settings-<page>.png` for each Settings page, `background.png`, the list
@@ -73,7 +73,8 @@ use monodrive::browser::{
     EditPreview, EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch,
     GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations,
     OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast, SelectNext,
-    ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo,
+    ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo, ViewAsGrid,
+    ViewAsList,
 };
 use monodrive::connect;
 use monodrive::native::{self, Native, SizeDone};
@@ -324,6 +325,12 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     save(&mut cx, window, out, "trash")?;
     dispatch(&mut cx, window, &GoRecents)?;
     save(&mut cx, window, out, "recents")?;
+    dispatch(&mut cx, window, &ViewAsGrid)?;
+    // A second pass lays out the grid's columns.
+    cx.update_window(window.into(), |_, window, _| window.refresh())?;
+    cx.run_until_parked();
+    save(&mut cx, window, out, "recents-grid")?;
+    dispatch(&mut cx, window, &ViewAsList)?;
 
     // A made-up release, on a copy that can't update itself, so nothing goes
     // to the network. Only this picture shows it.

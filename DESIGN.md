@@ -31,7 +31,7 @@ The header of a sheet with a query (palette, Go to Folder, Connect) is a bare fi
 - Every outlined text field is 28 pt high. The exception is rename, which fits inside the row it edits.
 - Rows in menus, pickers and popovers are 28 pt, or 40 pt with a muted subtitle on a second line. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt.
 - Rows in a stacked list of highlightable rows have a 2 pt gap (`ROW_GAP`), so highlights never touch. The gap belongs to the row above it: `row_slot` holds the role and the handlers, the row inside holds the highlight, so a hover, click or drop in the gap lands on that row. Two lists differ. The file list is virtualized, its rows touch as in Finder, and a change to its row height touches `uniform_list`, marquee math and the scrolling budget. Settings' page list keeps a plain gap, because each page is a Tab stop whose focus ring has to fit the row.
-- The top bar, a sheet's header, the Trash bar and the sidebar's foot are 40 pt. The path bar and the column titles are 28 pt. A toast is 36 pt. A Settings row is at least 44 pt.
+- The top bar, a sheet's header, the Trash and Recents bars and the sidebar's foot are 40 pt. The path bar and the column titles are 28 pt. A toast is 36 pt. A Settings row is at least 44 pt.
 
 ### Pane bars
 

@@ -656,6 +656,15 @@ fn recents_list_what_was_opened_mark_what_went_and_clear(cx: &mut TestAppContext
     press(cx, "up enter");
     assert_eq!(world.store.recents(), Ok(Vec::new()));
     assert!(shown(&browser, cx).0.is_empty());
+
+    // So is the button over the list, which empties the list where it is.
+    world.store.opened(&kept).unwrap();
+    world.lists_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(shown(&browser, cx).0, ["a.txt"]);
+    press_on(cx, "clear-recents");
+    assert_eq!(world.store.recents(), Ok(Vec::new()));
+    assert!(shown(&browser, cx).0.is_empty());
 }
 
 #[gpui::test]

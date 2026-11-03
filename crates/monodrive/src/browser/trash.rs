@@ -248,11 +248,7 @@ impl Pane {
         if !self.in_trash(cx) {
             return None;
         }
-        let title = match self.trash_header.count {
-            None => String::new(),
-            Some(1) => "1 item".to_string(),
-            Some(n) => format!("{n} items"),
-        };
+        let title = self.trash_header.count.map_or_else(String::new, item_count);
         let (known, why) = self.put_back();
         let can_empty = self.trash_header.erasable;
         Some(
@@ -315,5 +311,48 @@ impl Pane {
                     }),
                 ),
         )
+    }
+
+    /// The bar over Recents' list: its count and Clear Recents. Clearing only
+    /// forgets paths, so it asks nothing.
+    pub(super) fn recents_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if !self.showing_recents() || !self.query.is_empty() || self.preview.is_some() {
+            return None;
+        }
+        let count = self.entries.len();
+        Some(
+            theme::pane_bar(theme::TITLE_BAR_HEIGHT)
+                .justify_between()
+                .border_b_1()
+                .border_color(content(0.06))
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(item_count(count)),
+                )
+                .child(
+                    text_button(
+                        "clear-recents",
+                        "Clear Recents",
+                        if count == 0 {
+                            ButtonLook::Disabled
+                        } else {
+                            ButtonLook::Secondary
+                        },
+                    )
+                    .debug_selector(|| "clear-recents".into())
+                    .when(count > 0, |d| {
+                        d.on_click(cx.listener(|this, _, _, cx| this.clear_recents(cx)))
+                    }),
+                ),
+        )
+    }
+}
+
+fn item_count(count: usize) -> String {
+    match count {
+        1 => "1 item".to_string(),
+        n => format!("{n} items"),
     }
 }
