@@ -9,8 +9,7 @@ use super::sidebar::Places;
 use super::{ConnectToServer, EmptyTrash, Operations, lock, with_owner};
 use crate::jobs::JobLine;
 use crate::theme::{
-    self, ButtonLook, accent, content, dither_bar, icon, row_icon_button, section_label,
-    text_button,
+    self, ButtonLook, content, dither_bar, icon, row_icon_button, section_label, text_button,
 };
 use chrono::{DateTime, Local};
 use gpui::{
@@ -774,8 +773,14 @@ impl Pane {
         if let Some(age) = row.size.age(now) {
             said += &format!(". Scanned {age}.");
         }
+        // A drive that's gone can't be opened, so its rows rest fainter.
+        let ink = if location.mount.is_some() {
+            content(0.55)
+        } else {
+            content(0.3)
+        };
         let shown = stuff_row(
-            ("folder-fill", content(0.55)),
+            ("folder-01", ink),
             row.name.clone(),
             said,
             size_label(Some(row.size.on_disk), !row.size.complete, false),
@@ -821,7 +826,7 @@ impl Pane {
             .child(section_label("Right now").px_0())
             .when(quiet, |d| {
                 d.child(now_line(
-                    dot(content(0.2)),
+                    icon("clock", 16.).text_color(content(0.55)),
                     "Nothing running".to_string(),
                     "No copies, moves or agent changes.".to_string(),
                 ))
@@ -890,10 +895,14 @@ impl Pane {
             ),
             _ => None,
         };
-        let mark = dot(if location.connected {
-            theme::success()
+        let glyph = match location.kind {
+            LocationKind::Share { .. } | LocationKind::Sftp { .. } => "server",
+            LocationKind::Drive | LocationKind::Disconnected => "hard-drive",
+        };
+        let mark = icon(glyph, 16.).text_color(if location.connected {
+            content(0.55)
         } else {
-            content(0.2)
+            content(0.3)
         });
         now_line(
             mark,
@@ -904,14 +913,12 @@ impl Pane {
     }
 }
 
-/// The glyph and tint of a group's row: a project or a kind of thing.
+/// A group's glyph, in the one ink icons rest at. Color is kept for what can
+/// be done and what's moving: the buttons, the bar's dither and a job's ring.
 fn look(group: &Group) -> (&'static str, Hsla) {
-    match (group.kind, group.name.as_str()) {
-        (GroupKind::Cloud, _) => ("cloud", accent()),
-        (GroupKind::Folder, "Pictures") => ("folder-fill", theme::tint_orange()),
-        (GroupKind::Folder, "Movies") => ("folder-fill", theme::tint_purple()),
-        (GroupKind::Folder, "Music") => ("folder-fill", theme::tint_pink()),
-        _ => ("folder-fill", accent()),
+    match group.kind {
+        GroupKind::Cloud => ("cloud", content(0.55)),
+        GroupKind::Folder | GroupKind::Project => ("folder-01", content(0.55)),
     }
 }
 
@@ -962,9 +969,15 @@ fn location_state(location: &Location, scanning: bool, now: u64) -> String {
     if let Some((total, free)) = location.capacity {
         said.push(format!("{} free of {}", amount(free), amount(total)));
     }
-    if !location.connected {
-        said.push("Not connected".to_string());
-    }
+    said.insert(
+        0,
+        if location.connected {
+            "Connected"
+        } else {
+            "Not connected"
+        }
+        .to_string(),
+    );
     if scanning {
         said.push("Scanning…".to_string());
     } else {
@@ -978,10 +991,6 @@ fn location_state(location: &Location, scanning: bool, now: u64) -> String {
         }
     }
     said.join(" · ")
-}
-
-fn dot(ink: Hsla) -> gpui::Div {
-    div().size(px(12.)).rounded_full().flex_shrink_0().bg(ink)
 }
 
 /// A line of "Right now": a mark, what it is, and how it stands, over a
@@ -1023,7 +1032,7 @@ fn change_line(change: &AgentChange, now: u64) -> impl IntoElement + use<> {
     };
     let when = overview::age(change.at, now).unwrap_or_else(|| "just now".to_string());
     now_line(
-        dot(accent()),
+        icon("bot", 16.).text_color(content(0.55)),
         change
             .client
             .clone()

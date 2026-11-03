@@ -147,19 +147,6 @@ pub fn success() -> Hsla {
     rgb(if is_light() { 0x059669 } else { 0x10b981 }).into()
 }
 
-/// What tints a kind of folder on the Overview, at 3:1 on the theme's panes.
-pub fn tint_orange() -> Hsla {
-    rgb(if is_light() { 0xc2620e } else { 0xf0954f }).into()
-}
-
-pub fn tint_purple() -> Hsla {
-    rgb(if is_light() { 0x8250df } else { 0xb18cf2 }).into()
-}
-
-pub fn tint_pink() -> Hsla {
-    rgb(if is_light() { 0xc4307e } else { 0xf07ab0 }).into()
-}
-
 /// Black or white, whichever reads on the accent.
 pub fn on_accent() -> Hsla {
     let rgba = accent().to_rgb();
