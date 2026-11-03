@@ -269,6 +269,25 @@ fn floating_surface() -> impl IntoElement {
     .size_full()
 }
 
+/// A shortcut in its cap, in a sheet's footer or at the end of a row.
+pub fn key_cap(key: impl Into<SharedString>) -> Div {
+    const HEIGHT: f32 = 16.;
+    div()
+        .h(px(HEIGHT))
+        .min_w(px(HEIGHT))
+        .flex_shrink_0()
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(content(0.08))
+        .text_size(px(TEXT_CAPTION))
+        .font_weight(FontWeight::NORMAL)
+        .text_color(content(0.65))
+        .child(key.into())
+}
+
 pub fn section_label(label: &'static str) -> Div {
     div()
         .h(px(28.))

@@ -19,7 +19,7 @@
 //!
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
-//! `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
+//! `sidebar-keys.png`, `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png` and
 //! `recents.png`, then `updates.png`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
 //! `palette-favorites.png`), `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
@@ -63,8 +63,9 @@
 
 use gpui::{Action, HeadlessAppContext as Cx, Keystroke};
 use gpui::{
-    AppContext, Focusable, HeadlessAppContext, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, point, px, size,
+    AppContext, Capslock, Focusable, HeadlessAppContext, Modifiers, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, point,
+    px, size,
 };
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
@@ -290,6 +291,26 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
 
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();
+    // The keys show only in the active window, which a headless one isn't.
+    cx.update_window(window.into(), |_, window, _| window.activate_window())?;
+    cx.run_until_parked();
+    mouse(
+        &mut cx,
+        window,
+        vec![PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+            modifiers: Modifiers::command(),
+            capslock: Capslock::default(),
+        })],
+    )?;
+    save(&mut cx, window, out, "sidebar-keys")?;
+    mouse(
+        &mut cx,
+        window,
+        vec![PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+            modifiers: Modifiers::none(),
+            capslock: Capslock::default(),
+        })],
+    )?;
     dispatch(&mut cx, window, &EditFavorites)?;
     save(&mut cx, window, out, "sidebar-edit")?;
     dispatch(&mut cx, window, &EditFavorites)?;
@@ -703,8 +724,8 @@ fn shoot_drags(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gp
         ..Modifiers::default()
     };
     shoot_drag(cx, window, (row(6.), row(1.)), option, out, "drag-copy")?;
-    // A folder, onto the edge between Recents and the first favorite.
-    let between = point(px(120.), px(142.));
+    // A folder, onto the edge between the first two favorites.
+    let between = point(px(120.), px(170.));
     shoot_drag(
         cx,
         window,

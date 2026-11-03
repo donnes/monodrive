@@ -11,14 +11,15 @@ use crate::browser::{
     AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab,
     ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Duplicate, EditFavorites, EditPreview,
     Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications, GoComputer,
-    GoDesktop, GoDocuments, GoDownloads, GoHome, GoRecents, GoToFolder, GoTrash, HideInspector,
-    MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab,
-    NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
-    OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom,
-    RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
-    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
-    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid,
-    ViewAsList, ZoomIn, ZoomOut,
+    GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
+    GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome,
+    GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile,
+    NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook,
+    OpenInTerminal, OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack,
+    QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch,
+    SearchContents, SearchThisFolder, ShowCopiesAndMoves, ShowPackageContents, ShowSearches,
+    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles,
+    TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -47,6 +48,24 @@ actions!(
         ShowWelcome
     ]
 );
+
+type MakeAction = fn() -> Box<dyn Action>;
+
+/// The sidebar's first ten favorites, by position. Which folder each opens
+/// changes with the sidebar, so these stay out of the menu bar and the palette,
+/// whose Favorites page lists them by name.
+const FAVORITES: [(&str, &[&str], MakeAction); 10] = [
+    ("Favorite 1", &["cmd-1"], || Box::new(GoFavorite1)),
+    ("Favorite 2", &["cmd-2"], || Box::new(GoFavorite2)),
+    ("Favorite 3", &["cmd-3"], || Box::new(GoFavorite3)),
+    ("Favorite 4", &["cmd-4"], || Box::new(GoFavorite4)),
+    ("Favorite 5", &["cmd-5"], || Box::new(GoFavorite5)),
+    ("Favorite 6", &["cmd-6"], || Box::new(GoFavorite6)),
+    ("Favorite 7", &["cmd-7"], || Box::new(GoFavorite7)),
+    ("Favorite 8", &["cmd-8"], || Box::new(GoFavorite8)),
+    ("Favorite 9", &["cmd-9"], || Box::new(GoFavorite9)),
+    ("Favorite 10", &["cmd-0"], || Box::new(GoFavorite10)),
+];
 
 /// User overrides by command id: a shortcut, or `None` to turn it off.
 pub type Shortcuts = HashMap<String, Option<String>>;
@@ -118,6 +137,8 @@ pub struct Command {
     /// Trashes or erases files. Menus Monodrive draws show it in the danger
     /// color; the native menu bar doesn't.
     pub destructive: bool,
+    /// Runs from its shortcut and shows only in Keyboard settings.
+    pub keys_only: bool,
 }
 
 impl Command {
@@ -155,6 +176,7 @@ pub fn all() -> Vec<Command> {
             os_action: None,
             scopes: &[],
             destructive: false,
+            keys_only: false,
         }
     }
     fn destructive(command: Command) -> Command {
@@ -182,7 +204,7 @@ pub fn all() -> Vec<Command> {
     const SELECTION: &[Scope] = &[Scope::Selection];
     const FOLDER: &[Scope] = &[Scope::Folder];
     use Group::*;
-    vec![
+    let mut commands = vec![
         command("Settings…", App, &["cmd-,"], None, || {
             Box::new(OpenSettings)
         }),
@@ -477,11 +499,15 @@ pub fn all() -> Vec<Command> {
         }),
         on(
             FOLDER,
-            command("as List", View, &["cmd-1"], None, || Box::new(ViewAsList)),
+            command("as List", View, &["cmd-alt-1"], None, || {
+                Box::new(ViewAsList)
+            }),
         ),
         on(
             FOLDER,
-            command("as Grid", View, &["cmd-2"], None, || Box::new(ViewAsGrid)),
+            command("as Grid", View, &["cmd-alt-2"], None, || {
+                Box::new(ViewAsGrid)
+            }),
         ),
         separated(command("Split View", View, &["cmd-alt-s"], BROWSER, || {
             Box::new(ToggleSplit)
@@ -555,7 +581,7 @@ pub fn all() -> Vec<Command> {
             Box::new(ZoomIn)
         })),
         command("Zoom Out", View, &["cmd--"], None, || Box::new(ZoomOut)),
-        command("Actual Size", View, &["cmd-0"], None, || {
+        command("Actual Size", View, &["cmd-alt-0"], None, || {
             Box::new(ResetZoom)
         }),
         command("Minimize", Window, &["cmd-m"], None, || Box::new(Minimize)),
@@ -584,7 +610,12 @@ pub fn all() -> Vec<Command> {
             || Box::new(ShowCopiesAndMoves),
         )),
         command("Show Welcome…", Help, &[], None, || Box::new(ShowWelcome)),
-    ]
+    ];
+    commands.extend(FAVORITES.map(|(title, keys, action)| Command {
+        keys_only: true,
+        ..command(title, Go, keys, BROWSER, action)
+    }));
+    commands
 }
 
 fn valid(keys: &str) -> bool {
@@ -670,6 +701,12 @@ pub(crate) fn shortcuts_of(id: &str, cx: &App) -> Vec<String> {
 /// The label of the first shortcut command `id` runs on now, if any.
 pub fn shortcut_label(id: &str, cx: &App) -> Option<String> {
     shortcuts_of(id, cx).first().map(|keys| label(keys))
+}
+
+/// The label of the shortcut that opens favorite `fav`, if it has one.
+pub(crate) fn favorite_shortcut(fav: usize, cx: &App) -> Option<String> {
+    let (_, _, action) = FAVORITES.get(fav)?;
+    shortcut_label(action().name(), cx)
 }
 
 /// A shortcut as macOS shows it: "cmd-shift-p" is "⇧⌘P".
@@ -872,7 +909,7 @@ fn install_menus(cx: &mut App) {
     let commands = all();
     let items = |group: Group| {
         let mut items = Vec::new();
-        for command in commands.iter().filter(|c| c.group == group) {
+        for command in commands.iter().filter(|c| c.group == group && !c.keys_only) {
             if command.separated && !items.is_empty() {
                 items.push(MenuItem::separator());
             }
@@ -1068,8 +1105,8 @@ mod tests {
                 "| Organize Folder…",
                 "Get Info ⌘I",
                 "| Paste ⌘V",
-                "| ✓ as List ⌘1",
-                "as Grid ⌘2",
+                "| ✓ as List ⌥⌘1",
+                "as Grid ⌥⌘2",
                 "| Show Hidden Files ⌘>",
                 "| ✓ Sort by Name ⌃⌥⌘1",
                 "Sort by Date Modified ⌃⌥⌘2",

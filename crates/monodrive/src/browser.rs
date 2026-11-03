@@ -151,6 +151,16 @@ actions!(
         PutBack,
         GoRecents,
         GoTrash,
+        GoFavorite1,
+        GoFavorite2,
+        GoFavorite3,
+        GoFavorite4,
+        GoFavorite5,
+        GoFavorite6,
+        GoFavorite7,
+        GoFavorite8,
+        GoFavorite9,
+        GoFavorite10,
         ConnectToServer,
         EditFavorites,
         FavoriteUp,
@@ -1683,6 +1693,7 @@ impl Focusable for Browser {
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_drag(window, cx);
+        self.sidebar.command_held = sidebar::command_held(window);
         let prefs = cx.global::<Preferences>().clone();
         let system_light = matches!(
             window.appearance(),
@@ -1773,6 +1784,11 @@ impl Render for Browser {
             .when(!sheet && self.menu.is_none(), |d| d.key_context("Browser"))
             .track_focus(&self.focus);
         let root = self.drags(root, cx);
+        let root = root.on_modifiers_changed(cx.listener(|this, _, window, cx| {
+            if this.sidebar.command_held != sidebar::command_held(window) {
+                cx.notify();
+            }
+        }));
         // What acts on a pane goes to the one the commands are for.
         let root = self
             .pane()
@@ -1781,76 +1797,79 @@ impl Render for Browser {
         root
             // While a sheet is open, its commands (from the menu bar too) wait.
             .when(!sheet, |d| {
-                d.on_action(cx.listener(|this, _: &FocusNext, window, cx| {
-                    window.focus_next(cx);
-                    this.sync_sidebar_cursor(window, cx);
-                }))
-                .on_action(cx.listener(|this, _: &FocusPrevious, window, cx| {
-                    window.focus_prev(cx);
-                    this.sync_sidebar_cursor(window, cx);
-                }))
-                .on_action(cx.listener(|this, _: &ConnectToServer, window, cx| {
-                    this.open_connect(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)))
-                .on_action(cx.listener(|this, _: &ShowSearches, window, cx| {
-                    this.toggle_searches(window, cx)
-                }))
-                .when(has_query, |d| {
-                    d.on_action(
-                        cx.listener(|this, _: &SaveSearch, window, cx| {
+                sidebar::favorite_commands(d, cx)
+                    .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
+                        window.focus_next(cx);
+                        this.sync_sidebar_cursor(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &FocusPrevious, window, cx| {
+                        window.focus_prev(cx);
+                        this.sync_sidebar_cursor(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &ConnectToServer, window, cx| {
+                        this.open_connect(window, cx)
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &ShowSearches, window, cx| {
+                        this.toggle_searches(window, cx)
+                    }))
+                    .when(has_query, |d| {
+                        d.on_action(cx.listener(|this, _: &SaveSearch, window, cx| {
                             this.save_search(window, cx)
+                        }))
+                    })
+                    .on_action(cx.listener(|this, _: &ClearRecentSearches, _, cx| {
+                        this.clear_recent_searches(cx)
+                    }))
+                    // Esc ends a drag first, then closes Quick Look, then leaves
+                    // search, then lets go of the selection.
+                    .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+                        let back = this.drag.cancel();
+                        if cx.stop_active_drag(window) {
+                            return this.spring_back(back, window, cx);
+                        }
+                        this.toast = None;
+                        if this.tools_kept_it(cx) || this.close_preview(cx) {
+                            return;
+                        }
+                        if this.sidebar.editing {
+                            return this.toggle_editing(cx);
+                        }
+                        this.pane()
+                            .update(cx, |pane, cx| pane.clear_search(window, cx));
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &EmptyTrash, window, cx| {
+                            this.empty_trash(window, cx)
                         }),
                     )
-                })
-                .on_action(cx.listener(|this, _: &ClearRecentSearches, _, cx| {
-                    this.clear_recent_searches(cx)
-                }))
-                // Esc ends a drag first, then closes Quick Look, then leaves
-                // search, then lets go of the selection.
-                .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
-                    let back = this.drag.cancel();
-                    if cx.stop_active_drag(window) {
-                        return this.spring_back(back, window, cx);
-                    }
-                    this.toast = None;
-                    if this.tools_kept_it(cx) || this.close_preview(cx) {
-                        return;
-                    }
-                    if this.sidebar.editing {
-                        return this.toggle_editing(cx);
-                    }
-                    this.pane()
-                        .update(cx, |pane, cx| pane.clear_search(window, cx));
-                }))
-                .on_action(
-                    cx.listener(|this, _: &EmptyTrash, window, cx| this.empty_trash(window, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &ToggleSplit, window, cx| this.toggle_split(window, cx)),
-                )
-                .when(other_takes, |d| {
-                    d.on_action(cx.listener(|this, _: &CopyToOtherPane, window, cx| {
-                        this.send_to_other_pane(false, window, cx)
+                    .on_action(cx.listener(|this, _: &ToggleSplit, window, cx| {
+                        this.toggle_split(window, cx)
                     }))
-                    .on_action(cx.listener(
-                        |this, _: &MoveToOtherPane, window, cx| {
-                            this.send_to_other_pane(true, window, cx)
-                        },
-                    ))
-                })
-                .on_action(
-                    cx.listener(|this, _: &NewTab, window, cx| this.open_tab_here(window, cx)),
-                )
-                .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                    this.close_tab(this.active, window, cx)
-                }))
-                .on_action(
-                    cx.listener(|this, _: &NextTab, window, cx| this.step_tab(1, window, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &PreviousTab, window, cx| this.step_tab(-1, window, cx)),
-                )
+                    .when(other_takes, |d| {
+                        d.on_action(cx.listener(|this, _: &CopyToOtherPane, window, cx| {
+                            this.send_to_other_pane(false, window, cx)
+                        }))
+                        .on_action(cx.listener(
+                            |this, _: &MoveToOtherPane, window, cx| {
+                                this.send_to_other_pane(true, window, cx)
+                            },
+                        ))
+                    })
+                    .on_action(
+                        cx.listener(|this, _: &NewTab, window, cx| this.open_tab_here(window, cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                        this.close_tab(this.active, window, cx)
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &NextTab, window, cx| this.step_tab(1, window, cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &PreviousTab, window, cx| {
+                        this.step_tab(-1, window, cx)
+                    }))
             })
             .when(!sheet && !renaming, |d| {
                 d.when_some(lone_folder, |d, path| {

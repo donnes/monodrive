@@ -509,7 +509,7 @@ impl Pane {
         }
     }
 
-    /// ⌘1 and ⌘2: this pane's view, and where the next tab starts.
+    /// ⌥⌘1 and ⌥⌘2: this pane's view, and where the next tab starts.
     fn choose_view(&mut self, view: View, cx: &mut Context<Self>) {
         self.set_view(view);
         preferences::update(cx, |p| p.view = view);

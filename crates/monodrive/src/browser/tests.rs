@@ -712,7 +712,7 @@ fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
     cx.simulate_mouse_up(end, MouseButton::Left, with("cmd"));
     assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "c.txt", "d.txt"]);
     // In the grid it takes the cells it covers, not whole rows.
-    press(cx, "cmd-2");
+    press(cx, "cmd-alt-2");
     let cell = |ix: usize, cx: &mut VisualTestContext| {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
@@ -1502,7 +1502,7 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
 fn in_the_grid_a_right_click_opens_an_items_menu(cx: &mut TestAppContext) {
     let (_dir, folder) = sized();
     let (browser, cx) = browse(&folder, cx);
-    press(cx, "cmd-2");
+    press(cx, "cmd-alt-2");
     let cell = |ix: usize, cx: &mut VisualTestContext| {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
@@ -1647,7 +1647,7 @@ fn each_tab_has_its_own_folder_history_selection_view_and_sort(cx: &mut TestAppC
     assert_eq!(in_pane(&browser, cx, |pane, _| pane.history.len()), 1);
     press(cx, "cmd-up");
     assert_eq!(location(&browser, cx), project);
-    press(cx, "alt-down cmd-2 ctrl-alt-cmd-3");
+    press(cx, "alt-down cmd-alt-2 ctrl-alt-cmd-3");
     let in_tab =
         |cx: &mut VisualTestContext| in_pane(&browser, cx, |pane, _| (pane.view, pane.sort.by));
     assert_eq!(in_tab(cx), (View::Grid, SortBy::Size));
@@ -2014,7 +2014,7 @@ fn a_new_folder_made_after_leaving_its_tab_leaves_the_keys_alone(cx: &mut TestAp
 /// A folder holding one picture, and the pane's thumbnails once the grid drew
 /// it.
 fn drawn_thumbs(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Vec<Thumb> {
-    press(cx, "cmd-2");
+    press(cx, "cmd-alt-2");
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     in_pane(browser, cx, |pane, _| pane.thumbs.keys().cloned().collect())

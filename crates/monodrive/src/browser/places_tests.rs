@@ -8,7 +8,7 @@ use super::*;
 use crate::palette::{Page, PaletteView};
 use crate::preferences::View;
 use crate::session::{self, PaneState, Session, StopState};
-use gpui::{Action, Keystroke, TestAppContext, VisualTestContext, point};
+use gpui::{Action, Keystroke, Modifiers, TestAppContext, VisualTestContext, point};
 use monodrive_core::cloud::CloudFolder;
 use monodrive_core::entries::Sort;
 use monodrive_core::entries::{Entry, Kind};
@@ -385,6 +385,50 @@ fn edit_mode_shows_handles_and_removes_and_reorders_for_good(cx: &mut TestAppCon
     click(cx, "favorites-edit");
     press(cx, "escape");
     assert!(!on_screen(cx, "favorite-handle-0"));
+}
+
+#[gpui::test]
+fn command_and_a_number_opens_that_favorite(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (one, two) = two_favorites(&world);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-2");
+    assert_eq!(here(&browser, cx), two);
+    press(cx, "cmd-1");
+    assert_eq!(here(&browser, cx), one);
+    // Past the last favorite, nothing moves.
+    assert!(favorites(&browser, cx).len() < 10);
+    press(cx, "cmd-0");
+    assert_eq!(here(&browser, cx), one);
+}
+
+#[gpui::test]
+fn holding_command_alone_shows_the_favorites_keys(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    two_favorites(&world);
+    let (_browser, cx) = open(&world, &project, cx);
+    let hold = |cx: &mut VisualTestContext, keys: Modifiers| {
+        cx.simulate_modifiers_change(keys);
+        cx.run_until_parked();
+    };
+    let shown = |cx: &mut VisualTestContext| cx.debug_bounds("favorite-key-0").is_some();
+    assert!(!shown(cx));
+    hold(cx, Modifiers::command());
+    assert!(shown(cx));
+    assert!(cx.debug_bounds("favorite-key-1").is_some());
+    // ⇧⌘1 is another shortcut, so the hint would be wrong.
+    hold(cx, Modifiers::command_shift());
+    assert!(!shown(cx));
+    hold(cx, Modifiers::command());
+    assert!(shown(cx));
+    hold(cx, Modifiers::none());
+    assert!(!shown(cx));
+    // Edit mode has its own controls at the row's end.
+    click(cx, "favorites-edit");
+    hold(cx, Modifiers::command());
+    assert!(!shown(cx));
 }
 
 #[gpui::test]
@@ -1475,7 +1519,7 @@ fn tabs_and_panes_come_back_as_they_were(cx: &mut TestAppContext) {
     let (browser, cx) = open(&world, &project, cx);
     // The first tab went into docs; the second is on the project, in the grid,
     // split, with its right pane up a level and the keys there.
-    press(cx, "down cmd-down cmd-t cmd-up cmd-2 cmd-alt-s cmd-up");
+    press(cx, "down cmd-down cmd-t cmd-up cmd-alt-2 cmd-alt-s cmd-up");
     let state = saved_state(&browser, cx);
     let bytes = serde_json::to_vec(&Session::of(vec![state])).unwrap();
     let state = session::decode(&bytes).unwrap().windows.remove(0);
@@ -1844,9 +1888,9 @@ fn a_favorite_takes_files_and_the_edges_between_favorites_pin_folders(cx: &mut T
     assert_eq!(saved(&world.store)[..3], [one.clone(), pinned, two.clone()]);
     // Pinning moves nothing.
     assert!(project.join("docs/inner.md").exists());
-    // The edge under the last row pins after it, and Recents' before the first.
+    // The Favorites header pins before the first.
     let zeta = row(&browser, 1, cx);
-    let under = cx.debug_bounds("place-0").unwrap().bottom_center() + point(px(0.), px(1.));
+    let under = cx.debug_bounds("favorites-header").unwrap().center();
     carry(zeta, under, "", cx);
     assert_eq!(browser.read_with(cx, |b, _| b.drag.pins_at()), Some(0));
     cx.simulate_mouse_up(under, MouseButton::Left, with(""));
