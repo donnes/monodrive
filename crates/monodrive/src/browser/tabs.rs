@@ -519,7 +519,8 @@ impl Browser {
             pane.at > 0 || pane.organizing.is_some(),
             pane.at + 1 < pane.history.len(),
         );
-        let closed = !cx.global::<Preferences>().show_sidebar;
+        // Until the sidebar has slid away, its field is still the one drawn.
+        let closed = !cx.global::<Preferences>().show_sidebar && self.sidebar_fraction == 0.;
         // With no sidebar to hold it, the field shows while it's in use.
         let searching = closed
             && (!pane.query.is_empty()
