@@ -1018,7 +1018,9 @@ impl Browser {
                     .hover(|d| d.bg(content(0.08)).text_color(content(1.)))
                     .on_click(cx.listener(move |_, _, window, cx| {
                         let (parent, select) = (parent.clone(), select.clone());
-                        pane.update(cx, |pane, cx| pane.go_to(parent, select, window, cx));
+                        pane.update(cx, |pane, cx| {
+                            pane.go_to(parent, select.into_iter().collect(), window, cx)
+                        });
                     }))
                     .child(shown),
             )

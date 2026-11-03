@@ -25,6 +25,7 @@ fn urls(paths: &[PathBuf]) -> Retained<NSArray<NSURL>> {
 
 /// Shows `paths` selected in Finder.
 pub fn reveal(paths: &[PathBuf]) {
+    crate::finder::keep_reveals_in_finder();
     NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls(paths));
 }
 
