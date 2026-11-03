@@ -2359,6 +2359,7 @@ pub const TOOLS: [Tool; 67] = [
                 json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2});
             let color = json!({"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "Red, green, blue, alpha, each 0 to 1."});
             let points = json!({"type": "array", "items": point});
+            let rotation = json!({"type": "number", "default": 0, "description": "Degrees clockwise about its center."});
             json!({
                 "type": "object",
                 "properties": {
@@ -2367,13 +2368,13 @@ pub const TOOLS: [Tool; 67] = [
                         {"type": "object", "properties": {"type": {"const": "crop"}, "rect": rect}, "required": ["type", "rect"]},
                         {"type": "object", "properties": {"type": {"const": "rotate"}, "quarter_turns": {"type": "integer", "description": "Clockwise."}}, "required": ["type", "quarter_turns"]},
                         {"type": "object", "properties": {"type": {"const": "flip"}, "vertical": {"type": "boolean", "default": false}}, "required": ["type"]},
-                        {"type": "object", "properties": {"type": {"const": "pen"}, "points": points, "color": color, "width": {"type": "number", "default": 6}}, "required": ["type", "points"]},
-                        {"type": "object", "properties": {"type": {"const": "highlighter"}, "points": points, "color": color, "width": {"type": "number", "default": 24}}, "required": ["type", "points"]},
+                        {"type": "object", "properties": {"type": {"const": "pen"}, "points": points, "color": color, "width": {"type": "number", "default": 6}, "rotation": rotation}, "required": ["type", "points"]},
+                        {"type": "object", "properties": {"type": {"const": "highlighter"}, "points": points, "color": color, "width": {"type": "number", "default": 24}, "rotation": rotation}, "required": ["type", "points"]},
                         {"type": "object", "properties": {"type": {"const": "arrow"}, "from": point, "to": point, "color": color, "width": {"type": "number", "default": 6}}, "required": ["type", "from", "to"]},
-                        {"type": "object", "properties": {"type": {"const": "rectangle"}, "rect": rect, "color": color, "width": {"type": "number", "default": 6}}, "required": ["type", "rect"]},
-                        {"type": "object", "properties": {"type": {"const": "ellipse"}, "rect": rect, "color": color, "width": {"type": "number", "default": 6}}, "required": ["type", "rect"]},
-                        {"type": "object", "properties": {"type": {"const": "text"}, "at": point, "text": {"type": "string"}, "size": {"type": "number", "default": 36}, "color": color}, "required": ["type", "at", "text"]},
-                        {"type": "object", "properties": {"type": {"const": "redact"}, "rect": rect}, "required": ["type", "rect"]}
+                        {"type": "object", "properties": {"type": {"const": "rectangle"}, "rect": rect, "color": color, "width": {"type": "number", "default": 6}, "rotation": rotation}, "required": ["type", "rect"]},
+                        {"type": "object", "properties": {"type": {"const": "ellipse"}, "rect": rect, "color": color, "width": {"type": "number", "default": 6}, "rotation": rotation}, "required": ["type", "rect"]},
+                        {"type": "object", "properties": {"type": {"const": "text"}, "at": point, "text": {"type": "string"}, "size": {"type": "number", "default": 36}, "color": color, "wrap": {"type": "number", "description": "Width to wrap at, in pixels. Default: the right edge."}, "rotation": rotation}, "required": ["type", "at", "text"]},
+                        {"type": "object", "properties": {"type": {"const": "redact"}, "rect": rect, "rotation": rotation}, "required": ["type", "rect"]}
                     ]}},
                     "replace": {"type": "boolean", "default": false}
                 },

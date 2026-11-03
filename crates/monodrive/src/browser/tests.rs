@@ -275,7 +275,9 @@ fn a_mark_drawn_in_the_preview_saves_a_copy_that_undo_removes(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(drawn(cx, "edit-save"));
 
-    // Esc asks, and Keep Editing keeps the mark.
+    // The first Esc lets go of the mark, the next asks, and Keep Editing keeps it.
+    press(cx, "escape");
+    assert!(!drawn(cx, "edit-discard"));
     press(cx, "escape");
     assert!(drawn(cx, "edit-discard"));
     click(cx, "edit-keep");
@@ -456,9 +458,10 @@ fn words_typed_with_the_text_tool_land_where_it_was_clicked(cx: &mut TestAppCont
     let at = center - gpui::point(px(200.), px(100.));
     cx.simulate_mouse_down(at, MouseButton::Left, with(""));
     cx.simulate_mouse_up(at, MouseButton::Left, with(""));
-    // Letters that mean something to the list, and Space, are only words here.
-    press(cx, "space e space e enter");
-    assert!(!drawn(cx, "edit-text-field"));
+    // Letters that mean something to the list, and Space, are only words here,
+    // and Shift-Return starts another line. The card holds the keys.
+    press(cx, "space e space e shift-enter e enter");
+    assert!(!drawn(cx, "note-card"));
     assert!(drawn(cx, "edit-save"));
     click(cx, "edit-save");
     cx.run_until_parked();
@@ -467,10 +470,260 @@ fn words_typed_with_the_text_tool_land_where_it_was_clicked(cx: &mut TestAppCont
         .into_rgb8();
     let dark =
         |x0, x1, y0, y1| (x0..x1).any(|x| (y0..y1).any(|y| saved.get_pixel(x, y).0[0] < 128));
-    assert!(dark(100, 300, 50, 110), "the words are where the click was");
+    // 20 pt type, on two lines.
+    assert!(dark(100, 300, 50, 75), "the words are where the click was");
+    assert!(
+        dark(100, 300, 75, 100),
+        "with the second line under the first"
+    );
     assert!(!dark(0, 90, 0, 300), "and nowhere left of it");
     assert!(!dark(100, 600, 150, 300), "or below");
     let _ = browser;
+    release(owned, cx);
+}
+
+/// A white 600 by 300 picture in Edit mode, shown at its own size, with its pixel
+/// (0, 0) returned for turning picture pixels into window points.
+fn marking(
+    project: &std::path::Path,
+    cx: &mut gpui::VisualTestContext,
+) -> gpui::Point<gpui::Pixels> {
+    press(cx, "alt-down space e");
+    click(cx, "ink-black");
+    assert!(drawn(cx, "preview-edit-surface"));
+    let center = cx.debug_bounds("preview-edit-surface").unwrap().center();
+    let _ = project;
+    center - gpui::point(px(300.), px(150.))
+}
+
+fn white_picture(project: &std::path::Path) {
+    image::RgbImage::from_pixel(600, 300, image::Rgb([255, 255, 255]))
+        .save(project.join("zz.png"))
+        .unwrap();
+}
+
+fn drag_in(
+    cx: &mut gpui::VisualTestContext,
+    origin: gpui::Point<gpui::Pixels>,
+    from: (f32, f32),
+    to: (f32, f32),
+) {
+    let at = |p: (f32, f32)| origin + gpui::point(px(p.0), px(p.1));
+    cx.simulate_mouse_down(at(from), MouseButton::Left, with(""));
+    cx.simulate_mouse_move(at(to), Some(MouseButton::Left), with(""));
+    cx.simulate_mouse_up(at(to), MouseButton::Left, with(""));
+    cx.run_until_parked();
+}
+
+fn saved_picture(project: &std::path::Path, cx: &mut gpui::VisualTestContext) -> image::RgbImage {
+    click(cx, "edit-save");
+    cx.run_until_parked();
+    image::open(project.join("zz edited.png"))
+        .unwrap()
+        .into_rgb8()
+}
+
+fn inked(picture: &image::RgbImage, x: std::ops::Range<u32>, y: std::ops::Range<u32>) -> bool {
+    x.clone()
+        .any(|x| y.clone().any(|y| picture.get_pixel(x, y).0[0] < 128))
+}
+
+/// A box is ready to move once drawn, and what's saved is where it was left.
+#[gpui::test]
+fn a_mark_drawn_can_be_moved_before_saving(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    white_picture(&project);
+    let owned = own(cx);
+    let (_browser, cx) = browse(&project, cx);
+    let origin = marking(&project, cx);
+    click(cx, "tool-rectangle");
+    drag_in(cx, origin, (50., 50.), (150., 100.));
+    // By its left edge, 300 right and 150 down.
+    drag_in(cx, origin, (50., 75.), (350., 225.));
+    let saved = saved_picture(&project, cx);
+    assert!(inked(&saved, 340..360, 200..250), "the box's new left edge");
+    assert!(
+        !inked(&saved, 0..300, 0..150),
+        "and nothing at its old place"
+    );
+    release(owned, cx);
+}
+
+/// A corner scales, and the opposite one stays.
+#[gpui::test]
+fn dragging_a_corner_scales_a_mark(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    white_picture(&project);
+    let owned = own(cx);
+    let (_browser, cx) = browse(&project, cx);
+    let origin = marking(&project, cx);
+    click(cx, "tool-rectangle");
+    drag_in(cx, origin, (50., 50.), (150., 100.));
+    drag_in(cx, origin, (150., 100.), (450., 250.));
+    let saved = saved_picture(&project, cx);
+    assert!(inked(&saved, 445..455, 100..200), "the new right edge");
+    assert!(inked(&saved, 200..400, 245..255), "the new bottom edge");
+    assert!(inked(&saved, 45..55, 100..200), "the left edge held");
+    assert!(
+        !inked(&saved, 145..155, 60..95),
+        "the old right edge is gone"
+    );
+    release(owned, cx);
+}
+
+/// The handle above a mark turns it about its center.
+#[gpui::test]
+fn the_turning_handle_rotates_a_mark(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    white_picture(&project);
+    let owned = own(cx);
+    let (_browser, cx) = browse(&project, cx);
+    let origin = marking(&project, cx);
+    click(cx, "tool-rectangle");
+    // 200 wide, 40 tall, about (300, 150). The handle is 22 above its top.
+    drag_in(cx, origin, (200., 130.), (400., 170.));
+    drag_in(cx, origin, (300., 108.), (342., 150.));
+    let saved = saved_picture(&project, cx);
+    // A quarter turn: 40 wide, 200 tall.
+    assert!(inked(&saved, 275..285, 90..210), "standing on end");
+    assert!(
+        !inked(&saved, 205..265, 125..175),
+        "its old left end is gone"
+    );
+    release(owned, cx);
+}
+
+/// Two clicks reopen words; Delete and Undo work on what's picked up, not the file.
+#[gpui::test]
+fn words_can_change_and_a_mark_can_go_and_come_back(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    white_picture(&project);
+    let owned = own(cx);
+    let (_browser, cx) = browse(&project, cx);
+    let origin = marking(&project, cx);
+    click(cx, "tool-text");
+    let at = origin + gpui::point(px(100.), px(100.));
+    cx.simulate_mouse_down(at, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(at, MouseButton::Left, with(""));
+    press(cx, "a enter");
+    assert!(!drawn(cx, "note-card"));
+    // Twice on the words: the card comes back with them in it.
+    let on = at + gpui::point(px(4.), px(10.));
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: on,
+        button: MouseButton::Left,
+        modifiers: with(""),
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_mouse_up(on, MouseButton::Left, with(""));
+    assert!(drawn(cx, "note-card"));
+    press(cx, "enter");
+    assert!(!drawn(cx, "note-card"));
+    // Picked up, Delete takes it off, and the file stays.
+    click(cx, "tool-rectangle");
+    drag_in(cx, origin, (300., 200.), (400., 280.));
+    press(cx, "backspace");
+    assert!(project.join("zz.png").exists());
+    click(cx, "edit-undo");
+    cx.run_until_parked();
+    let saved = saved_picture(&project, cx);
+    assert!(
+        inked(&saved, 295..305, 200..280),
+        "Undo brought the box back"
+    );
+    assert!(
+        inked(&saved, 100..200, 100..140),
+        "the words are still there"
+    );
+    release(owned, cx);
+}
+
+/// Undo takes back a move, and Delete really takes the mark off.
+#[gpui::test]
+fn undo_takes_back_a_move_and_delete_removes_a_mark(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    white_picture(&project);
+    let owned = own(cx);
+    let (_browser, cx) = browse(&project, cx);
+    let origin = marking(&project, cx);
+    click(cx, "tool-rectangle");
+    drag_in(cx, origin, (50., 50.), (150., 100.));
+    drag_in(cx, origin, (50., 75.), (350., 225.));
+    click(cx, "edit-undo");
+    cx.run_until_parked();
+    // Back where it was drawn, and a second box to take off.
+    click(cx, "tool-rectangle");
+    drag_in(cx, origin, (300., 200.), (400., 280.));
+    press(cx, "backspace");
+    cx.run_until_parked();
+    let saved = saved_picture(&project, cx);
+    assert!(inked(&saved, 45..55, 60..90), "Undo put the box back");
+    assert!(
+        !inked(&saved, 200..500, 150..290),
+        "and Delete took the other off"
+    );
+    release(owned, cx);
+}
+
+/// A crop renumbers the picture's pixels, so what came before it stays put.
+#[gpui::test]
+fn a_mark_before_a_flip_is_part_of_the_picture(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    white_picture(&project);
+    let owned = own(cx);
+    let (_browser, cx) = browse(&project, cx);
+    let origin = marking(&project, cx);
+    click(cx, "tool-rectangle");
+    drag_in(cx, origin, (50., 50.), (150., 100.));
+    click(cx, "tool-flip");
+    cx.run_until_parked();
+    // Flipped, its left edge shows at 550. Neither there nor where its recipe
+    // still says it is does a press pick anything up.
+    drag_in(cx, origin, (550., 75.), (300., 200.));
+    drag_in(cx, origin, (50., 75.), (300., 200.));
+    let saved = saved_picture(&project, cx);
+    assert!(inked(&saved, 545..555, 60..90), "the box didn't move");
+    assert!(!inked(&saved, 200..500, 150..290), "nor did a copy of it");
+    release(owned, cx);
+}
+
+/// The card is modal: a stray press can't lose written words or reach the row.
+#[gpui::test]
+fn the_text_card_keeps_written_words_until_cancelled(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    image::RgbImage::from_pixel(600, 300, image::Rgb([255, 255, 255]))
+        .save(project.join("zz.png"))
+        .unwrap();
+    let owned = own(cx);
+    let (_browser, cx) = browse(&project, cx);
+    press(cx, "alt-down space e");
+    click(cx, "tool-text");
+    let at = cx.debug_bounds("preview-edit-surface").unwrap().origin + gpui::point(px(4.), px(4.));
+    let pick = |cx: &mut gpui::VisualTestContext| {
+        cx.simulate_mouse_down(at, MouseButton::Left, with(""));
+        cx.simulate_mouse_up(at, MouseButton::Left, with(""));
+        cx.run_until_parked();
+    };
+    pick(cx);
+    assert!(drawn(cx, "note-card"));
+    // Nothing written: a press elsewhere only closes it.
+    pick(cx);
+    assert!(!drawn(cx, "note-card"));
+    pick(cx);
+    press(cx, "a");
+    pick(cx);
+    assert!(drawn(cx, "note-card"), "written words stay");
+    click(cx, "tool-pen");
+    assert!(drawn(cx, "note-card"), "the row is behind it");
+    click(cx, "note-cancel");
+    assert!(!drawn(cx, "note-card"));
+    assert!(!drawn(cx, "edit-discard"));
+    press(cx, "escape");
+    assert!(
+        !drawn(cx, "preview-edit-surface"),
+        "Cancel added nothing to ask about"
+    );
     release(owned, cx);
 }
 

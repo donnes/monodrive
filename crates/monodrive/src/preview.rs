@@ -1080,7 +1080,7 @@ impl Render for PreviewView {
                         .into_any_element()
                 }
             }
-            Body::Picture { .. } if self.editing_image() => self.edit_surface(cx),
+            Body::Picture { .. } if self.editing_image() => self.edit_surface(window, cx),
             Body::Picture { modified } => {
                 let modified = *modified;
                 self.picture(modified, false, window, cx)
@@ -1142,7 +1142,7 @@ impl Render for PreviewView {
                 if let Some(player) = self.player.borrow().as_ref() {
                     player.hide();
                 }
-                self.edit_surface(cx)
+                self.edit_surface(window, cx)
             }
             Body::Media { video, modified } => {
                 let (video, modified) = (*video, *modified);

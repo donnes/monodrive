@@ -1738,6 +1738,16 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Delete takes a picked-up mark off the picture, not the file.
+        let modifiers = event.keystroke.modifiers;
+        if matches!(event.keystroke.key.as_str(), "backspace" | "delete")
+            && !modifiers.modified()
+            && !self.changing_names()
+            && let Some(view) = &self.preview
+            && view.update(cx, |view, cx| view.delete_mark(window, cx))
+        {
+            return cx.stop_propagation();
+        }
         // A name being edited takes its own typing.
         let Some(text) = typed(&event.keystroke).filter(|_| !self.changing_names()) else {
             return;
