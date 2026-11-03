@@ -4,14 +4,18 @@ Speed is the first thing Monodrive won't compromise on, so each part that makes 
 
 | What | Budget | Baseline |
 |---|---|---|
-| List a folder of 10,000 entries | 40 ms | 24 ms |
-| List a folder of 100,000 entries | 500 ms | 267 ms |
-| Sort 10,000 shuffled entries by any column | 5 ms | 1.9 ms by name, 2.6 ms by kind, 1.4 ms by size and by date |
+| List a folder of 10,000 entries | 40 ms | 10 ms |
+| List a folder of 100,000 entries | 500 ms | 127 ms |
+| Sort 10,000 shuffled entries by any column | 5 ms | 0.9 ms by name, 1.5 ms by kind, 0.5 ms by size and by date |
 | Draw a frame while scrolling 10,000 entries, p99 | 4 ms | 1.6 ms list, 2.3 ms grid |
 | Draw a frame while dragging a file over 10,000 entries, p99 | 4 ms | 2.5 ms |
 | Launch to drawing the folder's contents, warm, release build | 150 ms | 127 ms, the middle of three medians of seven |
 
-The baselines are from an M3 Pro, with the folders already in the disk cache: listing, sorting and launch on 2026-10-31, frame times on 2026-10-29. Compare numbers from the same machine; the budgets are for that class of Mac. Judge launch by the median of five runs, never one.
+The baselines are from an M3 Pro, with the folders already in the disk cache: listing and sorting on 2026-11-03, launch on 2026-10-31, frame times on 2026-10-29. Compare numbers from the same machine; the budgets are for that class of Mac. Judge launch by the median of five runs, never one.
+
+## Listing
+
+A listing asks `getattrlistbulk` for each batch of entries' names, types, sizes, dates and flags, where `read_dir` needed an `lstat` per entry. The kernel reading each entry's inode is still most of the time: about 4.5 ms of the 10 ms for 10,000 entries. Sorting writes every entry's key into one buffer and its first eight bytes into a number, so most comparisons are one integer compare.
 
 ## Launch
 

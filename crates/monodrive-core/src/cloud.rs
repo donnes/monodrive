@@ -77,7 +77,7 @@ impl Availability {
         Self::from_flags(meta.st_flags())
     }
 
-    fn from_flags(flags: u32) -> Self {
+    pub(crate) fn from_flags(flags: u32) -> Self {
         if flags & SF_DATALESS == 0 {
             Availability::Local
         } else {

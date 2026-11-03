@@ -4,9 +4,9 @@
 //! folder or closing a preview draws it at once instead of decoding it again.
 
 use gpui::{App, Asset, Global, RenderImage, Window};
-use image::ImageReader;
 use monodrive_core::cloud::Availability;
 use monodrive_core::entries::{Entry, Kind};
+use monodrive_core::thumbnails::Bitmap;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,8 +20,10 @@ pub struct Thumb {
     pub modified: u64,
 }
 
-/// What `image` decodes in this build.
-const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"];
+/// What ImageIO decodes, as measured.
+const PICTURES: [&str; 11] = [
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif", "avif",
+];
 /// What the system's generator opened when measured. `.avi`, `.mkv` and `.webm`
 /// fail, and `.ts` is more often TypeScript than video.
 const VIDEOS: [&str; 5] = ["mov", "mp4", "m4v", "mpg", "3gp"];
@@ -124,36 +126,36 @@ impl Asset for Thumbnail {
     }
 }
 
-/// A frame from the system's generator, which is BGRA already.
+/// A frame from the system's generator.
 fn generated(path: &Path, side: u32, cancelled: &dyn Fn() -> bool) -> Option<RenderImage> {
-    let bitmap = monodrive_core::thumbnails::generate(path, side, cancelled).ok()?;
-    let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)?;
-    Some(RenderImage::new(vec![image::Frame::new(pixels)]))
+    render_image(monodrive_core::thumbnails::generate(path, side, cancelled).ok()?)
 }
 
+/// Through ImageIO, which decodes at about the size asked rather than whole
+/// and then shrinks: 2.5 times as fast on a 12-megapixel photo. It also turns
+/// photos upright and reads HEIC.
 fn decode(path: &Path, side: u32) -> Option<RenderImage> {
     if std::fs::metadata(path).ok()?.len() > LARGEST {
         return None;
     }
-    let mut reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(512 * 1024 * 1024);
-    reader.limits(limits);
-    let image = reader.decode().ok()?;
-    // `DynamicImage::thumbnail` keeps the picture's shape; `imageops`'s
-    // stretches it to the box.
-    let mut pixels = if image.width() > side || image.height() > side {
-        image.thumbnail(side, side)
-    } else {
-        image
+    render_image(monodrive_core::thumbnails::picture(path, side).ok()?)
+}
+
+/// A bitmap from ImageIO as GPUI draws it. Both are BGRA, but ImageIO's
+/// colors are premultiplied by alpha and GPUI blends straight alpha, so a
+/// soft edge would draw too dark.
+pub(crate) fn render_image(bitmap: Bitmap) -> Option<RenderImage> {
+    let mut bytes = bitmap.bytes;
+    for pixel in bytes.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        if alpha != 0 && alpha != 255 {
+            for channel in &mut pixel[..3] {
+                let straight = (u16::from(*channel) * 255 + alpha / 2) / alpha;
+                *channel = u8::try_from(straight).unwrap_or(u8::MAX);
+            }
+        }
     }
-    .into_rgba8();
-    // GPUI's textures are BGRA.
-    for pixel in pixels.pixels_mut() {
-        pixel.0.swap(0, 2);
-    }
+    let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bytes)?;
     Some(RenderImage::new(vec![image::Frame::new(pixels)]))
 }
 
@@ -277,6 +279,17 @@ mod tests {
         // Red and blue swap places for GPUI.
         let bytes = thumb.as_bytes(0).unwrap();
         assert_eq!(&bytes[..4], &[30, 20, 10, 255]);
+        // A soft edge keeps its color, not the color times its alpha.
+        let soft = dir.path().join("soft.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 40, 128]))
+            .save_with_format(&soft, image::ImageFormat::Png)
+            .unwrap();
+        let soft = decode(&soft, 4).unwrap();
+        let pixel = &soft.as_bytes(0).unwrap()[..4];
+        assert_eq!(pixel[3], 128);
+        for (got, want) in pixel[..3].iter().zip([40, 100, 200]) {
+            assert!(got.abs_diff(want) <= 2, "{pixel:?}");
+        }
         std::fs::write(dir.path().join("fake.png"), b"no").unwrap();
         assert!(decode(&dir.path().join("fake.png"), 100).is_none());
     }
