@@ -138,10 +138,11 @@ enum Grab {
 /// and the mark alone on a small layer drawn the way saving draws it.
 #[derive(Default)]
 struct Dragged {
-    under: Option<(usize, Arc<RenderImage>)>,
-    under_task: Option<Task<()>>,
-    /// The mark's layer, and the shape it was drawn at.
-    layer: Option<(Layer, Step)>,
+    under: Option<Under>,
+    /// The under being drawn, and the mark and step count it's for.
+    under_task: Option<((usize, usize), Task<()>)>,
+    /// The mark's layer, the shape it was drawn at, and which mark it is.
+    layer: Option<(Layer, Step, usize)>,
     layer_task: Option<Task<()>>,
     /// The mark moved while its layer was being drawn.
     layer_stale: bool,
@@ -150,6 +151,14 @@ struct Dragged {
 /// A landing mark is still in the steps and not yet in the picture.
 fn waiting(steps: &[Step], shown: &[Step], at: usize, step: &Step) -> bool {
     steps.get(at) == Some(step) && shown.get(at) != Some(step)
+}
+
+/// The picture without the mark at `index`, flattened from the first `count`
+/// steps, so marks added after it aren't in it.
+struct Under {
+    index: usize,
+    count: usize,
+    image: Arc<RenderImage>,
 }
 
 /// A mark drawn alone, as saving draws it, and the part of the picture it covers.
@@ -361,10 +370,20 @@ impl Edit {
             .filter(move |(at, step, _)| waiting(steps, shown, *at, step))
     }
 
+    /// What stands in for the picture while a moved mark waits for the picture
+    /// to have it, when both halves are ready and are of that mark.
+    fn stand_ins(&self) -> Option<(&Under, &Layer, &Step)> {
+        let under = self.dragged.under.as_ref()?;
+        let (layer, step, index) = self.dragged.layer.as_ref()?;
+        (*index == under.index).then_some((under, layer, step))
+    }
+
     /// The mark at `index` as the screen shows it right now, so its handles sit
     /// on its ink while the picture catches up with the steps.
     fn on_screen(&self, index: usize) -> Option<&Step> {
-        if let (Some(_), Some((_, step))) = (&self.dragged.under, &self.dragged.layer) {
+        if let Some((under, _, step)) = self.stand_ins()
+            && under.index == index
+        {
             return Some(step);
         }
         if let Some((_, step, _)) = self.landing().find(|(at, ..)| *at == index) {
@@ -374,6 +393,53 @@ impl Edit {
             Subject::Picture { steps, shown, .. } if shown.len() == steps.len() => shown.get(index),
             _ => self.steps().get(index),
         }
+    }
+
+    /// Lets go of landing marks nothing needs any more: the picture has them,
+    /// and no stand-in from before them is still up.
+    fn prune_landing(&mut self, cx: &mut gpui::App) {
+        let landing = std::mem::take(&mut self.landing);
+        let Subject::Picture { steps, shown, .. } = &self.subject else {
+            return;
+        };
+        let under = self.dragged.under.as_ref();
+        let (keep, gone): (Vec<_>, Vec<_>) = landing.into_iter().partition(|(at, step, _)| {
+            waiting(steps, shown, *at, step)
+                || under.is_some_and(|under| *at >= under.count && steps.get(*at) == Some(step))
+        });
+        for (_, _, (layer, _)) in gone {
+            cx.drop_image(layer, None);
+        }
+        self.landing = keep;
+    }
+
+    /// Draws the layer of the mark at `index` here and now, in place of any
+    /// still being drawn. Says whether it could.
+    fn layer_now(&mut self, index: usize, window: &Window, cx: &mut gpui::App) -> bool {
+        let (Some(picture), Some(scale)) = (self.picture(), self.layer_scale(window)) else {
+            return false;
+        };
+        let Some(step) = self.steps().get(index).cloned() else {
+            return false;
+        };
+        let Ok(layer) = layer_of(&step, picture, scale) else {
+            return false;
+        };
+        self.dragged.layer_task = None;
+        self.dragged.layer_stale = false;
+        if let Some(((old, _), ..)) = self.dragged.layer.replace((layer, step, index)) {
+            cx.drop_image(old, None);
+        }
+        true
+    }
+
+    /// Stand-ins of another mark, which a moved mark needs until the picture
+    /// has it.
+    fn holding_for_other(&self, index: usize) -> bool {
+        self.dragged
+            .under
+            .as_ref()
+            .is_some_and(|under| under.index != index)
     }
 
     /// How finely a mark's layer is drawn, to look sharp at the size it shows.
@@ -628,12 +694,13 @@ impl PreviewView {
             return;
         };
         let dragged = std::mem::take(&mut edit.dragged);
-        if let Some((_, under)) = dragged.under {
-            cx.drop_image(under, None);
+        if let Some(under) = dragged.under {
+            cx.drop_image(under.image, None);
         }
-        if let Some(((layer, _), _)) = dragged.layer {
+        if let Some(((layer, _), ..)) = dragged.layer {
             cx.drop_image(layer, None);
         }
+        edit.prune_landing(cx);
     }
 
     /// Flattens the steps off the UI thread; only the newest result is kept.
@@ -680,20 +747,12 @@ impl PreviewView {
                     }
                     Err(why) => edit.error = Some(why),
                 }
-                let landing = std::mem::take(&mut edit.landing);
-                let Subject::Picture { steps, shown, .. } = &edit.subject else {
-                    return;
-                };
-                let (waiting, landed): (Vec<_>, Vec<_>) = landing
-                    .into_iter()
-                    .partition(|(at, step, _)| waiting(steps, shown, *at, step));
-                for (_, _, (layer, _)) in landed {
-                    cx.drop_image(layer, None);
-                }
-                edit.landing = waiting;
-                // The truth is in, so the stand-ins can go unless a drag needs them.
-                if edit.gesture.is_none() {
+                // The truth is in, so the stand-ins can go unless a mark is
+                // moving: only a drag changes the steps without flattening.
+                if edit.gesture.as_ref().is_none_or(|gesture| !gesture.moved) {
                     this.settle(cx);
+                } else {
+                    edit.prune_landing(cx);
                 }
                 cx.notify();
             });
@@ -705,20 +764,55 @@ impl PreviewView {
         let Some(edit) = &mut self.edit else {
             return;
         };
-        if edit.dragged.under_task.is_some()
+        // One for another mark, or from before a mark was added, is no use.
+        let wanted = (index, edit.steps().len());
+        if edit
+            .dragged
+            .under_task
+            .as_ref()
+            .is_some_and(|(of, _)| *of == wanted)
             || edit
                 .dragged
                 .under
                 .as_ref()
-                .is_some_and(|(of, _)| *of == index)
+                .is_some_and(|under| (under.index, under.count) == wanted)
         {
             return;
         }
+        edit.dragged.under_task = None;
         let mut steps = edit.steps().to_vec();
         if index >= steps.len() {
             return;
         }
+        let count = steps.len();
         steps.remove(index);
+        // A mark drawn moments ago isn't in the picture yet, which is then
+        // already everything but it.
+        if let Subject::Picture {
+            image: Some(image),
+            shown,
+            ..
+        } = &edit.subject
+            && *shown == steps
+        {
+            let image = image.clone();
+            if let Some(old) = edit.dragged.under.replace(Under {
+                index,
+                count,
+                image,
+            }) {
+                cx.drop_image(old.image, None);
+            }
+            if edit
+                .dragged
+                .layer
+                .as_ref()
+                .is_none_or(|(.., of)| *of != index)
+            {
+                edit.layer_now(index, window, cx);
+            }
+            return;
+        }
         let path = self.path.clone();
         let work = cx.background_executor().spawn(async move {
             let bitmap = edits::render(&path, &steps)?;
@@ -726,24 +820,33 @@ impl PreviewView {
                 .ok_or("couldn't draw the picture")?;
             Ok::<_, String>(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
         });
-        edit.dragged.under_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let done = work.await;
-            let _ = this.update(cx, |this, cx| {
-                let Some(edit) = &mut this.edit else {
-                    return;
-                };
-                edit.dragged.under_task = None;
-                match done {
-                    Ok(new) => {
-                        if let Some((_, old)) = edit.dragged.under.replace((index, new)) {
-                            cx.drop_image(old, None);
+        edit.dragged.under_task = Some((
+            wanted,
+            cx.spawn_in(window, async move |this, cx| {
+                let done = work.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let Some(edit) = &mut this.edit else {
+                        return;
+                    };
+                    edit.dragged.under_task = None;
+                    match done {
+                        Ok(image) => {
+                            if let Some(old) = edit.dragged.under.replace(Under {
+                                index,
+                                count,
+                                image,
+                            }) {
+                                cx.drop_image(old.image, None);
+                            }
+                            // With its own layer, so the two swap in together.
+                            edit.layer_now(index, window, cx);
                         }
+                        Err(why) => edit.error = Some(why),
                     }
-                    Err(why) => edit.error = Some(why),
-                }
-                cx.notify();
-            });
-        }));
+                    cx.notify();
+                });
+            }),
+        ));
     }
 
     /// Draws the moving mark's layer off the UI thread at the size it shows.
@@ -759,12 +862,18 @@ impl PreviewView {
         let (Some(picture), Some(scale)) = (edit.picture(), edit.layer_scale(window)) else {
             return;
         };
-        let Some(step) = edit.selected.and_then(|at| edit.steps().get(at)).cloned() else {
+        let Some(index) = edit.selected else {
             return;
         };
-        let work = cx
-            .background_executor()
-            .spawn(async move { layer_of(&step, picture, scale).map(|layer| (layer, step)) });
+        if edit.holding_for_other(index) {
+            return;
+        }
+        let Some(step) = edit.steps().get(index).cloned() else {
+            return;
+        };
+        let work = cx.background_executor().spawn(async move {
+            layer_of(&step, picture, scale).map(|layer| (layer, step, index))
+        });
         edit.dragged.layer_stale = false;
         edit.dragged.layer_task = Some(cx.spawn_in(window, async move |this, cx| {
             let done = work.await;
@@ -775,7 +884,7 @@ impl PreviewView {
                 edit.dragged.layer_task = None;
                 match done {
                     Ok(new) => {
-                        if let Some(((old, _), _)) = edit.dragged.layer.replace(new) {
+                        if let Some(((old, _), ..)) = edit.dragged.layer.replace(new) {
                             cx.drop_image(old, None);
                         }
                     }
@@ -821,6 +930,8 @@ impl PreviewView {
                     *steps = before;
                 }
                 *selected = None;
+                // Marks may have changed places, so the stand-ins no longer fit.
+                self.settle(cx);
                 self.flatten(window, cx);
             }
             Some(edit) => {
@@ -979,7 +1090,8 @@ impl PreviewView {
         if gesture.moved && edit.steps().get(index) == Some(&step) {
             return;
         }
-        if !gesture.moved {
+        let first = !gesture.moved;
+        if first {
             edit.remember_steps();
         }
         if let Some(gesture) = &mut edit.gesture {
@@ -990,8 +1102,14 @@ impl PreviewView {
         {
             *slot = step;
         }
+        // The first move draws the layer here, so the mark doesn't leave the
+        // screen while it's drawn off the UI thread. While another mark's
+        // stand-ins are up, this one waits for its own under instead.
+        let drawn = first && !edit.holding_for_other(index) && edit.layer_now(index, window, cx);
         self.flatten_under(index, window, cx);
-        self.draw_layer(window, cx);
+        if !drawn {
+            self.draw_layer(window, cx);
+        }
         cx.notify();
     }
 
@@ -1026,7 +1144,7 @@ impl PreviewView {
         let Some(edit) = &mut self.edit else {
             return false;
         };
-        if edit.text.is_some() {
+        if edit.text.is_some() || edit.saving.is_some() {
             return false;
         }
         let Some(index) = edit.selected.take() else {
@@ -1038,6 +1156,7 @@ impl PreviewView {
         {
             steps.remove(index);
         }
+        self.settle(cx);
         self.flatten(window, cx);
         cx.notify();
         true
@@ -1367,9 +1486,21 @@ impl PreviewView {
         let note = self.note_card(source, window, cx);
         // While a mark moves: the rest of the picture, with the mark's own layer
         // over it. Otherwise the picture, with marks it doesn't have yet.
-        let (shown, layers): (_, Vec<Layer>) = match (&edit.dragged.under, &edit.dragged.layer) {
-            (Some((_, under)), Some((layer, _))) => (under.clone(), vec![layer.clone()]),
-            _ => (
+        let (shown, layers): (_, Vec<Layer>) = match edit.stand_ins() {
+            Some((under, layer, _)) => (
+                under.image.clone(),
+                std::iter::once(layer.clone())
+                    .chain(
+                        edit.landing
+                            .iter()
+                            .filter(|(at, step, _)| {
+                                *at >= under.count && edit.steps().get(*at) == Some(step)
+                            })
+                            .map(|(_, _, layer)| layer.clone()),
+                    )
+                    .collect(),
+            ),
+            None => (
                 image,
                 edit.landing().map(|(_, _, layer)| layer.clone()).collect(),
             ),

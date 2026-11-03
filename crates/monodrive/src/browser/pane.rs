@@ -1742,6 +1742,7 @@ impl Pane {
         let modifiers = event.keystroke.modifiers;
         if matches!(event.keystroke.key.as_str(), "backspace" | "delete")
             && !modifiers.modified()
+            && !self.changing_names()
             && let Some(view) = &self.preview
             && view.update(cx, |view, cx| view.delete_mark(window, cx))
         {
