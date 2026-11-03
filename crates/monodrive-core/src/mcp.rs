@@ -1762,7 +1762,7 @@ fn overview_text(about: &Overview, now: u64) -> String {
             let short = if trash.complete { "" } else { "at least " };
             let _ = write!(
                 out,
-                ", {short}{} more after Empty Trash",
+                ", {short}{} more after emptying the Trash",
                 bytes(trash.unshared)
             );
             if let Some(age) = trash.age(now) {

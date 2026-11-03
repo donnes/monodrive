@@ -42,6 +42,8 @@ const RIGHT_NOW_WIDTH: f32 = 300.;
 const STUFF_ROW_HEIGHT: f32 = 34.;
 /// A row's title line, which a "Right now" mark centers on.
 const TITLE_LINE: f32 = 16.;
+const DISPLAY_LINE: f32 = 26.;
+const BASELINE_LIFT: f32 = 0.5;
 
 /// What the page shows, as last read.
 #[derive(Default)]
@@ -456,10 +458,14 @@ impl Pane {
         // Moving to the Trash frees nothing yet, so this says when it does.
         let promise = match (suggested, trash.is_some()) {
             (0, false) => "on this Mac.".to_string(),
-            (0, true) => format!("on this Mac. Empty Trash gets you to {at_least}{reach}."),
-            (1, _) => format!("on this Mac. This gets you to {at_least}{reach} after Empty Trash."),
+            (0, true) => format!("on this Mac. Emptying the Trash gets you to {at_least}{reach}."),
+            (1, _) => {
+                format!("on this Mac. This gets you to {at_least}{reach} after emptying the Trash.")
+            }
             (n, _) => {
-                format!("on this Mac. These {n} get you to {at_least}{reach} after Empty Trash.")
+                format!(
+                    "on this Mac. These {n} get you to {at_least}{reach} after emptying the Trash."
+                )
             }
         };
         div()
@@ -470,23 +476,37 @@ impl Pane {
             .child(
                 div()
                     .flex()
-                    .items_baseline()
+                    .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(theme::TEXT_DISPLAY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{} free", amount(disk.free))),
-                    )
-                    .child(
+                        // Bottom-aligned, then lifted by the difference in where
+                        // each size's baseline sits in its line, so the two
+                        // read as one sentence.
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_size(px(theme::TEXT_BODY))
-                            .text_color(content(0.65))
-                            .child(promise),
+                            .flex()
+                            .items_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .line_height(px(DISPLAY_LINE))
+                                    .text_size(px(theme::TEXT_DISPLAY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("{} free", amount(disk.free))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .mb(px(BASELINE_LIFT))
+                                    .line_height(px(TITLE_LINE))
+                                    .text_size(px(theme::TEXT_BODY))
+                                    .text_color(content(0.65))
+                                    .child(promise),
+                            ),
                     )
                     .when(trash.is_some(), |d| {
                         d.child(
@@ -961,7 +981,7 @@ fn location_state(location: &Location, scanning: bool, now: u64) -> String {
 }
 
 fn dot(ink: Hsla) -> gpui::Div {
-    div().size(px(8.)).rounded_full().flex_shrink_0().bg(ink)
+    div().size(px(12.)).rounded_full().flex_shrink_0().bg(ink)
 }
 
 /// A line of "Right now": a mark, what it is, and how it stands, over a
