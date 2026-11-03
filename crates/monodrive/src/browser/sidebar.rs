@@ -18,8 +18,7 @@ use crate::commands::{self, Scope};
 use crate::motion::Slide;
 use crate::preferences::{Preferences, SIDEBAR_WIDTHS};
 use crate::theme::{
-    self, ButtonLook, accent, circle_button, content, icon, icon_button, row_icon_button,
-    section_label,
+    self, ButtonLook, accent, content, icon, icon_button, row_icon_button, section_label,
 };
 use crate::traffic_lights;
 use gpui::{
@@ -1074,18 +1073,10 @@ impl Browser {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .when(crate::updates::available(cx), |d| {
-                        d.child(
-                            circle_button("updates", "Update Available", theme::BUTTON_HEIGHT)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(content(0.08)))
-                                .active(|s| s.bg(content(0.14)))
-                                .child(theme::icon("arrow-down-circle", 14.).text_color(accent()))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_updates(window, cx)
-                                })),
-                        )
-                    })
+                    .children(crate::updates::control(
+                        cx.listener(|this, _, window, cx| this.toggle_updates(window, cx)),
+                        cx,
+                    ))
                     .child(
                         icon_button("settings", "Settings", "settings", true)
                             .track_focus(&self.settings_focus)

@@ -81,7 +81,7 @@ Each selected row shows its new name, medium, with the old one after it at 0.65.
 
 ### Updates
 
-A signed release checks GitHub at launch, every 6 hours and when Settings' update track changes. While a newer release is out, a button with the accent icon sits left of Settings at the sidebar's foot and opens a 360 pt `Popover` above it. It lists what's new, newest first, with Download at the end, which becomes Restart once the update is in place. Check for Updates… reaches the same popover while the sidebar is closed. A debug or ad hoc build says it can't update itself and never reaches the network.
+A signed release checks GitHub 15 seconds after launch, every 4 minutes after that, and when Settings' update track changes. While a newer release is out, a download icon with an accent dot sits left of Settings at the sidebar's foot and opens a 360 pt `Popover` above it. The popover lists what's new, newest first, with Download at the end. Download closes the popover, and the icon becomes a ring that fills as the download arrives. Once the update is in place, a pill reads "Restart in 5s" and counts down to the restart, with Later to put it off. After Later, a restart icon with the dot stays, and its popover has Restart. Check for Updates… reaches the same popover while the sidebar is closed. A debug or ad hoc build says it can't update itself and never reaches the network.
 
 ### Inspector
 

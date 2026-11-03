@@ -1,13 +1,17 @@
-//! The updater: a button left of Settings while a newer release is out, and a
-//! popover listing what's new, with the button that installs it. One
-//! `Updates` serves every window. Only a signed release checks, so debug
-//! builds and tests never reach the network.
+//! The updater: a control left of Settings while a newer release is out, and
+//! a popover listing what's new, with the button that downloads it. The
+//! control then rings with the download's progress and counts down to the
+//! restart that runs it. One `Updates` serves every window. Only a signed
+//! release checks, so debug builds and tests never reach the network.
 
 use crate::menu;
 use crate::preferences::Preferences;
-use crate::theme::{self, ButtonLook, content, danger, text_button};
+use crate::theme::{self, ButtonLook, accent, circle_button, content, danger, text_button};
 use chrono::{DateTime, Utc};
-use gpui::{App, Context, Entity, Global, KeyBinding, Role, Task, actions, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, ClickEvent, Context, Entity, Global, KeyBinding, Role, Stateful, Task, Window,
+    actions, div, prelude::*, px,
+};
 use monodrive_core::VERSION;
 use monodrive_core::updates::{self, Channel, Release};
 use std::path::PathBuf;
@@ -19,9 +23,14 @@ pub fn bind(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Dismiss, Some("Updates"))]);
 }
 
-/// Often enough that a nightly shows the same day, and well inside GitHub's
-/// 60 anonymous requests an hour.
-const CHECK: Duration = Duration::from_secs(6 * 60 * 60);
+/// T3 Code's pace: the first check waits out the launch, then a release
+/// shows within minutes. 15 checks an hour stay well inside GitHub's 60
+/// anonymous requests. A short wait also means a Mac that slept, which
+/// pauses timers, checks again soon after it wakes.
+const FIRST_CHECK: Duration = Duration::from_secs(15);
+const CHECK: Duration = Duration::from_secs(4 * 60);
+/// The seconds the sidebar counts down before restarting into an update.
+const COUNTDOWN: u8 = 5;
 const WIDTH: f32 = 360.;
 /// The most releases the popover lists.
 const SHOWN: usize = 5;
@@ -30,9 +39,12 @@ const SHOWN: usize = 5;
 enum Stage {
     Idle,
     Checking,
-    Installing,
-    /// Swapped in; the next launch runs it.
-    Ready,
+    /// How much of the download has arrived, from 0 to 1. At 1 it's being
+    /// checked and swapped in.
+    Installing(f32),
+    /// Swapped in; the next launch runs it. Holds the seconds left before
+    /// the restart, or `None` once Later put it off.
+    Ready(Option<u8>),
 }
 
 pub struct Updates {
@@ -44,19 +56,21 @@ pub struct Updates {
     stage: Stage,
     error: Option<String>,
     work: Option<Task<()>>,
+    countdown: Option<Task<()>>,
     _timer: Option<Task<()>>,
 }
 
 pub struct Shared(pub Entity<Updates>);
 impl Global for Shared {}
 
-/// Starts checking, at launch and every `CHECK`, and again when the channel
-/// changes.
+/// Starts checking, soon after launch and every `CHECK`, and again when the
+/// channel changes.
 pub fn start(cx: &mut App) {
     let channel = cx.global::<Preferences>().update_channel;
     let updates = cx.new(|cx: &mut Context<Updates>| {
         let mut updates = Updates::new(channel, Vec::new(), None);
         updates._timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FIRST_CHECK).await;
             loop {
                 if this.update(cx, |this, cx| this.check(cx)).is_err() {
                     return;
@@ -83,10 +97,93 @@ pub fn start(cx: &mut App) {
     cx.set_global(Shared(updates));
 }
 
-/// Whether the sidebar shows the button.
-pub fn available(cx: &App) -> bool {
-    cx.try_global::<Shared>()
-        .is_some_and(|shared| !shared.0.read(cx).pending.is_empty())
+/// The sidebar's control left of Settings, while there's an update to act
+/// on: a download icon with a dot while one is out, a ring of the download's
+/// progress, a countdown to the restart, and a restart icon once Later put
+/// it off. `open` opens the popover.
+pub fn control(
+    open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Option<AnyElement> {
+    let entity = cx.try_global::<Shared>()?.0.clone();
+    let updates = entity.read(cx);
+    let control = match updates.stage {
+        Stage::Ready(Some(left)) => {
+            let label = format!("Restart in {left}s");
+            return Some(
+                div()
+                    .flex_shrink_0()
+                    .h(px(theme::BUTTON_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .bg(content(0.08))
+                    .child(
+                        div()
+                            .id("updates-countdown")
+                            .role(Role::Button)
+                            .aria_label(label.clone())
+                            .h_full()
+                            .pl(px(12.))
+                            .pr_1()
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .text_size(px(theme::TEXT_SMALL))
+                            .text_color(content(1.))
+                            .child(label)
+                            .on_click(open),
+                    )
+                    .child(
+                        text_button("updates-later", "Later", ButtonLook::Ghost).on_click(
+                            move |_, _, cx| entity.update(cx, |updates, cx| updates.later(cx)),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        Stage::Ready(None) => marked("rotate-cw", "Restart to Update"),
+        Stage::Installing(fraction) => {
+            circle_button("updates", "Downloading Update", theme::BUTTON_HEIGHT)
+                .aria_label(format!("Downloading Update, {:.0}%", fraction * 100.))
+                .relative()
+                .cursor_pointer()
+                .hover(|s| s.bg(content(0.08)))
+                .child(theme::ring(fraction, theme::BUTTON_HEIGHT))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(theme::icon("download", 12.).text_color(content(1.))),
+                )
+        }
+        _ if !updates.pending.is_empty() => marked("download", "Update Available"),
+        _ => return None,
+    };
+    Some(control.on_click(open).into_any_element())
+}
+
+/// A chrome button with `icon` and an accent dot, which says it waits on
+/// the user.
+fn marked(icon: &'static str, label: &'static str) -> Stateful<gpui::Div> {
+    circle_button("updates", label, theme::BUTTON_HEIGHT)
+        .relative()
+        .cursor_pointer()
+        .hover(|s| s.bg(content(0.08)))
+        .active(|s| s.bg(content(0.14)))
+        .child(theme::icon(icon, 14.).text_color(content(1.)))
+        .child(
+            div()
+                .absolute()
+                .top(px(2.))
+                .right(px(2.))
+                .size(px(6.))
+                .rounded_full()
+                .bg(accent()),
+        )
 }
 
 impl Updates {
@@ -99,6 +196,7 @@ impl Updates {
             stage: Stage::Idle,
             error: None,
             work: None,
+            countdown: None,
             _timer: None,
         }
     }
@@ -139,17 +237,27 @@ impl Updates {
         else {
             return;
         };
-        self.stage = Stage::Installing;
+        self.stage = Stage::Installing(0.);
         self.error = None;
         cx.notify();
+        let (sender, progress) = async_channel::unbounded();
         self.work = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { updates::install(&release, &app) })
-                .await;
+            let install = cx.background_executor().spawn(async move {
+                updates::install(&release, &app, |fraction| {
+                    let _ = sender.try_send(fraction);
+                })
+            });
+            // Ends when the install returns and drops the sender.
+            while let Ok(fraction) = progress.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    this.stage = Stage::Installing(fraction);
+                    cx.notify();
+                });
+            }
+            let result = install.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(()) => this.stage = Stage::Ready,
+                    Ok(()) => this.count_down(cx),
                     Err(error) => {
                         this.stage = Stage::Idle;
                         this.error = Some(error);
@@ -160,13 +268,53 @@ impl Updates {
         }));
     }
 
+    /// Restarts into the update in `COUNTDOWN` seconds, unless Later puts
+    /// it off first.
+    fn count_down(&mut self, cx: &mut Context<Self>) {
+        self.stage = Stage::Ready(Some(COUNTDOWN));
+        self.countdown = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let counting = this.update(cx, |this, cx| {
+                    let Stage::Ready(Some(left)) = &mut this.stage else {
+                        return false;
+                    };
+                    *left = left.saturating_sub(1);
+                    if *left == 0 {
+                        cx.restart();
+                        return false;
+                    }
+                    cx.notify();
+                    true
+                });
+                if !matches!(counting, Ok(true)) {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Stops the countdown. The update waits for the next launch, or for
+    /// Restart in the popover.
+    fn later(&mut self, cx: &mut Context<Self>) {
+        self.stage = Stage::Ready(None);
+        self.countdown = None;
+        cx.notify();
+    }
+
     fn headline(&self) -> String {
         let newest = self.pending.first();
         match (&self.stage, newest) {
-            (Stage::Ready, Some(release)) => {
+            (Stage::Ready(Some(left)), Some(release)) => {
+                format!("Restarting in {left}s to update to {}", release.version)
+            }
+            (Stage::Ready(None), Some(release)) => {
                 format!("Restart to finish updating to {}", release.version)
             }
-            (Stage::Installing, Some(release)) => format!("Downloading {}…", release.version),
+            (Stage::Installing(fraction), Some(release)) if *fraction < 1. => {
+                format!("Downloading {}… {:.0}%", release.version, fraction * 100.)
+            }
+            (Stage::Installing(_), Some(release)) => format!("Installing {}…", release.version),
             (_, Some(_)) => "Update ready to download".into(),
             (Stage::Checking, None) => "Checking for updates…".into(),
             (_, None) if self.app == Some(None) => {
@@ -262,30 +410,42 @@ impl Render for Updates {
                     .into_any_element(),
             );
         }
-        let action = match self.stage {
-            Stage::Ready => Some(
+        // Download closes the popover, so the sidebar's ring shows the rest.
+        let download = cx.listener(|this, _, window: &mut Window, cx| {
+            this.install(cx);
+            window.dispatch_action(Box::new(Dismiss), cx);
+        });
+        let actions: Vec<Stateful<gpui::Div>> = match self.stage {
+            Stage::Ready(Some(_)) => vec![
+                text_button("later", "Later", ButtonLook::Secondary)
+                    .on_click(cx.listener(|this, _, _, cx| this.later(cx))),
+                text_button("restart", "Restart Now", ButtonLook::Primary)
+                    .on_click(|_, _, cx| cx.restart()),
+            ],
+            Stage::Ready(None) => vec![
                 text_button("restart", "Restart", ButtonLook::Primary)
                     .on_click(|_, _, cx| cx.restart()),
-            ),
-            Stage::Installing => Some(text_button("download", "Download", ButtonLook::Disabled)),
-            _ if !self.pending.is_empty() => Some(if self.error.is_some() {
-                text_button("download", "Try Again", ButtonLook::Caution)
-                    .on_click(cx.listener(|this, _, _, cx| this.install(cx)))
+            ],
+            Stage::Installing(_) => vec![text_button("download", "Download", ButtonLook::Disabled)],
+            _ if !self.pending.is_empty() => vec![if self.error.is_some() {
+                text_button("download", "Try Again", ButtonLook::Caution).on_click(download)
             } else {
-                text_button("download", "Download", ButtonLook::Primary)
-                    .on_click(cx.listener(|this, _, _, cx| this.install(cx)))
-            }),
-            _ => None,
+                text_button("download", "Download", ButtonLook::Primary).on_click(download)
+            }],
+            _ => Vec::new(),
         };
-        lines.extend(action.map(|action| {
-            div()
-                .px_2()
-                .py(px(6.))
-                .flex()
-                .justify_end()
-                .child(action)
-                .into_any_element()
-        }));
+        if !actions.is_empty() {
+            lines.push(
+                div()
+                    .px_2()
+                    .py(px(6.))
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .children(actions)
+                    .into_any_element(),
+            );
+        }
         let height = window.viewport_size().height - px(theme::TITLE_BAR_HEIGHT + 16.);
         menu::card(WIDTH, height, lines)
             .id("updates")
