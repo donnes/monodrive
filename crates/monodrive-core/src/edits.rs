@@ -198,6 +198,29 @@ pub fn render(source: &Path, steps: &[Step]) -> Result<crate::thumbnails::Bitmap
     crate::thumbnails::bitmap(&image)
 }
 
+/// The source's first picture the right way up, `side` pixels on its longer
+/// edge at most, and never enlarged.
+pub(crate) fn upright(source: &CGImageSource, side: i32) -> Option<CFRetained<CGImage>> {
+    let options: Retained<NSMutableDictionary<NSString, AnyObject>> = NSMutableDictionary::new();
+    let yes = NSNumber::numberWithBool(true);
+    // SAFETY: the option keys are the framework's constants, and NSString and
+    // CFString, like NSDictionary and CFDictionary, are the same objects.
+    unsafe {
+        let insert = |name: &CFString, value: &AnyObject| {
+            let name: *const NSString = std::ptr::from_ref(name).cast();
+            options.insert(&*name, value);
+        };
+        insert(kCGImageSourceCreateThumbnailFromImageAlways, yes.as_ref());
+        insert(kCGImageSourceCreateThumbnailWithTransform, yes.as_ref());
+        insert(
+            kCGImageSourceThumbnailMaxPixelSize,
+            NSNumber::numberWithInt(side).as_ref(),
+        );
+        let dictionary: &CFDictionary = &*Retained::as_ptr(&options).cast();
+        source.thumbnail_at_index(0, Some(dictionary))
+    }
+}
+
 /// The picture the right way up, at full size, and its metadata saying so.
 fn decode(path: &Path) -> Result<(CFRetained<CGImage>, Option<CFRetained<CFDictionary>>), String> {
     let cannot = || format!("{} can't be read as a picture.", path.display());
@@ -207,30 +230,15 @@ fn decode(path: &Path) -> Result<(CFRetained<CGImage>, Option<CFRetained<CFDicti
     // constants, and NSDictionary and CFDictionary are the same object.
     unsafe {
         let source = CGImageSource::with_url(cf_url, None).ok_or_else(cannot)?;
-        let options: Retained<NSMutableDictionary<NSString, AnyObject>> =
-            NSMutableDictionary::new();
-        let yes = NSNumber::numberWithBool(true);
-        let key = |key: &CFString| -> *const NSString { std::ptr::from_ref(key).cast() };
-        let insert = |name: &CFString, value: &AnyObject| {
-            let name = &*key(name);
-            options.insert(name, value);
-        };
-        insert(kCGImageSourceCreateThumbnailFromImageAlways, yes.as_ref());
-        insert(kCGImageSourceCreateThumbnailWithTransform, yes.as_ref());
-        insert(
-            kCGImageSourceThumbnailMaxPixelSize,
-            NSNumber::numberWithInt(1 << 16).as_ref(),
-        );
-        let dictionary: &CFDictionary = &*Retained::as_ptr(&options).cast();
-        let image = source
-            .thumbnail_at_index(0, Some(dictionary))
-            .ok_or_else(cannot)?;
+        let image = upright(&source, 1 << 16).ok_or_else(cannot)?;
         let properties = source.properties_at_index(0, None).map(|properties| {
             // The pixels are upright now, so nothing may turn them again.
             let found: &NSDictionary<NSString, AnyObject> =
                 &*CFRetained::as_ptr(&properties).as_ptr().cast();
             let kept = NSMutableDictionary::dictionaryWithDictionary(found);
-            kept.removeObjectForKey(&*key(kCGImagePropertyOrientation));
+            let orientation: *const NSString =
+                std::ptr::from_ref(kCGImagePropertyOrientation).cast();
+            kept.removeObjectForKey(&*orientation);
             let raw = Retained::into_raw(kept.into_super().into_super());
             CFRetained::from_raw(std::ptr::NonNull::new_unchecked(raw.cast::<CFDictionary>()))
         });

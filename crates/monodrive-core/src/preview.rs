@@ -22,7 +22,6 @@ pub enum Kind {
     Html,
     Text,
     Zip,
-    Folder,
     /// Contents that aren't on this Mac. Reading would download them.
     NotDownloaded,
     /// Reading could show a privacy prompt.
@@ -55,11 +54,12 @@ fn by_extension(extension: &str) -> Kind {
 
 /// What's decided before the name matters. Availability comes first, as listing
 /// a placeholder folder downloads it.
-fn before_reading(availability: Availability, folder: bool, package: bool) -> Option<Kind> {
+fn before_reading(availability: Availability, folder: bool) -> Option<Kind> {
     if availability != Availability::Local {
         return Some(Kind::NotDownloaded);
     }
-    folder.then_some(if package { Kind::System } else { Kind::Folder })
+    // The only folders that get here are packages.
+    folder.then_some(Kind::System)
 }
 
 /// Which renderer `path` gets. Reads its metadata only.
@@ -70,11 +70,7 @@ pub fn classify(path: &Path) -> Kind {
     let Ok(meta) = std::fs::metadata(path) else {
         return Kind::System;
     };
-    if let Some(kind) = before_reading(
-        Availability::of(&meta),
-        meta.is_dir(),
-        crate::info::is_package(path),
-    ) {
+    if let Some(kind) = before_reading(Availability::of(&meta), meta.is_dir()) {
         return kind;
     }
     let extension = path
@@ -143,7 +139,6 @@ mod tests {
         assert_eq!(kind("Makefile"), Kind::Text);
         assert_eq!(kind("a.pdf"), Kind::System);
         assert_eq!(kind("a.unknown"), Kind::System);
-        assert_eq!(classify(dir.path()), Kind::Folder);
         let app = dir.path().join("Kit.app");
         std::fs::create_dir(&app).unwrap();
         assert_eq!(classify(&app), Kind::System);
@@ -156,18 +151,18 @@ mod tests {
             Availability::Downloading,
             Availability::Unknown,
         ] {
-            for (folder, package) in [(true, false), (true, true), (false, false)] {
+            for folder in [true, false] {
                 assert_eq!(
-                    before_reading(availability, folder, package),
+                    before_reading(availability, folder),
                     Some(Kind::NotDownloaded)
                 );
             }
         }
         assert_eq!(
-            before_reading(Availability::Local, true, false),
-            Some(Kind::Folder)
+            before_reading(Availability::Local, true),
+            Some(Kind::System)
         );
-        assert_eq!(before_reading(Availability::Local, false, false), None);
+        assert_eq!(before_reading(Availability::Local, false), None);
     }
 
     #[test]

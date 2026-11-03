@@ -42,8 +42,8 @@ const HIGHLIGHT_LIMIT: usize = 512 * 1024;
 /// Pixels asked for at 100%, as a picture's own size isn't known beforehand.
 const FULL_SIDE: u32 = 8192;
 
-/// One picture at one size, from the system's generator, which reads HEIC and
-/// RAW and never decodes past `side`.
+/// One picture at one size, from ImageIO, which reads HEIC and RAW, or a video's
+/// frame from the system's generator.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Sharp {
     path: PathBuf,
@@ -61,7 +61,10 @@ impl Asset for Sharp {
         _: &mut App,
     ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
         async move {
-            let bitmap = thumbnails::generate(&sharp.path, sharp.side, &|| false).ok()?;
+            // A video or audio file has no picture of its own to decode.
+            let bitmap = thumbnails::picture(&sharp.path, sharp.side)
+                .or_else(|_| thumbnails::generate(&sharp.path, sharp.side, &|| false))
+                .ok()?;
             let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)?;
             Some(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
         }
@@ -354,6 +357,7 @@ impl PreviewView {
     fn picture(
         &mut self,
         modified: u64,
+        poster: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -366,7 +370,8 @@ impl PreviewView {
             modified,
         };
         // A new size gives the last one back.
-        let image = window.use_asset::<Sharp>(&sharp, cx).flatten();
+        let loaded = window.use_asset::<Sharp>(&sharp, cx);
+        let image = loaded.clone().flatten();
         if self.held.as_ref().is_some_and(|(held, _)| *held != sharp)
             && let Some((old, old_image)) = self.held.take()
         {
@@ -377,7 +382,12 @@ impl PreviewView {
         }
         self.held = Some((sharp, image.clone()));
         let Some(image) = image else {
-            return div().size_full().into_any_element();
+            // Audio without artwork has no poster, and that's no failure.
+            return if loaded.is_some() && !poster {
+                notice("This picture can't be shown.")
+            } else {
+                div().size_full().into_any_element()
+            };
         };
         if self.zoomed {
             let scale = window.scale_factor();
@@ -435,7 +445,8 @@ impl PreviewView {
             .as_ref()
             .is_some_and(Player::frame_ready);
         // The player steps aside for an open menu, and this stands in for it.
-        let poster = (!framed || self.menu_open()).then(|| self.picture(modified, window, cx));
+        let poster =
+            (!framed || self.menu_open()).then(|| self.picture(modified, true, window, cx));
         let player = self.player.clone();
         let path = self.path.clone();
         // Nothing GPUI draws can sit over the player, so it steps aside for a menu.
@@ -647,6 +658,20 @@ impl PreviewView {
     }
 }
 
+/// Something to say in place of the file.
+fn notice(why: impl Into<SharedString>) -> gpui::AnyElement {
+    div()
+        .debug_selector(|| "preview-notice".into())
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(theme::TEXT_BODY))
+        .text_color(content(0.65))
+        .child(why.into())
+        .into_any_element()
+}
+
 /// A picture centered in the space it has and never enlarged, painted where
 /// `fit` says, so what's drawn and where a mark lands can't disagree. Left to
 /// layout, a picture's own height overruns a box shorter than it is.
@@ -712,7 +737,6 @@ fn read(path: &Path, light: bool) -> Body {
         Kind::Picture => Body::Picture {
             modified: modified(path),
         },
-        Kind::Folder => folder_rows(path),
         Kind::Zip => zip_rows(path),
         Kind::Text => match preview::read_text(path) {
             Ok(file) => {
@@ -752,28 +776,6 @@ fn modified(path: &Path) -> u64 {
         .ok()
         .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |at| at.as_secs())
-}
-
-fn folder_rows(path: &Path) -> Body {
-    let listed = cloud::without_downloads(|| {
-        std::fs::read_dir(path).map(|listed| {
-            listed
-                .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .filter(|name| !name.starts_with('.'))
-                .collect::<Vec<String>>()
-        })
-    });
-    let Ok(mut names) = listed else {
-        return Body::Notice("This folder can't be read.".into());
-    };
-    names.sort_by_key(|name| name.to_lowercase());
-    let said = format!(
-        "{} {}",
-        names.len(),
-        if names.len() == 1 { "item" } else { "items" }
-    );
-    Body::Rows(Arc::new(names), Some(said))
 }
 
 fn zip_rows(path: &Path) -> Body {
@@ -1029,16 +1031,7 @@ impl Render for PreviewView {
         }
         let content_view: gpui::AnyElement = match &self.body {
             Body::Loading => div().size_full().into_any_element(),
-            Body::Notice(why) => div()
-                .debug_selector(|| "preview-notice".into())
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(theme::TEXT_BODY))
-                .text_color(content(0.65))
-                .child(why.clone())
-                .into_any_element(),
+            Body::Notice(why) => notice(why.clone()),
             Body::Text { lines, cut } => {
                 let cut = *cut;
                 let rows = text_rows(lines.clone(), &self.scroll);
@@ -1091,7 +1084,7 @@ impl Render for PreviewView {
             Body::Picture { .. } if self.editing_image() => self.edit_surface(cx),
             Body::Picture { modified } => {
                 let modified = *modified;
-                self.picture(modified, window, cx)
+                self.picture(modified, false, window, cx)
             }
             // Out of flow, as a tall picture's height would otherwise run out of
             // the box.

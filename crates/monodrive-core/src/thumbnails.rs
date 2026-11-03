@@ -3,11 +3,13 @@
 
 use block2::RcBlock;
 use objc2::AnyThread;
+use objc2::rc::Retained;
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
 };
 use objc2_foundation::{NSError, NSString, NSURL};
+use objc2_image_io::CGImageSource;
 use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes,
     QLThumbnailGenerator, QLThumbnailRepresentation,
@@ -27,6 +29,22 @@ pub struct Bitmap {
     pub width: u32,
     pub height: u32,
     pub bytes: Vec<u8>,
+}
+
+/// `path` decoded by ImageIO, `side` pixels on its longer edge at most, the
+/// right way up. The generator below errors on a file over about 2300 pixels
+/// when asked for more than that, so it can't draw a big picture large. This
+/// reads pictures alone, and blocks, so call it off the UI thread. Refuses a
+/// cloud placeholder, since reading one would download it.
+pub fn picture(path: &Path, side: u32) -> Result<Bitmap, String> {
+    crate::cloud::refuse_placeholder(path)?;
+    let cannot = || format!("{} can't be read as a picture.", path.display());
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    // SAFETY: NSURL and CFURL are the same object, and `url` outlives the call.
+    let source = unsafe { CGImageSource::with_url(&*Retained::as_ptr(&url).cast(), None) }
+        .ok_or_else(cannot)?;
+    let image = crate::edits::upright(&source, side as i32).ok_or_else(cannot)?;
+    bitmap(&image)
 }
 
 /// A picture of `path`, `side` pixels on its longer edge at most, the right
@@ -169,6 +187,39 @@ mod tests {
             (bitmap.width * bitmap.height * 4) as usize
         );
         assert!(jpeg(&bitmap).unwrap().starts_with(&[0xff, 0xd8]));
+    }
+
+    #[test]
+    fn a_big_picture_comes_at_any_size_asked_and_never_larger_than_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.png");
+        image::RgbImage::new(3000, 2000).save(&path).unwrap();
+        for (side, width, height) in [(1500, 1500, 1000), (2800, 2800, 1867), (8192, 3000, 2000)] {
+            let bitmap = picture(&path, side).unwrap();
+            assert_eq!((bitmap.width, bitmap.height), (width, height), "at {side}");
+        }
+    }
+
+    #[test]
+    fn a_turned_photo_comes_back_the_right_way_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turned.jpg");
+        image::RgbImage::new(64, 36).save(&path).unwrap();
+        // An EXIF block after the JPEG's start, with orientation 6: turn a quarter.
+        let mut exif = vec![0xff, 0xe1, 0, 34];
+        exif.extend_from_slice(
+            b"Exif\0\0MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0",
+        );
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.splice(2..2, exif);
+        std::fs::write(&path, bytes).unwrap();
+        let bitmap = picture(&path, 128).unwrap();
+        assert_eq!((bitmap.width, bitmap.height), (36, 64));
+    }
+
+    #[test]
+    fn a_video_is_not_a_picture() {
+        assert!(picture(&fixture("rotated.mp4"), 128).is_err());
     }
 
     #[test]

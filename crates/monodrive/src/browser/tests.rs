@@ -2,7 +2,7 @@ use super::pane::*;
 use super::*;
 use crate::pasteboard::Pasteboard;
 use crate::preferences::View;
-use crate::thumbnails::{Thumb, Thumbnail};
+use crate::thumbnails::{Holders, Thumb};
 use gpui::{Keystroke, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point};
 use monodrive_core::entries::{Entry, Kind, Sort, SortBy};
 use monodrive_core::ops::Origin;
@@ -142,42 +142,55 @@ fn previewed(
 #[gpui::test]
 fn space_previews_the_selection_and_quick_look_follows_it(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
+    std::fs::write(project.join("b.txt"), "").unwrap();
+    std::fs::write(project.join("c.txt"), "").unwrap();
     let (browser, cx) = browse(&project, cx);
     let one = |name: &str| Some((vec![name.to_string()], 0));
     press(cx, "space");
     assert_eq!(previewed(&browser, cx), None);
+    // A folder has no preview.
     press(cx, "down space");
-    assert_eq!(previewed(&browser, cx), one("docs"));
+    assert_eq!(shown(&browser, cx).1, ["docs"]);
+    assert_eq!(previewed(&browser, cx), None);
+    press(cx, "down down space");
+    assert_eq!(previewed(&browser, cx), one("a.txt"));
     // The arrows still move the selection, and the panel follows; it
     // pages through several from the cursor.
     press(cx, "down");
-    assert_eq!(previewed(&browser, cx), one("zeta"));
+    assert_eq!(previewed(&browser, cx), one("b.txt"));
     press(cx, "shift-down");
     assert_eq!(
         previewed(&browser, cx),
-        Some((vec!["zeta".into(), "a.txt".into()], 1))
+        Some((vec!["b.txt".into(), "c.txt".into()], 1))
     );
     // Esc closes it and keeps the selection; ⌘Y opens and closes it too.
     press(cx, "escape");
     assert_eq!(previewed(&browser, cx), None);
-    assert_eq!(shown(&browser, cx).1, ["zeta", "a.txt"]);
+    assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
     press(cx, "cmd-y");
     assert!(previewed(&browser, cx).is_some());
     press(cx, "cmd-y");
     assert_eq!(previewed(&browser, cx), None);
-    // Going into a folder selects nothing, so it closes; going back
-    // selects the folder left, and it shows that.
-    press(cx, "alt-up space cmd-down");
-    assert_eq!(shown(&browser, cx), (vec!["inner.md".into()], vec![]));
+    // The arrows moving onto a folder close it.
+    press(cx, "alt-up down down space up");
+    assert_eq!(shown(&browser, cx).1, ["zeta"]);
     assert_eq!(previewed(&browser, cx), None);
-    press(cx, "down space cmd-[");
-    assert_eq!(previewed(&browser, cx), one("docs"));
+    // Going into a folder selects nothing, and going back selects the folder
+    // left, so either way it closes.
+    press(cx, "alt-up cmd-down");
+    assert_eq!(shown(&browser, cx), (vec!["inner.md".into()], vec![]));
+    press(cx, "down space");
+    assert_eq!(previewed(&browser, cx), one("inner.md"));
+    press(cx, "cmd-[");
+    assert_eq!(previewed(&browser, cx), None);
+    press(cx, "down down space");
+    assert_eq!(previewed(&browser, cx), one("a.txt"));
     // Space types in the search field, and the panel stays as it was.
     // A lone space searches for nothing, so the index never starts.
     press(cx, "cmd-f space");
     let typed = in_pane(&browser, cx, |b, cx| b.search.read(cx).text().to_string());
     assert_eq!(typed, " ");
-    assert_eq!(previewed(&browser, cx), one("docs"));
+    assert_eq!(previewed(&browser, cx), one("a.txt"));
     press(cx, "escape escape");
     assert_eq!(previewed(&browser, cx), None);
     // It types in a name being edited too.
@@ -215,10 +228,21 @@ fn the_preview_takes_the_panes_list_and_gives_it_back(cx: &mut TestAppContext) {
     press(cx, "escape");
     assert!(!drawn(cx, "preview"));
     assert_eq!(shown(&browser, cx).1, ["a.txt"]);
-    // A folder lists what's in it.
+    // A folder has no preview.
     press(cx, "alt-up space");
-    assert!(drawn(cx, "preview-rows"));
-    press(cx, "escape");
+    assert!(!drawn(cx, "preview"));
+}
+
+#[gpui::test]
+fn a_picture_that_cant_be_decoded_says_so(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("broken.png"), b"not a picture").unwrap();
+    let (_browser, cx) = browse(dir.path(), cx);
+    press(cx, "down space");
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(drawn(cx, "preview-notice"));
 }
 
 /// A preview's real path: the keys and mouse through the real `Browser`, a real
@@ -516,13 +540,12 @@ fn unsaved_edits_hold_the_preview_until_discarded(cx: &mut TestAppContext) {
     assert!(shown(&browser, cx).1.is_empty());
     assert!(drawn(cx, "edit-save"));
     assert_eq!(name(cx), Some(project.join("xb.png")));
-    press(cx, "down");
-    assert_eq!(shown(&browser, cx).1.len(), 1);
-    let selected = project.join(&shown(&browser, cx).1[0]);
+    press(cx, "alt-down up");
+    assert_eq!(shown(&browser, cx).1, ["xa.png"]);
     // Discarding lands on what's selected now.
     press(cx, "escape");
     click(cx, "edit-discard");
-    assert_eq!(name(cx), Some(selected.clone()));
+    assert_eq!(name(cx), Some(project.join("xa.png")));
     // So does undoing the only change, with nothing left to lose.
     press(cx, "alt-down e");
     assert_eq!(shown(&browser, cx).1, ["xb.png"]);
@@ -2013,6 +2036,16 @@ fn a_new_folder_made_after_leaving_its_tab_leaves_the_keys_alone(cx: &mut TestAp
 
 /// A folder holding one picture, and the pane's thumbnails once the grid drew
 /// it.
+fn held(thumb: &Thumb, cx: &mut VisualTestContext) -> bool {
+    cx.update(|_, cx| {
+        cx.default_global::<Holders>()
+            .held
+            .lock()
+            .unwrap()
+            .contains_key(thumb)
+    })
+}
+
 fn drawn_thumbs(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Vec<Thumb> {
     press(cx, "cmd-alt-2");
     cx.update(|window, _| window.refresh());
@@ -2021,7 +2054,7 @@ fn drawn_thumbs(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Vec<Th
 }
 
 #[gpui::test]
-fn closing_a_tab_or_a_pane_gives_back_its_thumbnails(cx: &mut TestAppContext) {
+fn closing_a_tab_or_a_pane_lets_go_of_its_thumbnails(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (one, two) = (dir.path().join("one"), dir.path().join("two"));
     for (folder, side) in [(&one, 40), (&two, 50)] {
@@ -2037,28 +2070,63 @@ fn closing_a_tab_or_a_pane_gives_back_its_thumbnails(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let thumbs = drawn_thumbs(&browser, cx);
     assert_eq!(thumbs.len(), 1);
-    let cached = |thumb: &Thumb, cx: &mut VisualTestContext| {
-        cx.update(|_, cx| cx.has_asset::<Thumbnail>(thumb))
-    };
-    assert!(cached(&thumbs[0], cx));
+    assert!(held(&thumbs[0], cx));
     press(cx, "cmd-w");
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    assert!(!cached(&thumbs[0], cx));
+    assert!(!held(&thumbs[0], cx));
     // The same for one of two panes.
     press(cx, "cmd-alt-s");
     on_pane(&browser, cx, |pane, cx| pane.navigate(two.clone(), cx));
     cx.run_until_parked();
     let thumbs = drawn_thumbs(&browser, cx);
-    assert!(cached(&thumbs[0], cx));
+    assert!(held(&thumbs[0], cx));
     press(cx, "cmd-alt-s");
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    assert!(!cached(&thumbs[0], cx));
+    assert!(!held(&thumbs[0], cx));
+}
+
+/// Coming back draws the decoded picture from memory instead of the icon, then
+/// the same picture decoded again.
+#[gpui::test]
+fn a_thumbnail_survives_leaving_its_folder_and_opening_a_preview(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (empty, pictures) = (dir.path().join("empty"), dir.path().join("pictures"));
+    std::fs::create_dir(&empty).unwrap();
+    std::fs::create_dir(&pictures).unwrap();
+    image::RgbaImage::new(40, 40)
+        .save(pictures.join("picture.png"))
+        .unwrap();
+    let (browser, cx) = browse(&pictures, cx);
+    let thumbs = drawn_thumbs(&browser, cx);
+    let image = |cx: &mut VisualTestContext| {
+        in_pane(&browser, cx, |pane, _| {
+            pane.thumbs[&thumbs[0]].clone().unwrap()
+        })
+    };
+    let before = image(cx);
+
+    on_pane(&browser, cx, |pane, cx| pane.navigate(empty.clone(), cx));
+    cx.run_until_parked();
+    assert!(drawn_thumbs(&browser, cx).is_empty());
+    assert!(!held(&thumbs[0], cx));
+    on_pane(&browser, cx, |pane, cx| pane.navigate(pictures.clone(), cx));
+    cx.run_until_parked();
+    assert_eq!(drawn_thumbs(&browser, cx), thumbs);
+    assert!(Arc::ptr_eq(&before, &image(cx)));
+
+    press(cx, "alt-up space");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!held(&thumbs[0], cx));
+    press(cx, "escape");
+    assert_eq!(drawn_thumbs(&browser, cx), thumbs);
+    assert!(Arc::ptr_eq(&before, &image(cx)));
 }
 
 #[gpui::test]
-fn a_thumbnail_stays_until_the_last_pane_showing_it_lets_go(cx: &mut TestAppContext) {
+fn a_thumbnail_is_held_until_the_last_pane_showing_it_lets_go(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (empty, pictures) = (dir.path().join("empty"), dir.path().join("pictures"));
     std::fs::create_dir(&empty).unwrap();
@@ -2071,8 +2139,6 @@ fn a_thumbnail_stays_until_the_last_pane_showing_it_lets_go(cx: &mut TestAppCont
     on_pane(&browser, cx, |pane, cx| pane.navigate(pictures.clone(), cx));
     cx.run_until_parked();
     let thumbs = drawn_thumbs(&browser, cx);
-    let cached =
-        |cx: &mut VisualTestContext| cx.update(|_, cx| cx.has_asset::<Thumbnail>(&thumbs[0]));
     // A new pane on the same folder draws the same picture; it goes when one
     // of the two does, and the other keeps it.
     press(cx, "cmd-alt-s");
@@ -2088,13 +2154,13 @@ fn a_thumbnail_stays_until_the_last_pane_showing_it_lets_go(cx: &mut TestAppCont
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     // Still the same picture: it wasn't dropped and decoded again.
-    assert!(cached(cx));
+    assert!(held(&thumbs[0], cx));
     assert!(Arc::ptr_eq(&before, &image(cx)));
-    // The last one out takes it.
+    // The last one out lets go of it.
     press(cx, "cmd-w");
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    assert!(!cached(cx));
+    assert!(!held(&thumbs[0], cx));
 }
 
 #[gpui::test]
