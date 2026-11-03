@@ -3,6 +3,7 @@
 //! shown, so what you see is what saving writes. Only the mark being drawn is
 //! GPUI's. Nothing touches the disk until Save, and undo here pops a step.
 
+use super::zoom::{Zoom, place as fitted_in};
 use super::{Body, PreviewView};
 use crate::browser::Operations;
 use crate::text_field::{self, TextField};
@@ -120,6 +121,32 @@ const INK_REACH: f32 = 5.;
 /// Within this many degrees of a right angle, a turn lands on it.
 const TURN_SNAP: f64 = 3.;
 
+/// The crop's frame, which starts as the whole picture.
+struct Cropping {
+    rect: Rect,
+    /// A drag under way: what it holds, where it started, and the frame then.
+    grab: Option<(CropGrab, [f64; 2], Rect)>,
+}
+
+/// What a press on the crop takes hold of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CropGrab {
+    Edges {
+        left: bool,
+        right: bool,
+        top: bool,
+        bottom: bool,
+    },
+    Move,
+    /// Outside the frame, a new one from there.
+    New,
+}
+
+/// How near an edge or corner of the crop a press takes it, in points.
+const GRIP: f32 = 10.;
+/// The crop's smallest side, in picture pixels.
+const SMALLEST_CROP: f64 = 8.;
+
 /// A drag on a mark, measured from where it began so it can't drift.
 struct Gesture {
     grab: Grab,
@@ -232,6 +259,9 @@ pub(super) struct Edit {
     draft: Vec<[f64; 2]>,
     /// Where the picture was last drawn, to turn the pointer into pixels.
     drawn: Rc<Cell<Bounds<Pixels>>>,
+    /// How close the picture is, from ⌘-scroll or a pinch.
+    zoom: Zoom,
+    cropping: Option<Cropping>,
     /// The mark with handles on it, as an index into the steps.
     selected: Option<usize>,
     gesture: Option<Gesture>,
@@ -445,7 +475,11 @@ impl Edit {
     /// How finely a mark's layer is drawn, to look sharp at the size it shows.
     fn layer_scale(&self, window: &Window) -> Option<f64> {
         let picture = self.picture()?;
-        let (_, fitted) = fit(self.drawn.get(), (picture.0 as f32, picture.1 as f32));
+        let (_, fitted) = fitted_in(
+            self.drawn.get(),
+            (picture.0 as f32, picture.1 as f32),
+            self.zoom,
+        );
         Some(f64::from((fitted * window.scale_factor()).min(1.)))
     }
 
@@ -492,18 +526,7 @@ impl Edit {
     }
 }
 
-/// The picture's frame in `bounds`, centered and fit, and its scale.
-pub(super) fn fit(bounds: Bounds<Pixels>, image: (f32, f32)) -> (Point<Pixels>, f32) {
-    let (width, height) = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
-    let scale = (width / image.0).min(height / image.1).min(1.);
-    let origin = point(
-        bounds.origin.x + px((width - image.0 * scale) / 2.),
-        bounds.origin.y + px((height - image.1 * scale) / 2.),
-    );
-    (origin, scale)
-}
-
-fn image_size(image: &RenderImage) -> (f32, f32) {
+pub(super) fn image_size(image: &RenderImage) -> (f32, f32) {
     let size = image.size(0);
     (size.width.0 as f32, size.height.0 as f32)
 }
@@ -530,7 +553,6 @@ fn step_of(tool: Tool, draft: &[[f64; 2]], ink: [f64; 4], image: (f32, f32)) -> 
     let rect = corners(first, last, image);
     let tiny = rect.width < 2. || rect.height < 2.;
     Some(match tool {
-        Tool::Crop if !tiny => Step::Crop { rect },
         Tool::Redact if !tiny => Step::Redact { rect, rotation: 0. },
         Tool::Rectangle if !tiny => Step::Rectangle {
             rect,
@@ -580,7 +602,9 @@ impl PreviewView {
             self.ask_to_leave(cx);
             return;
         }
-        if !self.can_edit() {
+        // The file on screen is on its way out while the next one loads, and
+        // what's done to it would go with it.
+        if !self.can_edit() || self.loading.is_some() {
             return;
         }
         let picture = matches!(self.body, Body::Picture { .. });
@@ -609,6 +633,8 @@ impl PreviewView {
             ink: INKS[0].1,
             draft: Vec::new(),
             drawn: Rc::new(Cell::new(Bounds::default())),
+            zoom: self.zoom,
+            cropping: None,
             selected: None,
             gesture: None,
             dragged: Dragged::default(),
@@ -650,6 +676,11 @@ impl PreviewView {
         self.edit.is_some()
     }
 
+    /// Whether a save is under way, or done and waiting on the file to reload.
+    pub(super) fn saving(&self) -> bool {
+        self.edit.as_ref().is_some_and(|edit| edit.saving.is_some())
+    }
+
     /// Whether what's on screen must stay, as a change would be lost.
     pub fn holding(&self) -> bool {
         self.edit.as_ref().is_some_and(Edit::changed)
@@ -663,6 +694,10 @@ impl PreviewView {
             return;
         }
         // Esc closes what's on top first.
+        if edit.cropping.take().is_some() {
+            edit.tool = None;
+            return cx.notify();
+        }
         if edit.menu.take().is_some()
             || edit.text.take().is_some()
             || edit.selected.take().is_some()
@@ -677,10 +712,8 @@ impl PreviewView {
     }
 
     fn leave_edit(&mut self, cx: &mut Context<Self>) {
-        if let Some(edit) = self.edit.take()
-            && let Some(image) = edit.image()
-        {
-            cx.drop_image(image.clone(), None);
+        if let Some(edit) = self.edit.take() {
+            drop_images(edit, cx);
         }
         if let Some((path, folder, position)) = self.wanted.take() {
             self.show(&path, folder, position, cx);
@@ -953,7 +986,7 @@ impl PreviewView {
     fn pixel_at(&self, at: Point<Pixels>) -> Option<[f64; 2]> {
         let edit = self.edit.as_ref()?;
         let image = image_size(edit.image()?);
-        let (origin, scale) = fit(edit.drawn.get(), image);
+        let (origin, scale) = fitted_in(edit.drawn.get(), image, edit.zoom);
         Some([
             f64::from((at.x - origin.x).as_f32() / scale),
             f64::from((at.y - origin.y).as_f32() / scale),
@@ -971,6 +1004,18 @@ impl PreviewView {
         let Some(edit) = &mut self.edit else {
             return;
         };
+        if let Some(picture) = edit.picture()
+            && let Some(cropping) = &mut edit.cropping
+        {
+            let (origin, scale) = fitted_in(
+                edit.drawn.get(),
+                (picture.0 as f32, picture.1 as f32),
+                edit.zoom,
+            );
+            let grab = grab_at(screen_rect(cropping.rect, origin, scale), event.position);
+            cropping.grab = Some((grab, place, cropping.rect));
+            return cx.notify();
+        }
         match edit.tool {
             Some(Tool::Text) => self.open_card(place, None, window, cx),
             Some(_) => edit.draft = vec![place],
@@ -1023,7 +1068,11 @@ impl PreviewView {
         let Some(picture) = edit.picture() else {
             return;
         };
-        let (_, scale) = fit(edit.drawn.get(), (picture.0 as f32, picture.1 as f32));
+        let (_, scale) = fitted_in(
+            edit.drawn.get(),
+            (picture.0 as f32, picture.1 as f32),
+            edit.zoom,
+        );
         let grab = edit.handle_at(place, scale).map(Grab::Handle);
         let hit = edit.mark_at(place, f64::from(INK_REACH / scale));
         let Some(index) = grab.and(edit.selected).or(hit) else {
@@ -1121,7 +1170,11 @@ impl PreviewView {
         };
         let cursor = match (edit.tool, place, edit.picture()) {
             (None, Some(place), Some(picture)) => {
-                let (_, scale) = fit(edit.drawn.get(), (picture.0 as f32, picture.1 as f32));
+                let (_, scale) = fitted_in(
+                    edit.drawn.get(),
+                    (picture.0 as f32, picture.1 as f32),
+                    edit.zoom,
+                );
                 if edit.handle_at(place, scale).is_some() {
                     CursorStyle::PointingHand
                 } else if edit.mark_at(place, f64::from(INK_REACH / scale)).is_some() {
@@ -1175,6 +1228,14 @@ impl PreviewView {
         if edit.gesture.is_some() {
             return self.drag_mark(place, window, cx);
         }
+        if let Some(picture) = edit.picture()
+            && let Some(cropping) = &mut edit.cropping
+            && let Some((grab, from, start)) = cropping.grab
+        {
+            let picture = (picture.0 as f32, picture.1 as f32);
+            cropping.rect = reshaped(start, grab, from, place, picture);
+            return cx.notify();
+        }
         if edit.draft.is_empty() {
             return;
         }
@@ -1198,6 +1259,10 @@ impl PreviewView {
             }
             return cx.notify();
         }
+        if let Some(cropping) = &mut edit.cropping {
+            cropping.grab = None;
+            return cx.notify();
+        }
         let draft = std::mem::take(&mut edit.draft);
         let (Some(tool), Some(image)) = (edit.tool, edit.image().map(|i| image_size(i))) else {
             return;
@@ -1210,15 +1275,9 @@ impl PreviewView {
             edit.remember();
         }
         match (&mut edit.subject, step) {
-            (Subject::Video { crop, .. }, Step::Crop { rect }) => {
-                *crop = Some(rect);
-                edit.tool = None;
-                cx.notify();
-            }
             (Subject::Picture { .. }, step) => {
-                // A crop changes the picture, so it isn't a tool to stay in. A
-                // shape is drawn once and is ready to move. The pen stays down,
-                // as a stroke is rarely the last.
+                // A shape is drawn once and is ready to move. The pen stays
+                // down, as a stroke is rarely the last.
                 let stays = matches!(tool, Tool::Pen | Tool::Highlighter);
                 if !stays {
                     edit.tool = None;
@@ -1301,6 +1360,92 @@ impl PreviewView {
         cx.notify();
     }
 
+    /// Crop: a frame over the whole picture, or the video's crop so far, to
+    /// drag in from its edges.
+    fn start_crop(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        // Until the last step is drawn, the picture's size may still change.
+        if matches!(
+            edit.subject,
+            Subject::Picture {
+                flattening: Some(_),
+                ..
+            }
+        ) {
+            return;
+        }
+        let Some((width, height)) = edit.image().map(|image| image_size(image)) else {
+            return;
+        };
+        let rect = match &edit.subject {
+            Subject::Video {
+                crop: Some(crop), ..
+            } => *crop,
+            _ => Rect {
+                x: 0.,
+                y: 0.,
+                width: f64::from(width),
+                height: f64::from(height),
+            },
+        };
+        edit.text = None;
+        edit.selected = None;
+        edit.tool = Some(Tool::Crop);
+        edit.cropping = Some(Cropping { rect, grab: None });
+        cx.notify();
+    }
+
+    /// Whether the crop's frame is up, for Return to apply it.
+    pub fn cropping(&self) -> bool {
+        self.edit
+            .as_ref()
+            .is_some_and(|edit| edit.cropping.is_some())
+    }
+
+    /// Return or the Crop button: what's inside the frame becomes the picture.
+    pub fn apply_crop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        let Some(cropping) = edit.cropping.take() else {
+            return;
+        };
+        edit.tool = None;
+        let rect = cropping.rect;
+        let whole = edit.image().is_some_and(|image| {
+            let (width, height) = image_size(image);
+            rect.x < 0.5
+                && rect.y < 0.5
+                && rect.width > f64::from(width) - 1.
+                && rect.height > f64::from(height) - 1.
+        });
+        // Widened back to the whole frame, a video's crop goes.
+        if let Subject::Video { crop, .. } = &edit.subject {
+            let next = (!whole).then_some(rect);
+            if *crop != next {
+                edit.remember();
+                if let Subject::Video { crop, .. } = &mut edit.subject {
+                    *crop = next;
+                }
+            }
+            return cx.notify();
+        }
+        if whole {
+            return cx.notify();
+        }
+        self.add_step(Step::Crop { rect }, window, cx);
+    }
+
+    fn cancel_crop(&mut self, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.edit {
+            edit.cropping = None;
+            edit.tool = None;
+        }
+        cx.notify();
+    }
+
     /// Crop on a video: pauses, and puts the current frame where handles can
     /// sit over it, as nothing GPUI draws can sit over the player.
     fn freeze_for_crop(&mut self, cx: &mut Context<Self>) {
@@ -1331,7 +1476,7 @@ impl PreviewView {
                         if let Some(old) = frozen.replace(frame) {
                             cx.drop_image(old, None);
                         }
-                        edit.tool = Some(Tool::Crop);
+                        this.start_crop(cx);
                     }
                     Err(why) => edit.error = Some(why),
                 }
@@ -1345,7 +1490,7 @@ impl PreviewView {
     pub(super) fn editing_image(&self) -> bool {
         self.edit.as_ref().is_some_and(|edit| match &edit.subject {
             Subject::Picture { .. } => true,
-            Subject::Video { frozen, .. } => frozen.is_some() && edit.tool == Some(Tool::Crop),
+            Subject::Video { frozen, .. } => frozen.is_some() && edit.cropping.is_some(),
         })
     }
 
@@ -1419,15 +1564,14 @@ impl PreviewView {
             let _ = this.update(cx, |this, cx| match done {
                 Ok(done) => {
                     cx.emit(Saved(Ok(done)));
-                    this.edit = None;
                     // The file on screen may have just been replaced, so it
-                    // reads again, unless the selection moved on meanwhile.
+                    // reads again, unless the selection moved on meanwhile. The
+                    // edit stays up until that's ready, so nothing flashes.
                     let (path, folder, position) = this
                         .wanted
                         .take()
                         .unwrap_or_else(|| (this.path.clone(), this.folder, this.position));
-                    this.path = PathBuf::new();
-                    this.show(&path, folder, position, cx);
+                    this.load(path, folder, position, cx);
                 }
                 Err(why) => {
                     if let Some(edit) = &mut this.edit {
@@ -1473,16 +1617,22 @@ impl PreviewView {
             return div().size_full().into_any_element();
         };
         let Some(image) = edit.image().cloned() else {
-            return div().size_full().into_any_element();
+            // The preview's picture until the first flatten, so opening the
+            // tools doesn't blank it.
+            return match &self.body {
+                Body::Picture { image, .. } => {
+                    super::placed(image.clone(), edit.zoom, None).into_any_element()
+                }
+                _ => div().size_full().into_any_element(),
+            };
         };
         let measured = edit.drawn.clone();
+        let drawn = edit.drawn.clone();
+        let zoom = edit.zoom;
         let source = image_size(&image);
         let (draft, tool, ink) = (edit.draft.clone(), edit.tool, edit.ink);
         let menu_open = edit.menu.is_some();
-        let crop = match &edit.subject {
-            Subject::Video { crop, .. } => *crop,
-            Subject::Picture { .. } => None,
-        };
+        let crop = edit.cropping.as_ref().map(|cropping| cropping.rect);
         let note = self.note_card(source, window, cx);
         // While a mark moves: the rest of the picture, with the mark's own layer
         // over it. Otherwise the picture, with marks it doesn't have yet.
@@ -1540,18 +1690,28 @@ impl PreviewView {
                     if this
                         .edit
                         .as_ref()
-                        .is_some_and(|edit| edit.gesture.is_some())
+                        .is_some_and(|edit| edit.gesture.is_some() || edit.cropping.is_some())
                     {
                         this.released(event, window, cx);
                     }
                 }),
             )
-            .child(super::fitted(shown))
+            .on_scroll_wheel(cx.listener(move |this, event, _, cx| {
+                this.scrolled(event, source, cx);
+            }))
+            // Cropping, the picture steps in from the edges, so the frame's
+            // handles there can be seen and taken.
+            .child(
+                div()
+                    .size_full()
+                    .when(crop.is_some(), |d| d.p_4())
+                    .child(super::placed(shown, zoom, Some(measured))),
+            )
             .child(
                 canvas(
-                    move |bounds, _, _| measured.set(bounds),
-                    move |bounds, _, window, _| {
-                        let (origin, scale) = fit(bounds, source);
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let (origin, scale) = fitted_in(drawn.get(), source, zoom);
                         for (layer, area) in &layers {
                             let frame = Bounds::new(
                                 origin
@@ -1575,19 +1735,7 @@ impl PreviewView {
                             paint_handles(step, picture, origin, scale, window);
                         }
                         if let Some(rect) = crop {
-                            let shown = [
-                                [rect.x, rect.y],
-                                [rect.x + rect.width, rect.y + rect.height],
-                            ];
-                            paint_mark(
-                                &shown,
-                                Some(Tool::Crop),
-                                ink,
-                                origin,
-                                scale,
-                                source,
-                                window,
-                            );
+                            paint_crop(rect, origin, scale, source, window);
                         }
                     },
                 )
@@ -1597,7 +1745,29 @@ impl PreviewView {
                 .size_full(),
             )
             .children(note)
+            // Not over the crop's corner.
+            .when(crop.is_none(), |d| {
+                d.child(super::legend(if zoom.movable() {
+                    "Scroll to move · ⌘ scroll or pinch to zoom"
+                } else {
+                    "⌘ scroll or pinch to zoom"
+                }))
+            })
             .into_any_element()
+    }
+
+    /// The edit's zoom and the box its picture sits in, while it shows one.
+    pub(super) fn edit_zoom(&mut self) -> Option<(Bounds<Pixels>, &mut Zoom)> {
+        if !self.editing_image() {
+            return None;
+        }
+        let edit = self.edit.as_mut()?;
+        Some((edit.drawn.get(), &mut edit.zoom))
+    }
+
+    /// The size of what the edit shows, for zooming it.
+    pub(super) fn edit_size(&self) -> Option<(f32, f32)> {
+        self.edit.as_ref()?.image().map(|image| image_size(image))
     }
 
     /// The Text tool's card, beside a dot where the words will land. It's
@@ -1613,7 +1783,7 @@ impl PreviewView {
         let (field, at, _) = edit.text.as_ref()?;
         let field = field.clone();
         let surface = edit.drawn.get();
-        let (origin, scale) = fit(surface, source);
+        let (origin, scale) = fitted_in(surface, source, edit.zoom);
         let dot = origin + point(px(at[0] as f32 * scale), px(at[1] as f32 * scale));
         let width = px(NOTE_WIDTH).min(surface.size.width - px(16.));
         let left = (dot.x + px(12.))
@@ -1817,6 +1987,9 @@ impl PreviewView {
                         tool == Some(kind),
                         cx,
                         move |this, _, cx| {
+                            if kind == Tool::Crop {
+                                return this.start_crop(cx);
+                            }
                             if let Some(edit) = &mut this.edit {
                                 edit.tool = (edit.tool != Some(kind)).then_some(kind);
                                 edit.selected = None;
@@ -1905,15 +2078,8 @@ impl PreviewView {
                     tool == Some(Tool::Crop) || cropped,
                     cx,
                     |this, _, cx| {
-                        let cropping = this
-                            .edit
-                            .as_ref()
-                            .is_some_and(|e| e.tool == Some(Tool::Crop));
-                        if cropping {
-                            if let Some(edit) = &mut this.edit {
-                                edit.tool = None;
-                            }
-                            cx.notify();
+                        if this.cropping() {
+                            this.cancel_crop(cx);
                         } else {
                             this.freeze_for_crop(cx);
                         }
@@ -2018,6 +2184,9 @@ impl PreviewView {
                         .flex()
                         .items_center()
                         .text_size(px(theme::TEXT_BODY))
+                        .cursor_pointer()
+                        // The pointer's row, as menus show it.
+                        .hover(|style| style.bg(theme::accent()).text_color(theme::on_accent()))
                         .child(label)
                 };
                 d.child(deferred(
@@ -2060,6 +2229,7 @@ impl PreviewView {
         let menu = edit.menu;
         let picture = matches!(edit.subject, Subject::Picture { .. });
         let edit_selected = edit.selected.is_some();
+        let cropping = edit.cropping.as_ref().map(|cropping| cropping.rect);
         let row_width = self.row_width.clone();
         let (narrow, very_narrow) = row_fits(row_width.get(), picture);
         let name_cell = div()
@@ -2094,7 +2264,7 @@ impl PreviewView {
             .border_b_1()
             .border_color(content(0.06))
             .child(measure);
-        let status = |text: &'static str| {
+        let status = |text: gpui::SharedString| {
             div()
                 .flex_1()
                 .min_w_0()
@@ -2104,14 +2274,14 @@ impl PreviewView {
                 .child(text)
         };
         let row = if let Some(cancel) = saving {
-            row.child(name_cell).child(status("Saving…")).child(
+            row.child(name_cell).child(status("Saving…".into())).child(
                 text_button("edit-cancel", "Cancel", ButtonLook::Secondary)
                     .debug_selector(|| "edit-cancel".into())
                     .on_click(move |_, _, _| cancel.store(true, Ordering::Relaxed)),
             )
         } else if confirming {
             row.child(name_cell)
-                .child(status("Discard these changes?"))
+                .child(status("Discard these changes?".into()))
                 .child(
                     text_button("edit-keep", "Keep Editing", ButtonLook::Ghost)
                         .debug_selector(|| "edit-keep".into())
@@ -2126,6 +2296,26 @@ impl PreviewView {
                     text_button("edit-discard", "Discard", ButtonLook::Primary)
                         .debug_selector(|| "edit-discard".into())
                         .on_click(cx.listener(|this, _, _, cx| this.leave_edit(cx))),
+                )
+        } else if let Some(rect) = cropping {
+            row.child(name_cell)
+                .child(status(
+                    format!(
+                        "{} × {} · Drag the edges or the middle",
+                        rect.width.round(),
+                        rect.height.round()
+                    )
+                    .into(),
+                ))
+                .child(
+                    text_button("edit-crop-cancel", "Cancel", ButtonLook::Ghost)
+                        .debug_selector(|| "edit-crop-cancel".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_crop(cx))),
+                )
+                .child(
+                    text_button("edit-crop-apply", "Crop", ButtonLook::Primary)
+                        .debug_selector(|| "edit-crop-apply".into())
+                        .on_click(cx.listener(|this, _, window, cx| this.apply_crop(window, cx))),
                 )
         } else {
             let tools = self.tool_buttons(cx);
@@ -2274,6 +2464,191 @@ impl PreviewView {
             let _ = this.update(cx, |_, cx| cx.emit(Saved(done)));
         })
         .detach();
+    }
+}
+
+/// What an edit holds on the GPU, given back as it ends.
+pub(super) fn drop_images(mut edit: Edit, cx: &mut gpui::App) {
+    let dragged = std::mem::take(&mut edit.dragged);
+    let image = edit.image().cloned();
+    for image in dragged
+        .under
+        .map(|under| under.image)
+        .into_iter()
+        .chain(dragged.layer.map(|((layer, _), ..)| layer))
+        .chain(edit.landing.drain(..).map(|(_, _, (layer, _))| layer))
+        .chain(image)
+    {
+        super::give_back_image(image, cx);
+    }
+}
+
+/// A rectangle in picture pixels, on screen.
+fn screen_rect(rect: Rect, origin: Point<Pixels>, scale: f32) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            origin.x + px(rect.x as f32 * scale),
+            origin.y + px(rect.y as f32 * scale),
+        ),
+        size(
+            px(rect.width as f32 * scale),
+            px(rect.height as f32 * scale),
+        ),
+    )
+}
+
+/// What a press at `at` takes hold of on a crop drawn at `frame`: an edge or a
+/// corner within `GRIP` of it, the middle, or else a new frame.
+fn grab_at(frame: Bounds<Pixels>, at: Point<Pixels>) -> CropGrab {
+    let grip = px(GRIP);
+    let near = |a: Pixels, b: Pixels| (a - b).abs() <= grip;
+    let across = at.x >= frame.left() - grip && at.x <= frame.right() + grip;
+    let down = at.y >= frame.top() - grip && at.y <= frame.bottom() + grip;
+    let (mut left, mut right) = (
+        near(at.x, frame.left()) && down,
+        near(at.x, frame.right()) && down,
+    );
+    let (mut top, mut bottom) = (
+        near(at.y, frame.top()) && across,
+        near(at.y, frame.bottom()) && across,
+    );
+    // A frame narrower than two grips takes the nearer edge.
+    if left && right {
+        let to_left = (at.x - frame.left()).abs() <= (at.x - frame.right()).abs();
+        (left, right) = (to_left, !to_left);
+    }
+    if top && bottom {
+        let to_top = (at.y - frame.top()).abs() <= (at.y - frame.bottom()).abs();
+        (top, bottom) = (to_top, !to_top);
+    }
+    if left || right || top || bottom {
+        CropGrab::Edges {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    } else if frame.contains(&at) {
+        CropGrab::Move
+    } else {
+        CropGrab::New
+    }
+}
+
+/// The crop after dragging what `grab` holds from `from` to `to`, in picture
+/// pixels. It never leaves the picture or gets smaller than `SMALLEST_CROP`.
+fn reshaped(start: Rect, grab: CropGrab, from: [f64; 2], to: [f64; 2], image: (f32, f32)) -> Rect {
+    let (width, height) = (f64::from(image.0), f64::from(image.1));
+    let least = (SMALLEST_CROP.min(width), SMALLEST_CROP.min(height));
+    match grab {
+        CropGrab::Move => Rect {
+            x: (start.x + to[0] - from[0]).clamp(0., width - start.width),
+            y: (start.y + to[1] - from[1]).clamp(0., height - start.height),
+            ..start
+        },
+        // Never thinner than the smallest crop, so its edges can still drag.
+        CropGrab::New => {
+            let rect = corners(from, to, image);
+            let (rect_width, rect_height) = (rect.width.max(least.0), rect.height.max(least.1));
+            Rect {
+                x: rect.x.min(width - rect_width),
+                y: rect.y.min(height - rect_height),
+                width: rect_width,
+                height: rect_height,
+            }
+        }
+        CropGrab::Edges {
+            left,
+            right,
+            top,
+            bottom,
+        } => {
+            // By how far the pointer moved, so a press beside an edge doesn't
+            // make it jump.
+            let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+            let (mut x0, mut x1) = (start.x, start.x + start.width);
+            let (mut y0, mut y1) = (start.y, start.y + start.height);
+            if left {
+                x0 = (x0 + dx).clamp(0., x1 - least.0);
+            }
+            if right {
+                x1 = (x1 + dx).clamp(x0 + least.0, width);
+            }
+            if top {
+                y0 = (y0 + dy).clamp(0., y1 - least.1);
+            }
+            if bottom {
+                y1 = (y1 + dy).clamp(y0 + least.1, height);
+            }
+            Rect {
+                x: x0,
+                y: y0,
+                width: x1 - x0,
+                height: y1 - y0,
+            }
+        }
+    }
+}
+
+/// The crop: the picture dimmed outside it, its edge, and handles at its
+/// corners and sides.
+fn paint_crop(
+    rect: Rect,
+    origin: Point<Pixels>,
+    scale: f32,
+    image: (f32, f32),
+    window: &mut Window,
+) {
+    let whole = screen_rect(
+        Rect {
+            x: 0.,
+            y: 0.,
+            width: f64::from(image.0),
+            height: f64::from(image.1),
+        },
+        origin,
+        scale,
+    );
+    let frame = screen_rect(rect, origin, scale);
+    // design: a scrim over the picture, which is the file's colors, not the app's.
+    let dim = hsla([0., 0., 0., 0.5]);
+    for part in [
+        Bounds::from_corners(whole.origin, point(whole.right(), frame.top())),
+        Bounds::from_corners(point(whole.left(), frame.bottom()), whole.bottom_right()),
+        Bounds::from_corners(
+            point(whole.left(), frame.top()),
+            point(frame.left(), frame.bottom()),
+        ),
+        Bounds::from_corners(
+            point(frame.right(), frame.top()),
+            point(whole.right(), frame.bottom()),
+        ),
+    ] {
+        window.paint_quad(gpui::fill(part, dim));
+    }
+    window.paint_quad(gpui::outline(
+        frame,
+        theme::accent(),
+        gpui::BorderStyle::Solid,
+    ));
+    let handle = px(8.);
+    let (left, right, top, bottom) = (frame.left(), frame.right(), frame.top(), frame.bottom());
+    let (middle_x, middle_y) = (frame.center().x, frame.center().y);
+    for (x, y) in [
+        (left, top),
+        (middle_x, top),
+        (right, top),
+        (left, middle_y),
+        (right, middle_y),
+        (left, bottom),
+        (middle_x, bottom),
+        (right, bottom),
+    ] {
+        let at = Bounds::new(
+            point(x - handle / 2., y - handle / 2.),
+            size(handle, handle),
+        );
+        window.paint_quad(gpui::fill(at, theme::accent()));
     }
 }
 
@@ -2429,16 +2804,12 @@ mod tests {
             height: 150.,
         };
         assert_eq!(
-            step_of(Tool::Crop, &drag, ink, image),
-            Some(Step::Crop { rect })
-        );
-        assert_eq!(
             step_of(Tool::Redact, &drag, ink, image),
             Some(Step::Redact { rect, rotation: 0. })
         );
         // A press without a drag makes no shape, but it's a dot for the pen.
         let press = [[10., 10.]];
-        assert_eq!(step_of(Tool::Crop, &press, ink, image), None);
+        assert_eq!(step_of(Tool::Redact, &press, ink, image), None);
         assert_eq!(step_of(Tool::Arrow, &press, ink, image), None);
         assert!(matches!(
             step_of(Tool::Pen, &press, ink, image),
@@ -2468,6 +2839,8 @@ mod tests {
             ink: INKS[0].1,
             draft: Vec::new(),
             drawn: Rc::new(Cell::new(Bounds::default())),
+            zoom: Zoom::default(),
+            cropping: None,
             selected: None,
             gesture: None,
             dragged: Dragged::default(),
@@ -2518,13 +2891,72 @@ mod tests {
     }
 
     #[test]
-    fn the_picture_is_fit_centered_and_never_enlarged() {
-        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(400.), px(400.)));
-        let (origin, scale) = fit(bounds, (800., 400.));
-        assert_eq!(scale, 0.5);
-        assert_eq!((origin.x, origin.y), (px(10.), px(120.)));
-        let (origin, scale) = fit(bounds, (100., 100.));
-        assert_eq!(scale, 1.);
-        assert_eq!((origin.x, origin.y), (px(160.), px(170.)));
+    fn the_crop_takes_the_edge_or_corner_pressed_and_stays_on_the_picture() {
+        let frame = Bounds::new(point(px(100.), px(100.)), size(px(200.), px(100.)));
+        let edges = |left, right, top, bottom| CropGrab::Edges {
+            left,
+            right,
+            top,
+            bottom,
+        };
+        assert_eq!(
+            grab_at(frame, point(px(104.), px(150.))),
+            edges(true, false, false, false)
+        );
+        assert_eq!(
+            grab_at(frame, point(px(297.), px(196.))),
+            edges(false, true, false, true)
+        );
+        assert_eq!(grab_at(frame, point(px(200.), px(150.))), CropGrab::Move);
+        assert_eq!(grab_at(frame, point(px(50.), px(50.))), CropGrab::New);
+
+        let image = (400., 300.);
+        let whole = Rect {
+            x: 0.,
+            y: 0.,
+            width: 400.,
+            height: 300.,
+        };
+        // Dragged past the picture, an edge stops at it, and past the far
+        // edge it keeps the smallest crop.
+        let right = reshaped(
+            whole,
+            edges(false, true, false, false),
+            [400., 10.],
+            [900., 10.],
+            image,
+        );
+        assert_eq!(right, whole);
+        let left = reshaped(
+            whole,
+            edges(true, false, false, false),
+            [0., 10.],
+            [500., 10.],
+            image,
+        );
+        assert_eq!((left.x, left.width), (392., 8.));
+        // Pressed a little inside the right edge, it moves by the drag alone.
+        let nudged = reshaped(
+            whole,
+            edges(false, true, false, false),
+            [395., 10.],
+            [345., 10.],
+            image,
+        );
+        assert_eq!(nudged.width, 350.);
+        // A new frame dragged off the picture's edge keeps the smallest size.
+        let new = reshaped(whole, CropGrab::New, [-50., 10.], [-20., 200.], image);
+        assert_eq!((new.x, new.width), (0., 8.));
+        // Moving keeps its size and stays inside.
+        let half = Rect {
+            width: 200.,
+            height: 150.,
+            ..whole
+        };
+        let moved = reshaped(half, CropGrab::Move, [10., 10.], [1000., -50.], image);
+        assert_eq!(
+            (moved.x, moved.y, moved.width, moved.height),
+            (200., 0., 200., 150.)
+        );
     }
 }

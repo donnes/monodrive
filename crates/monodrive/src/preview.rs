@@ -6,6 +6,7 @@ mod html;
 mod markdown;
 mod media;
 mod tools;
+mod zoom;
 
 pub use tools::Saved;
 
@@ -33,14 +34,19 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
+use zoom::{Zoom, place};
 
 /// Beyond this, text stays plain: highlighting walks the whole file.
 const HIGHLIGHT_LIMIT: usize = 512 * 1024;
 /// Pixels asked for at 100%, as a picture's own size isn't known beforehand.
 const FULL_SIDE: u32 = 8192;
+/// The side a picture decodes at to fill the window: the window's longer side
+/// in pixels, from the last one drawn, or a guess from the screen before that.
+static FIT_SIDE: AtomicU32 = AtomicU32::new(0);
 
 /// One picture at one size, from ImageIO, which reads HEIC and RAW, or a video's
 /// frame from the system's generator.
@@ -89,8 +95,11 @@ enum Body {
         blocks: Arc<Vec<Block>>,
         source: Arc<Vec<Line>>,
     },
+    /// Decoded to fill the window, along with the read, so it appears with
+    /// the bar above it.
     Picture {
         modified: u64,
+        image: Arc<RenderImage>,
     },
     Animated,
     Rows(Arc<Vec<String>>, Option<String>),
@@ -112,7 +121,17 @@ pub struct PreviewView {
     generation: u64,
     body: Body,
     show_source: bool,
-    zoomed: bool,
+    zoom: Zoom,
+    /// Actual Size was asked for, and waits on the full decode to know it.
+    want_actual: bool,
+    /// Where the picture's box was drawn, to zoom about the pointer.
+    frame: Rc<Cell<Bounds<Pixels>>>,
+    /// A drag moving a zoomed picture: where the pointer was last.
+    panning: Option<gpui::Point<Pixels>>,
+    pinch: Option<(zoom::Pinch, Task<()>)>,
+    /// The file being read, which takes over once it's ready, so the bar and
+    /// what's under it change together. What's shown stays until then.
+    loading: Option<(PathBuf, bool, (usize, usize))>,
     /// A sheet or menu is up, which a native view would draw over.
     covered: bool,
     /// The tools and what they've done so far.
@@ -154,7 +173,12 @@ impl PreviewView {
             generation: 0,
             body: Body::Loading,
             show_source: false,
-            zoomed: false,
+            zoom: Zoom::default(),
+            want_actual: false,
+            frame: Rc::new(Cell::new(Bounds::default())),
+            panning: None,
+            pinch: None,
+            loading: None,
             covered: false,
             edit: None,
             wanted: None,
@@ -186,42 +210,94 @@ impl PreviewView {
             return;
         }
         self.wanted = None;
-        self.position = position;
-        if self.path == path {
+        if let Some(loading) = self.loading.as_mut().filter(|(at, ..)| at == path) {
+            loading.2 = position;
+            return;
+        }
+        // A save's reload must land even if the selection came back meanwhile,
+        // as the file shown may have been replaced. While the save still writes,
+        // it loads the file itself when it's done.
+        if self.path == path && self.saving() && self.loading.is_some() {
+            return self.load(path.to_path_buf(), folder, position, cx);
+        }
+        if self.path == path && !matches!(self.body, Body::Loading) {
+            // Back on what's shown, nothing else is wanted.
+            self.loading = None;
+            self._reading = None;
+            self.position = position;
             return cx.notify();
         }
-        self.path = path.to_path_buf();
-        self.folder = folder;
+        self.load(path.to_path_buf(), folder, position, cx);
+    }
+
+    /// Whether there's anything to show yet. Until then the list stays, so the
+    /// preview never appears in pieces.
+    pub fn ready(&self) -> bool {
+        !matches!(self.body, Body::Loading)
+    }
+
+    /// Reads `path` off the UI thread; it takes over once it's ready.
+    fn load(
+        &mut self,
+        path: PathBuf,
+        folder: bool,
+        position: (usize, usize),
+        cx: &mut Context<Self>,
+    ) {
+        // Tools with nothing to lose close now, as they did before the next
+        // file had to load, so no mark can be drawn on the way out and lost.
+        if !self.holding()
+            && let Some(edit) = self.edit.take()
+        {
+            tools::drop_images(edit, cx);
+        }
         self.generation += 1;
-        self.edit = None;
-        self.loading_ticks = 40;
-        self.show_source = false;
-        self.zoomed = false;
-        self.body = Body::Loading;
-        self.scroll = UniformListScrollHandle::new();
-        self.release(cx);
         let generation = self.generation;
-        let path = self.path.clone();
+        self.loading = Some((path.clone(), folder, position));
         let light = theme::is_light();
+        let side = fit_side(cx);
         let work = cx
             .background_executor()
-            .spawn(async move { read(&path, light) });
+            .spawn(async move { read(&path, light, side) });
         self._reading = Some(cx.spawn(async move |this, cx| {
             let body = work.await;
             let _ = this.update(cx, |this, cx| {
-                // Moved on since: this is for a file no longer shown.
+                // Moved on since: this is for a file no longer wanted.
                 if this.generation == generation {
-                    this.blocks = match &body {
-                        Body::Markdown { blocks, .. } => {
-                            Some(ListState::new(blocks.len(), ListAlignment::Top, px(400.)))
-                        }
-                        _ => None,
-                    };
-                    this.body = body;
-                    cx.notify();
+                    this.take_over(body, cx);
+                } else {
+                    drop_body(body, cx);
                 }
             });
         }));
+    }
+
+    fn take_over(&mut self, body: Body, cx: &mut Context<Self>) {
+        let Some((path, folder, position)) = self.loading.take() else {
+            return drop_body(body, cx);
+        };
+        self.release(cx);
+        self.path = path;
+        self.folder = folder;
+        self.position = position;
+        self.loading_ticks = 40;
+        self.show_source = false;
+        self.zoom = Zoom::default();
+        self.want_actual = false;
+        self.panning = None;
+        self.scroll = UniformListScrollHandle::new();
+        self.blocks = match &body {
+            Body::Markdown { blocks, .. } => {
+                Some(ListState::new(blocks.len(), ListAlignment::Top, px(400.)))
+            }
+            _ => None,
+        };
+        self.body = body;
+        // A save that replaced this file waited for it, and the selection may
+        // have moved meanwhile.
+        if let Some((path, folder, position)) = self.wanted.take() {
+            self.show(&path, folder, position, cx);
+        }
         cx.notify();
     }
 
@@ -247,17 +323,23 @@ impl PreviewView {
     /// Gives back what's held: the picture in memory and on the GPU, and the
     /// native view.
     pub fn release(&mut self, cx: &mut App) {
+        if let Body::Picture { image, .. } = std::mem::replace(&mut self.body, Body::Loading) {
+            give_back_image(image, cx);
+        }
+        if let Some(edit) = self.edit.take() {
+            tools::drop_images(edit, cx);
+        }
+        self.pinch = None;
         if let Some((sharp, image)) = self.held.take() {
             cx.remove_asset::<Sharp>(&sharp);
             if let Some(image) = image {
-                cx.drop_image(image, None);
+                give_back_image(image, cx);
             }
         }
         self.native.borrow_mut().take();
         self.player.borrow_mut().take();
         self.page.borrow_mut().take();
         self._ticking = None;
-        self.edit = None;
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -284,16 +366,18 @@ impl PreviewView {
                 )
             }
             Body::Picture { .. } => {
-                let label = if self.zoomed { "Fit" } else { "Actual Size" };
+                let zoomed = self.zoom.zoomed() || self.want_actual;
+                let label = if zoomed { "Fit" } else { "Actual Size" };
                 Some(
                     tools::tip(
                         theme::icon_button("preview-zoom", label, "tool-zoom", true),
                         label,
                     )
                     .debug_selector(|| "preview-zoom".into())
-                    .when(self.zoomed, |d| d.bg(content(0.14)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.zoomed = !this.zoomed;
+                    .when(zoomed, |d| d.bg(content(0.14)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.zoom = Zoom::default();
+                        this.want_actual = !zoomed;
                         cx.notify();
                     })),
                 )
@@ -353,57 +437,236 @@ impl PreviewView {
             )
     }
 
-    fn picture(
+    /// A video's or song's picture, fit, until its first frame is ready.
+    fn poster(
         &mut self,
         modified: u64,
-        poster: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let viewport = window.viewport_size();
-        let fit =
-            (viewport.width.max(viewport.height).as_f32() * window.scale_factor()).ceil() as u32;
         let sharp = Sharp {
             path: self.path.clone(),
-            side: if self.zoomed { FULL_SIDE } else { fit },
+            side: fit_side(cx),
             modified,
         };
-        // A new size gives the last one back.
-        let loaded = window.use_asset::<Sharp>(&sharp, cx);
-        let image = loaded.clone().flatten();
-        if self.held.as_ref().is_some_and(|(held, _)| *held != sharp)
-            && let Some((old, old_image)) = self.held.take()
-        {
+        let image = window.use_asset::<Sharp>(&sharp, cx).flatten();
+        self.hold(sharp, image.clone(), window, cx);
+        // Audio without artwork has no poster, and that's no failure.
+        match image {
+            Some(image) => placed(image, Zoom::default(), None).into_any_element(),
+            None => div().size_full().into_any_element(),
+        }
+    }
+
+    /// Keeps `image` until something else is asked for, which gives it back.
+    fn hold(
+        &mut self,
+        sharp: Sharp,
+        image: Option<Arc<RenderImage>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.held.as_ref().is_some_and(|(held, _)| *held != sharp) {
+            self.give_back(window, cx);
+        }
+        self.held = Some((sharp, image));
+    }
+
+    fn give_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((old, old_image)) = self.held.take() {
             cx.remove_asset::<Sharp>(&old);
             if let Some(old_image) = old_image {
                 cx.drop_image(old_image, Some(window));
             }
         }
-        self.held = Some((sharp, image.clone()));
-        let Some(image) = image else {
-            // Audio without artwork has no poster, and that's no failure.
-            return if loaded.is_some() && !poster {
-                notice("This picture can't be shown.")
-            } else {
-                div().size_full().into_any_element()
+    }
+
+    /// The picture, fit or zoomed. Zoomed past what the fitted decode holds, it
+    /// decodes in full, and the fitted one stands in until that's ready.
+    fn picture(
+        &mut self,
+        image: Arc<RenderImage>,
+        modified: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let bounds = self.frame.get();
+        let source = tools::image_size(&image);
+        let (_, scale) = place(bounds, source, self.zoom);
+        let sharper =
+            self.want_actual || (self.zoom.zoomed() && scale * window.scale_factor() > 1.);
+        let full = if sharper {
+            let sharp = Sharp {
+                path: self.path.clone(),
+                side: FULL_SIDE,
+                modified,
             };
-        };
-        if self.zoomed {
-            let scale = window.scale_factor();
-            let size = image.size(0);
-            div()
-                .id("preview-picture")
-                .size_full()
-                .overflow_scroll()
-                .child(
-                    gpui::img(image.clone())
-                        .w(px(size.width.0 as f32 / scale))
-                        .h(px(size.height.0 as f32 / scale)),
-                )
-                .into_any_element()
+            let full = window.use_asset::<Sharp>(&sharp, cx).flatten();
+            self.hold(sharp, full.clone(), window, cx);
+            full
         } else {
-            fitted(image).into_any_element()
+            self.give_back(window, cx);
+            None
+        };
+        if self.want_actual
+            && let Some(full) = &full
+            && bounds.size.width > px(0.)
+        {
+            // One of its pixels to each of the screen's.
+            let (_, fit) = place(bounds, tools::image_size(full), Zoom::default());
+            let factor = 1. / (fit * window.scale_factor());
+            // Zooming stays at fit or closer; only this goes below it.
+            self.zoom = if factor < 1. {
+                Zoom {
+                    level: factor,
+                    ..Zoom::default()
+                }
+            } else {
+                Zoom::default().around(factor, bounds.center(), bounds, source)
+            };
+            self.want_actual = false;
         }
+        let movable = self.zoom.movable();
+        let grabbing = self.panning.is_some();
+        div()
+            .id("preview-picture")
+            .debug_selector(|| "preview-picture".into())
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .when(movable, |d| {
+                d.cursor(if grabbing {
+                    gpui::CursorStyle::ClosedHand
+                } else {
+                    gpui::CursorStyle::OpenHand
+                })
+            })
+            .on_scroll_wheel(cx.listener(move |this, event, _, cx| {
+                this.scrolled(event, source, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    if this.zoom.movable() {
+                        this.panning = Some(event.position);
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    let Some(last) = this.panning.filter(|_| event.dragging()) else {
+                        return;
+                    };
+                    this.zoom = this
+                        .zoom
+                        .panned(event.position - last, this.frame.get(), source);
+                    this.panning = Some(event.position);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.panning.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.panning.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(placed(
+                full.unwrap_or(image),
+                self.zoom,
+                Some(self.frame.clone()),
+            ))
+            .child(legend(if movable {
+                "Drag to move · ⌘ scroll or pinch to zoom"
+            } else {
+                "⌘ scroll or pinch to zoom"
+            }))
+            .into_any_element()
+    }
+
+    /// ⌘-scroll zooms what's shown, and scrolling moves it once zoomed.
+    pub(super) fn scrolled(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        image: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        if self.rezoom(|zoom, bounds| zoom.scrolled(event, bounds, image)) {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    /// Changes the zoom of what's shown, the edit's while it shows a picture,
+    /// in the box it's drawn in. Says whether it changed.
+    fn rezoom(&mut self, change: impl FnOnce(Zoom, Bounds<Pixels>) -> Option<Zoom>) -> bool {
+        if self.editing_image() {
+            let Some((bounds, zoom)) = self.edit_zoom() else {
+                return false;
+            };
+            return change(*zoom, bounds).map(|next| *zoom = next).is_some();
+        }
+        let Some(next) = change(self.zoom, self.frame.get()) else {
+            return false;
+        };
+        self.zoom = next;
+        self.want_actual = false;
+        true
+    }
+
+    /// The size of the picture on screen, the edit's or the preview's.
+    fn shown_size(&self) -> Option<(f32, f32)> {
+        if self.editing_image() {
+            return self.edit_size();
+        }
+        match &self.body {
+            Body::Picture { image, .. } => Some(tools::image_size(image)),
+            _ => None,
+        }
+    }
+
+    /// A pinch zooms the picture under it.
+    fn listen_for_pinch(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.pinch.is_some() {
+            return;
+        }
+        let Some(pinch) = zoom::pinch(window) else {
+            return;
+        };
+        let events = pinch.events.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok((delta, at)) = events.recv().await {
+                let pinched = this.update_in(cx, |this, window, cx| {
+                    // AppKit's points, before the app's UI scale.
+                    let at = at / window.content_zoom();
+                    let Some(image) = this.shown_size().filter(|_| !this.covered) else {
+                        return;
+                    };
+                    let zoomed = this.rezoom(|zoom, bounds| {
+                        bounds
+                            .contains(&at)
+                            .then(|| zoom.around(1. + delta, at, bounds, image))
+                    });
+                    if zoomed {
+                        cx.notify();
+                    }
+                });
+                if pinched.is_err() {
+                    break;
+                }
+            }
+        });
+        self.pinch = Some((pinch, task));
     }
 
     fn html(&self) -> gpui::AnyElement {
@@ -444,8 +707,7 @@ impl PreviewView {
             .as_ref()
             .is_some_and(Player::frame_ready);
         // The player steps aside for an open menu, and this stands in for it.
-        let poster =
-            (!framed || self.menu_open()).then(|| self.picture(modified, true, window, cx));
+        let poster = (!framed || self.menu_open()).then(|| self.poster(modified, window, cx));
         let player = self.player.clone();
         let path = self.path.clone();
         // Nothing GPUI draws can sit over the player, so it steps aside for a menu.
@@ -671,23 +933,30 @@ fn notice(why: impl Into<SharedString>) -> gpui::AnyElement {
         .into_any_element()
 }
 
-/// A picture centered in the space it has and never enlarged, painted where
-/// `fit` says, so what's drawn and where a mark lands can't disagree. Left to
-/// layout, a picture's own height overruns a box shorter than it is.
-pub(crate) fn fitted(image: Arc<RenderImage>) -> impl IntoElement {
+/// A picture where `place` puts it, painted there rather than laid out, so what's
+/// drawn and where a mark lands can't disagree. Left to layout, a picture's own
+/// height overruns a box shorter than it is. `frame` learns the box it's in.
+fn placed(
+    image: Arc<RenderImage>,
+    zoom: Zoom,
+    frame: Option<Rc<Cell<Bounds<Pixels>>>>,
+) -> impl IntoElement {
     canvas(
-        |_, _, _| {},
+        move |bounds, _, _| {
+            if let Some(frame) = &frame {
+                frame.set(bounds);
+            }
+        },
         move |bounds: Bounds<Pixels>, _, window, _| {
-            let source = image.size(0);
-            let source = (source.width.0 as f32, source.height.0 as f32);
-            let (origin, scale) = tools::fit(bounds, source);
-            let frame = Bounds::new(
+            let source = tools::image_size(&image);
+            let (origin, scale) = place(bounds, source, zoom);
+            let drawn = Bounds::new(
                 origin,
                 gpui::size(px(source.0 * scale), px(source.1 * scale)),
             );
             let _ = window.paint_image(
-                frame,
-                frame,
+                drawn,
+                drawn,
                 gpui::Corners::default(),
                 image.clone(),
                 0,
@@ -696,6 +965,44 @@ pub(crate) fn fitted(image: Arc<RenderImage>) -> impl IntoElement {
         },
     )
     .size_full()
+}
+
+/// How to zoom, in a corner over the picture.
+fn legend(text: &'static str) -> impl IntoElement {
+    div().absolute().right_2().bottom_2().child(
+        theme::floating(theme::Elevation::Popover)
+            .debug_selector(|| "preview-legend".into())
+            .px_2()
+            .py_1()
+            .text_size(px(theme::TEXT_SMALL))
+            .text_color(content(0.65))
+            .child(text),
+    )
+}
+
+/// The side to decode a picture at to fill the window.
+fn fit_side(cx: &App) -> u32 {
+    match FIT_SIDE.load(Ordering::Relaxed) {
+        0 => cx.primary_display().map_or(4096, |display| {
+            let size = display.bounds().size;
+            // Screens are Retina, and a bigger decode only costs a little.
+            (size.width.max(size.height).as_f32() * 2.).ceil() as u32
+        }),
+        side => side,
+    }
+}
+
+/// A read nobody wants any more gives its picture back.
+fn drop_body(body: Body, cx: &mut App) {
+    if let Body::Picture { image, .. } = body {
+        give_back_image(image, cx);
+    }
+}
+
+/// Frees `image` on the GPU once the window being updated is back among the
+/// app's windows, as `drop_image` can't reach it during its own update.
+pub(super) fn give_back_image(image: Arc<RenderImage>, cx: &mut App) {
+    cx.defer(move |cx| cx.drop_image(image, None));
 }
 
 /// `None` without a window on the main thread, as in tests.
@@ -716,7 +1023,7 @@ fn set_item(view: &Retained<QLPreviewView>, path: &Path, folder: bool) {
     unsafe { view.setPreviewItem(Some(&item)) };
 }
 
-fn read(path: &Path, light: bool) -> Body {
+fn read(path: &Path, light: bool, side: u32) -> Body {
     let notice = |why: &str| Body::Notice(why.to_string());
     match preview::classify(path) {
         Kind::NotDownloaded => notice("This file isn't downloaded. Download it to preview it."),
@@ -733,9 +1040,18 @@ fn read(path: &Path, light: bool) -> Body {
             modified: modified(path),
         },
         Kind::Animated => Body::Animated,
-        Kind::Picture => Body::Picture {
-            modified: modified(path),
-        },
+        Kind::Picture => {
+            let decoded = thumbnails::picture(path, side)
+                .ok()
+                .and_then(crate::thumbnails::render_image);
+            match decoded {
+                Some(image) => Body::Picture {
+                    modified: modified(path),
+                    image: Arc::new(image),
+                },
+                None => notice("This picture can't be shown."),
+            }
+        }
         Kind::Zip => zip_rows(path),
         Kind::Text => match preview::read_text(path) {
             Ok(file) => {
@@ -1013,6 +1329,14 @@ fn block(ix: usize, block: &Block) -> gpui::AnyElement {
 
 impl Render for PreviewView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size();
+        let side = viewport.width.max(viewport.height).as_f32() * window.scale_factor();
+        FIT_SIDE.store(side.ceil() as u32, Ordering::Relaxed);
+        if matches!(self.body, Body::Picture { .. }) || self.editing_image() {
+            self.listen_for_pinch(window, cx);
+        } else {
+            self.pinch = None;
+        }
         // Editing, the title row itself holds the tools.
         let header = match self.edit_row(cx) {
             Some(row) => row,
@@ -1081,9 +1405,9 @@ impl Render for PreviewView {
                 }
             }
             Body::Picture { .. } if self.editing_image() => self.edit_surface(window, cx),
-            Body::Picture { modified } => {
-                let modified = *modified;
-                self.picture(modified, false, window, cx)
+            Body::Picture { modified, image } => {
+                let (modified, image) = (*modified, image.clone());
+                self.picture(image, modified, window, cx)
             }
             // Out of flow, as a tall picture's height would otherwise run out of
             // the box.

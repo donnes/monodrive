@@ -5,11 +5,11 @@ Status: all eight steps built, with the differences below. Replaces the `QLPrevi
 Built differently from what's below, each to keep the first version small:
 
 - Markdown is a small renderer on `pulldown-cmark`, not a port of Monocode's 1,800 lines. Tables read as plain rows.
-- Pictures come from the system's generator (`monodrive_core::thumbnails`), not ImageIO directly. It reads HEIC and RAW and stops at the side asked for. Fit and 100% exist; pinch and pan by drag don't.
+- Pictures come from the system's generator (`monodrive_core::thumbnails`), not ImageIO directly. It reads HEIC and RAW and stops at the side asked for, along with the file's kind, so the bar and the picture appear in the same frame, and the list stays until they do. ⌘-scroll and a trackpad pinch zoom about the pointer, in the preview and while editing, dragging or scrolling moves a zoomed picture, and the bar's button goes between fit and 100%. GPUI doesn't report pinches on macOS, so `preview/zoom.rs` listens for them with an AppKit event monitor.
 - A video's poster is drawn only until its first frame is ready, which also gives its memory back.
 - Checked in a real window on 2026-11-02: a click inside `QLPreviewView` and inside `WKWebView`, then a real Space, reaches GPUI. A hostile page's script doesn't run. Playback advances the frame and the time.
 - An edit is written by whoever asks, the window or an agent, under a hidden name beside where it's going, and `Request::SaveEdit` only checks the original and moves that file into place. A long video export so never holds up the owner, but it also isn't a job in the title bar's ring: its progress and cancel belong to whoever started it. Undoing sends the edited file to the Trash, as with anything else Monodrive made.
-- The crop on a video is chosen on a frozen frame, and a turn isn't shown until it's saved. Trim is Set Start and Set End at the playhead, not handles on the track. A mark can't be moved once it's drawn, only undone. Pictures' tools have four inks and no width control.
+- The crop on a video is chosen on a frozen frame, and a turn isn't shown until it's saved. Trim is Set Start and Set End at the playhead, not handles on the track. Crop starts as a frame over the whole picture or frame whose edges and middle drag, and Return or Crop applies it. Marks since the last crop, turn or flip stay movable until Save. Pictures' tools have four inks and no width control.
 - Pictures paint into a rectangle `fit` computes rather than through layout, as a picture taller than its box otherwise overran it, and marks would have landed in the wrong place.
 - `examples/preview_window.rs` opens one real window on a file, to look at what headless snapshots can't draw.
 

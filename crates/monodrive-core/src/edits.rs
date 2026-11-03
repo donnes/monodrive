@@ -28,9 +28,9 @@ use objc2_foundation::{
     NSString, NSURL,
 };
 use objc2_image_io::{
-    CGImageDestination, CGImageSource, kCGImagePropertyOrientation,
-    kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform,
-    kCGImageSourceThumbnailMaxPixelSize,
+    CGImageDestination, CGImageSource, kCGImagePropertyOrientation, kCGImagePropertyTIFFDictionary,
+    kCGImagePropertyTIFFOrientation, kCGImageSourceCreateThumbnailFromImageAlways,
+    kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceThumbnailMaxPixelSize,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -264,13 +264,24 @@ fn decode(path: &Path) -> Result<(CFRetained<CGImage>, Option<CFRetained<CFDicti
         let source = CGImageSource::with_url(cf_url, None).ok_or_else(cannot)?;
         let image = upright(&source, 1 << 16).ok_or_else(cannot)?;
         let properties = source.properties_at_index(0, None).map(|properties| {
-            // The pixels are upright now, so nothing may turn them again.
+            // The pixels are upright now, so nothing may turn them again. The
+            // turn is also in the TIFF block, which ImageIO writes back as the
+            // EXIF tag, so both say upright.
             let found: &NSDictionary<NSString, AnyObject> =
                 &*CFRetained::as_ptr(&properties).as_ptr().cast();
             let kept = NSMutableDictionary::dictionaryWithDictionary(found);
-            let orientation: *const NSString =
-                std::ptr::from_ref(kCGImagePropertyOrientation).cast();
-            kept.removeObjectForKey(&*orientation);
+            let key = |name: &CFString| -> &NSString { &*std::ptr::from_ref(name).cast() };
+            let upright = NSNumber::numberWithInt(1);
+            kept.insert(key(kCGImagePropertyOrientation), upright.as_ref());
+            if let Some(tiff) = kept.objectForKey(key(kCGImagePropertyTIFFDictionary))
+                && let Some(tiff) = tiff.downcast_ref::<NSDictionary>()
+            {
+                // Its keys are strings, as ImageIO's property keys all are.
+                let tiff: &NSDictionary<NSString, AnyObject> = &*std::ptr::from_ref(tiff).cast();
+                let tiff = NSMutableDictionary::dictionaryWithDictionary(tiff);
+                tiff.insert(key(kCGImagePropertyTIFFOrientation), upright.as_ref());
+                kept.insert(key(kCGImagePropertyTIFFDictionary), tiff.as_ref());
+            }
             let raw = Retained::into_raw(kept.into_super().into_super());
             CFRetained::from_raw(std::ptr::NonNull::new_unchecked(raw.cast::<CFDictionary>()))
         });
@@ -812,6 +823,32 @@ mod tests {
                 .pixels()
                 .all(|pixel| pixel.0[..3].iter().all(|c| *c < 16))
         );
+    }
+
+    /// A phone photo is often stored on its side with an EXIF tag saying to
+    /// turn it. The saved pixels are upright, so the tag can't come along, or
+    /// every viewer would turn them again.
+    #[test]
+    fn a_turned_photo_saves_upright_without_its_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("turned.jpg");
+        image::RgbImage::new(64, 36).save(&source).unwrap();
+        // EXIF orientation 6: shown a quarter turn clockwise, 36 by 64.
+        let mut exif = vec![0xff, 0xe1, 0, 34];
+        exif.extend_from_slice(
+            b"Exif\0\0MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0",
+        );
+        let mut bytes = std::fs::read(&source).unwrap();
+        bytes.splice(2..2, exif);
+        std::fs::write(&source, bytes).unwrap();
+        let shown = |path: &Path| {
+            let bitmap = crate::thumbnails::picture(path, 128).unwrap();
+            (bitmap.width, bitmap.height)
+        };
+        assert_eq!(shown(&source), (36, 64));
+        let turned = dir.path().join("saved.jpg");
+        flatten(&source, &[Step::Rotate { quarter_turns: 1 }], &turned).unwrap();
+        assert_eq!(shown(&turned), (64, 36), "one more quarter, and no more");
     }
 
     #[test]
