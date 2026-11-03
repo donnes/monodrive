@@ -1,5 +1,6 @@
-//! The sidebar: Recents and the favorites from `places::Store`, the mounted
-//! volumes with how full each is, and the Trash and Settings at its foot.
+//! The sidebar: Recents and the favorites from `places::Store`, the cloud
+//! folders and the mounted volumes with how full each is, and the Trash and
+//! Settings at its foot.
 //! Everything shown is read off the UI thread and read again when a watch
 //! hears a change, so nothing here polls.
 
@@ -169,6 +170,8 @@ pub(super) fn lists_hidden(dir: &Path, wanted: bool, tidy: &[PathBuf]) -> bool {
 #[derive(Default)]
 pub(super) struct Sidebar {
     pub(super) places: Vec<Place>,
+    /// Read with the volumes, which is also when the window comes forward.
+    pub(super) cloud: Vec<CloudFolder>,
     pub(super) volumes: Vec<Volume>,
     pub(super) servers: Vec<String>,
     /// Why the saved lists didn't read. They stay as last read, and nothing
@@ -188,6 +191,7 @@ pub(super) struct Sidebar {
 pub(super) enum Row {
     Recents,
     Favorite(usize),
+    Cloud(usize),
     Volume(usize),
 }
 
@@ -196,6 +200,7 @@ pub(super) enum Row {
 pub(super) enum RowTarget {
     Recents,
     Favorite(PathBuf),
+    Cloud(PathBuf),
     Volume(PathBuf),
 }
 
@@ -343,9 +348,9 @@ impl Browser {
         };
         let listed = cx
             .background_executor()
-            .spawn(async move { places.drives.list() });
+            .spawn(async move { (places.drives.list(), places.drives.cloud()) });
         self.sidebar.load_volumes = Some(cx.spawn(async move |this, cx| {
-            let volumes = listed.await;
+            let (volumes, cloud) = listed.await;
             let _ = this.update(cx, |this, cx| {
                 let gone: Vec<_> = this
                     .sidebar
@@ -376,6 +381,7 @@ impl Browser {
                     pane.update(cx, |pane, cx| pane.navigate(home(), cx));
                 }
                 this.sidebar.volumes = volumes;
+                this.sidebar.cloud = cloud;
                 this.load_lists(cx);
                 this.save_session(cx);
                 // A drive that's back may be what a restored pane waits for.
@@ -505,11 +511,13 @@ impl Browser {
     /// What the sidebar's keys are on.
     pub(super) fn row_at(&self, ix: usize) -> Option<Row> {
         let favorites = self.sidebar.places.len();
+        let cloud = self.sidebar.cloud.len();
         match ix {
             0 => Some(Row::Recents),
             ix if ix <= favorites => Some(Row::Favorite(ix - 1)),
+            ix if ix <= favorites + cloud => Some(Row::Cloud(ix - favorites - 1)),
             ix => {
-                let volume = ix - favorites - 1;
+                let volume = ix - favorites - cloud - 1;
                 (volume < self.sidebar.volumes.len()).then_some(Row::Volume(volume))
             }
         }
@@ -522,6 +530,7 @@ impl Browser {
             Row::Favorite(ix) => {
                 RowTarget::Favorite(self.sidebar.places.get(ix)?.favorite.path.clone())
             }
+            Row::Cloud(ix) => RowTarget::Cloud(self.sidebar.cloud.get(ix)?.path.clone()),
             Row::Volume(ix) => RowTarget::Volume(self.sidebar.volumes.get(ix)?.mount.clone()),
         })
     }
@@ -569,6 +578,11 @@ impl Browser {
                 .pane()
                 .update(cx, |pane, cx| pane.open_recents(window, cx)),
             Some(Row::Favorite(ix)) => self.open_favorite(ix, window, cx),
+            Some(Row::Cloud(ix)) => {
+                if let Some(path) = self.sidebar.cloud.get(ix).map(|c| c.path.clone()) {
+                    self.pane().update(cx, |pane, cx| pane.go(path, window, cx));
+                }
+            }
             Some(Row::Volume(ix)) => {
                 if let Some(mount) = self.sidebar.volumes.get(ix).map(|v| v.mount.clone()) {
                     self.pane()
@@ -614,6 +628,12 @@ impl Browser {
                     Availability::Unavailable(why) => return self.toast(why, true, None, cx),
                 }
             }
+            Some(Row::Cloud(ix)) => {
+                let Some(folder) = self.sidebar.cloud.get(ix) else {
+                    return;
+                };
+                Stop::folder(folder.path.clone())
+            }
             Some(Row::Volume(ix)) => {
                 let Some(volume) = self.sidebar.volumes.get(ix) else {
                     return;
@@ -653,14 +673,20 @@ impl Browser {
             .iter()
             .position(|place| place.at() == Some(folder))
             .map(|ix| ix + 1);
-        favorite.or_else(|| {
-            let volume = self
+        let after_favorites = self.sidebar.places.len() + 1;
+        let cloud = || {
+            let ix = self.sidebar.cloud.iter().position(|c| c.path == folder)?;
+            Some(ix + after_favorites)
+        };
+        let volume = || {
+            let ix = self
                 .sidebar
                 .volumes
                 .iter()
                 .position(|v| v.mount == folder)?;
-            Some(volume + self.sidebar.places.len() + 1)
-        })
+            Some(ix + after_favorites + self.sidebar.cloud.len())
+        };
+        favorite.or_else(cloud).or_else(volume)
     }
 
     /// Where a row's presses land, the gap under it included. An edited
@@ -892,6 +918,30 @@ impl Browser {
             .map(|d| self.pin_edges(d, fav))
     }
 
+    fn cloud_row(
+        &self,
+        at: usize,
+        here: &Here,
+        cursor: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let folder = &self.sidebar.cloud[at];
+        let ix = at + 1 + self.sidebar.places.len();
+        let selected = here.showing_folder() && here.folder == folder.path;
+        let row = Self::row(ix, selected, true, cursor)
+            .h(px(ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon("cloud", 16.).text_color(content(if selected { 1. } else { 0.55 })))
+            .child(div().flex_1().truncate().child(folder.name.clone()));
+        let target = (folder.path.clone(), folder.name.clone());
+        Self::slot(ix, selected, true, cx)
+            .aria_label(folder.name.clone())
+            .child(row)
+            .map(|d| self.drop_row(d, ix, Some(target)))
+    }
+
     fn volume_row(
         &self,
         vol: usize,
@@ -900,7 +950,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let volume = &self.sidebar.volumes[vol];
-        let ix = vol + 1 + self.sidebar.places.len();
+        let ix = vol + 1 + self.sidebar.places.len() + self.sidebar.cloud.len();
         let selected = here.showing_folder() && here.folder == volume.mount;
         let mount = volume.mount.clone();
         let glyph = if volume.network {
@@ -1169,7 +1219,8 @@ impl Browser {
         };
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
-        let last_row = self.sidebar.places.len() + self.sidebar.volumes.len();
+        let last_row =
+            self.sidebar.places.len() + self.sidebar.cloud.len() + self.sidebar.volumes.len();
         div()
             .relative()
             .w(px(width))
@@ -1316,6 +1367,11 @@ impl Browser {
                             .collect::<Vec<_>>(),
                     )
                     .child(section_label("Locations").flex_shrink_0())
+                    .children(
+                        (0..self.sidebar.cloud.len())
+                            .map(|ix| self.cloud_row(ix, &here, cursor, cx))
+                            .collect::<Vec<_>>(),
+                    )
                     .children(
                         (0..self.sidebar.volumes.len())
                             .map(|vol| self.volume_row(vol, &here, cursor, cx))

@@ -27,9 +27,11 @@ pub struct CloudFolder {
 }
 
 /// The cloud folders under `home`: iCloud Drive, then what's in
-/// `~/Library/CloudStorage` by name, as macOS names the folders there. It
-/// looks at those folders from outside and never goes in, since going in can
-/// ask for permission or wake the provider. One it can't see isn't listed.
+/// `~/Library/CloudStorage` by name. macOS names those `Provider-account`,
+/// so each goes by its provider, or by the whole name when two accounts share
+/// one. It looks at those folders from outside and never goes in, since going
+/// in can ask for permission or wake the provider. One it can't see isn't
+/// listed.
 pub fn folders(home: &Path) -> Vec<CloudFolder> {
     let library = home.join("Library");
     let icloud = library.join("Mobile Documents/com~apple~CloudDocs");
@@ -45,6 +47,24 @@ pub fn folders(home: &Path) -> Vec<CloudFolder> {
         })
         .collect();
     providers.sort_by_key(|folder| folder.name.to_lowercase());
+    fn provider(name: &str) -> &str {
+        name.split_once('-').map_or(name, |(provider, _)| provider)
+    }
+    let names: Vec<String> = providers
+        .iter()
+        .map(|folder| {
+            let short = provider(&folder.name);
+            let shared = providers
+                .iter()
+                .filter(|other| provider(&other.name) == short)
+                .count()
+                > 1;
+            if shared { &folder.name } else { short }.to_owned()
+        })
+        .collect();
+    for (folder, name) in providers.iter_mut().zip(names) {
+        folder.name = name;
+    }
     icloud
         .is_dir()
         .then(|| CloudFolder {
@@ -306,13 +326,32 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         assert_eq!(folders(home.path()), []);
         let storage = home.path().join("Library/CloudStorage");
-        for name in ["OneDrive-Personal", "Dropbox", ".hidden"] {
+        for name in [
+            "OneDrive-Personal",
+            "Dropbox",
+            ".hidden",
+            "GoogleDrive-me@example.com",
+            "GoogleDrive-work@example.com",
+        ] {
             std::fs::create_dir_all(storage.join(name)).unwrap();
         }
         std::fs::write(storage.join("a file"), "").unwrap();
         let names =
             |home: &Path| -> Vec<String> { folders(home).into_iter().map(|f| f.name).collect() };
-        assert_eq!(names(home.path()), ["Dropbox", "OneDrive-Personal"]);
+        // Two accounts of one provider keep their whole names apart.
+        assert_eq!(
+            names(home.path()),
+            [
+                "Dropbox",
+                "GoogleDrive-me@example.com",
+                "GoogleDrive-work@example.com",
+                "OneDrive"
+            ]
+        );
+        assert_eq!(
+            folders(home.path())[3].path,
+            storage.join("OneDrive-Personal")
+        );
         let icloud = home
             .path()
             .join("Library/Mobile Documents/com~apple~CloudDocs");

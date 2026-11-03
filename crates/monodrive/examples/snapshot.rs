@@ -1044,7 +1044,7 @@ impl Drives for MadeUp {
                 path: root.join("CloudStorage/Dropbox"),
             },
             CloudFolder {
-                name: "GoogleDrive-you@example.com".into(),
+                name: "GoogleDrive".into(),
                 path: root.join("CloudStorage/GoogleDrive-you@example.com"),
             },
         ]
