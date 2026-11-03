@@ -9,7 +9,8 @@ use super::sidebar::Places;
 use super::{ConnectToServer, EmptyTrash, Operations, lock, with_owner};
 use crate::jobs::JobLine;
 use crate::theme::{
-    self, ButtonLook, content, dither_bar, icon, row_icon_button, section_label, text_button,
+    self, ButtonLook, accent, content, dither_bar, icon, row_icon_button, section_label,
+    text_button,
 };
 use chrono::{DateTime, Local};
 use gpui::{
@@ -773,9 +774,9 @@ impl Pane {
         if let Some(age) = row.size.age(now) {
             said += &format!(". Scanned {age}.");
         }
-        // A drive that's gone can't be opened, so its rows rest fainter.
+        // A drive that's gone can't be opened, so its rows go faint.
         let ink = if location.mount.is_some() {
-            content(0.55)
+            accent()
         } else {
             content(0.3)
         };
@@ -900,7 +901,7 @@ impl Pane {
             LocationKind::Drive | LocationKind::Disconnected => "hard-drive",
         };
         let mark = icon(glyph, 16.).text_color(if location.connected {
-            content(0.55)
+            theme::success()
         } else {
             content(0.3)
         });
@@ -913,12 +914,15 @@ impl Pane {
     }
 }
 
-/// A group's glyph, in the one ink icons rest at. Color is kept for what can
-/// be done and what's moving: the buttons, the bar's dither and a job's ring.
+/// A group's glyph and its tint: the accent, or a kind of folder's own color,
+/// as Finder tells Pictures and Movies apart.
 fn look(group: &Group) -> (&'static str, Hsla) {
-    match group.kind {
-        GroupKind::Cloud => ("cloud", content(0.55)),
-        GroupKind::Folder | GroupKind::Project => ("folder-01", content(0.55)),
+    match (group.kind, group.name.as_str()) {
+        (GroupKind::Cloud, _) => ("cloud", accent()),
+        (GroupKind::Folder, "Pictures") => ("folder-01", theme::tint_orange()),
+        (GroupKind::Folder, "Movies") => ("folder-01", theme::tint_purple()),
+        (GroupKind::Folder, "Music") => ("folder-01", theme::tint_pink()),
+        _ => ("folder-01", accent()),
     }
 }
 
@@ -994,22 +998,20 @@ fn location_state(location: &Location, scanning: bool, now: u64) -> String {
 }
 
 /// A line of "Right now": a mark, what it is, and how it stands, over a
-/// hairline. Marks sit in one column so the text lines up.
+/// hairline. Marks center on both lines, as the folders' do.
 fn now_line(mark: impl IntoElement, title: String, detail: String) -> gpui::Div {
     div()
         .py_2()
         .border_t_1()
         .border_color(content(0.06))
         .flex()
-        .items_start()
+        .items_center()
         .gap_2()
         .child(
             div()
                 .w(px(16.))
-                .h(px(TITLE_LINE))
                 .flex_shrink_0()
                 .flex()
-                .items_center()
                 .justify_center()
                 .child(mark),
         )
@@ -1032,7 +1034,7 @@ fn change_line(change: &AgentChange, now: u64) -> impl IntoElement + use<> {
     };
     let when = overview::age(change.at, now).unwrap_or_else(|| "just now".to_string());
     now_line(
-        icon("bot", 16.).text_color(content(0.55)),
+        icon("bot", 16.).text_color(accent()),
         change
             .client
             .clone()
