@@ -48,7 +48,33 @@ pub struct PaneState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StopState {
     pub place: Favorite,
-    pub recents: bool,
+    #[serde(alias = "recents", deserialize_with = "shows_or_older")]
+    pub shows: Shows,
+}
+
+/// What a place in the history shows: its folder, or a page in front of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shows {
+    #[default]
+    Folder,
+    Recents,
+    Overview,
+}
+
+/// Sessions saved before Overview said `"recents": true`.
+fn shows_or_older<'de, D: serde::Deserializer<'de>>(from: D) -> Result<Shows, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Older(bool),
+        Now(Shows),
+    }
+    Ok(match Saved::deserialize(from)? {
+        Saved::Older(true) => Shows::Recents,
+        Saved::Older(false) => Shows::Folder,
+        Saved::Now(shows) => shows,
+    })
 }
 
 impl Session {
@@ -223,13 +249,30 @@ mod tests {
                         path: format!("/stop/{ix}").into(),
                         volume: None,
                     },
-                    recents: false,
+                    shows: Shows::Folder,
                 })
                 .collect(),
             at,
             view: View::List,
             sort: Sort::default(),
         }
+    }
+
+    #[test]
+    fn a_session_from_before_the_overview_still_opens_on_recents() {
+        let saved = br#"{"version":1,"windows":[{"tabs":[{"panes":[{"history":[
+            {"place":{"path":"/a"},"recents":true},
+            {"place":{"path":"/b"},"recents":false},
+            {"place":{"path":"/c"},"shows":"overview"}
+        ],"at":0,"view":"list","sort":{"by":"name","ascending":true}}],
+        "second_focused":false,"ratio":0.5}],"active":0,"frame":null}]}"#;
+        let session = decode(saved).unwrap();
+        let shows: Vec<Shows> = session.windows[0].tabs[0].panes[0]
+            .history
+            .iter()
+            .map(|stop| stop.shows)
+            .collect();
+        assert_eq!(shows, [Shows::Recents, Shows::Folder, Shows::Overview]);
     }
 
     #[test]

@@ -21,6 +21,7 @@ Someone moving through files fast, mostly from the keyboard, who chose this over
 | Cards, sheets, popovers, toasts, the content pane, Settings plates, code boxes | 14 pt | `RADIUS_CARD` |
 | Thumbnails and color swatches, which are pictures and not controls | 4 pt | `RADIUS_THUMB` |
 | The marquee, which matches Finder's | Square | none |
+| A dither bar, whose cells are the shape | Square | none |
 
 The header of a sheet with a query (palette, Go to Folder, Connect) is a bare field with no outline, as in Spotlight: there is no shape to round. Any field with a visible outline is a pill.
 
@@ -126,6 +127,8 @@ The system font. Menlo only for code, paths in code boxes, tool names and a file
 | 13 | `TEXT_BODY` | Rows, body copy, Settings labels |
 | 14 | `TEXT_TITLE` | Sidebar rows, a card's title, typed fields |
 
+The Overview's free space is `TEXT_DISPLAY`, 28 pt semibold, the one figure in the app that's larger than a title.
+
 Weights: regular by default, medium for section labels, sidebar rows, primary buttons and what's selected, semibold for the current folder and group titles. The Row size and Label size settings choose from 12, 13 and 14.
 
 ### Color
@@ -145,6 +148,7 @@ Ink is the theme's content color at a fixed alpha, through `content()`. Nothing 
 | 0.06 | Hairlines between regions and Settings rows |
 | 0.03 | List stripes and Settings plates |
 
+- `tint_orange()`, `tint_purple()` and `tint_pink()` tell kinds of folder apart on the Overview, as Finder's folders do, beside `accent()` for the rest. They're for that page's icons only.
 - `accent()` with `on_accent()` is for the selection, the row under the keys, primary buttons, switches and focus. Text on the accent stays opaque, secondary text included: at 0.8 it falls to 3.7:1 on some presets.
 - `danger()` is for what failed or can't be undone, and only that. `success()` is for what's done.
 - A command that trashes or erases files is marked `destructive` in `commands.rs`: today Move to Trash and Empty Trash, and not Remove from Sidebar, which only forgets a bookmark. In the context menu and the palette its title and shortcut are `danger()`. Under the keys, its row fills with `danger_fill()` and all its text is `on_danger()`, at 4.5:1 or better in both themes. The native menu bar stays native.
@@ -207,7 +211,7 @@ Nothing moves continuously: it pegs the GPU on high-refresh displays. Everything
 
 ### Icons
 
-The SVGs in `crates/monodrive/assets/icons`, one stroke weight, tinted with `.text_color`. Sizes are 12 pt inside small controls, 14 pt in chrome and fields, and 16 pt in rows.
+The SVGs in `crates/monodrive/assets/icons`, one stroke weight, tinted with `.text_color`. The one filled icon is `folder-fill`, for the Overview's tinted rows. Sizes are 12 pt inside small controls, 14 pt in chrome and fields, and 16 pt in rows.
 
 A button that shows only an icon names itself while the pointer rests on it, as the Trash and Settings buttons do. Wrap every `icon_button`, `row_icon_button`, `circle_button` and hand-built icon control in `tip`, which puts the name above, or `tip_below` in the top bar, where there's no room above, and under anything the name mustn't cover, such as a video. The name is the button's label in title case, and may add its key: `Close (Esc)`. Only a button whose hover already opens a card that names it, such as an available update, goes without. `scripts/check-design` flags an icon button with no tip.
 
@@ -231,6 +235,7 @@ All in `theme.rs`, except motion, which `motion.rs` holds and Motion describes. 
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
 - `tip(button, label)`, `tip_below(button, label)`: a button's name in a small card, above or below it while the pointer rests on it. Every icon button takes one.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.
+- `dither_bar(certain, conditional)`: a 9 pt meter of 3 pt cells over a 0.14 track, from Monocode's charts. Solid ink at 0.55 is space that's taken for certain; the accent, dithered, is space that depends on a choice, such as what Empty Trash would free. Dither means only that. It paints when the view does and never animates.
 - `key_cap(key)`: a shortcut in a 16 pt cap, in a sheet's footer or a row.
 - `icon(path, side)`, `section_label(label)`.
 

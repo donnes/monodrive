@@ -4,6 +4,7 @@
 
 use super::pane::Pane;
 use super::{CancelRename, CommitRename, with_owner};
+use crate::session::Shows;
 use crate::theme::{self, ButtonLook, content, danger, text_button};
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, MouseButton, Task, Window, div, prelude::*, px,
@@ -18,7 +19,7 @@ const SHOWN: usize = 6;
 
 pub(super) struct Review {
     /// Where it was opened. Going anywhere else leaves it.
-    place: (PathBuf, bool, String),
+    place: (PathBuf, Shows, String),
     keys: FocusHandle,
     pub(super) proposal: Option<Proposal>,
     /// The destinations switched off.
@@ -42,7 +43,7 @@ impl Review {
 impl Pane {
     /// Organize: the review, with nothing changed.
     pub(super) fn start_organize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.changing_names() {
+        if self.changing_names() || self.showing_overview() {
             return;
         }
         let keys = cx.focus_handle();

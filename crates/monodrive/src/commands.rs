@@ -13,13 +13,14 @@ use crate::browser::{
     Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications, GoComputer,
     GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
     GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome,
-    GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile,
-    NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook,
-    OpenInTerminal, OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack,
-    QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch,
-    SearchContents, SearchThisFolder, ShowCopiesAndMoves, ShowPackageContents, ShowSearches,
-    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles,
-    TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    GoOverview, GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane,
+    MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab,
+    OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith, OrganizeFolder,
+    PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder,
+    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
+    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
+    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid,
+    ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -451,9 +452,12 @@ pub fn all() -> Vec<Command> {
         command("Enclosing Folder", Go, &["cmd-up"], BROWSER, || {
             Box::new(EnclosingFolder)
         }),
-        separated(command("Recents", Go, &["cmd-shift-f"], BROWSER, || {
-            Box::new(GoRecents)
+        separated(command("Overview", Go, &["cmd-alt-o"], BROWSER, || {
+            Box::new(GoOverview)
         })),
+        command("Recents", Go, &["cmd-shift-f"], BROWSER, || {
+            Box::new(GoRecents)
+        }),
         command("Home", Go, &["cmd-shift-h"], BROWSER, || Box::new(GoHome)),
         command("Desktop", Go, &["cmd-shift-d"], BROWSER, || {
             Box::new(GoDesktop)

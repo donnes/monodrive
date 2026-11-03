@@ -5,6 +5,7 @@
 use super::pane::Pane;
 use super::{CancelRename, CommitRename, short_reason, with_owner};
 use crate::preferences::{Preferences, View};
+use crate::session::Shows;
 use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, accent, content, danger, text_button};
 use gpui::{
@@ -25,7 +26,7 @@ pub(super) struct BatchRename {
     /// The selected paths, in the order shown: numbers count in this order.
     pub(super) paths: Vec<PathBuf>,
     /// Where it was opened. Going anywhere else leaves it.
-    place: (PathBuf, bool, String),
+    place: (PathBuf, Shows, String),
     pub(super) numbering: bool,
     /// Names read from each file, with what's been read so far.
     pub(super) suggesting: bool,
@@ -269,9 +270,9 @@ impl Pane {
             || self.preview_typing
     }
 
-    pub(super) fn place_now(&self) -> (PathBuf, bool, String) {
+    pub(super) fn place_now(&self) -> (PathBuf, Shows, String) {
         let stop = self.stop();
-        (stop.folder.clone(), stop.recents, self.query.clone())
+        (stop.folder.clone(), stop.shows, self.query.clone())
     }
 
     /// An Apply is waiting on the owner: nothing here may change under it.

@@ -6,6 +6,7 @@ mod drag;
 mod inspector;
 mod open_with;
 mod organize;
+mod overview;
 mod pane;
 mod searches;
 mod sidebar;
@@ -150,6 +151,7 @@ actions!(
         Eject,
         ClearRecents,
         PutBack,
+        GoOverview,
         GoRecents,
         GoTrash,
         GoFavorite1,
@@ -652,6 +654,11 @@ impl Browser {
             .then(|| monodrive_core::volumes::holding(&self.sidebar.volumes, pane.folder()))
             .flatten();
         Chrome {
+            jobs: if pane.showing_overview() {
+                self.jobs.read(cx).lines()
+            } else {
+                Vec::new()
+            },
             width,
             focused,
             covered: self.sheet_open() || self.menu.is_some(),

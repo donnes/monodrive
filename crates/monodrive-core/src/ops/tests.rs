@@ -1195,6 +1195,7 @@ fn trimming_keeps_an_old_job_that_was_continued_lately() {
             steps: Vec::new(),
             creates: Vec::new(),
             temps: Vec::new(),
+            at: 0,
         };
         let outcome = Outcome {
             op,
@@ -2526,4 +2527,75 @@ fn entries_that_are_one_path_once_extracted_refuse_the_item_before_anything_is_w
         assert!(!why.contains("Trash"), "nothing was written: {why}");
         assert_eq!(names(&dest), Vec::<String>::new());
     }
+}
+
+#[test]
+fn agent_changes_say_who_changed_what_lately_and_need_no_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths(dir.path());
+    std::fs::create_dir_all(&paths.state).unwrap();
+    let agent = Origin::Agent {
+        client: Some("claude-code".into()),
+    };
+    let begin = |op, origin, at| Record::Begin {
+        op,
+        submission: submission(origin, Request::Undo),
+        target: None,
+        steps: Vec::new(),
+        creates: Vec::new(),
+        temps: Vec::new(),
+        at,
+    };
+    let end = |op, title: &str| Record::End {
+        op,
+        outcome: Outcome {
+            op,
+            title: title.into(),
+            items: vec![
+                Item {
+                    path: "/a".into(),
+                    result: Ok("/b".into()),
+                },
+                Item {
+                    path: "/c".into(),
+                    result: Err("no".into()),
+                },
+            ],
+            interrupted: false,
+        },
+        steps: Vec::new(),
+    };
+    let records = [
+        begin(1, agent.clone(), 50),
+        end(1, "Too old"),
+        begin(2, Origin::Window, 200),
+        end(2, "The window's"),
+        begin(3, agent.clone(), 300),
+        end(3, "Rename"),
+        begin(4, agent, 400),
+    ];
+    let mut journal = String::new();
+    for record in &records {
+        journal += &serde_json::to_string(record).unwrap();
+        journal.push('\n');
+    }
+    journal += "{\"torn";
+    std::fs::write(paths.state.join(JOURNAL), &journal).unwrap();
+
+    let changes = agent_changes(&paths, 100, 10);
+    assert_eq!(
+        changes,
+        [AgentChange {
+            client: Some("claude-code".into()),
+            title: "Rename".into(),
+            items: 1,
+            at: 300,
+        }],
+        "only what an agent finished since then, counting what changed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(paths.state.join(JOURNAL)).unwrap(),
+        journal,
+        "looking leaves the journal alone, torn line included"
+    );
 }
