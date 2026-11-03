@@ -4,7 +4,7 @@ Status: steps 1 to 4 done. Step 5 waits for plan 22's delete review.
 
 Decisions made while building it:
 
-- The page follows the picked Desk mockup, whose image the maintainer holds, with one change the maintainer picked on 2026-11-03: every icon rests in one ink, and color marks only what can be done or is moving, so folders aren't tinted and Right now has icons in place of colored dots. It adds one thing the mockup lacks: the disk bar under the headline, from Monocode's charts through `theme::dither_bar`. Solid is what's taken, and the accent, dithered, is what the suggestions and the Trash could give back. It has no motion, glow or hover repaint.
+- The page follows the picked Desk mockup, whose image the maintainer holds, with one change the maintainer picked on 2026-11-03: Right now has outlined icons in place of colored dots, tinted like the folders, so both columns are one kind of mark. It adds one thing the mockup lacks: the disk bar under the headline, from Monocode's charts through `theme::dither_bar`. Solid is what's taken, and the accent, dithered, is what the suggestions and the Trash could give back. It has no motion, glow or hover repaint.
 - "Your stuff" says Largest first, not the mockup's Recently active first, because nothing records activity.
 - A project on several locations lists each copy under its row on a press, in place of a page of its own.
 - Suggestions only move to the Trash. No tool's own cleanup command runs, so tools that own their cleanup, npm among them, aren't suggested.

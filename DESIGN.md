@@ -148,6 +148,7 @@ Ink is the theme's content color at a fixed alpha, through `content()`. Nothing 
 | 0.06 | Hairlines between regions and Settings rows |
 | 0.03 | List stripes and Settings plates |
 
+- On the Overview, icons are tinted: `accent()` for folders and agents, `tint_orange()`, `tint_purple()` and `tint_pink()` for Pictures, Movies and Music as Finder tells them apart, `success()` for a connected location, and 0.3 for what's away. That page alone.
 - `accent()` with `on_accent()` is for the selection, the row under the keys, primary buttons, switches and focus. Text on the accent stays opaque, secondary text included: at 0.8 it falls to 3.7:1 on some presets.
 - `danger()` is for what failed or can't be undone, and only that. `success()` is for what's done.
 - A command that trashes or erases files is marked `destructive` in `commands.rs`: today Move to Trash and Empty Trash, and not Remove from Sidebar, which only forgets a bookmark. In the context menu and the palette its title and shortcut are `danger()`. Under the keys, its row fills with `danger_fill()` and all its text is `on_danger()`, at 4.5:1 or better in both themes. The native menu bar stays native.
