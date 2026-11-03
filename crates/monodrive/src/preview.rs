@@ -65,8 +65,7 @@ impl Asset for Sharp {
             let bitmap = thumbnails::picture(&sharp.path, sharp.side)
                 .or_else(|_| thumbnails::generate(&sharp.path, sharp.side, &|| false))
                 .ok()?;
-            let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)?;
-            Some(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
+            crate::thumbnails::render_image(bitmap).map(Arc::new)
         }
     }
 }
