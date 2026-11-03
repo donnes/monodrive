@@ -1833,50 +1833,72 @@ impl Pane {
         cx.stop_propagation();
     }
 
-    /// Shows `folder` with `select` selected, the way Go to Folder and a
-    /// pasted path land.
+    /// Shows `folder` with `select` selected, the way Go to Folder, a pasted
+    /// path and another app's Show in Finder land.
     pub(super) fn go_to(
         &mut self,
         folder: PathBuf,
-        select: Option<PathBuf>,
+        select: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A hidden file asked for by name shows, though hidden files are off.
         let hidden = select
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .is_some_and(|name| name.to_string_lossy().starts_with('.'));
+            .iter()
+            .filter_map(|path| path.file_name())
+            .any(|name| name.to_string_lossy().starts_with('.'));
         // Asked after any navigation, which clears the last folder's peek.
         let needs_peek = |this: &Self| hidden && !this.show_hidden && !this.peek_hidden;
         if folder == self.folder() && self.showing_folder() {
-            let found = select
-                .as_ref()
-                .filter(|_| !self.listing)
-                .and_then(|path| self.entries.iter().position(|e| &e.path == path));
-            match found {
-                Some(ix) => self.select_row(ix, cx),
-                None if select.is_some() => {
-                    // Selected once the listing that has it lands.
-                    self.reselect = select;
+            let found: Vec<usize> = if self.listing {
+                Vec::new()
+            } else {
+                select
+                    .iter()
+                    .filter_map(|path| self.entries.iter().position(|e| &e.path == path))
+                    .collect()
+            };
+            match found.as_slice() {
+                [] if !select.is_empty() => {
+                    self.select_when_listed(select);
                     if needs_peek(self) {
                         self.peek_hidden = true;
                         self.reload(cx);
                     }
                 }
-                None => {}
+                [] => {}
+                [ix] => self.select_row(*ix, cx),
+                [first, ..] => {
+                    self.selection.clear();
+                    for &ix in &found {
+                        self.selection.toggle(&self.entries[ix]);
+                    }
+                    self.reveal(*first, ScrollStrategy::Nearest);
+                    cx.notify();
+                }
             }
         } else {
             self.navigate(folder, cx);
-            if select.is_some() {
-                self.reselect = select;
-            }
+            self.select_when_listed(select);
             if needs_peek(self) {
                 self.peek_hidden = true;
                 self.reload(cx);
             }
         }
         self.focus_list(window, cx);
+    }
+
+    /// Selects `paths` once the listing that has them lands, the first with
+    /// the cursor on it. Nothing asked keeps the selection the listing picks.
+    fn select_when_listed(&mut self, mut paths: Vec<PathBuf>) {
+        match paths.len() {
+            0 => {}
+            1 => self.reselect = paths.pop(),
+            _ => {
+                self.reselect = paths.first().cloned();
+                self.select_after = paths;
+            }
+        }
     }
 
     /// Asks the owner for a change, shared with agents' history.
@@ -2472,7 +2494,7 @@ impl Pane {
                                                     move |this, _, window, cx| {
                                                         this.go_to(
                                                             path.clone(),
-                                                            child.clone(),
+                                                            child.iter().cloned().collect(),
                                                             window,
                                                             cx,
                                                         )

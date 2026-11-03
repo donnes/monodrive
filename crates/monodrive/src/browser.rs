@@ -1426,9 +1426,10 @@ impl Browser {
         let view = cx.new(|cx| GotoView::new(folder, cx));
         cx.subscribe_in(&view, window, |this, _, event: &GotoEvent, window, cx| {
             let destination = match event {
-                GotoEvent::Go(destination) => {
-                    Some((destination.folder.clone(), destination.select.clone()))
-                }
+                GotoEvent::Go(destination) => Some((
+                    destination.folder.clone(),
+                    destination.select.iter().cloned().collect(),
+                )),
                 GotoEvent::Dismissed => None,
             };
             this.close_sheet(window, cx);
@@ -1440,6 +1441,21 @@ impl Browser {
         .detach();
         window.focus(&view.focus_handle(cx), cx);
         self.set_sheet(Some(Sheet::Goto(view)), cx);
+    }
+
+    /// Shows what another app asked for, through Show in Finder or Open in
+    /// Monodrive.
+    pub(crate) fn land(
+        &mut self,
+        to: crate::finder::Move,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if to.new_tab {
+            self.new_tab(Stop::folder(to.folder.clone()), window, cx);
+        }
+        self.pane()
+            .update(cx, |pane, cx| pane.go_to(to.folder, to.select, window, cx));
     }
 
     /// Opens the palette on what would run now, which is read off the frame
@@ -1535,9 +1551,9 @@ impl Browser {
             PaletteEvent::Run(action) => {
                 self.after_sheet = Some(AfterSheet::Run(action.boxed_clone()));
             }
-            PaletteEvent::Go(folder) => self
-                .pane()
-                .update(cx, |pane, cx| pane.go_to(folder.clone(), None, window, cx)),
+            PaletteEvent::Go(folder) => self.pane().update(cx, |pane, cx| {
+                pane.go_to(folder.clone(), Vec::new(), window, cx)
+            }),
             PaletteEvent::Open(file) => self.pane().update(cx, |pane, cx| pane.open_file(file, cx)),
             PaletteEvent::Eject(mount) => self.eject(mount.clone(), cx),
             PaletteEvent::Connect(address) => self.connect_to(address, window, cx),

@@ -1955,6 +1955,37 @@ fn location(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> PathBuf {
 }
 
 #[gpui::test]
+fn show_in_finder_selects_what_it_names_and_opens_folders_in_new_tabs(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let docs = project.join("docs");
+    let (browser, cx) = browse(&docs, cx);
+    let land = |folder: &Path, select: &[&str], new_tab: bool, cx: &mut VisualTestContext| {
+        let to = crate::finder::Move {
+            folder: folder.to_path_buf(),
+            select: select.iter().map(|name| project.join(name)).collect(),
+            new_tab,
+        };
+        browser.update_in(cx, |browser, window, cx| browser.land(to, window, cx));
+        cx.run_until_parked();
+    };
+    // Files elsewhere: their folder, in this tab, all of them selected.
+    land(&project, &["a.txt", "zeta"], false, cx);
+    assert_eq!(
+        (location(&browser, cx), tabs(&browser, cx)),
+        (project.clone(), (1, 0))
+    );
+    assert_eq!(shown(&browser, cx).1, ["zeta", "a.txt"]);
+    // Asked again where it already is, the selection changes in place.
+    land(&project, &["docs", "a.txt"], false, cx);
+    assert_eq!(shown(&browser, cx).1, ["docs", "a.txt"]);
+    // A folder opens in a new tab, and the one left keeps its place.
+    land(&docs, &[], true, cx);
+    assert_eq!((location(&browser, cx), tabs(&browser, cx)), (docs, (2, 1)));
+    press(cx, "ctrl-shift-tab");
+    assert_eq!(location(&browser, cx), project);
+}
+
+#[gpui::test]
 fn each_tab_has_its_own_folder_history_selection_view_and_sort(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let (browser, cx) = browse(&project, cx);
