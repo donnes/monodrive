@@ -285,7 +285,7 @@ fn in_the_grid_a_cells_icon_drags_and_a_folder_cell_takes_it(cx: &mut TestAppCon
     let (_dir, project) = folder();
     let mut owned = own(cx);
     let (browser, cx) = browse(&project, cx);
-    press(cx, "cmd-2");
+    press(cx, "cmd-alt-2");
     draw(cx);
     let cell = |ix: usize, cx: &mut VisualTestContext| {
         in_pane(&browser, cx, |pane, _| {
@@ -441,7 +441,7 @@ fn releasing_a_resting_drag_drops_on_what_the_pill_shows(cx: &mut TestAppContext
     let (_dir, project) = folder();
     let mut owned = own(cx);
     let (browser, cx) = browse(&project, cx);
-    press(cx, "cmd-2");
+    press(cx, "cmd-alt-2");
     draw(cx);
     let cell = |ix: usize, cx: &mut VisualTestContext| {
         in_pane(&browser, cx, |pane, _| {

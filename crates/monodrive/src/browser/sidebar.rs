@@ -7,9 +7,10 @@ use super::drag::{Spot, Target, offers};
 use super::pane::Stop;
 use super::searches;
 use super::{
-    Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, OpenInNewTab, OpenPlace,
-    OpenSelected, Operations, PlaceNext, PlacePrevious, Sheet, drag_area, home, lock,
-    sidebar_width,
+    Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, GoFavorite1, GoFavorite2,
+    GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9,
+    GoFavorite10, OpenInNewTab, OpenPlace, OpenSelected, Operations, PlaceNext, PlacePrevious,
+    Sheet, drag_area, home, lock, sidebar_width,
 };
 use crate::assets::NIGHT_SKY;
 use crate::commands::{self, Scope};
@@ -20,8 +21,8 @@ use crate::theme::{
 };
 use gpui::{
     Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, ImageSource,
-    KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point, Render, Resource, Role,
-    Stateful, Task, Window, div, img, prelude::*, px,
+    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point, Render,
+    Resource, Role, Stateful, Task, Window, div, img, prelude::*, px,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::Entry;
@@ -172,6 +173,8 @@ pub(super) struct Sidebar {
     error: Option<String>,
     /// Edit mode: each favorite shows a handle and a ✕.
     pub(super) editing: bool,
+    /// ⌘ alone was held at the last draw, so the favorites show their keys.
+    pub(super) command_held: bool,
     load_volumes: Option<Task<()>>,
     load_lists: Option<Task<()>>,
     _heard: Vec<Task<()>>,
@@ -258,6 +261,31 @@ pub(crate) fn glyph_of(path: &Path) -> &'static str {
 fn fullness(volume: &Volume) -> Option<f32> {
     (volume.total > 0)
         .then(|| (volume.total.saturating_sub(volume.free) as f64 / volume.total as f64) as f32)
+}
+
+/// Whether ⌘ alone is held here. GPUI rereads the keys and redraws when the
+/// window activates, so a ⌘ let go in another app leaves nothing behind.
+pub(super) fn command_held(window: &Window) -> bool {
+    window.is_window_active() && window.modifiers() == Modifiers::command()
+}
+
+/// ⌘1 to ⌘0: open the favorite at that position.
+pub(super) fn favorite_commands(root: gpui::Div, cx: &mut Context<Browser>) -> gpui::Div {
+    fn opens<A: Action>(root: gpui::Div, fav: usize, cx: &mut Context<Browser>) -> gpui::Div {
+        root.on_action(cx.listener(move |this, _: &A, window, cx| {
+            this.open_favorite(fav, window, cx);
+        }))
+    }
+    let root = opens::<GoFavorite1>(root, 0, cx);
+    let root = opens::<GoFavorite2>(root, 1, cx);
+    let root = opens::<GoFavorite3>(root, 2, cx);
+    let root = opens::<GoFavorite4>(root, 3, cx);
+    let root = opens::<GoFavorite5>(root, 4, cx);
+    let root = opens::<GoFavorite6>(root, 5, cx);
+    let root = opens::<GoFavorite7>(root, 6, cx);
+    let root = opens::<GoFavorite8>(root, 7, cx);
+    let root = opens::<GoFavorite9>(root, 8, cx);
+    opens::<GoFavorite10>(root, 9, cx)
 }
 
 /// A small button in a sidebar row. It takes the press from the row under it.
@@ -727,18 +755,17 @@ impl Browser {
     }
 
     /// `slot`, the row at position `at` in Favorites, with its edges while
-    /// folders are dragged. `first` has none above it to pin before.
-    fn pin_edges(&self, slot: Stateful<gpui::Div>, at: usize, first: bool) -> Stateful<gpui::Div> {
+    /// folders are dragged.
+    fn pin_edges(&self, slot: Stateful<gpui::Div>, at: usize) -> Stateful<gpui::Div> {
         let pins = self.drag.folders();
         slot.when(pins, |d| {
             d.relative()
-                .when(!first, |d| d.child(self.pin_edge(at, true)))
-                .child(self.pin_edge(if first { at } else { at + 1 }, false))
+                .child(self.pin_edge(at, true))
+                .child(self.pin_edge(at + 1, false))
         })
-        .when(
-            self.drag.pins_at() == Some(if first { at } else { at + 1 }),
-            |d| d.relative().child(theme::insertion_line()),
-        )
+        .when(self.drag.pins_at() == Some(at + 1), |d| {
+            d.relative().child(theme::insertion_line())
+        })
     }
 
     fn recents_row(
@@ -750,7 +777,6 @@ impl Browser {
         let selected = !here.searching && here.recents;
         Self::slot(0, selected, true, cx)
             .aria_label("Recents")
-            .map(|d| self.pin_edges(d, 0, true))
             .child(
                 Self::row(0, selected, true, cursor)
                     .h(px(ROW_HEIGHT))
@@ -780,6 +806,10 @@ impl Browser {
         };
         let unavailable = reason.is_some();
         let editing = self.sidebar.editing;
+        let key =
+            (self.sidebar.command_held && !editing && !self.sheet_open() && self.menu.is_none())
+                .then(|| commands::favorite_shortcut(fav, cx))
+                .flatten();
         let row = Self::row(ix, selected, !editing, cursor)
             .h(px(ROW_HEIGHT))
             .flex()
@@ -832,6 +862,9 @@ impl Browser {
                             .child(why)
                     })),
             )
+            .children(key.map(|key| {
+                theme::key_cap(key).debug_selector(move || format!("favorite-key-{fav}"))
+            }))
             .when(editing, |d| {
                 d.child(
                     row_button(
@@ -853,7 +886,7 @@ impl Browser {
             })
             .child(row)
             .map(|d| self.drop_row(d, ix, folder))
-            .map(|d| self.pin_edges(d, fav, false))
+            .map(|d| self.pin_edges(d, fav))
     }
 
     fn volume_row(
@@ -941,9 +974,19 @@ impl Browser {
     fn favorites_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let editing = self.sidebar.editing;
         let label = if editing { "Done" } else { "Edit" };
+        let drag = self.drag.clone();
+        // Pins first, so folders can land even with no favorite to drop beside.
         section_label("Favorites")
+            .debug_selector(|| "favorites-header".into())
+            .relative()
             .flex_shrink_0()
             .justify_between()
+            .when(self.drag.folders(), |d| {
+                offers(d, move |_| drag.offer(Target::Pin(0)))
+            })
+            .when(self.drag.pins_at() == Some(0), |d| {
+                d.child(theme::insertion_line())
+            })
             .child(
                 theme::text_button("favorites-edit", label, ButtonLook::Ghost)
                     .debug_selector(|| "favorites-edit".into())
@@ -1213,8 +1256,8 @@ impl Browser {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .child(self.favorites_header(cx))
                     .child(self.recents_row(&here, cursor, cx))
+                    .child(self.favorites_header(cx))
                     .children(self.sidebar.error.clone().map(|why| {
                         div()
                             .px_2()

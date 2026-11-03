@@ -961,7 +961,7 @@ impl SettingsView {
                 vec![
                     row(
                         "View as",
-                        Some("⌘1 and ⌘2 switch it too."),
+                        Some("⌥⌘1 and ⌥⌘2 switch it too."),
                         self.focusable(
                             "view",
                             true,

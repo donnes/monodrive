@@ -59,6 +59,10 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 ⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits at the sidebar's top right, so it stays just before Back and Forward: closing the sidebar only takes away what's between them. The traffic lights stay, with the button right after them. The sidebar opens and closes at once, with no animation: a width that moves lays out the whole window each frame. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
 
+### Favorites' keys
+
+⌘1 to ⌘9 and ⌘0 open the first ten favorites, in the order the sidebar lists them. Recents sits above the Favorites section and isn't one. While ⌘ alone is held, each of those rows shows its shortcut at the end in a `key_cap`, at once and with no fade, and no row moves. An Edit session, a sheet or a menu hides them. A favorite that's unavailable says why in a toast, as a click does.
+
 ### Nightly builds
 
 A nightly has a night sky behind the top of its sidebar in a dark theme, `assets/nightly/sidebar-sky.svg`, one still picture whose right and bottom edges fade through a soft rounded corner, pinned to the sidebar's right edge. Its name and icon change in the Dock. Stable and debug builds have none of this.
@@ -202,6 +206,7 @@ All in `theme.rs`. Each returns an element the caller extends.
 - `drop_outline()`: what a drop would land on, over it; the caller gives it the shape's radius. `insertion_line()`: where a drop would land between stacked rows, in the gap under the row above.
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.
+- `key_cap(key)`: a shortcut in a 16 pt cap, in a sheet's footer or a row.
 - `icon(path, side)`, `section_label(label)`.
 
 Add a primitive once two views need it. Until then, build from the scales.

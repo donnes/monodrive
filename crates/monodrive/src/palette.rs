@@ -237,7 +237,6 @@ const WIDTH: f32 = 576.;
 const TALL_ROW: f32 = 40.;
 const LIST_HEIGHT: f32 = 360.;
 const FOOTER_HEIGHT: f32 = 32.;
-const KEY_CAP_HEIGHT: f32 = 16.;
 
 pub struct PaletteView {
     query: Entity<TextField>,
@@ -494,7 +493,7 @@ impl PaletteView {
         let palette = commands::OpenPalette.name();
         let mut pool: Vec<Row> = all
             .iter()
-            .filter(|command| command.id() != palette)
+            .filter(|command| command.id() != palette && !command.keys_only)
             .map(|command| self.command_row(RESULTS, command, prefs, &ticked))
             .collect();
         for page in [Page::Remote, Page::Cloud, Page::Drives, Page::Favorites] {
@@ -1092,18 +1091,7 @@ pub(crate) fn key_hint(keys: &[&str], what: &'static str) -> impl IntoElement + 
         .gap_1()
         .text_size(px(theme::TEXT_CAPTION))
         .text_color(content(0.65))
-        .children(keys.iter().map(|key| {
-            div()
-                .h(px(KEY_CAP_HEIGHT))
-                .min_w(px(KEY_CAP_HEIGHT))
-                .px_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(content(0.08))
-                .child(key.to_string())
-        }))
+        .children(keys.iter().map(|key| theme::key_cap(key.to_string())))
         .child(what)
 }
 
