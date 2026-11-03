@@ -66,6 +66,7 @@ icons!(
     "tool-pen",
     "tool-redact",
     "tool-rotate",
+    "tool-select",
     "tool-start",
     "tool-text",
     "tool-undo",

@@ -3,8 +3,10 @@
 //! `ops` then checks the original didn't change, and moves the file into place
 //! as one operation that Undo reverses, so a long export never holds the owner.
 
+mod marks;
 mod video;
 
+pub use marks::{Frame, Handle, render_mark};
 pub use video::{
     Clip, VideoRecipe, export, frame, frame_bitmap, size as video_size, video_extension,
 };
@@ -12,14 +14,18 @@ pub use video::{
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSAttributedStringNSStringDrawing as _, NSColor, NSFont, NSGraphicsContext};
+use objc2_app_kit::{
+    NSAttributedStringNSExtendedStringDrawing as _, NSAttributedStringNSStringDrawing as _,
+    NSColor, NSFont, NSGraphicsContext, NSStringDrawingOptions,
+};
 use objc2_core_foundation::{CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage,
     CGImageAlphaInfo, CGImageByteOrderInfo, CGLineCap, CGLineJoin,
 };
 use objc2_foundation::{
-    NSAttributedString, NSDictionary, NSMutableDictionary, NSNumber, NSPoint, NSString, NSURL,
+    NSAttributedString, NSDictionary, NSMutableDictionary, NSNumber, NSPoint, NSRect, NSSize,
+    NSString, NSURL,
 };
 use objc2_image_io::{
     CGImageDestination, CGImageSource, kCGImagePropertyOrientation,
@@ -72,6 +78,9 @@ pub enum Step {
         color: [f64; 4],
         #[serde(default = "line")]
         width: f64,
+        /// Degrees clockwise about its center.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rotation: f64,
     },
     Highlighter {
         points: Vec<[f64; 2]>,
@@ -79,6 +88,9 @@ pub enum Step {
         color: [f64; 4],
         #[serde(default = "highlight_width")]
         width: f64,
+        /// Degrees clockwise about its center.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rotation: f64,
     },
     Arrow {
         from: [f64; 2],
@@ -94,6 +106,9 @@ pub enum Step {
         color: [f64; 4],
         #[serde(default = "line")]
         width: f64,
+        /// Degrees clockwise about its center.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rotation: f64,
     },
     Ellipse {
         rect: Rect,
@@ -101,6 +116,9 @@ pub enum Step {
         color: [f64; 4],
         #[serde(default = "line")]
         width: f64,
+        /// Degrees clockwise about its center.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rotation: f64,
     },
     Text {
         at: [f64; 2],
@@ -109,12 +127,26 @@ pub enum Step {
         size: f64,
         #[serde(default = "red")]
         color: [f64; 4],
+        /// Where lines wrap, in pixels. Without it they wrap at the picture's
+        /// right edge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wrap: Option<f64>,
+        /// Degrees clockwise about its center.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rotation: f64,
     },
     /// Solid black, since a blur can be reversed. Saving then strips the
     /// metadata, as an embedded thumbnail can show what's hidden.
     Redact {
         rect: Rect,
+        /// Degrees clockwise about its center.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rotation: f64,
     },
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.
 }
 
 fn highlight_width() -> f64 {
@@ -403,25 +435,48 @@ fn apply(image: &CGImage, step: &Step) -> Result<CFRetained<CGImage>, String> {
             CGContext::draw_image(c, whole(width, height), Some(image));
             finished(&context)
         }
+        mark => drawn_on(image, |c, _| draw_mark(c, mark, (width, height))),
+    }
+}
+
+/// Draws a mark on a context in the picture's top-left coordinates.
+fn draw_mark(c: &CGContext, step: &Step, picture: (f64, f64)) {
+    let Some(frame) = step.frame(picture) else {
+        return;
+    };
+    let turned = frame.rotation != 0.;
+    if turned {
+        // With y running down, a positive angle turns clockwise.
+        let center = frame.center();
+        CGContext::save_g_state(Some(c));
+        CGContext::translate_ctm(Some(c), center[0], center[1]);
+        CGContext::rotate_ctm(Some(c), frame.rotation.to_radians());
+        CGContext::translate_ctm(Some(c), -center[0], -center[1]);
+    }
+    match step {
+        Step::Crop { .. } | Step::Rotate { .. } | Step::Flip { .. } => {}
         Step::Pen {
             points,
             color,
             width,
+            ..
         }
         | Step::Highlighter {
             points,
             color,
             width,
-        } => drawn_on(image, |c, _| {
+            ..
+        } => {
             ink(c, *color, *width);
             stroke(c, points);
-        }),
+        }
         Step::Arrow {
             from,
             to,
             color,
             width,
-        } => drawn_on(image, |c, _| {
+            ..
+        } => {
             ink(c, *color, *width);
             stroke(c, &[*from, *to]);
             let angle = (to[1] - from[1]).atan2(to[0] - from[0]);
@@ -433,36 +488,42 @@ fn apply(image: &CGImage, step: &Step) -> Result<CFRetained<CGImage>, String> {
                 ];
                 stroke(c, &[wing, *to]);
             }
-        }),
-        Step::Rectangle { rect, color, width } => drawn_on(image, |c, _| {
+        }
+        Step::Rectangle {
+            rect, color, width, ..
+        } => {
             ink(c, *color, *width);
             CGContext::stroke_rect(Some(c), cg_rect(*rect));
-        }),
-        Step::Ellipse { rect, color, width } => drawn_on(image, |c, _| {
+        }
+        Step::Ellipse {
+            rect, color, width, ..
+        } => {
             ink(c, *color, *width);
             CGContext::stroke_ellipse_in_rect(Some(c), cg_rect(*rect));
-        }),
-        Step::Redact { rect } => drawn_on(image, |c, _| {
+        }
+        Step::Redact { rect, .. } => {
             CGContext::set_rgb_fill_color(Some(c), 0., 0., 0., 1.);
             CGContext::fill_rect(Some(c), cg_rect(*rect));
-        }),
+        }
         Step::Text {
-            at,
-            text,
-            size,
-            color,
-        } => drawn_on(image, |c, _| draw_text(c, *at, text, *size, *color)),
+            text, size, color, ..
+        } => {
+            let rect = NSRect::new(
+                NSPoint::new(frame.rect.x, frame.rect.y),
+                NSSize::new(frame.rect.width + 1., frame.rect.height + 1.),
+            );
+            draw_text(c, rect, text, *size, *color);
+        }
+    }
+    if turned {
+        CGContext::restore_g_state(Some(c));
     }
 }
 
-fn draw_text(context: &CGContext, at: [f64; 2], text: &str, size: f64, color: [f64; 4]) {
+fn styled(text: &str, size: f64, color: [f64; 4]) -> Retained<NSAttributedString> {
     let [r, g, b, a] = color;
-    // SAFETY: the context outlives this, is set current only on this thread for
-    // the draw, and the keys are the framework's own.
+    // SAFETY: the keys are the framework's own.
     unsafe {
-        let graphics = NSGraphicsContext::graphicsContextWithCGContext_flipped(context, true);
-        NSGraphicsContext::saveGraphicsState_class();
-        NSGraphicsContext::setCurrentContext(Some(&graphics));
         let font = NSFont::systemFontOfSize(size);
         let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
         let keys: [&NSString; 2] = [
@@ -471,14 +532,51 @@ fn draw_text(context: &CGContext, at: [f64; 2], text: &str, size: f64, color: [f
         ];
         let values: [&AnyObject; 2] = [font.as_ref(), color.as_ref()];
         let attributes = NSDictionary::from_slices(&keys, &values);
-        let string = NSAttributedString::initWithString_attributes(
+        NSAttributedString::initWithString_attributes(
             NSAttributedString::alloc(),
             &NSString::from_str(text),
             Some(&attributes),
-        );
-        string.drawAtPoint(NSPoint::new(at[0], at[1]));
-        NSGraphicsContext::restoreGraphicsState_class();
+        )
     }
+}
+
+/// Where text falls, unturned. Without a `wrap` it wraps at the picture's right
+/// edge, as a note is often longer than the room beside it. With hardly any room
+/// there, it starts further left, so a long note isn't a column of letters.
+fn text_frame(at: [f64; 2], text: &str, size: f64, wrap: Option<f64>, picture: (f64, f64)) -> Rect {
+    let string = styled(text, size, [0., 0., 0., 1.]);
+    let (x, room) = match wrap {
+        Some(wrap) => (at[0], wrap),
+        None => {
+            let room = picture.0 - at[0];
+            let x = if string.size().width > room && room < picture.0 / 4. {
+                (picture.0 - string.size().width).max(picture.0 * 3. / 4.)
+            } else {
+                at[0]
+            };
+            (x, picture.0 - x)
+        }
+    };
+    let measured = string.boundingRectWithSize_options_context(
+        NSSize::new(room.max(1.), f64::MAX),
+        NSStringDrawingOptions::UsesLineFragmentOrigin,
+        None,
+    );
+    Rect {
+        x,
+        y: at[1],
+        width: measured.size.width.ceil(),
+        height: measured.size.height.ceil(),
+    }
+}
+
+fn draw_text(context: &CGContext, rect: NSRect, text: &str, size: f64, color: [f64; 4]) {
+    // The context outlives this, and is current only on this thread for the draw.
+    let graphics = NSGraphicsContext::graphicsContextWithCGContext_flipped(context, true);
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&graphics));
+    styled(text, size, color).drawInRect(rect);
+    NSGraphicsContext::restoreGraphicsState_class();
 }
 
 #[cfg(test)]
@@ -518,6 +616,7 @@ mod tests {
                         width: 10.,
                         height: 20.,
                     },
+                    rotation: 0.,
                 },
                 Step::Rotate { quarter_turns: 1 },
             ],
@@ -557,6 +656,7 @@ mod tests {
                         width: 10.,
                         height: 20.,
                     },
+                    rotation: 0.,
                 },
                 Step::Flip { vertical: false },
             ],
@@ -578,6 +678,7 @@ mod tests {
                     points: vec![[10., 10.], [30., 10.]],
                     color: [1., 0., 0., 1.],
                     width: 4.,
+                    rotation: 0.,
                 },
                 Step::Rectangle {
                     rect: Rect {
@@ -588,12 +689,15 @@ mod tests {
                     },
                     color: [0., 0., 1., 1.],
                     width: 2.,
+                    rotation: 0.,
                 },
                 Step::Text {
                     at: [10., 40.],
                     text: "Hi".into(),
                     size: 20.,
                     color: [0., 0., 0., 1.],
+                    wrap: None,
+                    rotation: 0.,
                 },
             ],
             &out,
@@ -614,6 +718,46 @@ mod tests {
         );
         let inked = (10..40).any(|x| (40..65).any(|y| at(x, y)[0] < 100));
         assert!(inked, "the text drew nothing near where it was asked");
+    }
+
+    /// A long note clicked near the right edge stays on the picture, and one
+    /// clicked in the last sliver doesn't become a column of letters.
+    #[test]
+    fn long_text_wraps_inside_the_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = picture(dir.path(), "white.png", 400, 200, [255, 255, 255]);
+        let note = "Sidebar icons need a hover state and a pressed state";
+        let draw = |x: f64, name: &str| {
+            let out = dir.path().join(name);
+            flatten(
+                &source,
+                &[Step::Text {
+                    at: [x, 10.],
+                    text: note.into(),
+                    size: 20.,
+                    color: [0., 0., 0., 1.],
+                    wrap: None,
+                    rotation: 0.,
+                }],
+                &out,
+            )
+            .unwrap();
+            pixels(&out)
+        };
+        let inked =
+            |image: &image::RgbaImage, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
+                xs.clone()
+                    .any(|x| ys.clone().any(|y| image.get_pixel(x, y).0[0] < 128))
+            };
+        let wrapped = draw(200., "wrapped.png");
+        assert!(inked(&wrapped, 200..400, 10..35), "the first line");
+        assert!(inked(&wrapped, 200..400, 35..60), "the second line");
+        assert!(
+            !inked(&wrapped, 0..195, 0..200),
+            "nothing left of the click"
+        );
+        let sliver = draw(390., "sliver.png");
+        assert!(inked(&sliver, 300..390, 10..35), "it moved left to fit");
     }
 
     /// A JPEG whose EXIF description says `SECRET-PLACE`.
@@ -660,7 +804,7 @@ mod tests {
             height: 30.,
         };
         let redacted = dir.path().join("redacted.jpg");
-        flatten(&source, &[Step::Redact { rect }], &redacted).unwrap();
+        flatten(&source, &[Step::Redact { rect, rotation: 0. }], &redacted).unwrap();
         assert!(!says_secret(&redacted));
         let drawn = pixels(&redacted);
         assert!(

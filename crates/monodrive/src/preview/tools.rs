@@ -8,11 +8,12 @@ use crate::browser::Operations;
 use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, content, danger, text_button};
 use gpui::{
-    AnyElement, Bounds, Context, Entity, EventEmitter, Focusable, FontWeight, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, RenderImage,
-    Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*, px, size,
+    AnyElement, Bounds, Context, CursorStyle, Entity, EventEmitter, Focusable, FontWeight,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point,
+    RenderImage, Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*,
+    px, size,
 };
-use monodrive_core::edits::{self, Clip, Rect, Step};
+use monodrive_core::edits::{self, Clip, Handle, Rect, Step};
 use monodrive_core::ops::{Opened, Origin, Outcome, Request, SaveTo};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -56,7 +57,7 @@ const PICTURE_TOOLS: [(Tool, &str, &str, &str); 8] = [
 
 /// The row's width below which the tools move behind a menu, and below which
 /// the name goes too: what each row needs, measured from its buttons.
-const PICTURE_ROW: f32 = 720.;
+const PICTURE_ROW: f32 = 730.;
 const VIDEO_ROW: f32 = 480.;
 const NAMELESS_ROW: f32 = 330.;
 
@@ -105,6 +106,46 @@ fn menu_card(width: f32, from_right: bool) -> gpui::Div {
         .occlude()
 }
 
+/// The card the Text tool writes in. Its height is only for keeping it inside
+/// the picture's pane.
+const NOTE_WIDTH: f32 = 320.;
+const NOTE_HEIGHT: f32 = 204.;
+const NOTE_ROWS: usize = 5;
+
+/// How far, on screen, the turning handle sits off a mark, and how close a press
+/// must be to a handle or to a mark's ink.
+const TURN_HANDLE_OUT: f32 = 22.;
+const HANDLE_REACH: f32 = 9.;
+const INK_REACH: f32 = 5.;
+/// Within this many degrees of a right angle, a turn lands on it.
+const TURN_SNAP: f64 = 3.;
+
+/// A drag on a mark, measured from where it began so it can't drift.
+struct Gesture {
+    grab: Grab,
+    start: [f64; 2],
+    original: Step,
+    moved: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Grab {
+    Move,
+    Handle(Handle),
+}
+
+/// What the picture shows while a mark moves: everything else, flattened once,
+/// and the mark alone on a small layer drawn the way saving draws it.
+#[derive(Default)]
+struct Dragged {
+    under: Option<(usize, Arc<RenderImage>)>,
+    under_task: Option<Task<()>>,
+    layer: Option<(Arc<RenderImage>, Rect)>,
+    layer_task: Option<Task<()>>,
+    /// The mark moved while its layer was being drawn.
+    layer_stale: bool,
+}
+
 /// Marks' colors, in the file and on screen.
 const INKS: [(&str, [f64; 4]); 4] = [
     ("ink-red", [0.9, 0.2, 0.15, 1.]),
@@ -130,6 +171,8 @@ fn hsla(color: [f64; 4]) -> gpui::Hsla {
 enum Subject {
     Picture {
         steps: Vec<Step>,
+        /// What each change replaced, for Undo.
+        past: Vec<Vec<Step>>,
         /// The picture as the steps leave it, in pixels.
         image: Option<Arc<RenderImage>>,
         flattening: Option<Task<()>>,
@@ -159,8 +202,16 @@ pub(super) struct Edit {
     draft: Vec<[f64; 2]>,
     /// Where the picture was last drawn, to turn the pointer into pixels.
     drawn: Rc<Cell<Bounds<Pixels>>>,
+    /// The mark with handles on it, as an index into the steps.
+    selected: Option<usize>,
+    gesture: Option<Gesture>,
+    dragged: Dragged,
+    /// What the pointer would do if pressed now.
+    cursor: CursorStyle,
     /// Text waiting for a place: the field, and where it goes.
     text: Option<(Entity<TextField>, [f64; 2], Subscription)>,
+    /// The Text step the card is changing, when it isn't a new one.
+    rewriting: Option<usize>,
     /// What had the keys before the text field, to give them back.
     keys_before: Option<gpui::FocusHandle>,
     /// Esc asked, with changes that would be lost.
@@ -216,6 +267,62 @@ impl Edit {
                 crop,
                 ..
             } => start.is_some() || end.is_some() || *muted || *turns != 0 || crop.is_some(),
+        }
+    }
+
+    fn steps(&self) -> &[Step] {
+        match &self.subject {
+            Subject::Picture { steps, .. } => steps,
+            Subject::Video { .. } => &[],
+        }
+    }
+
+    /// Marks from before a crop, turn or flip are part of the picture by now:
+    /// their pixels no longer mean the same place.
+    fn first_movable(&self) -> usize {
+        self.steps()
+            .iter()
+            .rposition(|step| !step.is_mark())
+            .map_or(0, |last| last + 1)
+    }
+
+    fn picture(&self) -> Option<(f64, f64)> {
+        let (width, height) = image_size(self.image()?);
+        Some((f64::from(width), f64::from(height)))
+    }
+
+    /// The topmost movable mark a press at `at` lands on. The selected mark
+    /// counts all over its frame, so a box can be dragged from its middle.
+    fn mark_at(&self, at: [f64; 2], reach: f64) -> Option<usize> {
+        let picture = self.picture()?;
+        let steps = self.steps();
+        if let Some(selected) = self.selected
+            && let Some(frame) = steps.get(selected).and_then(|step| step.frame(picture))
+            && frame.contains(at, reach)
+        {
+            return Some(selected);
+        }
+        (self.first_movable()..steps.len())
+            .rev()
+            .find(|index| steps[*index].hit(at, picture, reach))
+    }
+
+    /// The selected mark's handle under `at`, given the picture's scale on screen.
+    fn handle_at(&self, at: [f64; 2], scale: f32) -> Option<Handle> {
+        let picture = self.picture()?;
+        let step = self.steps().get(self.selected?)?;
+        let scale = f64::from(scale);
+        let reach = f64::from(HANDLE_REACH) / scale;
+        step.handles(picture, f64::from(TURN_HANDLE_OUT) / scale)
+            .into_iter()
+            .find(|(_, place)| (place[0] - at[0]).hypot(place[1] - at[1]) <= reach)
+            .map(|(handle, _)| handle)
+    }
+
+    /// Before a change to a picture, so Undo can come back to this.
+    fn remember_steps(&mut self) {
+        if let Subject::Picture { steps, past, .. } = &mut self.subject {
+            past.push(steps.clone());
         }
     }
 
@@ -301,16 +408,18 @@ fn step_of(tool: Tool, draft: &[[f64; 2]], ink: [f64; 4], image: (f32, f32)) -> 
     let tiny = rect.width < 2. || rect.height < 2.;
     Some(match tool {
         Tool::Crop if !tiny => Step::Crop { rect },
-        Tool::Redact if !tiny => Step::Redact { rect },
+        Tool::Redact if !tiny => Step::Redact { rect, rotation: 0. },
         Tool::Rectangle if !tiny => Step::Rectangle {
             rect,
             color: ink,
             width,
+            rotation: 0.,
         },
         Tool::Ellipse if !tiny => Step::Ellipse {
             rect,
             color: ink,
             width,
+            rotation: 0.,
         },
         Tool::Arrow if first != last => Step::Arrow {
             from: first,
@@ -322,11 +431,13 @@ fn step_of(tool: Tool, draft: &[[f64; 2]], ink: [f64; 4], image: (f32, f32)) -> 
             points: draft.to_vec(),
             color: ink,
             width,
+            rotation: 0.,
         },
         Tool::Highlighter => Step::Highlighter {
             points: draft.to_vec(),
             color: [ink[0], ink[1], ink[2], 0.4],
             width: width * 4.,
+            rotation: 0.,
         },
         _ => return None,
     })
@@ -355,6 +466,7 @@ impl PreviewView {
             subject: if picture {
                 Subject::Picture {
                     steps: Vec::new(),
+                    past: Vec::new(),
                     image: None,
                     flattening: None,
                 }
@@ -373,7 +485,12 @@ impl PreviewView {
             ink: INKS[0].1,
             draft: Vec::new(),
             drawn: Rc::new(Cell::new(Bounds::default())),
+            selected: None,
+            gesture: None,
+            dragged: Dragged::default(),
+            cursor: CursorStyle::Arrow,
             text: None,
+            rewriting: None,
             keys_before: None,
             confirming: false,
             menu: None,
@@ -421,7 +538,10 @@ impl PreviewView {
             return;
         }
         // Esc closes what's on top first.
-        if edit.menu.take().is_some() || edit.text.take().is_some() {
+        if edit.menu.take().is_some()
+            || edit.text.take().is_some()
+            || edit.selected.take().is_some()
+        {
             return cx.notify();
         }
         if edit.changed() && !edit.confirming {
@@ -441,6 +561,20 @@ impl PreviewView {
             self.show(&path, folder, position, cx);
         }
         cx.notify();
+    }
+
+    /// Drops what stood in for the picture while a mark moved.
+    fn settle(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        let dragged = std::mem::take(&mut edit.dragged);
+        if let Some((_, under)) = dragged.under {
+            cx.drop_image(under, None);
+        }
+        if let Some((layer, _)) = dragged.layer {
+            cx.drop_image(layer, None);
+        }
     }
 
     /// Flattens the steps off the UI thread; only the newest result is kept.
@@ -482,20 +616,121 @@ impl PreviewView {
                     }
                     Err(why) => edit.error = Some(why),
                 }
+                // The truth is in, so the stand-ins can go unless a drag needs them.
+                if edit.gesture.is_none() {
+                    this.settle(cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Everything but the mark being dragged, once, for it to move over.
+    fn flatten_under(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        if edit.dragged.under_task.is_some()
+            || edit
+                .dragged
+                .under
+                .as_ref()
+                .is_some_and(|(of, _)| *of == index)
+        {
+            return;
+        }
+        let mut steps = edit.steps().to_vec();
+        if index >= steps.len() {
+            return;
+        }
+        steps.remove(index);
+        let path = self.path.clone();
+        let work = cx.background_executor().spawn(async move {
+            let bitmap = edits::render(&path, &steps)?;
+            let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)
+                .ok_or("couldn't draw the picture")?;
+            Ok::<_, String>(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
+        });
+        edit.dragged.under_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let done = work.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(edit) = &mut this.edit else {
+                    return;
+                };
+                edit.dragged.under_task = None;
+                match done {
+                    Ok(new) => {
+                        if let Some((_, old)) = edit.dragged.under.replace((index, new)) {
+                            cx.drop_image(old, None);
+                        }
+                    }
+                    Err(why) => edit.error = Some(why),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Draws the moving mark's layer off the UI thread at the size it shows.
+    /// One at a time: a mark that moved meanwhile draws again when it's done.
+    fn draw_layer(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let device = window.scale_factor();
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        if edit.dragged.layer_task.is_some() {
+            edit.dragged.layer_stale = true;
+            return;
+        }
+        let Some(picture) = edit.picture() else {
+            return;
+        };
+        let Some(step) = edit.selected.and_then(|at| edit.steps().get(at)).cloned() else {
+            return;
+        };
+        let (_, fitted) = fit(edit.drawn.get(), (picture.0 as f32, picture.1 as f32));
+        let scale = f64::from((fitted * device).min(1.));
+        let work = cx.background_executor().spawn(async move {
+            let (bitmap, area) = edits::render_mark(&step, picture, scale)?;
+            let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)
+                .ok_or("couldn't draw the mark")?;
+            Ok::<_, String>((
+                Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
+                area,
+            ))
+        });
+        edit.dragged.layer_stale = false;
+        edit.dragged.layer_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let done = work.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let Some(edit) = &mut this.edit else {
+                    return;
+                };
+                edit.dragged.layer_task = None;
+                match done {
+                    Ok(new) => {
+                        if let Some((old, _)) = edit.dragged.layer.replace(new) {
+                            cx.drop_image(old, None);
+                        }
+                    }
+                    Err(why) => edit.error = Some(why),
+                }
+                if std::mem::take(&mut edit.dragged.layer_stale) {
+                    this.draw_layer(window, cx);
+                }
                 cx.notify();
             });
         }));
     }
 
     fn add_step(&mut self, step: Step, window: &Window, cx: &mut Context<Self>) {
-        if let Some(Edit {
-            subject: Subject::Picture { steps, .. },
-            error,
-            ..
-        }) = &mut self.edit
-        {
-            steps.push(step);
-            *error = None;
+        if let Some(edit) = &mut self.edit {
+            edit.remember_steps();
+            edit.selected = None;
+            edit.error = None;
+            if let Subject::Picture { steps, .. } = &mut edit.subject {
+                steps.push(step);
+            }
         }
         self.flatten(window, cx);
         cx.notify();
@@ -504,10 +739,14 @@ impl PreviewView {
     fn undo_step(&mut self, window: &Window, cx: &mut Context<Self>) {
         match &mut self.edit {
             Some(Edit {
-                subject: Subject::Picture { steps, .. },
+                subject: Subject::Picture { steps, past, .. },
+                selected,
                 ..
             }) => {
-                steps.pop();
+                if let Some(before) = past.pop() {
+                    *steps = before;
+                }
+                *selected = None;
                 self.flatten(window, cx);
             }
             Some(edit) => {
@@ -548,22 +787,191 @@ impl PreviewView {
             return;
         };
         match edit.tool {
-            Some(Tool::Text) => {
-                edit.keys_before = window.focused(cx);
-                let field = cx.new(|cx| TextField::new("Text", "Type, then press Return", cx));
-                window.focus(&field.focus_handle(cx), cx);
-                let edits = cx.subscribe(&field, |_, _, _: &text_field::Changed, _| {});
-                edit.text = Some((field, place, edits));
-            }
+            Some(Tool::Text) => self.open_card(place, None, window, cx),
             Some(_) => edit.draft = vec![place],
-            None => {}
+            None => self.press_on_marks(place, event.click_count, window, cx),
         }
         cx.notify();
     }
 
-    fn dragged(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if !event.dragging() {
+    /// The card, for new words at `place` or for changing a Text step's.
+    fn open_card(
+        &mut self,
+        place: [f64; 2],
+        rewriting: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edit) = &mut self.edit else {
             return;
+        };
+        let words = rewriting.and_then(|at| match edit.steps().get(at) {
+            Some(Step::Text { text, .. }) => Some(text.clone()),
+            _ => None,
+        });
+        edit.keys_before = window.focused(cx);
+        let field = cx.new(|cx| {
+            let mut field = TextField::new("Text", "What should it say?", cx).with_rows(NOTE_ROWS);
+            if let Some(words) = &words {
+                field.set_text(words, words.len()..words.len(), cx);
+            }
+            field
+        });
+        window.focus(&field.focus_handle(cx), cx);
+        // Add is only live with something to add.
+        let edits = cx.subscribe(&field, |_, _, _: &text_field::Changed, cx| cx.notify());
+        edit.text = Some((field, place, edits));
+        edit.rewriting = rewriting;
+    }
+
+    /// With no tool up, a press picks up what's under it.
+    fn press_on_marks(
+        &mut self,
+        place: [f64; 2],
+        clicks: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        let Some(picture) = edit.picture() else {
+            return;
+        };
+        let (_, scale) = fit(edit.drawn.get(), (picture.0 as f32, picture.1 as f32));
+        let grab = edit.handle_at(place, scale).map(Grab::Handle);
+        let hit = edit.mark_at(place, f64::from(INK_REACH / scale));
+        let Some(index) = grab.and(edit.selected).or(hit) else {
+            edit.selected = None;
+            return;
+        };
+        let original = edit.steps()[index].clone();
+        // Two clicks on words change them.
+        if clicks == 2
+            && let Step::Text { at, .. } = &original
+        {
+            let at = *at;
+            edit.selected = Some(index);
+            return self.open_card(at, Some(index), window, cx);
+        }
+        edit.selected = Some(index);
+        edit.gesture = Some(Gesture {
+            grab: grab.unwrap_or(Grab::Move),
+            start: place,
+            original,
+            moved: false,
+        });
+    }
+
+    /// The selected mark's new shape, for the pointer at `place`.
+    fn gesture_step(edit: &Edit, gesture: &Gesture, place: [f64; 2]) -> Option<Step> {
+        let picture = edit.picture()?;
+        // Held inside the picture, so a mark can't be dropped out of reach.
+        let place = [place[0].clamp(0., picture.0), place[1].clamp(0., picture.1)];
+        Some(match gesture.grab {
+            Grab::Move => gesture
+                .original
+                .moved(place[0] - gesture.start[0], place[1] - gesture.start[1]),
+            Grab::Handle(Handle::Turn) => {
+                let frame = gesture.original.frame(picture)?;
+                let center = frame.center();
+                let angle = |at: [f64; 2]| (at[1] - center[1]).atan2(at[0] - center[0]);
+                let turned = frame.rotation + (angle(place) - angle(gesture.start)).to_degrees();
+                let right = (turned / 90.).round() * 90.;
+                gesture
+                    .original
+                    .turned_to(if (turned - right).abs() < TURN_SNAP {
+                        right
+                    } else {
+                        turned
+                    })
+            }
+            Grab::Handle(handle) => gesture.original.resized(handle, place, picture),
+        })
+    }
+
+    /// A drag on the selected mark: the steps follow at once, and the picture
+    /// follows through its layer.
+    fn drag_mark(&mut self, place: [f64; 2], window: &Window, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        let (Some(gesture), Some(index)) = (&edit.gesture, edit.selected) else {
+            return;
+        };
+        let Some(step) = Self::gesture_step(edit, gesture, place) else {
+            return;
+        };
+        if gesture.moved && edit.steps().get(index) == Some(&step) {
+            return;
+        }
+        if !gesture.moved {
+            edit.remember_steps();
+        }
+        if let Some(gesture) = &mut edit.gesture {
+            gesture.moved = true;
+        }
+        if let Subject::Picture { steps, .. } = &mut edit.subject
+            && let Some(slot) = steps.get_mut(index)
+        {
+            *slot = step;
+        }
+        self.flatten_under(index, window, cx);
+        self.draw_layer(window, cx);
+        cx.notify();
+    }
+
+    /// The pointer's cursor says what a press would do.
+    fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let place = self.pixel_at(position);
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        let cursor = match (edit.tool, place, edit.picture()) {
+            (None, Some(place), Some(picture)) => {
+                let (_, scale) = fit(edit.drawn.get(), (picture.0 as f32, picture.1 as f32));
+                if edit.handle_at(place, scale).is_some() {
+                    CursorStyle::PointingHand
+                } else if edit.mark_at(place, f64::from(INK_REACH / scale)).is_some() {
+                    CursorStyle::OpenHand
+                } else {
+                    CursorStyle::Arrow
+                }
+            }
+            (Some(_), ..) => CursorStyle::Crosshair,
+            _ => CursorStyle::Arrow,
+        };
+        if edit.cursor != cursor {
+            edit.cursor = cursor;
+            cx.notify();
+        }
+    }
+
+    /// The selected mark off the picture. Says whether there was one.
+    pub fn delete_mark(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let Some(edit) = &mut self.edit else {
+            return false;
+        };
+        if edit.text.is_some() {
+            return false;
+        }
+        let Some(index) = edit.selected.take() else {
+            return false;
+        };
+        edit.remember_steps();
+        if let Subject::Picture { steps, .. } = &mut edit.subject
+            && index < steps.len()
+        {
+            steps.remove(index);
+        }
+        self.flatten(window, cx);
+        cx.notify();
+        true
+    }
+
+    fn dragged(&mut self, event: &MouseMoveEvent, window: &Window, cx: &mut Context<Self>) {
+        if !event.dragging() {
+            return self.hover(event.position, cx);
         }
         let Some(place) = self.pixel_at(event.position) else {
             return;
@@ -571,6 +979,9 @@ impl PreviewView {
         let Some(edit) = &mut self.edit else {
             return;
         };
+        if edit.gesture.is_some() {
+            return self.drag_mark(place, window, cx);
+        }
         if edit.draft.is_empty() {
             return;
         }
@@ -588,6 +999,12 @@ impl PreviewView {
         let Some(edit) = &mut self.edit else {
             return;
         };
+        if let Some(gesture) = edit.gesture.take() {
+            if gesture.moved {
+                self.flatten(window, cx);
+            }
+            return cx.notify();
+        }
         let draft = std::mem::take(&mut edit.draft);
         let (Some(tool), Some(image)) = (edit.tool, edit.image().map(|i| image_size(i))) else {
             return;
@@ -606,17 +1023,41 @@ impl PreviewView {
                 cx.notify();
             }
             (Subject::Picture { .. }, step) => {
-                // A crop changes the picture, so it isn't a tool to stay in.
-                if matches!(step, Step::Crop { .. }) {
+                // A crop changes the picture, so it isn't a tool to stay in. A
+                // shape is drawn once and is ready to move. The pen stays down,
+                // as a stroke is rarely the last.
+                let stays = matches!(tool, Tool::Pen | Tool::Highlighter);
+                if !stays {
                     edit.tool = None;
                 }
+                let is_mark = step.is_mark();
+                let index = edit.steps().len();
                 self.add_step(step, window, cx);
+                if !stays
+                    && is_mark
+                    && let Some(edit) = &mut self.edit
+                {
+                    edit.selected = Some(index);
+                }
             }
             _ => cx.notify(),
         }
     }
 
-    /// Return in the text field: places the words where the click was.
+    /// Closes the card without adding its words.
+    fn cancel_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.edit {
+            edit.text = None;
+            edit.rewriting = None;
+            if let Some(keys) = edit.keys_before.take() {
+                window.focus(&keys, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Add in the card: places the words where the click was, or changes the
+    /// words of the Text it opened on.
     pub(super) fn commit_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = &mut self.edit else {
             return;
@@ -628,22 +1069,41 @@ impl PreviewView {
             window.focus(&keys, cx);
         }
         let words = field.read(cx).text().trim().to_string();
-        let long = edit.image().map_or(1000., |i| {
-            let (w, h) = image_size(i);
-            f64::from(w.max(h))
-        });
-        let color = edit.ink;
-        if !words.is_empty() {
-            self.add_step(
-                Step::Text {
-                    at,
-                    text: words,
-                    size: (long / 30.).max(12.),
-                    color,
-                },
-                window,
-                cx,
-            );
+        let rewriting = edit.rewriting.take();
+        let Some(picture) = edit.picture() else {
+            return;
+        };
+        if words.is_empty() {
+            return cx.notify();
+        }
+        if let Some(index) = rewriting {
+            edit.remember_steps();
+            if let Subject::Picture { steps, .. } = &mut edit.subject
+                && let Some(slot) = steps.get_mut(index)
+                && let Step::Text { text, wrap, .. } = slot
+            {
+                // New words get room again, instead of the width the old ones fit.
+                *text = words;
+                *wrap = None;
+                *slot = slot.clone().pinned(picture);
+            }
+            self.flatten(window, cx);
+            return cx.notify();
+        }
+        let step = Step::Text {
+            at,
+            text: words,
+            size: (picture.0.max(picture.1) / 30.).max(12.),
+            color: edit.ink,
+            wrap: None,
+            rotation: 0.,
+        }
+        .pinned(picture);
+        edit.tool = None;
+        let index = edit.steps().len();
+        self.add_step(step, window, cx);
+        if let Some(edit) = &mut self.edit {
+            edit.selected = Some(index);
         }
         cx.notify();
     }
@@ -815,7 +1275,7 @@ impl PreviewView {
     }
 
     /// The image under the tools, with the mark being drawn over it.
-    pub(super) fn edit_surface(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn edit_surface(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(edit) = &self.edit else {
             return div().size_full().into_any_element();
         };
@@ -830,6 +1290,25 @@ impl PreviewView {
             Subject::Video { crop, .. } => *crop,
             Subject::Picture { .. } => None,
         };
+        let note = self.note_card(source, window, cx);
+        // While a mark moves: the rest of the picture, with the mark's own layer
+        // over it.
+        let (shown, layer) = match (&edit.dragged.under, &edit.dragged.layer) {
+            (Some((_, under)), Some((layer, area))) => {
+                (under.clone(), Some((layer.clone(), *area)))
+            }
+            _ => (image, None),
+        };
+        let cursor = edit
+            .gesture
+            .as_ref()
+            .map_or(edit.cursor, |_| CursorStyle::ClosedHand);
+        let picture = (f64::from(source.0), f64::from(source.1));
+        let chrome = edit
+            .selected
+            .and_then(|at| edit.steps().get(at))
+            .filter(|_| edit.text.is_none())
+            .cloned();
         div()
             .id("preview-edit-surface")
             .debug_selector(|| "preview-edit-surface".into())
@@ -845,15 +1324,50 @@ impl PreviewView {
                     }
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event, _, cx| this.dragged(event, cx)))
+            .cursor(cursor)
+            .on_mouse_move(cx.listener(|this, event, window, cx| this.dragged(event, window, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::released))
-            .child(super::fitted(image))
+            // A mark let go of past the pane's edge stays where it got to.
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if this
+                        .edit
+                        .as_ref()
+                        .is_some_and(|edit| edit.gesture.is_some())
+                    {
+                        this.released(event, window, cx);
+                    }
+                }),
+            )
+            .child(super::fitted(shown))
             .child(
                 canvas(
                     move |bounds, _, _| measured.set(bounds),
                     move |bounds, _, window, _| {
                         let (origin, scale) = fit(bounds, source);
+                        if let Some((layer, area)) = &layer {
+                            let frame = Bounds::new(
+                                origin
+                                    + point(px(area.x as f32 * scale), px(area.y as f32 * scale)),
+                                size(
+                                    px(area.width as f32 * scale),
+                                    px(area.height as f32 * scale),
+                                ),
+                            );
+                            let _ = window.paint_image(
+                                frame,
+                                frame,
+                                gpui::Corners::default(),
+                                layer.clone(),
+                                0,
+                                false,
+                            );
+                        }
                         paint_mark(&draft, tool, ink, origin, scale, source, window);
+                        if let Some(step) = &chrome {
+                            paint_handles(step, picture, origin, scale, window);
+                        }
                         if let Some(rect) = crop {
                             let shown = [
                                 [rect.x, rect.y],
@@ -876,7 +1390,125 @@ impl PreviewView {
                 .left_0()
                 .size_full(),
             )
+            .children(note)
             .into_any_element()
+    }
+
+    /// The Text tool's card, beside a dot where the words will land. It's
+    /// modal: a press elsewhere closes an empty card and can't lose written
+    /// words, and nothing behind it reacts.
+    fn note_card(
+        &self,
+        source: (f32, f32),
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let edit = self.edit.as_ref()?;
+        let (field, at, _) = edit.text.as_ref()?;
+        let field = field.clone();
+        let surface = edit.drawn.get();
+        let (origin, scale) = fit(surface, source);
+        let dot = origin + point(px(at[0] as f32 * scale), px(at[1] as f32 * scale));
+        let width = px(NOTE_WIDTH).min(surface.size.width - px(16.));
+        let left = (dot.x + px(12.))
+            .min(surface.right() - width - px(8.))
+            .max(surface.left() + px(8.));
+        let top = (dot.y + px(12.))
+            .min(surface.bottom() - px(NOTE_HEIGHT) - px(8.))
+            .max(surface.top() + px(8.));
+        let empty = field.read(cx).text().trim().is_empty();
+        let rewriting = edit.rewriting.is_some();
+        let label = if rewriting { "Done" } else { "Add" };
+        let add = if empty {
+            text_button("note-add", label, ButtonLook::Disabled)
+        } else {
+            text_button("note-add", label, ButtonLook::Primary)
+                .on_click(cx.listener(|this, _, window, cx| this.commit_text(window, cx)))
+        };
+        let card = theme::floating(theme::Elevation::Popover)
+            .debug_selector(|| "note-card".into())
+            .absolute()
+            .left(left)
+            .top(top)
+            .w(width)
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .occlude()
+            .key_context("Rename")
+            .on_action(
+                cx.listener(|this, _: &crate::browser::CommitRename, window, cx| {
+                    this.commit_text(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::browser::CancelRename, window, cx| {
+                    this.cancel_text(window, cx)
+                }),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_BODY))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(if rewriting { "Change text" } else { "Add text" }),
+            )
+            .child(
+                theme::field(theme::accent())
+                    .debug_selector(|| "note-field".into())
+                    .rounded(px(theme::RADIUS_ROW))
+                    .p_2()
+                    .child(field.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_1()
+                    .child(
+                        text_button("note-cancel", "Cancel", ButtonLook::Ghost)
+                            .debug_selector(|| "note-cancel".into())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.cancel_text(window, cx)),
+                            ),
+                    )
+                    .child(add.debug_selector(|| "note-add".into())),
+            );
+        let viewport = window.viewport_size();
+        Some(deferred(
+            gpui::anchored().position(point(px(0.), px(0.))).child(
+                div()
+                    .id("note-scrim")
+                    .debug_selector(|| "note-scrim".into())
+                    .relative()
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            if field.read(cx).text().trim().is_empty() {
+                                this.cancel_text(window, cx);
+                            }
+                        }),
+                    )
+                    .when(!rewriting, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .left(dot.x - px(5.))
+                                .top(dot.y - px(5.))
+                                .size(px(10.))
+                                .rounded_full()
+                                // design: a mark's own color, part of the file and not the app.
+                                .bg(hsla(edit.ink))
+                                .border_1()
+                                .border_color(content(1.)),
+                        )
+                    })
+                    .child(card),
+            ),
+        ))
     }
 
     /// A tool: a 24 pt icon, named when hovered.
@@ -921,10 +1553,27 @@ impl PreviewView {
                         .border_1()
                         .border_color(content(0.3))
                         .when(ink == color, |d| d.border_2().border_color(content(1.)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let mut recolored = false;
                             if let Some(edit) = &mut this.edit {
                                 edit.ink = color;
                                 edit.menu = None;
+                                if let Some(index) = edit.selected {
+                                    let new = edit.steps().get(index).map(|m| m.in_color(color));
+                                    if new.as_ref() != edit.steps().get(index) {
+                                        edit.remember_steps();
+                                        if let Subject::Picture { steps, .. } = &mut edit.subject
+                                            && let (Some(slot), Some(new)) =
+                                                (steps.get_mut(index), new)
+                                        {
+                                            *slot = new;
+                                            recolored = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if recolored {
+                                this.flatten(window, cx);
                             }
                             cx.notify();
                         }))
@@ -941,6 +1590,19 @@ impl PreviewView {
         let mut tools = Vec::new();
         match &edit.subject {
             Subject::Picture { .. } => {
+                tools.push(self.tool_button(
+                    "tool-select",
+                    "Move",
+                    "tool-select",
+                    tool.is_none(),
+                    cx,
+                    |this, _, cx| {
+                        if let Some(edit) = &mut this.edit {
+                            edit.tool = None;
+                        }
+                        cx.notify();
+                    },
+                ));
                 for (kind, id, label, path) in PICTURE_TOOLS {
                     tools.push(self.tool_button(
                         id,
@@ -951,7 +1613,7 @@ impl PreviewView {
                         move |this, _, cx| {
                             if let Some(edit) = &mut this.edit {
                                 edit.tool = (edit.tool != Some(kind)).then_some(kind);
-                                edit.text = None;
+                                edit.selected = None;
                             }
                             cx.notify();
                         },
@@ -1191,7 +1853,7 @@ impl PreviewView {
         let confirming = edit.confirming;
         let menu = edit.menu;
         let picture = matches!(edit.subject, Subject::Picture { .. });
-        let text_field = edit.text.as_ref().map(|(field, _, _)| field.clone());
+        let edit_selected = edit.selected.is_some();
         let row_width = self.row_width.clone();
         let (narrow, very_narrow) = row_fits(row_width.get(), picture);
         let name_cell = div()
@@ -1259,36 +1921,21 @@ impl PreviewView {
                         .debug_selector(|| "edit-discard".into())
                         .on_click(cx.listener(|this, _, _, cx| this.leave_edit(cx))),
                 )
-        } else if let Some(field) = text_field {
-            row.child(
-                theme::field(theme::accent())
-                    .debug_selector(|| "edit-text-field".into())
-                    .key_context("Rename")
-                    .on_action(
-                        cx.listener(|this, _: &crate::browser::CommitRename, window, cx| {
-                            this.commit_text(window, cx)
-                        }),
-                    )
-                    .on_action(
-                        cx.listener(|this, _: &crate::browser::CancelRename, window, cx| {
-                            if let Some(edit) = &mut this.edit {
-                                edit.text = None;
-                                if let Some(keys) = edit.keys_before.take() {
-                                    window.focus(&keys, cx);
-                                }
-                            }
-                            cx.notify();
-                        }),
-                    )
-                    .h(px(theme::FIELD_HEIGHT))
-                    .flex_1()
-                    .min_w_0()
-                    .px_2()
-                    .child(field),
-            )
         } else {
             let tools = self.tool_buttons(cx);
             let inks = self.inks(cx);
+            let delete = edit_selected.then(|| {
+                self.tool_button(
+                    "edit-delete",
+                    "Delete",
+                    "trash",
+                    false,
+                    cx,
+                    |this, window, cx| {
+                        this.delete_mark(window, cx);
+                    },
+                )
+            });
             let undo = self.tool_button(
                 "edit-undo",
                 "Undo",
@@ -1344,6 +1991,7 @@ impl PreviewView {
                     .children(inks)
             };
             row.child(div().flex_1().min_w_0())
+                .children(delete)
                 .child(undo)
                 .child(save)
                 .child(done)
@@ -1509,6 +2157,55 @@ fn paint_mark(
     }
 }
 
+/// The selected mark's frame and handles.
+fn paint_handles(
+    step: &Step,
+    picture: (f64, f64),
+    origin: Point<Pixels>,
+    scale: f32,
+    window: &mut Window,
+) {
+    let on_screen = |at: [f64; 2]| {
+        point(
+            origin.x + px(at[0] as f32 * scale),
+            origin.y + px(at[1] as f32 * scale),
+        )
+    };
+    let handles = step.handles(picture, f64::from(TURN_HANDLE_OUT / scale));
+    let line = |points: &[Point<Pixels>], window: &mut Window| {
+        let mut path = PathBuilder::stroke(px(1.));
+        path.add_polygon(points, false);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, theme::accent());
+        }
+    };
+    if let Some(frame) = step.frame(picture).filter(|_| handles.len() > 2) {
+        let mut outline: Vec<_> = (0..4).map(|at| on_screen(frame.corner(at))).collect();
+        outline.push(outline[0]);
+        line(&outline, window);
+        line(
+            &[
+                on_screen(frame.above_top(0.)),
+                on_screen(frame.above_top(f64::from(TURN_HANDLE_OUT / scale))),
+            ],
+            window,
+        );
+    }
+    for (_, at) in handles {
+        let side = px(10.);
+        let center = on_screen(at);
+        window.paint_quad(
+            gpui::fill(
+                Bounds::new(center - point(side / 2., side / 2.), size(side, side)),
+                theme::accent(),
+            )
+            .corner_radii(side / 2.)
+            .border_widths(px(1.))
+            .border_color(content(1.)),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1531,7 +2228,7 @@ mod tests {
         );
         assert_eq!(
             step_of(Tool::Redact, &drag, ink, image),
-            Some(Step::Redact { rect })
+            Some(Step::Redact { rect, rotation: 0. })
         );
         // A press without a drag makes no shape, but it's a dot for the pen.
         let press = [[10., 10.]];
@@ -1565,7 +2262,12 @@ mod tests {
             ink: INKS[0].1,
             draft: Vec::new(),
             drawn: Rc::new(Cell::new(Bounds::default())),
+            selected: None,
+            gesture: None,
+            dragged: Dragged::default(),
+            cursor: CursorStyle::Arrow,
             text: None,
+            rewriting: None,
             keys_before: None,
             confirming: false,
             menu: None,
