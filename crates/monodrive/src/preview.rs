@@ -803,6 +803,17 @@ impl PreviewView {
                 }
             }));
         }
+        // Each button's name and the icon that shows the state it's in.
+        let play = if playing {
+            ("Pause", "pause")
+        } else {
+            ("Play", "play")
+        };
+        let mute = if muted {
+            ("Unmute", "tool-mute")
+        } else {
+            ("Mute", "volume")
+        };
         let fraction = duration.map_or(0., |total| (position / total).clamp(0., 1.)) as f32;
         let track = self.track.clone();
         let measured = self.track.clone();
@@ -812,10 +823,9 @@ impl PreviewView {
             .border_t_1()
             .border_color(content(0.06))
             .child(
-                text_button(
-                    "preview-play",
-                    if playing { "Pause" } else { "Play" },
-                    ButtonLook::Secondary,
+                tools::tip_below(
+                    theme::icon_button("preview-play", play.0, play.1, true),
+                    play.0,
                 )
                 .debug_selector(|| "preview-play".into())
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -875,11 +885,11 @@ impl PreviewView {
                     }),
             )
             .child(
-                text_button(
-                    "preview-mute",
-                    if muted { "Unmute" } else { "Mute" },
-                    ButtonLook::Ghost,
+                tools::tip_below(
+                    theme::icon_button("preview-mute", mute.0, mute.1, true),
+                    mute.0,
                 )
+                .debug_selector(|| "preview-mute".into())
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(player) = this.player.borrow().as_ref() {
                         player.toggle_muted();
