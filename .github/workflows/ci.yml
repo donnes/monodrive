@@ -52,7 +52,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/check
+      - name: Design
+        run: scripts/check design
+      - name: Format
+        run: scripts/check format
+      - name: Clippy
+        run: scripts/check clippy
+      - name: Tests
+        run: scripts/check test
 
   deny:
     name: Dependencies and licenses

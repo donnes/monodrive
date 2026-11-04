@@ -1,6 +1,7 @@
 name: Release
 
-# Nightly runs daily from main, skipping a commit that already has a nightly.
+# A nightly ships from main when commits landed since the last one and that
+# one is at least six hours old.
 # Both channels run on demand from the Actions tab.
 # Stable creates the vX.Y.Z tag on the commit it built, and needs the signing secrets.
 #
@@ -15,8 +16,9 @@ name: Release
 
 on:
   schedule:
-    # Avoid minute zero, when GitHub's scheduled jobs are busiest.
-    - cron: "17 6 * * *"
+    # GitHub starts scheduled runs late or drops them, so check often. Minute
+    # zero is the busiest. Most runs stop in Prepare.
+    - cron: "8,38 * * * *"
   workflow_dispatch:
     inputs:
       channel:
@@ -31,8 +33,10 @@ on:
 permissions:
   contents: read
 
+# Nightlies queue behind each other, so a waiting run sees the nightly before
+# it and skips. Stable has its own group, so a nightly never displaces it.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.channel == 'stable' && 'stable' || 'nightly' }}
   cancel-in-progress: false
 
 jobs:
@@ -50,6 +54,7 @@ jobs:
           fetch-depth: 0
       - id: plan
         env:
+          GH_TOKEN: ${{ github.token }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CHANNEL: ${{ inputs.channel || 'nightly' }}
           STABLE_VERSION: ${{ inputs.version }}
@@ -88,9 +93,16 @@ jobs:
             channel=nightly
             version=$next-nightly.$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER
             previous=$(git tag --list 'v*-nightly.*' --sort=-v:refname | head -1 || true)
-            if [[ "$GITHUB_EVENT_NAME" == schedule && -n "$(git tag --points-at HEAD --list 'v*-nightly.*')" ]]; then
-              echo "This commit already has a nightly."
-              due=false
+            if [[ "$GITHUB_EVENT_NAME" == schedule && -n "$previous" ]]; then
+              published=$(gh release view "$previous" --json publishedAt --jq .publishedAt)
+              age=$(( $(date -u +%s) - $(date -u -d "$published" +%s) ))
+              if [[ -z "$(git rev-list -n 1 "$previous..HEAD")" ]]; then
+                echo "Nothing landed since $previous."
+                due=false
+              elif (( age < 6 * 3600 )); then
+                echo "$previous shipped less than six hours ago."
+                due=false
+              fi
             fi
           fi
           {
@@ -111,7 +123,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/check
+      - name: Design
+        run: scripts/check design
+      - name: Format
+        run: scripts/check format
+      - name: Clippy
+        run: scripts/check clippy
+      - name: Tests
+        run: scripts/check test
 
   deny:
     name: Dependencies and licenses
