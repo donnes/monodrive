@@ -174,7 +174,11 @@ Two levels, both from `floating`: `Popover` for menus, popovers, toasts and the 
 
 ### Motion
 
-Nothing moves continuously: it pegs the GPU on high-refresh displays. A sheet may fade in once, for 200 ms at most, a drag's outline pulses once before a folder opens, and the sidebar slides open and closed. Hover and press are instant.
+Nothing moves continuously: it pegs the GPU on high-refresh displays. A sheet may fade in once, for 200 ms at most, a drag's outline pulses once before a folder opens, and the sidebar slides open and closed. A toast rises 8 pt into place over 200 ms and sinks out over 150 ms, both easing out; a new toast takes the words of one on screen without moving it. Hover and press are instant.
+
+### Haptics and sounds
+
+`feedback.rs` taps the trackpad and plays Finder's sounds. A Force Touch trackpad taps only under a finger, so haptics go with the pointer: a folder opening under a drag and ⌥ or ⌘ flipping a drop between move and copy are a level change, the insertion line finding a slot in Favorites is an alignment, and a drop landing is generic. Keys never tap. Moving to the Trash and emptying it play Finder's sounds as interface sounds, which macOS silences with "Play user interface sound effects" off. An agent's changes stay silent.
 
 ### Copy
 

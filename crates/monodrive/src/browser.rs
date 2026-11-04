@@ -49,10 +49,10 @@ use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
 use crate::traffic_lights;
 use crate::updates;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
-    FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window, WindowAppearance, WindowControlArea,
-    actions, canvas, div, prelude::*, px,
+    Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity,
+    FocusHandle, Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window,
+    WindowAppearance, WindowControlArea, actions, canvas, div, ease_out_quint, prelude::*, px,
 };
 use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Request};
@@ -256,6 +256,9 @@ const FRAME_SETTLE: Duration = Duration::from_millis(300);
 const INDEX_POLL: Duration = Duration::from_millis(500);
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
+/// A toast rises into place, and leaves faster than it came.
+const TOAST_ENTER: Duration = Duration::from_millis(200);
+const TOAST_LEAVE: Duration = Duration::from_millis(150);
 
 pub struct Browser {
     /// Keeps the browser's keys working wherever focus is.
@@ -1614,6 +1617,66 @@ impl Browser {
             0.
         };
         let ink = if toast.failed { danger() } else { content(1.) };
+        let card = theme::floating(Elevation::Popover)
+            .id("toast")
+            .occlude()
+            .max_w(px(520.))
+            .mx_4()
+            .h(px(36.))
+            .pl_3()
+            .pr(px(6.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .when(toast.failed, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(theme::RADIUS_CARD - 1.))
+                        .bg(danger().opacity(0.12)),
+                )
+            })
+            .child(
+                div()
+                    .relative()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(theme::TEXT_BODY))
+                    .text_color(ink)
+                    .child(toast.text.clone()),
+            )
+            .when_some(toast.undo, |d, op| {
+                d.child(
+                    theme::text_button("toast-undo", "Undo", ButtonLook::Ghost)
+                        .debug_selector(|| "toast-undo".into())
+                        .relative()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(accent())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.toast = None;
+                            this.pane().update(cx, |pane, cx| {
+                                pane.submit(Request::UndoOf { op }, window, cx)
+                            });
+                        })),
+                )
+            })
+            .when(toast.undo.is_none(), |d| d.pr_3());
+        // The entrance plays when a toast appears, not when a new one takes
+        // the place of one on screen. Both run once and skip with Reduce Motion.
+        let card = if toast.leaving {
+            card.with_animation(
+                "toast-leave",
+                Animation::new(TOAST_LEAVE).with_easing(ease_out_quint()),
+                |card, t| card.opacity(1. - t).top(px(4. * t)),
+            )
+        } else {
+            card.with_animation(
+                "toast-enter",
+                Animation::new(TOAST_ENTER).with_easing(ease_out_quint()),
+                |card, t| card.opacity(t).top(px(8. * (1. - t))),
+            )
+        };
         Some(
             div()
                 .absolute()
@@ -1622,53 +1685,7 @@ impl Browser {
                 .right_0()
                 .flex()
                 .justify_center()
-                .child(
-                    theme::floating(Elevation::Popover)
-                        .id("toast")
-                        .occlude()
-                        .max_w(px(520.))
-                        .mx_4()
-                        .h(px(36.))
-                        .pl_3()
-                        .pr(px(6.))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .when(toast.failed, |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .rounded(px(theme::RADIUS_CARD - 1.))
-                                    .bg(danger().opacity(0.12)),
-                            )
-                        })
-                        .child(
-                            div()
-                                .relative()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(theme::TEXT_BODY))
-                                .text_color(ink)
-                                .child(toast.text.clone()),
-                        )
-                        .when_some(toast.undo, |d, op| {
-                            d.child(
-                                theme::text_button("toast-undo", "Undo", ButtonLook::Ghost)
-                                    .debug_selector(|| "toast-undo".into())
-                                    .relative()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(accent())
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.toast = None;
-                                        this.pane().update(cx, |pane, cx| {
-                                            pane.submit(Request::UndoOf { op }, window, cx)
-                                        });
-                                    })),
-                            )
-                        })
-                        .when(toast.undo.is_none(), |d| d.pr_3()),
-                ),
+                .child(card),
         )
     }
 
@@ -1678,15 +1695,30 @@ impl Browser {
     fn toast(&mut self, text: String, failed: bool, undo: Option<u64>, cx: &mut Context<Self>) {
         let expire = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
-            let _ = this.update(cx, |this, cx| {
-                this.toast = None;
+            let leaves = this.update(cx, |this, cx| {
                 cx.notify();
+                if cx.reduce_motion() {
+                    this.toast = None;
+                    return false;
+                }
+                if let Some(toast) = this.toast.as_mut() {
+                    toast.leaving = true;
+                }
+                true
             });
+            if leaves.unwrap_or(false) {
+                cx.background_executor().timer(TOAST_LEAVE).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.toast = None;
+                    cx.notify();
+                });
+            }
         });
         self.toast = Some(Toast {
             text,
             failed,
             undo,
+            leaving: false,
             _expire: expire,
         });
         cx.notify();
@@ -2103,6 +2135,8 @@ struct Toast {
     /// Offers Undo of this operation, which the owner refuses once
     /// anything else has changed files since.
     undo: Option<u64>,
+    /// On its way out, for `TOAST_LEAVE`.
+    leaving: bool,
     _expire: Task<()>,
 }
 

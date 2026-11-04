@@ -20,6 +20,7 @@ use super::{
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
+use crate::feedback::{self, Sound};
 use crate::file_icons;
 use crate::jobs;
 use crate::onboarding::IndexGate;
@@ -1933,6 +1934,11 @@ impl Pane {
             let undo =
                 (changed && !matches!(request, Request::EmptyTrash { .. })).then_some(outcome.op);
             self.toast(said, false, undo, cx);
+            match &request {
+                Request::Trash { .. } if changed => feedback::sound(Sound::MoveToTrash, cx),
+                Request::EmptyTrash { .. } if changed => feedback::sound(Sound::EmptyTrash, cx),
+                _ => {}
+            }
             if matches!(request, Request::EmptyTrash { .. }) {
                 cx.emit(PaneEvent::VolumesChanged);
             }

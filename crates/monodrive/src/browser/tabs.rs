@@ -4,6 +4,7 @@
 use super::drag::{Spot, Target, offers};
 use super::pane::{Opening, Pane, Stop};
 use super::{Browser, drag_area};
+use crate::feedback::{self, Haptic};
 use crate::preferences::Preferences;
 use crate::theme::{self, accent, content, icon_button, row_icon_button};
 use gpui::{
@@ -479,6 +480,9 @@ impl Browser {
                         )
                         .drag_over::<DraggedTab>(|s, _, _, _| s.bg(content(0.14)))
                         .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                            if dragged.ix != ix {
+                                feedback::haptic(Haptic::Generic, cx);
+                            }
                             this.move_tab(dragged.ix, ix, cx);
                         }))
                 }

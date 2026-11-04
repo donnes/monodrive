@@ -11,6 +11,7 @@
 use super::Browser;
 use super::pane::{Pane, SpringReturn, text_width};
 use super::sidebar::{Drives, Places};
+use crate::feedback::{self, Haptic};
 use crate::file_icons;
 use crate::preferences::Preferences;
 use crate::theme::{self, Elevation, content};
@@ -241,7 +242,7 @@ struct Session {
     target_devices: HashMap<PathBuf, Option<u64>>,
     /// What the frame shows, worked out once per target, keys and answer about
     /// its volume, since a selection can run to thousands.
-    decided: Option<(Target, (bool, bool, bool), Decision)>,
+    decided: Option<Decided>,
     /// What the spring timer below is for, or was: a target that has opened
     /// doesn't open again while the pointer stays on it.
     spring_for: Option<Target>,
@@ -255,6 +256,37 @@ struct Session {
     button_watch: Option<Task<()>>,
     /// The files came from another app, whose drag AppKit ends.
     external: bool,
+}
+
+/// A decision, with the target, ⌥, ⌘ and same volume it was made for.
+type Decided = (Target, (bool, bool, bool), Decision);
+
+/// The tap a new decision earns over the last one: ⌥ or ⌘ turning a move into a
+/// copy or back, or the insertion line in Favorites finding a slot. A volume's
+/// answer arriving can turn a copy into a move too, but no hand did that.
+fn tap(was: Option<&Decided>, now: &Decided) -> Option<Haptic> {
+    let (target, (alt, cmd, _), decision) = now;
+    match (was, decision) {
+        (Some((_, _, Decision::Pin { at: before, .. })), Decision::Pin { at, .. })
+            if before == at =>
+        {
+            None
+        }
+        (_, Decision::Pin { .. }) => Some(Haptic::Alignment),
+        (
+            Some((
+                before,
+                (was_alt, was_cmd, _),
+                Decision::Send {
+                    moving: was_moving, ..
+                },
+            )),
+            Decision::Send { moving, .. },
+        ) if before == target && (was_alt, was_cmd) != (alt, cmd) && was_moving != moving => {
+            Some(Haptic::LevelChange)
+        }
+        _ => None,
+    }
 }
 
 /// What a cancelled drag goes back to.
@@ -345,18 +377,17 @@ impl Drag {
         self.0.borrow().session.as_ref().is_some_and(|s| s.folders)
     }
 
-    /// Before a frame: ends with GPUI's drag, and works out what it would do.
-    fn settle(&self, dragging: bool, keys: Modifiers) {
+    /// Before a frame: ends with GPUI's drag, and works out what it would do,
+    /// with the tap a change in that earns.
+    fn settle(&self, dragging: bool, keys: Modifiers) -> Option<Haptic> {
         let mut state = self.0.borrow_mut();
         if !dragging {
             state.session = None;
         }
-        let Some(session) = state.session.as_mut() else {
-            return;
-        };
+        let session = state.session.as_mut()?;
         let Some(target) = session.target.clone() else {
             session.decided = None;
-            return;
+            return None;
         };
         let same_volume = session.same_volume(&target);
         let pressed = (keys.alt, keys.platform, same_volume);
@@ -365,9 +396,16 @@ impl Drag {
             .as_ref()
             .is_some_and(|(was, held, _)| *was == target && *held == pressed)
         {
-            let decision = decide(&session.sources, &target, keys, same_volume);
-            session.decided = Some((target, pressed, decision));
+            let decided = (
+                target.clone(),
+                pressed,
+                decide(&session.sources, &target, keys, same_volume),
+            );
+            let tap = tap(session.decided.as_ref(), &decided);
+            session.decided = Some(decided);
+            return tap;
         }
+        None
     }
 
     /// Reads what the frame shows a drop would do.
@@ -786,7 +824,9 @@ impl Browser {
     /// the platform replays the last move, and AppKit its dragging updates, so
     /// the pill catches up with a scroll or a closed tab under the pointer.
     pub(super) fn settle_drag(&self, window: &Window, cx: &mut Context<Self>) {
-        self.drag.settle(cx.has_active_drag(), held_keys(window));
+        if let Some(tap) = self.drag.settle(cx.has_active_drag(), held_keys(window)) {
+            feedback::haptic(tap, cx);
+        }
         self.read_volumes(cx);
         self.watch_button(window, cx);
         self.time_spring(window, cx);
@@ -877,6 +917,7 @@ impl Browser {
             Spot::Tab(ix) => {
                 if *ix != self.active && *ix < self.tabs.len() {
                     self.show_tab(*ix, window, cx);
+                    feedback::haptic(Haptic::LevelChange, cx);
                 }
                 return;
             }
@@ -892,6 +933,7 @@ impl Browser {
         };
         self.drag.remember_pane(&pane, cx);
         pane.update(cx, |pane, cx| pane.navigate(path.clone(), cx));
+        feedback::haptic(Haptic::LevelChange, cx);
     }
 
     /// Esc: the tab and the panes as they were, Back history and all.
@@ -988,10 +1030,15 @@ impl Browser {
                 into,
                 moving,
                 ..
-            }) => self
-                .pane()
-                .update(cx, |pane, cx| pane.send(paths, into, moving, window, cx)),
-            Some(Decision::Pin { paths, at }) => self.pin_folders(paths, at, cx),
+            }) => {
+                feedback::haptic(Haptic::Generic, cx);
+                self.pane()
+                    .update(cx, |pane, cx| pane.send(paths, into, moving, window, cx));
+            }
+            Some(Decision::Pin { paths, at }) => {
+                feedback::haptic(Haptic::Generic, cx);
+                self.pin_folders(paths, at, cx);
+            }
             Some(Decision::Nothing(_)) | None => {}
         }
     }
@@ -1214,6 +1261,39 @@ mod tests {
             true,
         );
         assert_eq!(decided.says(), "Move g to a");
+    }
+
+    #[test]
+    fn a_tap_comes_from_the_keys_flipping_a_drop_or_a_new_slot_not_from_the_disk() {
+        let sources = paths(&["/a/f"]);
+        let at = |target: Target, alt: bool, same_volume: bool| -> Decided {
+            let decision = decide(&sources, &target, keys(alt, false), same_volume);
+            (target, (alt, false, same_volume), decision)
+        };
+        let docs = || folder("/a/docs", "docs");
+        let moving = at(docs(), false, true);
+        // ⌥ turns the move into a copy, and letting go turns it back.
+        let copying = at(docs(), true, true);
+        assert_eq!(tap(Some(&moving), &copying), Some(Haptic::LevelChange));
+        assert_eq!(tap(Some(&copying), &moving), Some(Haptic::LevelChange));
+        // The volume's answer turns a copy into a move with no key pressed.
+        let unknown = at(docs(), false, false);
+        assert_eq!(tap(Some(&unknown), &moving), None);
+        // A new folder under the pointer is no flip, whatever it does.
+        let other = at(folder("/b", "b"), true, true);
+        assert_eq!(tap(Some(&moving), &other), None);
+        // The insertion line taps where it shows, once.
+        let pin = |at: usize| {
+            (
+                Target::Pin(at),
+                (false, false, false),
+                decide(&sources, &Target::Pin(at), keys(false, false), false),
+            )
+        };
+        assert_eq!(tap(None, &pin(1)), Some(Haptic::Alignment));
+        assert_eq!(tap(Some(&moving), &pin(1)), Some(Haptic::Alignment));
+        assert_eq!(tap(Some(&pin(1)), &pin(2)), Some(Haptic::Alignment));
+        assert_eq!(tap(Some(&pin(2)), &pin(2)), None);
     }
 
     #[gpui::test]

@@ -15,6 +15,7 @@ use super::{
 };
 use crate::assets::NIGHT_SKY;
 use crate::commands::{self, Scope};
+use crate::feedback::{self, Haptic};
 use crate::motion::Slide;
 use crate::preferences::{Preferences, SIDEBAR_WIDTHS};
 use crate::theme::{
@@ -909,6 +910,9 @@ impl Browser {
             .aria_label(label)
             .when(editing, |d| {
                 d.on_drop(cx.listener(move |this, dragged: &DraggedFavorite, _, cx| {
+                    if dragged.ix != fav {
+                        feedback::haptic(Haptic::Generic, cx);
+                    }
                     this.move_favorite(dragged.ix, fav, cx);
                 }))
             })
