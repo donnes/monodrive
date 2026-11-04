@@ -822,7 +822,7 @@ impl Pane {
                     Ok((root, children, watch, missing, verified, matches)) => {
                         if this.showing_folder() {
                             let listed = root.iter().chain(children.values().flatten());
-                            this.ask_downloads(listed, true, cx);
+                            this.ask_downloads(listed, cx);
                         }
                         this.root = root;
                         this.matches = matches;
@@ -880,13 +880,12 @@ impl Pane {
     }
 
     /// Asks macOS, off the UI thread, which folders in `listed` hold
-    /// something not downloaded, and badges them when it answers. A whole
-    /// listing's answer replaces the last one; a folder opened in place adds
-    /// to it.
+    /// something not downloaded, and badges them when it answers. An answer
+    /// replaces only what it was asked, so a folder opened in place while a
+    /// listing's answer is on its way keeps its own.
     fn ask_downloads<'a>(
         &mut self,
         listed: impl IntoIterator<Item = &'a Entry>,
-        whole: bool,
         cx: &mut Context<Self>,
     ) {
         let folders: Vec<Entry> = listed
@@ -894,17 +893,17 @@ impl Pane {
             .filter(|entry| entry.kind == Kind::Dir)
             .cloned()
             .collect();
-        let answer = cx
-            .background_executor()
-            .spawn(async move { cloud::partly_downloaded(&folders) });
+        let answer = cx.background_executor().spawn(async move {
+            let partly = cloud::partly_downloaded(&folders);
+            (folders, partly)
+        });
         self.asking.push(cx.spawn(async move |this, cx| {
-            let partly = answer.await;
+            let (asked, partly) = answer.await;
             let _ = this.update(cx, |this, cx| {
-                if whole {
-                    this.partly_downloaded = partly;
-                } else {
-                    this.partly_downloaded.extend(partly);
+                for folder in &asked {
+                    this.partly_downloaded.remove(&folder.path);
                 }
+                this.partly_downloaded.extend(partly);
                 cx.notify();
             });
         }));
@@ -1062,7 +1061,7 @@ impl Pane {
             let (list, watched) = list.await;
             let _ = this.update(cx, |this, cx| {
                 if this.expanding.remove(&path).is_some() && this.expanded.contains(&path) {
-                    this.ask_downloads(&list, false, cx);
+                    this.ask_downloads(&list, cx);
                     // Watched from now on, not just from the next listing.
                     this.watch.folders.insert(path.clone(), watched);
                     this.children.insert(path, list);
