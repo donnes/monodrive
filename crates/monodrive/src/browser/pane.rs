@@ -2047,6 +2047,10 @@ impl Pane {
     /// ↩: edits the selected item's name in place, or with several selected
     /// opens the bar. From the list while it's open, the keys go back to it.
     pub(super) fn rename_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Return applies a crop in the preview, as nothing there is renamed.
+        if let Some(view) = self.preview.clone().filter(|view| view.read(cx).cropping()) {
+            return view.update(cx, |view, cx| view.apply_crop(window, cx));
+        }
         if self.batch.is_some() {
             return self.take_keys(window, cx);
         }
@@ -3751,8 +3755,11 @@ impl Pane {
             .child(
                 self.organize_page(cx)
                     .or_else(|| {
+                        // Until it has something to show, so it never
+                        // appears in pieces.
                         self.preview
                             .clone()
+                            .filter(|view| view.read(cx).ready())
                             .map(gpui::IntoElement::into_any_element)
                     })
                     .unwrap_or(list),

@@ -124,7 +124,7 @@ impl<V: Message + AsRef<NSView>> Drop for Host<V> {
     }
 }
 
-fn content_view(window: &Window) -> Option<Retained<NSView>> {
+pub(crate) fn content_view(window: &Window) -> Option<Retained<NSView>> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
     let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         return None;

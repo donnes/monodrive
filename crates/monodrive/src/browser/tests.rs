@@ -727,6 +727,37 @@ fn the_text_card_keeps_written_words_until_cancelled(cx: &mut TestAppContext) {
     release(owned, cx);
 }
 
+/// The crop starts as the whole picture, its edges drag in, and Return, which
+/// would otherwise rename the file, applies it.
+#[gpui::test]
+fn the_crop_starts_whole_and_its_edges_drag_in(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    image::RgbImage::from_pixel(200, 100, image::Rgb([255, 255, 255]))
+        .save(project.join("zz.png"))
+        .unwrap();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down space e");
+    click(cx, "tool-crop");
+    assert!(drawn(cx, "edit-crop-apply"));
+    // The picture is centered and not enlarged, so its right edge is 100 points
+    // right of the middle.
+    let center = cx.debug_bounds("preview-edit-surface").unwrap().center();
+    let edge = center + gpui::point(px(100.), px(0.));
+    let dragged_to = center + gpui::point(px(50.), px(0.));
+    cx.simulate_mouse_down(edge, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(dragged_to, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(dragged_to, MouseButton::Left, with(""));
+    press(cx, "enter");
+    assert!(!drawn(cx, "edit-crop-apply"));
+    assert_eq!(editing(&browser, cx), None, "Return renamed nothing");
+    click(cx, "edit-save");
+    cx.run_until_parked();
+    let saved = image::open(project.join("zz edited.png")).unwrap();
+    assert_eq!((saved.width(), saved.height()), (150, 100));
+    release(owned, cx);
+}
+
 #[gpui::test]
 fn a_save_that_fails_partway_keeps_the_edit(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
