@@ -50,11 +50,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SEARCH_LIMIT: usize = 200;
 /// How long the disk must settle before a changed folder lists again.
 pub(super) const REFRESH_DELAY: Duration = Duration::from_millis(150);
+/// How long a press on the listing rests before moving draws a rectangle.
+/// Moving sooner is a click that slipped, so it selects nothing.
+pub(super) const MARQUEE_HOLD: Duration = Duration::from_millis(200);
 /// What stands for the path levels that don't fit.
 const COLLAPSED: &str = "…";
 /// A crumb's side padding.
@@ -1417,7 +1420,7 @@ impl Pane {
     }
 
     /// Selects what the rectangle covers, from where it began to the
-    /// pointer, once the pointer has travelled a few points.
+    /// pointer, once the pointer has travelled a few points after the hold.
     fn sweep_marquee(&mut self, cx: &mut Context<Self>) {
         let Some(pointer) = self.marquee.as_ref().map(|m| m.pointer) else {
             return;
@@ -1428,9 +1431,13 @@ impl Pane {
         };
         marquee.end = at;
         let travel = at - marquee.start;
-        if !marquee.dragging && travel.x.abs().max(travel.y.abs()) > px(3.) {
-            marquee.dragging = true;
-            self.selection.begin_sweep(marquee.additive);
+        if !marquee.dragging && !marquee.slipped && travel.x.abs().max(travel.y.abs()) > px(3.) {
+            if cx.background_executor().now() - marquee.pressed < MARQUEE_HOLD {
+                marquee.slipped = true;
+            } else {
+                marquee.dragging = true;
+                self.selection.begin_sweep(marquee.additive);
+            }
         }
         if !marquee.dragging {
             return;
@@ -3121,8 +3128,12 @@ pub(super) struct Marquee {
     pointer: Point<Pixels>,
     /// ⌘ or ⇧ was held: the drag adds to what's selected.
     additive: bool,
-    /// Past a few points of travel; a click until then.
+    /// When the button went down, for `MARQUEE_HOLD`.
+    pressed: Instant,
+    /// Past a few points of travel after the hold; a click until then.
     dragging: bool,
+    /// Moved before the hold was up: a click, whatever follows.
+    slipped: bool,
     /// An auto-scroll step waits on the next frame.
     scrolling: bool,
 }
@@ -3739,7 +3750,9 @@ impl Pane {
                         end: at,
                         pointer: event.position,
                         additive: event.modifiers.platform || event.modifiers.shift,
+                        pressed: cx.background_executor().now(),
                         dragging: false,
+                        slipped: false,
                         scrolling: false,
                     });
                     cx.notify();
