@@ -33,6 +33,7 @@ icons!(
     "chevron-right",
     "clock",
     "cloud",
+    "cloud-download",
     "copy",
     "download",
     "eject",

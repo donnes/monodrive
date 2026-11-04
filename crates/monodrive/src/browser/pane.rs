@@ -2601,11 +2601,14 @@ impl Pane {
                         let rename = self.rename_field(&entry.path, cell - 8., cx);
                         let grabs = !missing && rename.is_none();
                         let badge = self.in_cloud(entry).then(|| {
-                            cloud_badge(match (selected, active) {
-                                (true, true) => on_accent(),
-                                (true, false) => content(1.),
-                                (false, _) => content(0.55),
-                            })
+                            cloud_badge(
+                                GRID_BADGE,
+                                match (selected, active) {
+                                    (true, true) => on_accent(),
+                                    (true, false) => content(1.),
+                                    (false, _) => content(0.55),
+                                },
+                            )
                         });
                         div()
                             .id(ix)
@@ -2774,48 +2777,65 @@ impl Pane {
                                         .gap_2()
                                         .when(grabs && !selected, |d| Self::grab(d, ix, cx))
                                         .child(file_icons::icon(entry, icon_size, window, cx))
-                                        .child(match rename {
-                                            // The name stays put; its outline grows around it.
-                                            Some(field) => field.ml(px(-7.)).into_any_element(),
-                                            None => {
-                                                let name = new
-                                                    .as_ref()
-                                                    .map_or(&entry.name, |new| &new.name);
-                                                div()
-                                                    .min_w_0()
-                                                    .max_w(px(360.))
-                                                    .overflow_hidden()
-                                                    .whitespace_nowrap()
-                                                    .text_overflow(name_overflow(name))
-                                                    .map(|d| match &new {
-                                                        Some(new) if new.problem => {
-                                                            d.text_color(danger())
-                                                        }
-                                                        Some(new) if new.renamed => {
-                                                            d.font_weight(FontWeight::MEDIUM)
-                                                        }
-                                                        _ => d,
-                                                    })
-                                                    .child(name.clone())
-                                                    .map(|d| match selected && new.is_some() {
-                                                        true => self.suggested_name(
-                                                            d,
-                                                            &entry.path,
-                                                            name,
-                                                            cx,
-                                                        ),
-                                                        false => d,
-                                                    })
-                                                    .into_any_element()
-                                            }
-                                        })
-                                        .when(self.in_cloud(entry), |d| {
-                                            d.child(cloud_badge(if selected {
-                                                selected_ink
-                                            } else {
-                                                content(0.55)
-                                            }))
-                                        }),
+                                        // The badge sits closer to the name than the
+                                        // name to its icon.
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(match rename {
+                                                    // The name stays put; its outline grows around it.
+                                                    Some(field) => {
+                                                        field.ml(px(-7.)).into_any_element()
+                                                    }
+                                                    None => {
+                                                        let name = new
+                                                            .as_ref()
+                                                            .map_or(&entry.name, |new| &new.name);
+                                                        div()
+                                                            .min_w_0()
+                                                            .max_w(px(360.))
+                                                            .overflow_hidden()
+                                                            .whitespace_nowrap()
+                                                            .text_overflow(name_overflow(name))
+                                                            .map(|d| match &new {
+                                                                Some(new) if new.problem => {
+                                                                    d.text_color(danger())
+                                                                }
+                                                                Some(new) if new.renamed => d
+                                                                    .font_weight(
+                                                                        FontWeight::MEDIUM,
+                                                                    ),
+                                                                _ => d,
+                                                            })
+                                                            .child(name.clone())
+                                                            .map(|d| {
+                                                                match selected && new.is_some() {
+                                                                    true => self.suggested_name(
+                                                                        d,
+                                                                        &entry.path,
+                                                                        name,
+                                                                        cx,
+                                                                    ),
+                                                                    false => d,
+                                                                }
+                                                            })
+                                                            .into_any_element()
+                                                    }
+                                                })
+                                                .when(self.in_cloud(entry), |d| {
+                                                    d.child(cloud_badge(
+                                                        LIST_BADGE,
+                                                        if selected {
+                                                            selected_ink
+                                                        } else {
+                                                            content(0.55)
+                                                        },
+                                                    ))
+                                                }),
+                                        ),
                                 )
                                 .children(new.and_then(|new| {
                                     let ink = if new.problem { danger() } else { content(0.65) };
@@ -3026,36 +3046,44 @@ pub(super) fn grid_name(
             None => vec![line(name)],
         };
     };
-    // As in Finder, the badge ends the name's last line, or takes a line of
-    // its own when a one-line name leaves no room for it.
-    let with_badge = |text: Option<gpui::Div>| {
+    // The badge always ends the name's last line. A one-line name with no
+    // room for it breaks before its extension, so no part of the name hides.
+    let with_badge = |text: gpui::Div| {
         div()
             .flex()
             .items_center()
             .justify_center()
             .gap_1()
-            .children(text.map(|text| text.min_w_0()))
+            .child(text.min_w_0())
             .child(badge)
     };
-    if wraps_at(width - px(CLOUD_BADGE + 4.)).is_none() {
-        return vec![with_badge(Some(line(name)))];
+    let room = width - px(GRID_BADGE + 4.);
+    if wraps_at(room).is_none() {
+        return vec![with_badge(line(name))];
     }
-    match wraps_at(width) {
+    let ix = wraps_at(width).or_else(|| {
+        kept_extension(name)
+            .map(|extension| name.len() - extension.len())
+            .or_else(|| wraps_at(room))
+    });
+    match ix {
         Some(ix) => vec![
             line(name[..ix].trim_end()),
-            with_badge(Some(line(&name[ix..]).text_ellipsis_middle())),
+            with_badge(line(&name[ix..]).text_ellipsis_middle()),
         ],
-        None => vec![line(name), with_badge(None)],
+        None => vec![with_badge(line(name).text_ellipsis_middle())],
     }
 }
 
-/// How wide the cloud badge is.
-const CLOUD_BADGE: f32 = 12.;
+/// How wide the cloud badge is beside a grid label, and beside a list row's
+/// name.
+const GRID_BADGE: f32 = 12.;
+const LIST_BADGE: f32 = 14.;
 
 /// The cloud after the name of an item that isn't all downloaded, as Finder
 /// shows it.
-fn cloud_badge(ink: gpui::Hsla) -> gpui::Svg {
-    icon("cloud", CLOUD_BADGE).text_color(ink)
+fn cloud_badge(side: f32, ink: gpui::Hsla) -> gpui::Svg {
+    icon("cloud-download", side).text_color(ink)
 }
 
 /// The extension a cut name still shows. Past this many characters, or with
