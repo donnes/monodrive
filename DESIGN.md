@@ -178,7 +178,7 @@ Nothing moves continuously: it pegs the GPU on high-refresh displays. A sheet ma
 
 ### Haptics and sounds
 
-`feedback.rs` taps the trackpad and plays Finder's sounds. A Force Touch trackpad taps only under a finger, so haptics go with the pointer: a folder opening under a drag and ⌥ or ⌘ flipping a drop between move and copy are a level change, the insertion line finding a slot in Favorites is an alignment, and a drop landing is generic. Keys never tap. Moving to the Trash and emptying it play Finder's sounds as interface sounds, which macOS silences with "Play user interface sound effects" off. An agent's changes stay silent.
+`feedback.rs` taps the trackpad and plays Finder's sounds. A Force Touch trackpad taps only under a finger, so haptics go with the pointer: a folder opening under a drag and ⌥ or ⌘ flipping a drop between move and copy are a level change, the insertion line finding a slot in Favorites is an alignment, and a drop landing is generic. Nothing taps outside a drag: a shortcut is pressed with no finger on the trackpad. Moving to the Trash and emptying it play Finder's sounds as interface sounds, which macOS silences with "Play user interface sound effects" off. An agent's changes stay silent.
 
 ### Copy
 
