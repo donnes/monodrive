@@ -285,6 +285,7 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     dispatch(&mut cx, window, &Rename)?;
     type_text(&mut cx, window, "Renamed")?;
     dispatch(&mut cx, window, &CommitRename)?;
+    settle();
     save(&mut cx, window, out, "toast")?;
     dispatch(&mut cx, window, &Undo)?;
     dispatch(&mut cx, window, &EmptyTrash)?;
@@ -885,7 +886,7 @@ fn shoot_search(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> g
 /// Lets the Settings sheet finish fading in, which goes by the clock.
 #[expect(
     clippy::disallowed_methods,
-    reason = "A picture of the sheet, not a test; the fade has no event to wait on."
+    reason = "A picture of a sheet or a toast, not a test; the entrance has no event to wait on."
 )]
 fn settle() {
     std::thread::sleep(std::time::Duration::from_millis(300));

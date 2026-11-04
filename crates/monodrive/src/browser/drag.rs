@@ -13,10 +13,11 @@ use super::pane::{Pane, SpringReturn, text_width};
 use super::sidebar::{Drives, Places};
 use crate::feedback::{self, Haptic};
 use crate::file_icons;
+use crate::motion;
 use crate::preferences::Preferences;
 use crate::theme::{self, Elevation, content};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Context, Div, DragMoveEvent, Entity, EntityId,
+    AnimationExt, AnyElement, App, Context, Div, DragMoveEvent, Entity, EntityId,
     ExternalDragPayload, ExternalPaths, FileDragPaths, FontWeight, Modifiers, MouseButton,
     MouseUpEvent, Pixels, PlatformInput, Point, Render, Stateful, Task, Window, div, prelude::*,
     px,
@@ -33,8 +34,6 @@ use std::time::Duration;
 
 /// How long a drag rests on a folder before it opens, the pulse included.
 pub(super) const SPRING_DELAY: Duration = Duration::from_millis(1000);
-/// The outline's one pulse, just before it opens.
-const SPRING_PULSE: Duration = Duration::from_millis(150);
 /// How often a drag checks that the button is still down.
 const BUTTON_CHECK: Duration = Duration::from_millis(50);
 /// The drag image's icon.
@@ -485,11 +484,9 @@ impl Drag {
             return outline.into_any_element();
         }
         outline
-            .with_animation(
-                "spring-pulse",
-                Animation::new(SPRING_PULSE),
-                |outline, t| outline.opacity(0.3 + 0.7 * (2. * t - 1.).abs()),
-            )
+            .with_animation("spring-pulse", motion::pulse(), |outline, t| {
+                outline.opacity(0.3 + 0.7 * (2. * t - 1.).abs())
+            })
             .into_any_element()
     }
 
@@ -873,7 +870,7 @@ impl Browser {
             .map(|places| places.drives.clone());
         let timer = cx.spawn_in(window, async move |this, cx| {
             if waits {
-                let rest = SPRING_DELAY - SPRING_PULSE;
+                let rest = SPRING_DELAY - motion::PULSE;
                 cx.background_executor().timer(rest).await;
             }
             let Target::Folder { path, .. } = &target else {
@@ -890,7 +887,7 @@ impl Browser {
             if waits {
                 drag.set_pulsing(true);
                 let _ = this.update(cx, |_, cx| cx.notify());
-                cx.background_executor().timer(SPRING_PULSE).await;
+                cx.background_executor().timer(motion::PULSE).await;
                 drag.set_pulsing(false);
             }
             let _ = this.update_in(cx, |this, window, cx| {

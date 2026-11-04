@@ -36,7 +36,7 @@ use crate::empty_trash::{self, EmptyTrashView};
 use crate::goto::{GotoEvent, GotoView};
 use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
-use crate::motion::Slide;
+use crate::motion::{self, Slide};
 use crate::onboarding::{self, IndexGate, Step};
 use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
@@ -49,10 +49,10 @@ use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
 use crate::traffic_lights;
 use crate::updates;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity,
-    FocusHandle, Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window,
-    WindowAppearance, WindowControlArea, actions, canvas, div, ease_out_quint, prelude::*, px,
+    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
+    FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window, WindowAppearance, WindowControlArea,
+    actions, canvas, div, prelude::*, px,
 };
 use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Request};
@@ -256,9 +256,6 @@ const FRAME_SETTLE: Duration = Duration::from_millis(300);
 const INDEX_POLL: Duration = Duration::from_millis(500);
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
-/// A toast rises into place, and leaves faster than it came.
-const TOAST_ENTER: Duration = Duration::from_millis(200);
-const TOAST_LEAVE: Duration = Duration::from_millis(150);
 
 pub struct Browser {
     /// Keeps the browser's keys working wherever focus is.
@@ -1665,17 +1662,9 @@ impl Browser {
         // The entrance plays when a toast appears, not when a new one takes
         // the place of one on screen. Both run once and skip with Reduce Motion.
         let card = if toast.leaving {
-            card.with_animation(
-                "toast-leave",
-                Animation::new(TOAST_LEAVE).with_easing(ease_out_quint()),
-                |card, t| card.opacity(1. - t).top(px(4. * t)),
-            )
+            motion::sink_out(card, "toast-leave")
         } else {
-            card.with_animation(
-                "toast-enter",
-                Animation::new(TOAST_ENTER).with_easing(ease_out_quint()),
-                |card, t| card.opacity(t).top(px(8. * (1. - t))),
-            )
+            motion::rise_in(card, "toast-enter")
         };
         Some(
             div()
@@ -1707,7 +1696,7 @@ impl Browser {
                 true
             });
             if leaves.unwrap_or(false) {
-                cx.background_executor().timer(TOAST_LEAVE).await;
+                cx.background_executor().timer(motion::EXIT).await;
                 let _ = this.update(cx, |this, cx| {
                     this.toast = None;
                     cx.notify();
@@ -2135,7 +2124,7 @@ struct Toast {
     /// Offers Undo of this operation, which the owner refuses once
     /// anything else has changed files since.
     undo: Option<u64>,
-    /// On its way out, for `TOAST_LEAVE`.
+    /// On its way out, for `motion::EXIT`.
     leaving: bool,
     _expire: Task<()>,
 }

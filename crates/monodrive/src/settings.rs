@@ -7,6 +7,7 @@ use crate::background::{self, Backdrop, Effect, Look, Scope};
 use crate::browser::CheckForUpdates;
 use crate::commands::{self, Group};
 use crate::frame;
+use crate::motion;
 use crate::native::native;
 use crate::palettes::{self, PALETTES};
 use crate::preferences::{
@@ -18,7 +19,7 @@ use crate::theme::{
     on_accent, text_button,
 };
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity,
+    Anchor, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity,
     EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, PromptLevel, Role, ScrollHandle,
     SharedString, Stateful, Subscription, Toggled, Window, actions, anchored, canvas, deferred,
@@ -30,7 +31,6 @@ use monodrive_core::updates::Channel;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
 
 actions!(settings, [Close, FocusNext, FocusPrevious]);
 
@@ -2213,12 +2213,8 @@ impl Render for SettingsView {
                                     ),
                             ),
                     ),
-            )
-            .with_animation(
-                "settings-enter",
-                Animation::new(Duration::from_millis(200)).with_easing(ease_out),
-                |card, t| card.opacity(t).top(px(6. * (1. - t))),
             );
+        let card = motion::rise_in(card, "settings-enter");
         div()
             .id("settings-overlay")
             // A click anywhere ends a recording, so it can't be left running.
@@ -2266,16 +2262,10 @@ impl Render for SettingsView {
                 cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
             )
             .child(card)
-            .with_animation(
-                "settings-scrim",
-                Animation::new(Duration::from_millis(200)).with_easing(ease_out),
-                |scrim, t| scrim.bg(theme::scrim(t)),
-            )
+            .with_animation("settings-scrim", motion::entrance(), |scrim, t| {
+                scrim.bg(theme::scrim(t))
+            })
     }
-}
-
-fn ease_out(t: f32) -> f32 {
-    1. - (1. - t).powi(3)
 }
 
 /// The value at `offset` points along a track `width` wide. The knob's
