@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
-# The checks CI runs. Run before pushing.
+# The checks CI runs. Run before pushing. CI runs each step by name, so the
+# Actions UI lists them: scripts/check design|format|clippy|test.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-scripts/check-design
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --locked -- --test-threads=2
+run() {
+  case "$1" in
+    design) scripts/check-design ;;
+    format) cargo fmt --all --check ;;
+    clippy) cargo clippy --workspace --all-targets --all-features --locked -- -D warnings ;;
+    test) cargo test --workspace --locked -- --test-threads=2 ;;
+    *)
+      echo "usage: scripts/check [design|format|clippy|test]..." >&2
+      exit 2
+      ;;
+  esac
+}
+
+steps=("$@")
+if [[ ${#steps[@]} -eq 0 ]]; then
+  steps=(design format clippy test)
+fi
+for step in "${steps[@]}"; do
+  run "$step"
+done
