@@ -39,6 +39,7 @@ use gpui::{
     ScrollWheelEvent, Subscription, Task, TextOverflow, UniformListScrollHandle, Window, canvas,
     div, point, prelude::*, px, uniform_list,
 };
+use monodrive_core::cloud;
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::Index;
 use monodrive_core::info;
@@ -283,6 +284,11 @@ pub struct Pane {
     pub(super) trash_header: trash::TrashHeader,
     /// Rows in Recents whose files are gone.
     pub(super) missing: HashSet<PathBuf>,
+    /// Folders on screen that hold something not downloaded, as macOS last
+    /// said. They get the cloud badge a placeholder gets from its flag.
+    partly_downloaded: HashSet<PathBuf>,
+    /// Asking macOS which folders those are. A new listing drops these.
+    asking: Vec<Task<()>>,
     backdrop: Entity<Backdrop>,
     pub(super) chrome: Chrome,
     /// The window's drag of files.
@@ -386,6 +392,8 @@ impl Pane {
             lone_folder: None,
             trash_header: trash::TrashHeader::default(),
             missing: HashSet::new(),
+            partly_downloaded: HashSet::new(),
+            asking: Vec::new(),
             backdrop: cx.new(|_| Backdrop::default()),
             chrome: Chrome::default(),
             drag,
@@ -680,6 +688,10 @@ impl Pane {
             return;
         }
         self.remember = Task::ready(());
+        self.asking.clear();
+        if !self.showing_folder() {
+            self.partly_downloaded.clear();
+        }
         let mut folder = self.folder().to_path_buf();
         let query = self.query.clone();
         let search = self.current_search();
@@ -808,6 +820,10 @@ impl Pane {
                 this.listing = false;
                 match result {
                     Ok((root, children, watch, missing, verified, matches)) => {
+                        if this.showing_folder() {
+                            let listed = root.iter().chain(children.values().flatten());
+                            this.ask_downloads(listed, cx);
+                        }
                         this.root = root;
                         this.matches = matches;
                         this.children = children;
@@ -861,6 +877,43 @@ impl Pane {
                 cx.notify();
             });
         });
+    }
+
+    /// Asks macOS, off the UI thread, which folders in `listed` hold
+    /// something not downloaded, and badges them when it answers. An answer
+    /// replaces only what it was asked, so a folder opened in place while a
+    /// listing's answer is on its way keeps its own.
+    fn ask_downloads<'a>(
+        &mut self,
+        listed: impl IntoIterator<Item = &'a Entry>,
+        cx: &mut Context<Self>,
+    ) {
+        let folders: Vec<Entry> = listed
+            .into_iter()
+            .filter(|entry| entry.kind == Kind::Dir)
+            .cloned()
+            .collect();
+        let answer = cx.background_executor().spawn(async move {
+            let partly = cloud::partly_downloaded(&folders);
+            (folders, partly)
+        });
+        self.asking.push(cx.spawn(async move |this, cx| {
+            let (asked, partly) = answer.await;
+            let _ = this.update(cx, |this, cx| {
+                for folder in &asked {
+                    this.partly_downloaded.remove(&folder.path);
+                }
+                this.partly_downloaded.extend(partly);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Whether `entry` gets the cloud badge: it, or something in it, isn't
+    /// downloaded.
+    fn in_cloud(&self, entry: &Entry) -> bool {
+        entry.availability == cloud::Availability::Placeholder
+            || self.partly_downloaded.contains(&entry.path)
     }
 
     /// The layout on screen: a content search's lines and a batch's new
@@ -1008,6 +1061,7 @@ impl Pane {
             let (list, watched) = list.await;
             let _ = this.update(cx, |this, cx| {
                 if this.expanding.remove(&path).is_some() && this.expanded.contains(&path) {
+                    this.ask_downloads(&list, cx);
                     // Watched from now on, not just from the next listing.
                     this.watch.folders.insert(path.clone(), watched);
                     this.children.insert(path, list);
@@ -2546,6 +2600,13 @@ impl Pane {
                         };
                         let rename = self.rename_field(&entry.path, cell - 8., cx);
                         let grabs = !missing && rename.is_none();
+                        let badge = self.in_cloud(entry).then(|| {
+                            cloud_badge(match (selected, active) {
+                                (true, true) => on_accent(),
+                                (true, false) => content(1.),
+                                (false, _) => content(0.55),
+                            })
+                        });
                         div()
                             .id(ix)
                             .role(gpui::Role::ListItem)
@@ -2595,6 +2656,7 @@ impl Pane {
                                         &entry.name,
                                         px(cell - 18.),
                                         px(label),
+                                        badge,
                                         window,
                                     ))
                                     .into_any_element(),
@@ -2746,6 +2808,13 @@ impl Pane {
                                                     })
                                                     .into_any_element()
                                             }
+                                        })
+                                        .when(self.in_cloud(entry), |d| {
+                                            d.child(cloud_badge(if selected {
+                                                selected_ink
+                                            } else {
+                                                content(0.55)
+                                            }))
                                         }),
                                 )
                                 .children(new.and_then(|new| {
@@ -2924,6 +2993,7 @@ pub(super) fn grid_name(
     name: &str,
     width: gpui::Pixels,
     size: gpui::Pixels,
+    badge: Option<gpui::Svg>,
     window: &Window,
 ) -> Vec<gpui::Div> {
     let line = |text: &str| {
@@ -2935,20 +3005,57 @@ pub(super) fn grid_name(
     let mut wrapper = window
         .text_system()
         .line_wrapper(gpui::font(theme::UI_FONT), size);
-    let wrap = wrapper
-        .wrap_line(
-            &[gpui::LineFragment::text(name)],
-            width,
-            gpui::IndentAdjustment::NoIndent,
-        )
-        .next();
-    match wrap {
-        Some(boundary) if boundary.ix < name.len() => vec![
-            line(name[..boundary.ix].trim_end()),
-            line(&name[boundary.ix..]).text_ellipsis_middle(),
-        ],
-        _ => vec![line(name)],
+    // Where the name's first line ends, if it needs a second.
+    let mut wraps_at = |width| {
+        wrapper
+            .wrap_line(
+                &[gpui::LineFragment::text(name)],
+                width,
+                gpui::IndentAdjustment::NoIndent,
+            )
+            .next()
+            .map(|boundary| boundary.ix)
+            .filter(|ix| *ix < name.len())
+    };
+    let Some(badge) = badge else {
+        return match wraps_at(width) {
+            Some(ix) => vec![
+                line(name[..ix].trim_end()),
+                line(&name[ix..]).text_ellipsis_middle(),
+            ],
+            None => vec![line(name)],
+        };
+    };
+    // As in Finder, the badge ends the name's last line, or takes a line of
+    // its own when a one-line name leaves no room for it.
+    let with_badge = |text: Option<gpui::Div>| {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .children(text.map(|text| text.min_w_0()))
+            .child(badge)
+    };
+    if wraps_at(width - px(CLOUD_BADGE + 4.)).is_none() {
+        return vec![with_badge(Some(line(name)))];
     }
+    match wraps_at(width) {
+        Some(ix) => vec![
+            line(name[..ix].trim_end()),
+            with_badge(Some(line(&name[ix..]).text_ellipsis_middle())),
+        ],
+        None => vec![line(name), with_badge(None)],
+    }
+}
+
+/// How wide the cloud badge is.
+const CLOUD_BADGE: f32 = 12.;
+
+/// The cloud after the name of an item that isn't all downloaded, as Finder
+/// shows it.
+fn cloud_badge(ink: gpui::Hsla) -> gpui::Svg {
+    icon("cloud", CLOUD_BADGE).text_color(ink)
 }
 
 /// The extension a cut name still shows. Past this many characters, or with

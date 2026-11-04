@@ -1022,6 +1022,7 @@ impl Browser {
             let state = match info.availability {
                 Availability::Placeholder => "In the cloud",
                 Availability::Downloading => "Downloading…",
+                _ if info.partly_downloaded => "Partly in the cloud",
                 _ => "On this Mac",
             };
             rows.push(fact("Availability", state.to_string()));

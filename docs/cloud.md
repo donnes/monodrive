@@ -10,6 +10,12 @@ iCloud Drive and File Provider apps such as Dropbox, Google Drive and OneDrive k
 
 `cloud::Availability` comes from the `st_flags` of the `lstat` a listing already makes, so it adds no system call. A listing says `Local` or `Placeholder`. Only `info` asks Foundation whether a placeholder is `Downloading`, whether the item is in the cloud at all, and why its last download failed. Those questions go to the provider's daemon, which takes about a millisecond an item. A search result from the index is `Unknown`, because fsearch keeps no flags.
 
+## Folders that aren't all downloaded
+
+Finder badges a folder when anything under it, at any depth, is a placeholder, even though the folder itself is on disk. fileproviderd keeps that answer as each item's `isRecursivelyDownloaded`, and Foundation has no key for it: `NSURLUbiquitousItemDownloadingStatusKey` only says whether the folder itself is downloaded. `cloud::fully_downloaded` asks the private `FPItemManager`, as Finder does, about 1.5 ms an item.
+
+We chose the private class over keeping our own copy of that answer, which would mean walking every cloud folder and watching it for downloads and evictions. A macOS without the class answers `None`, so folders lose their badge and nothing else changes; files keep theirs, since it comes from their flag. `cloud::partly_downloaded` asks only about the folders in a listing whose parent is in a File Provider domain, so listing a folder elsewhere costs one quick `None`. The pane asks after a listing lands and badges folders when the answer arrives, and asks again whenever it lists the folder again. `list_dir`, `stat` and the inspector use the same answer.
+
 ## What never downloads
 
 - Listing a folder never reads its files. Opening a placeholder folder lists it, as Finder does, because there's no other way to show what it holds.

@@ -5,12 +5,18 @@
 //! Nothing here reads contents; downloading and removing a download ask
 //! macOS through NSFileManager. docs/cloud.md records what reads what.
 
+use crate::entries::{Entry, Kind};
 use crate::ops::{self, Origin};
+use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+use objc2::{msg_send, sel};
 use objc2_foundation::{
-    NSArray, NSFileManager, NSNumber, NSString, NSURL, NSURLIsUbiquitousItemKey, NSURLResourceKey,
-    NSURLUbiquitousItemHasUnresolvedConflictsKey, NSURLUbiquitousItemIsUploadedKey,
+    NSArray, NSError, NSFileManager, NSNumber, NSString, NSURL, NSURLIsUbiquitousItemKey,
+    NSURLResourceKey, NSURLUbiquitousItemHasUnresolvedConflictsKey,
+    NSURLUbiquitousItemIsUploadedKey,
 };
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::os::macos::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -110,6 +116,59 @@ impl Availability {
     }
 }
 
+/// Whether everything under `path` is on this Mac, as fileproviderd keeps it
+/// for Finder's cloud badge: a folder holding a placeholder at any depth
+/// isn't. `None` outside iCloud Drive and File Provider folders, or when
+/// macOS doesn't say.
+///
+/// Foundation only says whether a folder itself is downloaded, so this asks
+/// the private `FPItemManager`, about 1.5 ms an item. Each message is checked
+/// first, so a macOS without it answers `None` instead of crashing.
+pub fn fully_downloaded(path: &Path) -> Option<bool> {
+    fn responds(object: &AnyObject, selector: Sel) -> bool {
+        // SAFETY: NSObject's own method, on an NSObject.
+        unsafe { msg_send![object, respondsToSelector: selector] }
+    }
+    let class = AnyClass::get(c"FPItemManager")?;
+    class.class_method(sel!(defaultManager))?;
+    with_url(path, |url| {
+        // SAFETY: checked above; it takes nothing and returns an object.
+        let manager: Option<Retained<AnyObject>> = unsafe { msg_send![class, defaultManager] };
+        let manager = manager.filter(|m| responds(m, sel!(itemForURL:error:)))?;
+        // SAFETY: checked above; a URL and an error pointer it may leave
+        // alone. It returns nil outside a File Provider domain.
+        let item: Option<Retained<AnyObject>> = unsafe {
+            msg_send![&manager, itemForURL: url, error: std::ptr::null_mut::<*mut NSError>()]
+        };
+        let item = item.filter(|item| responds(item, sel!(isRecursivelyDownloaded)))?;
+        // SAFETY: checked above; it takes nothing and returns a BOOL.
+        let downloaded: Bool = unsafe { msg_send![&item, isRecursivelyDownloaded] };
+        Some(downloaded.as_bool())
+    })
+}
+
+/// The folders in `listed` that hold something not downloaded, for the badge
+/// Finder gives them. Placeholder folders aren't asked, since their flag says
+/// so already, and only folders whose parent is in the cloud are, so a
+/// listing anywhere else costs one quick answer of `None`.
+pub fn partly_downloaded(listed: &[Entry]) -> HashSet<PathBuf> {
+    let mut parents: HashMap<&Path, bool> = HashMap::new();
+    listed
+        .iter()
+        .filter(|entry| entry.kind == Kind::Dir && entry.availability.is_local())
+        .filter(|entry| {
+            let Some(parent) = entry.path.parent() else {
+                return false;
+            };
+            *parents
+                .entry(parent)
+                .or_insert_with(|| fully_downloaded(parent).is_some())
+                && fully_downloaded(&entry.path) == Some(false)
+        })
+        .map(|entry| entry.path.clone())
+        .collect()
+}
+
 /// Why `path` isn't read: reading it would download it unseen.
 pub fn not_downloaded(path: &Path) -> String {
     format!("{} isn't downloaded. Download it first.", path.display())
@@ -138,6 +197,10 @@ pub fn read_error(path: &Path, e: &std::io::Error) -> String {
         format!("{}: {e}", path.display())
     }
 }
+
+// Loads FPItemManager for `fully_downloaded`.
+#[link(name = "FileProvider", kind = "framework")]
+unsafe extern "C" {}
 
 // IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES and IOPOL_SCOPE_THREAD from
 // <sys/resource.h>, which libc doesn't export.
@@ -379,6 +442,11 @@ mod tests {
         let meta = std::fs::symlink_metadata(dir.path().join("a.txt")).unwrap();
         assert_eq!(Availability::of(&meta), Availability::Local);
         assert_eq!(refuse_placeholders(dir.path()), Ok(()));
+        // Outside the cloud, fileproviderd has nothing to say about a folder.
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        assert_eq!(fully_downloaded(dir.path()), None);
+        let listed = crate::entries::list_dir(dir.path(), false, Default::default()).unwrap();
+        assert_eq!(partly_downloaded(&listed), HashSet::new());
     }
 
     #[test]
