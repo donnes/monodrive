@@ -78,21 +78,61 @@ enum Menu {
     Tools,
 }
 
-/// A tool's name beside the pointer.
-struct Tip(&'static str);
+/// A button's name, centered above or below it, on the side away from a video.
+/// GPUI puts a tooltip under the pointer, and nothing GPUI draws can sit over
+/// a video's layer.
+struct Tip {
+    label: &'static str,
+    over: Bounds<Pixels>,
+    below: bool,
+}
 
 impl gpui::Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        theme::floating(theme::Elevation::Popover)
-            .px_2()
-            .py_1()
-            .text_size(px(theme::TEXT_SMALL))
-            .child(div().relative().child(self.0))
+        let over = self.over;
+        let (y, anchor) = if self.below {
+            (over.bottom() + px(4.), gpui::Anchor::TopCenter)
+        } else {
+            (over.top() - px(4.), gpui::Anchor::BottomCenter)
+        };
+        gpui::anchored()
+            .position(point(over.center().x, y))
+            .anchor(anchor)
+            .snap_to_window_with_margin(px(8.))
+            .child(
+                theme::floating(theme::Elevation::Popover)
+                    .px_2()
+                    .py_1()
+                    .whitespace_nowrap()
+                    .text_size(px(theme::TEXT_SMALL))
+                    .child(self.label),
+            )
     }
 }
 
+/// For buttons above the picture or video.
 pub(super) fn tip(button: Stateful<gpui::Div>, label: &'static str) -> Stateful<gpui::Div> {
-    button.tooltip(move |_, cx| cx.new(|_| Tip(label)).into())
+    tip_on(button, label, false)
+}
+
+/// For buttons below the video.
+pub(super) fn tip_below(button: Stateful<gpui::Div>, label: &'static str) -> Stateful<gpui::Div> {
+    tip_on(button, label, true)
+}
+
+fn tip_on(button: Stateful<gpui::Div>, label: &'static str, below: bool) -> Stateful<gpui::Div> {
+    let over = Rc::new(Cell::new(Bounds::default()));
+    let measured = over.clone();
+    button
+        .child(
+            canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        )
+        .tooltip(move |_, cx| {
+            let over = over.get();
+            cx.new(|_| Tip { label, over, below }).into()
+        })
 }
 
 /// A menu under its button, at its right edge or its left.

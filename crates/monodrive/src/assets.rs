@@ -45,7 +45,9 @@ icons!(
     "keyboard",
     "link",
     "palette",
+    "pause",
     "pencil",
+    "play",
     "rotate-ccw",
     "rotate-cw",
     "search",
@@ -72,6 +74,7 @@ icons!(
     "tool-undo",
     "tool-zoom",
     "trash",
+    "volume",
 );
 
 /// The app's mark in full color, for `img`.
