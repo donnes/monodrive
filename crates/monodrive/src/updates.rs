@@ -1,8 +1,9 @@
-//! The updater: a control left of Settings while a newer release is out, and
-//! a popover listing what's new, with the button that downloads it. The
-//! control then rings with the download's progress and counts down to the
-//! restart that runs it. One `Updates` serves every window. Only a signed
-//! release checks, so debug builds and tests never reach the network.
+//! The updater: a control left of Settings while a newer release is out,
+//! which downloads it when pressed, and a card listing what's new, which
+//! shows while the pointer is on the control and for Check for Updates….
+//! The control then rings with the download's progress and counts down to
+//! the restart that runs it. One `Updates` serves every window. Only a
+//! signed release checks, so debug builds and tests never reach the network.
 
 use crate::menu;
 use crate::preferences::Preferences;
@@ -98,57 +99,65 @@ pub fn start(cx: &mut App) {
 }
 
 /// The sidebar's control left of Settings, while there's an update to act
-/// on: a download icon with a dot while one is out, a ring of the download's
-/// progress, a countdown to the restart, and a restart icon once Later put
-/// it off. `open` opens the popover.
+/// on: a download icon with a dot while one is out, which downloads it, a
+/// ring of the download's progress, a countdown to the restart, and a
+/// restart icon once Later put it off. `hover` hears the pointer come and
+/// go, so the browser can show the card.
 pub fn control(
-    open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    hover: impl Fn(&bool, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Option<AnyElement> {
     let entity = cx.try_global::<Shared>()?.0.clone();
     let updates = entity.read(cx);
+    if !updates.shown() {
+        return None;
+    }
+    let install = {
+        let entity = entity.clone();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            entity.update(cx, |updates, cx| updates.install(cx))
+        }
+    };
     let control = match updates.stage {
         Stage::Ready(Some(left)) => {
             let label = format!("Restart in {left}s");
-            return Some(
-                div()
-                    .flex_shrink_0()
-                    .h(px(theme::BUTTON_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .bg(content(0.08))
-                    .child(
-                        div()
-                            .id("updates-countdown")
-                            .role(Role::Button)
-                            .aria_label(label.clone())
-                            .h_full()
-                            .pl(px(12.))
-                            .pr_1()
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_size(px(theme::TEXT_SMALL))
-                            .text_color(content(1.))
-                            .child(label)
-                            .on_click(open),
-                    )
-                    .child(
-                        text_button("updates-later", "Later", ButtonLook::Ghost).on_click(
-                            move |_, _, cx| entity.update(cx, |updates, cx| updates.later(cx)),
-                        ),
-                    )
-                    .into_any_element(),
-            );
+            div()
+                .flex_shrink_0()
+                .h(px(theme::BUTTON_HEIGHT))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .bg(content(0.08))
+                .child(
+                    div()
+                        .id("updates-countdown")
+                        .role(Role::Button)
+                        .aria_label(label.clone())
+                        .h_full()
+                        .pl(px(12.))
+                        .pr_1()
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_size(px(theme::TEXT_SMALL))
+                        .text_color(content(1.))
+                        .child(label)
+                        .on_click(|_, _, cx| cx.restart()),
+                )
+                .child(
+                    text_button("updates-later", "Later", ButtonLook::Ghost).on_click(
+                        move |_, _, cx| entity.update(cx, |updates, cx| updates.later(cx)),
+                    ),
+                )
+                .into_any_element()
         }
-        Stage::Ready(None) => marked("rotate-cw", "Restart to Update"),
+        Stage::Ready(None) => marked("rotate-cw", "Restart to Update")
+            .on_click(|_, _, cx| cx.restart())
+            .into_any_element(),
         Stage::Installing(fraction) => {
             circle_button("updates", "Downloading Update", theme::BUTTON_HEIGHT)
                 .aria_label(format!("Downloading Update, {:.0}%", fraction * 100.))
                 .relative()
-                .cursor_pointer()
-                .hover(|s| s.bg(content(0.08)))
                 .child(theme::ring(fraction, theme::BUTTON_HEIGHT))
                 .child(
                     div()
@@ -159,11 +168,21 @@ pub fn control(
                         .justify_center()
                         .child(theme::icon("download", 12.).text_color(content(1.))),
                 )
+                .into_any_element()
         }
-        _ if !updates.pending.is_empty() => marked("download", "Update Available"),
-        _ => return None,
+        _ => marked("download", "Update Available")
+            .on_click(install)
+            .into_any_element(),
     };
-    Some(control.on_click(open).into_any_element())
+    // One id for every stage, so the pointer stays on it as the stage moves.
+    Some(
+        div()
+            .id("updates-control")
+            .flex_shrink_0()
+            .on_hover(hover)
+            .child(control)
+            .into_any_element(),
+    )
 }
 
 /// A chrome button with `icon` and an accent dot, which says it waits on
@@ -199,6 +218,11 @@ impl Updates {
             countdown: None,
             _timer: None,
         }
+    }
+
+    /// Whether the sidebar shows the control: an update is out or on its way.
+    pub fn shown(&self) -> bool {
+        !self.pending.is_empty() || matches!(self.stage, Stage::Installing(_) | Stage::Ready(_))
     }
 
     /// Asks GitHub, unless an update is already on its way in.
@@ -295,7 +319,7 @@ impl Updates {
     }
 
     /// Stops the countdown. The update waits for the next launch, or for
-    /// Restart in the popover.
+    /// the control's restart.
     fn later(&mut self, cx: &mut Context<Self>) {
         self.stage = Stage::Ready(None);
         self.countdown = None;
@@ -309,13 +333,18 @@ impl Updates {
                 format!("Restarting in {left}s to update to {}", release.version)
             }
             (Stage::Ready(None), Some(release)) => {
-                format!("Restart to finish updating to {}", release.version)
+                format!(
+                    "Click the restart button to finish updating to {}",
+                    release.version
+                )
             }
             (Stage::Installing(fraction), Some(release)) if *fraction < 1. => {
                 format!("Downloading {}… {:.0}%", release.version, fraction * 100.)
             }
             (Stage::Installing(_), Some(release)) => format!("Installing {}…", release.version),
-            (_, Some(_)) => "Update ready to download".into(),
+            (_, Some(release)) => {
+                format!("Click the update button to install {}", release.version)
+            }
             (Stage::Checking, None) => "Checking for updates…".into(),
             (_, None) if self.app == Some(None) => {
                 "This copy isn't a signed release, so it can't update itself.".into()
@@ -338,8 +367,8 @@ fn age(published: &str, now: DateTime<Utc>) -> Option<String> {
 }
 
 impl Render for Updates {
-    /// The popover's card; the browser places it and closes it.
-    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The card of what's new; the browser places it and closes it.
+    fn render(&mut self, window: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
         let now = Utc::now();
         let text = |text: String, size: f32, ink| {
             div()
@@ -407,42 +436,6 @@ impl Render for Updates {
                             .child(theme::icon("external-link", 12.))
                             .on_click(move |_, _, cx| cx.open_url(&page)),
                     )
-                    .into_any_element(),
-            );
-        }
-        // Download closes the popover, so the sidebar's ring shows the rest.
-        let download = cx.listener(|this, _, window: &mut Window, cx| {
-            this.install(cx);
-            window.dispatch_action(Box::new(Dismiss), cx);
-        });
-        let actions: Vec<Stateful<gpui::Div>> = match self.stage {
-            Stage::Ready(Some(_)) => vec![
-                text_button("later", "Later", ButtonLook::Secondary)
-                    .on_click(cx.listener(|this, _, _, cx| this.later(cx))),
-                text_button("restart", "Restart Now", ButtonLook::Primary)
-                    .on_click(|_, _, cx| cx.restart()),
-            ],
-            Stage::Ready(None) => vec![
-                text_button("restart", "Restart", ButtonLook::Primary)
-                    .on_click(|_, _, cx| cx.restart()),
-            ],
-            Stage::Installing(_) => vec![text_button("download", "Download", ButtonLook::Disabled)],
-            _ if !self.pending.is_empty() => vec![if self.error.is_some() {
-                text_button("download", "Try Again", ButtonLook::Caution).on_click(download)
-            } else {
-                text_button("download", "Download", ButtonLook::Primary).on_click(download)
-            }],
-            _ => Vec::new(),
-        };
-        if !actions.is_empty() {
-            lines.push(
-                div()
-                    .px_2()
-                    .py(px(6.))
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .children(actions)
                     .into_any_element(),
             );
         }

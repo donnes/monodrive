@@ -355,6 +355,14 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     cx.run_until_parked();
     dispatch(&mut cx, window, &CheckForUpdates)?;
     save(&mut cx, window, out, "updates")?;
+    // The same card, while the pointer rests on the sidebar's update control.
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    // Left of Settings, at the sidebar's foot, as the default frame lays it out.
+    let control = point(px(188.), px(680.));
+    mouse(&mut cx, window, vec![move_to(control)])?;
+    cx.advance_clock(std::time::Duration::from_millis(300));
+    save(&mut cx, window, out, "updates-peek")?;
     cx.update(|cx| cx.remove_global::<updates::Shared>());
 
     let window = open(&mut cx, folder)?;
@@ -662,6 +670,14 @@ fn release_at(position: Point<Pixels>, modifiers: Modifiers) -> PlatformInput {
         position,
         modifiers,
         click_count: 1,
+    })
+}
+
+fn move_to(position: Point<Pixels>) -> PlatformInput {
+    PlatformInput::MouseMove(MouseMoveEvent {
+        position,
+        pressed_button: None,
+        modifiers: Modifiers::default(),
     })
 }
 

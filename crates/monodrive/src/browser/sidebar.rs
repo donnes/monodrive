@@ -1078,7 +1078,7 @@ impl Browser {
                     .items_center()
                     .gap_1()
                     .children(crate::updates::control(
-                        cx.listener(|this, _, window, cx| this.toggle_updates(window, cx)),
+                        cx.listener(|this, over: &bool, _, cx| this.peek_updates(false, *over, cx)),
                         cx,
                     ))
                     .child(
