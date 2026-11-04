@@ -2,7 +2,7 @@
 //! itself, never a link's target, and never asks Spotlight, so each call is
 //! a few system calls and one LaunchServices lookup for the kind.
 
-use crate::cloud::Availability;
+use crate::cloud::{self, Availability};
 use crate::entries::Kind;
 use objc2::runtime::AnyObject;
 use objc2_foundation::{
@@ -44,6 +44,9 @@ pub struct Info {
     /// iCloud Drive or a File Provider app keeps it in the cloud, so it can
     /// be downloaded or have its download removed.
     pub in_cloud: bool,
+    /// A folder in the cloud that holds something not downloaded, at any
+    /// depth, which Finder badges as it does a placeholder.
+    pub partly_downloaded: bool,
     /// Why its latest download failed, as its provider says.
     pub download_error: Option<String>,
 }
@@ -121,6 +124,10 @@ pub fn info(path: &Path) -> Result<Info, String> {
         link,
         availability,
         in_cloud: known.in_cloud,
+        partly_downloaded: kind == Kind::Dir
+            && known.in_cloud
+            && availability.is_local()
+            && cloud::fully_downloaded(path) == Some(false),
         download_error: known.download_error,
         path: path.to_path_buf(),
     })

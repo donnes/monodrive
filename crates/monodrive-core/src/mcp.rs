@@ -564,14 +564,13 @@ impl Server {
                 entries::list_dir(&expand_home(&path), show_hidden, order)
                     .map_err(|e| format!("{path}: {e}"))
                     .map(|list| {
+                        let partly = cloud::partly_downloaded(&list);
                         list.iter().fold(String::new(), |mut out, e| {
-                            let _ = writeln!(
-                                out,
-                                "{}{}{}",
-                                e.name,
-                                suffix(e.kind),
-                                marker(e.availability)
-                            );
+                            let marker = match partly.contains(&e.path) {
+                                true => " (not all downloaded)",
+                                false => marker(e.availability),
+                            };
+                            let _ = writeln!(out, "{}{}{marker}", e.name, suffix(e.kind));
                             out
                         })
                     })
@@ -1386,6 +1385,7 @@ fn stat(about: &Info) -> String {
         );
     }
     let availability = match about.availability {
+        cloud::Availability::Local if about.partly_downloaded => Some("not all downloaded"),
         cloud::Availability::Local if about.in_cloud => Some("downloaded"),
         cloud::Availability::Local | cloud::Availability::Unknown => None,
         cloud::Availability::Placeholder => Some("not downloaded"),
@@ -2256,8 +2256,8 @@ pub const TOOLS: [Tool; 67] = [
     },
     Tool {
         name: "list_dir",
-        description: "List one folder. Folders end in /, links in @, and cloud placeholders that \
-    aren't downloaded in (not downloaded). Names sort as people read them (file2 before file10). For \
+        description: "List one folder. Folders end in /, links in @, cloud placeholders that \
+    aren't downloaded in (not downloaded), and folders holding one in (not all downloaded). Names sort as people read them (file2 before file10). For \
     the newest or largest first, sort by modified or size with descending: true.",
         input_schema: || {
             json!({
