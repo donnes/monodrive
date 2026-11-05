@@ -13,7 +13,7 @@ use gpui::{
     AnyElement, Bounds, Context, CursorStyle, Entity, EventEmitter, Focusable, FontWeight,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point,
     RenderImage, Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*,
-    px, size,
+    px, relative, size,
 };
 use monodrive_core::edits::{self, Clip, Handle, Rect, Step};
 use monodrive_core::ops::{Opened, Origin, Outcome, Request, SaveTo};
@@ -2218,15 +2218,16 @@ impl PreviewView {
             match trimming.grab.map(|(grab, _)| grab) {
                 Some(TrimGrab::Start) => start,
                 Some(TrimGrab::End) => end,
-                _ => format!("{start} – {end} · Drag either end"),
+                _ => format!("{start} – {end}"),
             }
         });
         let row_width = self.row_width.clone();
         let (narrow, very_narrow) = row_fits(row_width.get(), picture);
+        // Shrinks before anything else; the cap keeps room for the status.
         let name_cell = div()
             .debug_selector(|| "preview-name".into())
             .min_w_0()
-            .max_w(px(if narrow { 120. } else { 90. }))
+            .max_w(relative(0.4))
             .flex_shrink(1.)
             .truncate()
             .text_size(px(theme::TEXT_BODY))
@@ -2255,6 +2256,14 @@ impl PreviewView {
             .border_b_1()
             .border_color(content(0.06))
             .child(measure);
+        let separator = || {
+            div()
+                .flex_shrink_0()
+                .w(px(1.))
+                .h(px(16.))
+                .mx_1()
+                .bg(content(0.12))
+        };
         let status = |text: gpui::SharedString| {
             div()
                 .flex_1()
@@ -2265,13 +2274,17 @@ impl PreviewView {
                 .child(text)
         };
         let row = if let Some(cancel) = saving {
-            row.child(name_cell).child(status("Saving…".into())).child(
-                text_button("edit-cancel", "Cancel", ButtonLook::Secondary)
-                    .debug_selector(|| "edit-cancel".into())
-                    .on_click(move |_, _, _| cancel.store(true, Ordering::Relaxed)),
-            )
+            row.child(name_cell)
+                .child(separator())
+                .child(status("Saving…".into()))
+                .child(
+                    text_button("edit-cancel", "Cancel", ButtonLook::Secondary)
+                        .debug_selector(|| "edit-cancel".into())
+                        .on_click(move |_, _, _| cancel.store(true, Ordering::Relaxed)),
+                )
         } else if confirming {
             row.child(name_cell)
+                .child(separator())
                 .child(status("Discard these changes?".into()))
                 .child(
                     text_button("edit-keep", "Keep Editing", ButtonLook::Ghost)
@@ -2290,6 +2303,7 @@ impl PreviewView {
                 )
         } else if let Some(times) = trimming {
             row.child(name_cell)
+                .child(separator())
                 .child(status(times.into()))
                 .child(
                     text_button("trim-cancel", "Cancel", ButtonLook::Ghost)
@@ -2303,6 +2317,7 @@ impl PreviewView {
                 )
         } else if let Some(rect) = cropping {
             row.child(name_cell)
+                .child(separator())
                 .child(status(
                     format!(
                         "{} × {} · Drag the edges or the middle",
@@ -2348,14 +2363,6 @@ impl PreviewView {
             let done = text_button("edit-done", "Done", ButtonLook::Ghost)
                 .debug_selector(|| "edit-done".into())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_edit(window, cx)));
-            let separator = || {
-                div()
-                    .flex_shrink_0()
-                    .w(px(1.))
-                    .h(px(16.))
-                    .mx_1()
-                    .bg(content(0.12))
-            };
             let row = if very_narrow {
                 row
             } else {
