@@ -736,7 +736,10 @@ impl PreviewView {
         .top_0()
         .left_0()
         .size_full();
-        let strip = self.strip(cx);
+        let strip = match self.trim_bar(cx) {
+            Some(bar) => bar,
+            None => self.strip(cx).into_any_element(),
+        };
         div()
             .size_full()
             .flex()
@@ -761,8 +764,47 @@ impl PreviewView {
             .into_any_element()
     }
 
-    /// Play, the scrub track, the time and mute, redrawn about 4 times a second
-    /// while it plays and not at all otherwise.
+    /// Redraws about 4 times a second while it plays, and while a file loads,
+    /// as nothing else says when its length is known. Not at all otherwise.
+    fn keep_ticking(&mut self, cx: &mut Context<Self>) {
+        let (playing, loaded) = self.player.borrow().as_ref().map_or((false, false), |p| {
+            (
+                p.playing(),
+                p.duration().is_some() && (p.frame_ready() || !p.is_video()),
+            )
+        });
+        if self._ticking.is_some() || !(playing || (!loaded && self.loading_ticks > 0)) {
+            return;
+        }
+        self._ticking = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let going = this.update(cx, |this, cx| {
+                    cx.notify();
+                    let player = this.player.borrow();
+                    let playing = player.as_ref().is_some_and(Player::playing);
+                    let known = player.as_ref().is_some_and(|p| {
+                        p.duration().is_some() && (p.frame_ready() || !p.is_video())
+                    });
+                    drop(player);
+                    this.loading_ticks = this.loading_ticks.saturating_sub(1);
+                    let going = playing || (!known && this.loading_ticks > 0);
+                    if !going {
+                        this._ticking = None;
+                    }
+                    going
+                });
+                if !matches!(going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Play, the scrub track, the time and mute. A trimmed video's strip
+    /// covers only what's kept.
     fn strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let held = self.player.borrow();
         let playing = held.as_ref().is_some_and(Player::playing);
@@ -770,39 +812,13 @@ impl PreviewView {
         let position = held.as_ref().map_or(0., Player::position);
         let duration = held.as_ref().and_then(Player::duration);
         drop(held);
-        // Also while a file loads, as nothing else says when its length is known.
-        let loaded = self
-            .player
-            .borrow()
-            .as_ref()
-            .is_some_and(|p| p.duration().is_some() && (p.frame_ready() || !p.is_video()));
-        if self._ticking.is_none() && (playing || (!loaded && self.loading_ticks > 0)) {
-            self._ticking = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(250))
-                        .await;
-                    let going = this.update(cx, |this, cx| {
-                        cx.notify();
-                        let player = this.player.borrow();
-                        let playing = player.as_ref().is_some_and(Player::playing);
-                        let known = player.as_ref().is_some_and(|p| {
-                            p.duration().is_some() && (p.frame_ready() || !p.is_video())
-                        });
-                        drop(player);
-                        this.loading_ticks = this.loading_ticks.saturating_sub(1);
-                        let going = playing || (!known && this.loading_ticks > 0);
-                        if !going {
-                            this._ticking = None;
-                        }
-                        going
-                    });
-                    if !matches!(going, Ok(true)) {
-                        break;
-                    }
-                }
-            }));
-        }
+        self.keep_ticking(cx);
+        let range = self.trimmed(duration);
+        let (from, span) = match (range, duration) {
+            (Some((from, to)), _) => (from, Some(to - from)),
+            (None, total) => (0., total),
+        };
+        let position = (position - from).max(0.);
         // Each button's name and the icon that shows the state it's in.
         let play = if playing {
             ("Pause", "pause")
@@ -814,7 +830,7 @@ impl PreviewView {
         } else {
             ("Mute", "volume")
         };
-        let fraction = duration.map_or(0., |total| (position / total).clamp(0., 1.)) as f32;
+        let fraction = span.map_or(0., |span| (position / span).clamp(0., 1.)) as f32;
         let track = self.track.clone();
         let measured = self.track.clone();
         theme::pane_bar(theme::TITLE_BAR_HEIGHT)
@@ -828,9 +844,9 @@ impl PreviewView {
                     play.0,
                 )
                 .debug_selector(|| "preview-play".into())
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(player) = this.player.borrow().as_ref() {
-                        player.toggle();
+                        player.toggle(range);
                     }
                     cx.notify();
                 })),
@@ -854,9 +870,9 @@ impl PreviewView {
                             }
                             let at = (event.position.x - bounds.origin.x).as_f32() / width;
                             if let Some(player) = this.player.borrow().as_ref()
-                                && let Some(total) = player.duration()
+                                && let Some(span) = span
                             {
-                                player.seek(f64::from(at.clamp(0., 1.)) * total);
+                                player.seek(from + f64::from(at.clamp(0., 1.)) * span);
                             }
                             cx.notify();
                         }),
@@ -879,8 +895,8 @@ impl PreviewView {
                     .flex_shrink_0()
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(content(0.65))
-                    .child(match duration {
-                        Some(total) => format!("{} / {}", clock(position), clock(total)),
+                    .child(match span {
+                        Some(span) => format!("{} / {}", clock(position), clock(span)),
                         None => clock(position),
                     }),
             )
