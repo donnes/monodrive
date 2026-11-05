@@ -1,7 +1,8 @@
 name: Release
 
 # A nightly ships from main when commits landed since the last one and that
-# one is at least six hours old.
+# one is at least six hours old. A merge to main checks right away; the
+# schedule catches merges that landed inside those six hours.
 # Both channels run on demand from the Actions tab.
 # Stable creates the vX.Y.Z tag on the commit it built, and needs the signing secrets.
 #
@@ -15,9 +16,12 @@ name: Release
 # OPENROUTER_API_KEY, optional, has Claude summarize the changes in the notes.
 
 on:
+  push:
+    branches: [main]
   schedule:
-    # GitHub starts scheduled runs late or drops them, so check often. Minute
-    # zero is the busiest. Most runs stop in Prepare.
+    # GitHub starts scheduled runs hours late or drops most of them, so a
+    # merge can't wait on one. Minute zero is the busiest. Most runs stop in
+    # Prepare.
     - cron: "8,38 * * * *"
   workflow_dispatch:
     inputs:
@@ -34,10 +38,12 @@ permissions:
   contents: read
 
 # Nightlies queue behind each other, so a waiting run sees the nightly before
-# it and skips. Stable has its own group, so a nightly never displaces it.
+# it and skips. Without queue: max, GitHub keeps one waiting run and cancels
+# the rest. Stable has its own group, so a nightly never displaces it.
 concurrency:
   group: release-${{ inputs.channel == 'stable' && 'stable' || 'nightly' }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   prepare:
@@ -93,7 +99,7 @@ jobs:
             channel=nightly
             version=$next-nightly.$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER
             previous=$(git tag --list 'v*-nightly.*' --sort=-v:refname | head -1 || true)
-            if [[ "$GITHUB_EVENT_NAME" == schedule && -n "$previous" ]]; then
+            if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch && -n "$previous" ]]; then
               published=$(gh release view "$previous" --json publishedAt --jq .publishedAt)
               age=$(( $(date -u +%s) - $(date -u -d "$published" +%s) ))
               if [[ -z "$(git rev-list -n 1 "$previous..HEAD")" ]]; then
