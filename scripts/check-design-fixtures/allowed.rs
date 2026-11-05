@@ -28,3 +28,8 @@ fn excused() {
     div().bg(gpui::rgb(0x1));
     div().bg(gpui::rgb(0x2)); // design: so does this one.
 }
+
+fn motion() {
+    motion::rise_in(div().relative(), "a");
+    div().with_animation("b", motion::entrance(), |d, t| d.opacity(t));
+}

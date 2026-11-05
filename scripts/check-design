@@ -1,5 +1,5 @@
 #!/usr/bin/env perl
-# Fails on UI values that DESIGN.md says come from theme.rs. A justified
+# Fails on UI values that DESIGN.md says come from theme.rs, or motion.rs. A justified
 # exception gets `// design: <reason>` on the line or the line above it.
 #
 # It reads the source as text, whitespace and all, so it stops the slips that
@@ -77,6 +77,8 @@ sub problems_in {
     $each->(qr/\.text_(?:xs|sm|base|lg|xl|\dxl)\s*\(\s*\)/,
         "text size outside the scale, use TEXT_CAPTION, TEXT_SMALL, TEXT_BODY or TEXT_TITLE");
     $each->(qr/\bBoxShadow\b|\.shadow\s*\(\s*vec!/, "raw shadow, use floating or a shadow from theme.rs");
+    $each->(qr/\bAnimation\s*::\s*new\b|\.with_easing\s*\(/,
+        "raw duration or curve, use motion.rs: entrance, exit, pulse, rise_in or sink_out");
 
     my $parens = qr/(\((?:[^()]++|(?-1))*\))/;
     while ($code =~ /(?<![\w.])content\s*$parens/g) {
@@ -122,7 +124,8 @@ exit 1 if $wrong;
 my @files;
 find(
     sub {
-        push @files, $File::Find::name if /\.rs$/ && $_ ne "theme.rs" && $_ ne "palettes.rs";
+        push @files, $File::Find::name
+          if /\.rs$/ && $_ ne "theme.rs" && $_ ne "palettes.rs" && $_ ne "motion.rs";
     },
     "crates/monodrive/src"
 );

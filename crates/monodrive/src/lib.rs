@@ -8,6 +8,7 @@ pub mod browser;
 mod commands;
 pub mod connect;
 mod empty_trash;
+mod feedback;
 pub mod file_icons;
 mod frame;
 mod goto;
@@ -141,6 +142,7 @@ pub fn run(folder: Option<PathBuf>) {
                 _watches: Box::new((job_watch, place_watches)),
             });
             cx.set_global(pasteboard::Pasteboard::general());
+            cx.set_global(feedback::Feedback::default());
             commands::apply(cx);
             // A changed shortcut rebuilds the keymap and the menu bar; Show
             // Hidden Files' checkmark rebuilds the menu bar alone.

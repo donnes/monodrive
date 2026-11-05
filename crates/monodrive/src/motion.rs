@@ -1,8 +1,67 @@
-//! Frame-driven motion, ported from Monocode's `pane_motion.rs`. A critically
-//! damped spring gives a quick response and a quiet finish, and keeps its
-//! velocity when a slide reverses partway.
-use std::{cell::Cell, time::Instant};
+//! The app's motion, as DESIGN.md's Motion section names it: how long things
+//! take to appear and leave, the one curve they ease on, and the spring for
+//! movement a person can reverse partway. Views take these instead of their
+//! own durations and curves; `scripts/check-design` holds them to it.
+use gpui::{Animation, AnimationElement, AnimationExt, ElementId, IntoElement, Styled, px};
+use std::{
+    cell::Cell,
+    time::{Duration, Instant},
+};
 
+/// Appearing: a sheet, a toast.
+pub(crate) const ENTER: Duration = Duration::from_millis(200);
+/// Leaving, faster than appearing: the person has moved on.
+pub(crate) const EXIT: Duration = Duration::from_millis(150);
+/// A drag's outline dips once before the folder under it opens.
+pub(crate) const PULSE: Duration = Duration::from_millis(150);
+/// How far something rises as it appears.
+pub(crate) const RISE: f32 = 8.;
+
+/// The one curve for appearing and leaving: the quintic ease-out,
+/// cubic-bezier(0.22, 1, 0.36, 1). It moves on the first frame, where the eye
+/// is, and settles slowly. Nothing eases in: a slow start reads as lag.
+pub(crate) fn ease_out(t: f32) -> f32 {
+    1. - (1. - t).powi(5)
+}
+
+/// Runs once over `ENTER`, for an animator of the caller's own.
+pub(crate) fn entrance() -> Animation {
+    Animation::new(ENTER).with_easing(ease_out)
+}
+
+pub(crate) fn exit() -> Animation {
+    Animation::new(EXIT).with_easing(ease_out)
+}
+
+/// Linear, since the animator shapes the dip.
+pub(crate) fn pulse() -> Animation {
+    Animation::new(PULSE)
+}
+
+/// `element` fading in as it rises `RISE` into place. It needs `relative()`,
+/// so the offset moves it without laying anything else out again.
+pub(crate) fn rise_in<E: IntoElement + Styled + 'static>(
+    element: E,
+    id: impl Into<ElementId>,
+) -> AnimationElement<E> {
+    element.with_animation(id, entrance(), |element, t| {
+        element.opacity(t).top(px(RISE * (1. - t)))
+    })
+}
+
+/// `element` fading out as it sinks back the way it came, half as far.
+pub(crate) fn sink_out<E: IntoElement + Styled + 'static>(
+    element: E,
+    id: impl Into<ElementId>,
+) -> AnimationElement<E> {
+    element.with_animation(id, exit(), |element, t| {
+        element.opacity(1. - t).top(px(RISE / 2. * t))
+    })
+}
+
+/// Movement a person can reverse partway, such as the sidebar, ported from
+/// Monocode's `pane_motion.rs`. A critically damped spring gives a quick
+/// response and a quiet finish, and keeps its velocity when a slide reverses.
 pub(crate) struct Slide {
     from: f32,
     to: f32,

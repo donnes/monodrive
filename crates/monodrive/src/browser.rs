@@ -36,7 +36,7 @@ use crate::empty_trash::{self, EmptyTrashView};
 use crate::goto::{GotoEvent, GotoView};
 use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
-use crate::motion::Slide;
+use crate::motion::{self, Slide};
 use crate::onboarding::{self, IndexGate, Step};
 use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
@@ -1614,6 +1614,58 @@ impl Browser {
             0.
         };
         let ink = if toast.failed { danger() } else { content(1.) };
+        let card = theme::floating(Elevation::Popover)
+            .id("toast")
+            .occlude()
+            .max_w(px(520.))
+            .mx_4()
+            .h(px(36.))
+            .pl_3()
+            .pr(px(6.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .when(toast.failed, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(theme::RADIUS_CARD - 1.))
+                        .bg(danger().opacity(0.12)),
+                )
+            })
+            .child(
+                div()
+                    .relative()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(theme::TEXT_BODY))
+                    .text_color(ink)
+                    .child(toast.text.clone()),
+            )
+            .when_some(toast.undo, |d, op| {
+                d.child(
+                    theme::text_button("toast-undo", "Undo", ButtonLook::Ghost)
+                        .debug_selector(|| "toast-undo".into())
+                        .relative()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(accent())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.toast = None;
+                            this.pane().update(cx, |pane, cx| {
+                                pane.submit(Request::UndoOf { op }, window, cx)
+                            });
+                        })),
+                )
+            })
+            .when(toast.undo.is_none(), |d| d.pr_3());
+        // The entrance plays when a toast appears, not when a new one takes
+        // the place of one on screen. Both run once and skip with Reduce Motion.
+        let card = if toast.leaving {
+            motion::sink_out(card, "toast-leave")
+        } else {
+            motion::rise_in(card, "toast-enter")
+        };
         Some(
             div()
                 .absolute()
@@ -1622,53 +1674,7 @@ impl Browser {
                 .right_0()
                 .flex()
                 .justify_center()
-                .child(
-                    theme::floating(Elevation::Popover)
-                        .id("toast")
-                        .occlude()
-                        .max_w(px(520.))
-                        .mx_4()
-                        .h(px(36.))
-                        .pl_3()
-                        .pr(px(6.))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .when(toast.failed, |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .rounded(px(theme::RADIUS_CARD - 1.))
-                                    .bg(danger().opacity(0.12)),
-                            )
-                        })
-                        .child(
-                            div()
-                                .relative()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(theme::TEXT_BODY))
-                                .text_color(ink)
-                                .child(toast.text.clone()),
-                        )
-                        .when_some(toast.undo, |d, op| {
-                            d.child(
-                                theme::text_button("toast-undo", "Undo", ButtonLook::Ghost)
-                                    .debug_selector(|| "toast-undo".into())
-                                    .relative()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(accent())
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.toast = None;
-                                        this.pane().update(cx, |pane, cx| {
-                                            pane.submit(Request::UndoOf { op }, window, cx)
-                                        });
-                                    })),
-                            )
-                        })
-                        .when(toast.undo.is_none(), |d| d.pr_3()),
-                ),
+                .child(card),
         )
     }
 
@@ -1678,15 +1684,30 @@ impl Browser {
     fn toast(&mut self, text: String, failed: bool, undo: Option<u64>, cx: &mut Context<Self>) {
         let expire = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
-            let _ = this.update(cx, |this, cx| {
-                this.toast = None;
+            let leaves = this.update(cx, |this, cx| {
                 cx.notify();
+                if cx.reduce_motion() {
+                    this.toast = None;
+                    return false;
+                }
+                if let Some(toast) = this.toast.as_mut() {
+                    toast.leaving = true;
+                }
+                true
             });
+            if leaves.unwrap_or(false) {
+                cx.background_executor().timer(motion::EXIT).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.toast = None;
+                    cx.notify();
+                });
+            }
         });
         self.toast = Some(Toast {
             text,
             failed,
             undo,
+            leaving: false,
             _expire: expire,
         });
         cx.notify();
@@ -2103,6 +2124,8 @@ struct Toast {
     /// Offers Undo of this operation, which the owner refuses once
     /// anything else has changed files since.
     undo: Option<u64>,
+    /// On its way out, for `motion::EXIT`.
+    leaving: bool,
     _expire: Task<()>,
 }
 

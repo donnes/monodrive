@@ -174,7 +174,29 @@ Two levels, both from `floating`: `Popover` for menus, popovers, toasts and the 
 
 ### Motion
 
-Nothing moves continuously: it pegs the GPU on high-refresh displays. A sheet may fade in once, for 200 ms at most, a drag's outline pulses once before a folder opens, and the sidebar slides open and closed. Hover and press are instant.
+Nothing moves continuously: it pegs the GPU on high-refresh displays. Everything else is decided in this order, with values from `motion.rs`. `scripts/check-design` rejects a duration or curve written anywhere else.
+
+1. **Should it move?** Frequency decides, not whether a key or the pointer started it. What a person does many times an hour stays still: hover, press, selection, navigation, a listing changing, menus and the command palette. What happens now and then may move: a sheet, a toast, the sidebar.
+2. **Why does it move?** To show where something came from or went: the sidebar slides from its edge, and a toast rises from the bottom and sinks back. Or to say a state is about to change: a drag's outline dips once before its folder opens. Never for decoration.
+3. **How long, on which curve?**
+
+| Name | Value | For |
+|---|---|---|
+| `ENTER`, `entrance()` | 200 ms, `ease_out` | A sheet or a toast appearing |
+| `EXIT`, `exit()` | 150 ms, `ease_out` | Leaving, faster than appearing |
+| `PULSE`, `pulse()` | 150 ms, linear | The drag outline's dip |
+| `RISE` | 8 pt | How far something rises as it appears |
+| `Slide` | A critically damped spring | The sidebar, and anything a person can reverse partway |
+
+`ease_out` is the quintic ease-out, cubic-bezier(0.22, 1, 0.36, 1). It moves on the first frame, where the eye is, and settles slowly. Nothing eases in, because a slow start reads as lag. Movement across the screen uses `Slide`, which keeps its speed when it reverses, so there's no ease-in-out curve.
+
+4. **What changes?** Opacity, and the offset of a `relative()` element, which lays nothing else out again. `rise_in` fades an element in as it rises `RISE` into place, and `sink_out` fades it out as it sinks back half as far. Width, height and padding don't animate, except at the sidebar's edge, where the panes lay out each frame. GPUI can't scale a div, so nothing grows from a point.
+5. **What if it's interrupted?** A one-shot plays once per appearance: a new toast takes the words of the one on screen without moving. A slide turns around from where it is, at its speed.
+6. **Reduce Motion**, read at launch, ends every one-shot and slide at once, so nothing moves or fades.
+
+### Haptics and sounds
+
+`feedback.rs` taps the trackpad and plays Finder's sounds. A Force Touch trackpad taps only under a finger, so haptics go with the pointer: a folder opening under a drag and ⌥ or ⌘ flipping a drop between move and copy are a level change, the insertion line finding a slot in Favorites is an alignment, and a drop landing is generic. Nothing taps outside a drag: a shortcut is pressed with no finger on the trackpad. Moving to the Trash and emptying it play Finder's sounds as interface sounds, which macOS silences with "Play user interface sound effects" off. An agent's changes stay silent.
 
 ### Copy
 
@@ -193,7 +215,7 @@ The SVGs in `crates/monodrive/assets/icons`, one stroke weight, tinted with `.te
 
 ## Primitives
 
-All in `theme.rs`. Each returns an element the caller extends.
+All in `theme.rs`, except motion, which `motion.rs` holds and Motion describes. Each returns an element the caller extends.
 
 - `RADIUS_ROW`, `RADIUS_CARD`, `RADIUS_THUMB`; `TEXT_CAPTION`, `TEXT_SMALL`, `TEXT_BODY`, `TEXT_TITLE`; `TITLE_BAR_HEIGHT`, `PATH_BAR_HEIGHT`, `PANE_INSET`, `ROW_HEIGHT`, `SIDEBAR_ROW_HEIGHT`, `ROW_GAP`, `BUTTON_HEIGHT`, `FIELD_HEIGHT`.
 - `content`, `accent`, `on_accent`, `danger`, `danger_fill`, `on_danger`, `success`, `scrim`, `well`, `knob`, `raised`: colors. `focus_ring`, `knob_shadow`, `raised_shadow`: shadows.

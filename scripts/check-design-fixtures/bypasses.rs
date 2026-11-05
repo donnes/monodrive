@@ -33,3 +33,8 @@ fn sizes() {
     div().child(icon(page.icon(), 15.)); //~
     div().shadow(vec![]); //~
 }
+
+fn motion() {
+    div().with_animation("a", Animation::new(Duration::from_millis(300)), |d, t| d.opacity(t)); //~
+    div().with_animation("b", motion::entrance().with_easing(ease_in), |d, t| d.opacity(t)); //~
+}
