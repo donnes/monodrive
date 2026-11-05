@@ -369,7 +369,7 @@ impl PreviewView {
                 let zoomed = self.zoom.zoomed() || self.want_actual;
                 let label = if zoomed { "Fit" } else { "Actual Size" };
                 Some(
-                    tools::tip(
+                    theme::tip(
                         theme::icon_button("preview-zoom", label, "tool-zoom", true),
                         label,
                     )
@@ -389,7 +389,7 @@ impl PreviewView {
             Body::Picture { .. } | Body::Media { video: true, .. }
         );
         let edit_button = can_edit.then(|| {
-            tools::tip(
+            theme::tip(
                 theme::icon_button("preview-edit", "Edit", "pencil", true),
                 "Edit (E)",
             )
@@ -428,7 +428,7 @@ impl PreviewView {
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSelected), cx)),
             )
             .child(
-                tools::tip(
+                theme::tip(
                     theme::icon_button("preview-close", "Close", "cancel-01", true),
                     "Close (Esc)",
                 )
@@ -823,7 +823,7 @@ impl PreviewView {
             .border_t_1()
             .border_color(content(0.06))
             .child(
-                tools::tip_below(
+                theme::tip_below(
                     theme::icon_button("preview-play", play.0, play.1, true),
                     play.0,
                 )
@@ -885,7 +885,7 @@ impl PreviewView {
                     }),
             )
             .child(
-                tools::tip_below(
+                theme::tip_below(
                     theme::icon_button("preview-mute", mute.0, mute.1, true),
                     mute.0,
                 )

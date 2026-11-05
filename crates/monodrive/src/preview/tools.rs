@@ -78,63 +78,6 @@ enum Menu {
     Tools,
 }
 
-/// A button's name, centered above or below it, on the side away from a video.
-/// GPUI puts a tooltip under the pointer, and nothing GPUI draws can sit over
-/// a video's layer.
-struct Tip {
-    label: &'static str,
-    over: Bounds<Pixels>,
-    below: bool,
-}
-
-impl gpui::Render for Tip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let over = self.over;
-        let (y, anchor) = if self.below {
-            (over.bottom() + px(4.), gpui::Anchor::TopCenter)
-        } else {
-            (over.top() - px(4.), gpui::Anchor::BottomCenter)
-        };
-        gpui::anchored()
-            .position(point(over.center().x, y))
-            .anchor(anchor)
-            .snap_to_window_with_margin(px(8.))
-            .child(
-                theme::floating(theme::Elevation::Popover)
-                    .px_2()
-                    .py_1()
-                    .whitespace_nowrap()
-                    .text_size(px(theme::TEXT_SMALL))
-                    .child(self.label),
-            )
-    }
-}
-
-/// For buttons above the picture or video.
-pub(super) fn tip(button: Stateful<gpui::Div>, label: &'static str) -> Stateful<gpui::Div> {
-    tip_on(button, label, false)
-}
-
-/// For buttons below the video.
-pub(super) fn tip_below(button: Stateful<gpui::Div>, label: &'static str) -> Stateful<gpui::Div> {
-    tip_on(button, label, true)
-}
-
-fn tip_on(button: Stateful<gpui::Div>, label: &'static str, below: bool) -> Stateful<gpui::Div> {
-    let over = Rc::new(Cell::new(Bounds::default()));
-    let measured = over.clone();
-    button
-        .child(
-            canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
-                .absolute()
-                .size_full(),
-        )
-        .tooltip(move |_, cx| {
-            let over = over.get();
-            cx.new(|_| Tip { label, over, below }).into()
-        })
-}
-
 /// A menu under its button, at its right edge or its left.
 fn menu_card(width: f32, from_right: bool) -> gpui::Div {
     theme::floating(theme::Elevation::Popover)
@@ -1937,7 +1880,7 @@ impl PreviewView {
         cx: &mut Context<Self>,
         click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Stateful<gpui::Div> {
-        tip(theme::icon_button(id, label, path, true), label)
+        theme::tip(theme::icon_button(id, label, path, true), label)
             .debug_selector(move || id.into())
             .when(on, |d| d.bg(content(0.14)))
             .on_click(cx.listener(move |this, _, window, cx| {

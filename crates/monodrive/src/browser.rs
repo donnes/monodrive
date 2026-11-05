@@ -256,6 +256,8 @@ const FRAME_SETTLE: Duration = Duration::from_millis(300);
 const INDEX_POLL: Duration = Duration::from_millis(500);
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
+/// How long the pointer rests before the update card follows it.
+const PEEK_DELAY: Duration = Duration::from_millis(200);
 
 pub struct Browser {
     /// Keeps the browser's keys working wherever focus is.
@@ -298,6 +300,15 @@ pub struct Browser {
     jobs_focus: FocusHandle,
     /// The updates popover's keys.
     updates_focus: FocusHandle,
+    /// The pointer rests on the sidebar's update control or its card, which
+    /// shows what's new.
+    updates_peek: bool,
+    /// Where the pointer is, kept apart because one move from the control
+    /// onto the card reports the card's arrival before the control's exit.
+    over_update_control: bool,
+    over_update_card: bool,
+    /// The wait before `updates_peek` follows the pointer.
+    updates_peek_wait: Option<Task<()>>,
     /// A job of the window's needs an answer: the popover opens once the
     /// next frame has drawn.
     jobs_wanted: bool,
@@ -533,6 +544,10 @@ impl Browser {
             jobs,
             jobs_focus: cx.focus_handle(),
             updates_focus: cx.focus_handle(),
+            updates_peek: false,
+            over_update_control: false,
+            over_update_card: false,
+            updates_peek_wait: None,
             jobs_wanted: false,
             sheet: None,
             glass: None,
@@ -1147,6 +1162,13 @@ impl Browser {
     /// it's open.
     fn set_sheet(&mut self, sheet: Option<Sheet>, cx: &mut Context<Self>) {
         let jobs = matches!(sheet, Some(Sheet::Jobs));
+        // A sheet closes the update card, which then never hears the pointer
+        // leave.
+        if sheet.is_some() {
+            self.updates_peek = false;
+            self.over_update_card = false;
+            self.updates_peek_wait = None;
+        }
         self.sheet = sheet;
         self.jobs.update(cx, |list, cx| list.set_open(jobs, cx));
         cx.notify();
@@ -1252,24 +1274,64 @@ impl Browser {
         self.set_sheet(Some(Sheet::Jobs), cx);
     }
 
-    /// The sidebar's button: the updates popover, above it.
-    fn toggle_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.sheet, Some(Sheet::Updates)) {
-            return self.close_sheet(window, cx);
-        }
-        self.remember_focus(window, cx);
-        window.focus(&self.updates_focus, cx);
-        self.set_sheet(Some(Sheet::Updates), cx);
-    }
-
-    /// Check for Updates…: asks now, and shows what it finds.
+    /// Check for Updates…: asks now, and shows what it finds in the updates
+    /// popover, above the sidebar's foot.
     fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(shared) = cx.try_global::<updates::Shared>() {
             shared.0.clone().update(cx, |updates, cx| updates.check(cx));
         }
         if !matches!(self.sheet, Some(Sheet::Updates)) {
-            self.toggle_updates(window, cx);
+            self.remember_focus(window, cx);
+            window.focus(&self.updates_focus, cx);
+            self.set_sheet(Some(Sheet::Updates), cx);
         }
+    }
+
+    /// The pointer came onto or left the update control or its card. The
+    /// card waits a moment either way, so passing over the control on the
+    /// way to Settings doesn't flash it, and the gap between the two doesn't
+    /// close it.
+    pub(super) fn peek_updates(&mut self, card: bool, over: bool, cx: &mut Context<Self>) {
+        if card {
+            self.over_update_card = over;
+        } else {
+            self.over_update_control = over;
+        }
+        let over = self.over_update_control || self.over_update_card;
+        if self.updates_peek == over {
+            self.updates_peek_wait = None;
+            return;
+        }
+        let wait = cx.background_executor().timer(PEEK_DELAY);
+        self.updates_peek_wait = Some(cx.spawn(async move |this, cx| {
+            wait.await;
+            let _ = this.update(cx, |this, cx| {
+                this.updates_peek = over;
+                this.updates_peek_wait = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The card the update control shows while the pointer rests on it,
+    /// where the popover opens, but without taking keys or presses.
+    fn updates_peek_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let updates = cx.try_global::<updates::Shared>()?.0.clone();
+        let shown = self.updates_peek
+            && self.sheet.is_none()
+            && self.sidebar_open
+            && updates.read(cx).has_update();
+        shown.then(|| {
+            div()
+                .id("updates-peek")
+                .absolute()
+                .bottom(px(44.))
+                .left(px(8.))
+                .on_hover(
+                    cx.listener(|this, over: &bool, _, cx| this.peek_updates(true, *over, cx)),
+                )
+                .child(updates)
+        })
     }
 
     /// The updates popover's place, and what closes it: Esc or a press
@@ -2033,6 +2095,7 @@ impl Render for Browser {
                     Sheet::Connect(view) => view.clone().into_any_element(),
                 }
             }))
+            .children(self.updates_peek_card(cx))
             .children(self.menu.as_ref().map(|menu| menu.view.clone()))
             .children(self.drag_pill(window))
             // Last, so its window listeners run before any element's.
