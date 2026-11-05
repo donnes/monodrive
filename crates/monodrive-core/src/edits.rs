@@ -8,7 +8,7 @@ mod video;
 
 pub use marks::{Frame, Handle, render_mark};
 pub use video::{
-    Clip, VideoRecipe, export, frame, frame_bitmap, size as video_size, video_extension,
+    Clip, VideoRecipe, export, filmstrip, frame, frame_bitmap, size as video_size, video_extension,
 };
 
 use objc2::AnyThread;

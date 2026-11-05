@@ -8,7 +8,7 @@ use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::NSView;
 use objc2_av_foundation::{AVLayerVideoGravityResizeAspect, AVPlayer, AVPlayerLayer};
-use objc2_core_media::CMTime;
+use objc2_core_media::{CMTime, kCMTimeInvalid};
 use objc2_foundation::{NSRect, NSString, NSURL};
 use std::path::Path;
 
@@ -76,21 +76,42 @@ impl Player {
         unsafe { self.player.rate() > 0. }
     }
 
-    /// Play or pause. At the end, playing starts over.
-    pub fn toggle(&self) {
-        // SAFETY: plain calls on the main thread that made it.
+    /// Play or pause, within `range` when there is one, stopping at its end.
+    /// Playing from its end or from outside it starts at its start.
+    pub fn toggle(&self, range: Option<(f64, f64)>) {
+        if self.playing() {
+            // SAFETY: a plain call on the main thread that made it.
+            unsafe { self.player.pause() };
+            return;
+        }
+        let Some((from, to)) = range.or_else(|| Some((0., self.duration()?))) else {
+            return;
+        };
+        let at = self.position();
+        // AVPlayer stops a hair short of an end it's given.
+        if at < from || at >= to - 0.05 {
+            self.seek(from);
+        }
+        self.set_end(range.map(|(_, to)| to));
+        // SAFETY: a plain call on the main thread that made it.
+        unsafe { self.player.play() };
+    }
+
+    /// Where playing stops: `None` for the end of the file.
+    pub fn set_end(&self, end: Option<f64>) {
+        // SAFETY: plain properties, on the main thread that made it.
         unsafe {
-            if self.playing() {
-                self.player.pause();
-            } else {
-                if let Some(total) = self.duration()
-                    && self.position() >= total
-                {
-                    self.seek(0.);
-                }
-                self.player.play();
+            if let Some(item) = self.player.currentItem() {
+                item.setForwardPlaybackEndTime(
+                    end.map_or(kCMTimeInvalid, |end| CMTime::with_seconds(end, 600)),
+                );
             }
         }
+    }
+
+    pub fn pause(&self) {
+        // SAFETY: a plain call on the main thread that made it.
+        unsafe { self.player.pause() };
     }
 
     /// Seconds in.
@@ -140,6 +161,12 @@ impl Drop for Player {
     }
 }
 
+/// `1:05.4`, to a tenth of a second, for trimming.
+pub fn clock_tenths(seconds: f64) -> String {
+    let tenths = (seconds.max(0.) * 10.).round();
+    format!("{}.{}", clock(tenths / 10.), tenths as u64 % 10)
+}
+
 /// `1:05`, or `1:02:05` past an hour.
 pub fn clock(seconds: f64) -> String {
     let whole = seconds.max(0.) as u64;
@@ -161,5 +188,8 @@ mod tests {
         assert_eq!(clock(65.4), "1:05");
         assert_eq!(clock(3725.), "1:02:05");
         assert_eq!(clock(-1.), "0:00");
+        assert_eq!(clock_tenths(65.44), "1:05.4");
+        // Rounding up carries into the seconds.
+        assert_eq!(clock_tenths(59.96), "1:00.0");
     }
 }

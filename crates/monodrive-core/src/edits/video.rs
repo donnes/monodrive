@@ -342,6 +342,46 @@ pub fn frame_bitmap(source: &Path, seconds: f64) -> Result<crate::thumbnails::Bi
     crate::thumbnails::bitmap(&*grab(source, seconds)?)
 }
 
+/// `count` frames spread evenly through the video, each at most `height` pixels
+/// tall, for the trim bar's filmstrip. Each is the keyframe nearest its place,
+/// which is fast and close enough at that size.
+pub fn filmstrip(
+    source: &Path,
+    count: usize,
+    height: f64,
+) -> Result<Vec<crate::thumbnails::Bitmap>, String> {
+    crate::cloud::refuse_placeholder(source)?;
+    let asset = asset(source);
+    // SAFETY: valid objects, on this thread only.
+    unsafe {
+        let length = asset.duration().seconds();
+        if !(length.is_finite() && length > 0.) {
+            return Err(format!(
+                "{} has no length macOS can read.",
+                source.display()
+            ));
+        }
+        let slot = length / count as f64;
+        let generator = AVAssetImageGenerator::assetImageGeneratorWithAsset(&asset);
+        generator.setAppliesPreferredTrackTransform(true);
+        // Wide enough for any video's shape, so the height decides.
+        generator.setMaximumSize(CGSize::new(height * 4., height));
+        generator.setRequestedTimeToleranceBefore(time(slot / 2.));
+        generator.setRequestedTimeToleranceAfter(time(slot / 2.));
+        (0..count)
+            .map(|at| {
+                let image = generator
+                    .copyCGImageAtTime_actualTime_error(
+                        time(slot * (at as f64 + 0.5)),
+                        std::ptr::null_mut(),
+                    )
+                    .map_err(|e| e.localizedDescription().to_string())?;
+                crate::thumbnails::bitmap(&image)
+            })
+            .collect()
+    }
+}
+
 fn grab(source: &Path, seconds: f64) -> Result<Retained<objc2_core_graphics::CGImage>, String> {
     crate::cloud::refuse_placeholder(source)?;
     let asset = asset(source);
@@ -367,6 +407,22 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)
+    }
+
+    #[test]
+    fn a_filmstrip_has_the_frames_asked_for_standing_upright() {
+        // Stored 64 by 36, flagged to play turned a quarter.
+        let frames = filmstrip(&fixture("rotated.mp4"), 3, 32.).unwrap();
+        assert_eq!(frames.len(), 3);
+        for frame in frames {
+            assert!(frame.height <= 32);
+            assert!(
+                frame.height > frame.width,
+                "{}×{}",
+                frame.width,
+                frame.height
+            );
+        }
     }
 
     #[test]
