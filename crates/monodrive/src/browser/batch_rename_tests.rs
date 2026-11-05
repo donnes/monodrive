@@ -3,7 +3,9 @@
 //! printable key that missed them would start a search, and so the index.
 
 use super::batch_rename::BatchRename;
-use super::tests::{browse, click, in_pane, on_pane, own, press, release, shown, toast};
+use super::tests::{
+    browse, click, click_unanswered, in_pane, on_pane, own, press, release, shown, toast,
+};
 use super::*;
 use crate::preferences::View;
 use crate::text_field::TextField;
@@ -338,27 +340,6 @@ fn key_unanswered(cx: &mut VisualTestContext, key: &str, text: Option<&str>) {
     keystroke.key_char = text.map(str::to_string);
     cx.update(|window, cx| {
         window.dispatch_keystroke(keystroke, cx);
-    });
-}
-
-/// A press and release at `at` without running the executor.
-fn click_unanswered(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
-    let press = gpui::MouseDownEvent {
-        button: gpui::MouseButton::Left,
-        position: at,
-        modifiers: gpui::Modifiers::none(),
-        click_count: 1,
-        first_mouse: false,
-    };
-    let release = gpui::MouseUpEvent {
-        button: gpui::MouseButton::Left,
-        position: at,
-        modifiers: gpui::Modifiers::none(),
-        click_count: 1,
-    };
-    cx.update(|window, cx| {
-        window.dispatch_event(gpui::PlatformInput::MouseDown(press), cx);
-        window.dispatch_event(gpui::PlatformInput::MouseUp(release), cx);
     });
 }
 
