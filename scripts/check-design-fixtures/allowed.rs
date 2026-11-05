@@ -33,3 +33,13 @@ fn motion() {
     motion::rise_in(div().relative(), "a");
     div().with_animation("b", motion::entrance(), |d, t| d.opacity(t));
 }
+
+fn named_buttons() {
+    theme::tip(icon_button("trash", "Trash", "trash", true), "Trash");
+    tip_below(
+        theme::row_icon_button(("close", ix), "Close", "cancel-01", ink),
+        "Close",
+    );
+    // design: the hover card names it.
+    circle_button("updates", "Update", 24.);
+}

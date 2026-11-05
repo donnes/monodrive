@@ -746,9 +746,12 @@ impl Browser {
                 rows
             }
         };
-        let hide = icon_button("inspector-hide", "Hide Inspector", "cancel-01", true)
-            .debug_selector(|| "inspector-hide".into())
-            .on_click(cx.listener(|this, _, window, cx| this.set_inspector(false, window, cx)));
+        let hide = theme::tip(
+            icon_button("inspector-hide", "Hide Inspector", "cancel-01", true),
+            "Hide Inspector",
+        )
+        .debug_selector(|| "inspector-hide".into())
+        .on_click(cx.listener(|this, _, window, cx| this.set_inspector(false, window, cx)));
         Some(
             div()
                 .id("inspector")

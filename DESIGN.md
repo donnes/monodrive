@@ -209,6 +209,8 @@ Nothing moves continuously: it pegs the GPU on high-refresh displays. Everything
 
 The SVGs in `crates/monodrive/assets/icons`, one stroke weight, tinted with `.text_color`. Sizes are 12 pt inside small controls, 14 pt in chrome and fields, and 16 pt in rows.
 
+A button that shows only an icon names itself while the pointer rests on it, as the Trash and Settings buttons do. Wrap every `icon_button`, `row_icon_button`, `circle_button` and hand-built icon control in `tip`, which puts the name above, or `tip_below` in the top bar, where there's no room above, and under anything the name mustn't cover, such as a video. The name is the button's label in title case, and may add its key: `Close (Esc)`. Only a button whose hover already opens a card that names it, such as an available update, goes without. `scripts/check-design` flags an icon button with no tip.
+
 ### macOS conventions
 
 ⌘ shortcuts shown with their symbols, Finder's sizes and sort order, Trash instead of delete, ↩ for what a sheet's primary button does, Esc to leave it, and the traffic lights in the 40 pt top bar. Buttons sit at the end of a card, with the primary one last.
@@ -227,7 +229,7 @@ All in `theme.rs`, except motion, which `motion.rs` holds and Motion describes. 
 - `row_slot(id)`: where a stacked row's role and handlers go, gap included. `row(active)`: the row inside it, in a menu, picker or popover. `row_muted(active)` is its secondary ink. `destructive_row(active)` and `destructive_ink(active)` are the same for a command marked `destructive`.
 - `drop_outline()`: what a drop would land on, over it; the caller gives it the shape's radius. `insertion_line()`: where a drop would land between stacked rows, in the gap under the row above.
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
-- `tip(button, label)`, `tip_below(button, label)`: a button's name in a small card, above or below it while the pointer rests on it.
+- `tip(button, label)`, `tip_below(button, label)`: a button's name in a small card, above or below it while the pointer rests on it. Every icon button takes one.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.
 - `key_cap(key)`: a shortcut in a 16 pt cap, in a sheet's footer or a row.
 - `icon(path, side)`, `section_label(label)`.

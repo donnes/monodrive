@@ -776,8 +776,11 @@ impl SettingsView {
                 self.focusable(
                     "close",
                     true,
-                    icon_button("close-settings", "Close", "cancel-01", true)
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Dismissed))),
+                    theme::tip(
+                        icon_button("close-settings", "Close", "cancel-01", true),
+                        "Close",
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(Dismissed))),
                     cx,
                 ),
             )
@@ -1418,11 +1421,14 @@ impl SettingsView {
                             .gap_2()
                             .when(changed, |d| {
                                 d.child(
-                                    theme::row_icon_button(
-                                        SharedString::from(format!("reset-{id}")),
+                                    theme::tip(
+                                        theme::row_icon_button(
+                                            SharedString::from(format!("reset-{id}")),
+                                            "Use the default",
+                                            "rotate-ccw",
+                                            content(0.55),
+                                        ),
                                         "Use the default",
-                                        "rotate-ccw",
-                                        content(0.55),
                                     )
                                     .on_click(cx.listener(
                                         move |this, _, _, cx| this.reset_shortcut(id, context, cx),

@@ -303,7 +303,11 @@ fn row_button(
     label: &'static str,
     glyph: &'static str,
 ) -> Stateful<gpui::Div> {
-    theme::row_icon_button(id, label, glyph, content(0.55)).debug_selector(move || selector.clone())
+    theme::tip(
+        theme::row_icon_button(id, label, glyph, content(0.55)),
+        label,
+    )
+    .debug_selector(move || selector.clone())
 }
 
 impl Browser {
@@ -848,21 +852,24 @@ impl Browser {
         let row = if editing {
             row.drag_over::<DraggedFavorite>(|s, _, _, _| s.bg(content(0.14)))
                 .child(
-                    div()
-                        .id(("favorite-handle", fav))
-                        .debug_selector(move || format!("favorite-handle-{fav}"))
-                        .role(Role::Button)
-                        .aria_label("Drag to reorder")
-                        .flex_shrink_0()
-                        .cursor(CursorStyle::OpenHand)
-                        .child(icon("grip-vertical", 14.).text_color(content(0.55)))
-                        .on_drag(
-                            DraggedFavorite {
-                                ix: fav,
-                                label: label.clone(),
-                            },
-                            |dragged, _, _, cx| cx.new(|_| dragged.clone()),
-                        ),
+                    theme::tip(
+                        div()
+                            .id(("favorite-handle", fav))
+                            .debug_selector(move || format!("favorite-handle-{fav}"))
+                            .role(Role::Button)
+                            .aria_label("Drag to reorder")
+                            .flex_shrink_0()
+                            .cursor(CursorStyle::OpenHand)
+                            .child(icon("grip-vertical", 14.).text_color(content(0.55))),
+                        "Drag to reorder",
+                    )
+                    .on_drag(
+                        DraggedFavorite {
+                            ix: fav,
+                            label: label.clone(),
+                        },
+                        |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+                    ),
                 )
         } else {
             row
@@ -1063,7 +1070,7 @@ impl Browser {
             .justify_between()
             .gap_2()
             .child(
-                icon_button("trash", "Trash", "trash", true)
+                theme::tip(icon_button("trash", "Trash", "trash", true), "Trash")
                     .debug_selector(|| "open-trash".into())
                     .when(in_trash, |d| d.bg(content(0.14)))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1082,12 +1089,15 @@ impl Browser {
                         cx,
                     ))
                     .child(
-                        icon_button("settings", "Settings", "settings", true)
-                            .track_focus(&self.settings_focus)
-                            .focus_visible(|s| s.shadow(theme::focus_ring()))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                            ),
+                        theme::tip(
+                            icon_button("settings", "Settings", "settings", true),
+                            "Settings",
+                        )
+                        .track_focus(&self.settings_focus)
+                        .focus_visible(|s| s.shadow(theme::focus_ring()))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                        ),
                     ),
             )
     }
@@ -1113,11 +1123,14 @@ impl Browser {
             .gap_1()
             .child(searches::track_anchor(self.search_anchor.clone()))
             .child(
-                row_icon_button(
-                    "search-menu-button",
+                theme::tip_below(
+                    row_icon_button(
+                        "search-menu-button",
+                        "Searches",
+                        if contents { "file" } else { "search" },
+                        content(if plain { 0.55 } else { 1. }),
+                    ),
                     "Searches",
-                    if contents { "file" } else { "search" },
-                    content(if plain { 0.55 } else { 1. }),
                 )
                 .debug_selector(|| "search-menu-button".into())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_searches(window, cx))),
@@ -1125,12 +1138,15 @@ impl Browser {
             .child(div().flex_1().min_w_0().child(search))
             .when(typed, |d| {
                 d.child(
-                    row_icon_button("clear-search", "Clear Search", "cancel-01", content(0.55))
-                        .debug_selector(|| "clear-search".into())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.pane()
-                                .update(cx, |pane, cx| pane.clear_search(window, cx));
-                        })),
+                    theme::tip_below(
+                        row_icon_button("clear-search", "Clear Search", "cancel-01", content(0.55)),
+                        "Clear Search",
+                    )
+                    .debug_selector(|| "clear-search".into())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.pane()
+                            .update(cx, |pane, cx| pane.clear_search(window, cx));
+                    })),
                 )
             })
             .when_some(
@@ -1162,9 +1178,12 @@ impl Browser {
             .gap_1()
             .child(drag_area().w(px(lights(window))).h_full())
             .child(
-                icon_button("toggle-sidebar", "Show Sidebar", "sidebar-left", true)
-                    .debug_selector(|| "toggle-sidebar".into())
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
+                theme::tip_below(
+                    icon_button("toggle-sidebar", "Show Sidebar", "sidebar-left", true),
+                    "Show Sidebar",
+                )
+                .debug_selector(|| "toggle-sidebar".into())
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
     }
 

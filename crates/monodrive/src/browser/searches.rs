@@ -806,19 +806,25 @@ impl SearchMenu {
                         ),
                 )
                 .child(
-                    row_icon_button(("rename-search", ix), "Rename Search", "pencil", ink)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.rename_saved(ix, window, cx);
-                        })),
+                    theme::tip(
+                        row_icon_button(("rename-search", ix), "Rename Search", "pencil", ink),
+                        "Rename Search",
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.rename_saved(ix, window, cx);
+                    })),
                 )
                 .child(
-                    row_icon_button(("remove-search", ix), "Remove Search", "cancel-01", ink)
-                        .debug_selector(move || format!("remove-search-{ix}"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.remove_saved(ix, window, cx);
-                        })),
+                    theme::tip(
+                        row_icon_button(("remove-search", ix), "Remove Search", "cancel-01", ink),
+                        "Remove Search",
+                    )
+                    .debug_selector(move || format!("remove-search-{ix}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.remove_saved(ix, window, cx);
+                    })),
                 ),
         )
     }

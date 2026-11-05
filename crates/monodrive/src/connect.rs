@@ -187,11 +187,14 @@ impl Render for ConnectView {
                         .pr_1()
                         .child(div().flex_1().min_w_0().truncate().child(address.clone()))
                         .child(
-                            row_icon_button(
-                                ("forget-server", ix),
+                            theme::tip(
+                                row_icon_button(
+                                    ("forget-server", ix),
+                                    "Forget this server",
+                                    "cancel-01",
+                                    if selected { on_accent() } else { content(0.55) },
+                                ),
                                 "Forget this server",
-                                "cancel-01",
-                                if selected { on_accent() } else { content(0.55) },
                             )
                             .debug_selector(move || format!("forget-server-{ix}"))
                             .occlude()

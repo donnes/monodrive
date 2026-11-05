@@ -80,6 +80,13 @@ sub problems_in {
     $each->(qr/\bAnimation\s*::\s*new\b|\.with_easing\s*\(/,
         "raw duration or curve, use motion.rs: entrance, exit, pulse, rise_in or sink_out");
 
+    while ($code =~ /(?<![\w.])(?:icon_button|row_icon_button|circle_button)\s*\(/g) {
+        my ($start, $end) = ($-[0], $+[0]);
+        my $before = substr($code, $start > 200 ? $start - 200 : 0, $start > 200 ? 200 : $start);
+        next if $before =~ /(?:\bfn\s+|\btip(?:_below)?\s*\(\s*(?:theme\s*::\s*)?)\z/;
+        $flag->($start, $end, "icon button without a name on hover, wrap it in tip or tip_below");
+    }
+
     my $parens = qr/(\((?:[^()]++|(?-1))*\))/;
     while ($code =~ /(?<![\w.])content\s*$parens/g) {
         my ($start, $end, $args) = ($-[0], $+[0], $1);
