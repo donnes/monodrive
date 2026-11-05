@@ -33,11 +33,12 @@ pub struct CloudFolder {
 }
 
 /// The cloud folders under `home`: iCloud Drive, then what's in
-/// `~/Library/CloudStorage` by name. macOS names those `Provider-account`,
-/// so each goes by its provider, or by the whole name when two accounts share
-/// one. It looks at those folders from outside and never goes in, since going
-/// in can ask for permission or wake the provider. One it can't see isn't
-/// listed.
+/// `~/Library/CloudStorage` by name. Each goes by the name Finder gives it,
+/// such as "Proton Drive", which fileproviderd knows without going inside
+/// the folder. Without it, macOS's `Provider-account` folder name goes by its
+/// provider. When two share a name, each goes by its whole folder name. It
+/// never lists inside those folders, since that can ask for permission or wake
+/// the provider. One it can't see isn't listed.
 pub fn folders(home: &Path) -> Vec<CloudFolder> {
     let library = home.join("Library");
     let icloud = library.join("Mobile Documents/com~apple~CloudDocs");
@@ -52,25 +53,29 @@ pub fn folders(home: &Path) -> Vec<CloudFolder> {
             (!name.starts_with('.')).then_some(CloudFolder { name, path })
         })
         .collect();
-    providers.sort_by_key(|folder| folder.name.to_lowercase());
-    fn provider(name: &str) -> &str {
-        name.split_once('-').map_or(name, |(provider, _)| provider)
-    }
-    let names: Vec<String> = providers
+    let short: Vec<String> = providers
         .iter()
         .map(|folder| {
-            let short = provider(&folder.name);
-            let shared = providers
-                .iter()
-                .filter(|other| provider(&other.name) == short)
-                .count()
-                > 1;
-            if shared { &folder.name } else { short }.to_owned()
+            provider_name(&folder.path).unwrap_or_else(|| {
+                let name = &folder.name;
+                name.split_once('-')
+                    .map_or(name.as_str(), |(provider, _)| provider)
+                    .to_owned()
+            })
+        })
+        .collect();
+    let names: Vec<String> = short
+        .iter()
+        .zip(&providers)
+        .map(|(name, folder)| {
+            let shared = short.iter().filter(|other| *other == name).count() > 1;
+            if shared { &folder.name } else { name }.clone()
         })
         .collect();
     for (folder, name) in providers.iter_mut().zip(names) {
         folder.name = name;
     }
+    providers.sort_by_key(|folder| folder.name.to_lowercase());
     icloud
         .is_dir()
         .then(|| CloudFolder {
@@ -80,6 +85,30 @@ pub fn folders(home: &Path) -> Vec<CloudFolder> {
         .into_iter()
         .chain(providers)
         .collect()
+}
+
+/// What Finder calls the File Provider folder at `path`, from the private
+/// `FPProviderDomain`, since no public API says. `None` outside a File
+/// Provider domain, or on a macOS without the class.
+fn provider_name(path: &Path) -> Option<String> {
+    let class = AnyClass::get(c"FPProviderDomain")?;
+    class.class_method(sel!(providerDomainForURL:error:))?;
+    with_url(path, |url| {
+        // SAFETY: checked above; a URL and an error pointer it may leave
+        // alone. It returns nil outside a File Provider domain.
+        let domain: Option<Retained<AnyObject>> = unsafe {
+            msg_send![class, providerDomainForURL: url, error: std::ptr::null_mut::<*mut NSError>()]
+        };
+        let domain = domain.filter(|domain| responds(domain, sel!(domainFullDisplayName)))?;
+        // SAFETY: checked above; it takes nothing and returns a string.
+        let name: Option<Retained<NSString>> = unsafe { msg_send![&domain, domainFullDisplayName] };
+        Some(name?.to_string()).filter(|name| !name.is_empty())
+    })
+}
+
+fn responds(object: &AnyObject, selector: Sel) -> bool {
+    // SAFETY: NSObject's own method, on an NSObject.
+    unsafe { msg_send![object, respondsToSelector: selector] }
 }
 
 /// Whether an item's contents are on this Mac.
@@ -125,10 +154,6 @@ impl Availability {
 /// the private `FPItemManager`, about 1.5 ms an item. Each message is checked
 /// first, so a macOS without it answers `None` instead of crashing.
 pub fn fully_downloaded(path: &Path) -> Option<bool> {
-    fn responds(object: &AnyObject, selector: Sel) -> bool {
-        // SAFETY: NSObject's own method, on an NSObject.
-        unsafe { msg_send![object, respondsToSelector: selector] }
-    }
     let class = AnyClass::get(c"FPItemManager")?;
     class.class_method(sel!(defaultManager))?;
     with_url(path, |url| {
@@ -198,7 +223,7 @@ pub fn read_error(path: &Path, e: &std::io::Error) -> String {
     }
 }
 
-// Loads FPItemManager for `fully_downloaded`.
+// Loads FPItemManager and FPProviderDomain.
 #[link(name = "FileProvider", kind = "framework")]
 unsafe extern "C" {}
 
