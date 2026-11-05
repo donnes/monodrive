@@ -779,16 +779,22 @@ impl PaletteView {
         };
         let button_ink = if active { muted } else { content(0.55) };
         let eject_button = row.eject.is_some().then(|| {
-            row_icon_button(("palette-eject", ix), "Eject", "eject", button_ink)
-                .occlude()
-                .on_click(cx.listener(move |this, _, _, cx| this.eject(ix, cx)))
+            theme::tip(
+                row_icon_button(("palette-eject", ix), "Eject", "eject", button_ink),
+                "Eject",
+            )
+            .occlude()
+            .on_click(cx.listener(move |this, _, _, cx| this.eject(ix, cx)))
         });
         let forget_button = row.forget.is_some().then(|| {
-            row_icon_button(
-                ("palette-forget", ix),
+            theme::tip(
+                row_icon_button(
+                    ("palette-forget", ix),
+                    "Forget this server",
+                    "cancel-01",
+                    button_ink,
+                ),
                 "Forget this server",
-                "cancel-01",
-                button_ink,
             )
             .occlude()
             .on_click(cx.listener(move |this, _, _, cx| this.forget(ix, cx)))

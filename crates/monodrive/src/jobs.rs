@@ -215,20 +215,23 @@ impl Jobs {
         let waiting = shown.iter().any(|job| job.state == State::Waiting);
         let badge = (failed || waiting).then(|| if failed { danger() } else { accent() });
         Some(
-            circle_button("jobs-ring", "Copies and Moves", theme::BUTTON_HEIGHT)
-                .relative()
-                .cursor_pointer()
-                .hover(|s| s.bg(content(0.08)))
-                .child(theme::ring(progress(&shown), 14.))
-                .children(badge.map(|color| {
-                    div()
-                        .absolute()
-                        .top(px(2.))
-                        .right(px(2.))
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(color)
-                })),
+            theme::tip_below(
+                circle_button("jobs-ring", "Copies and Moves", theme::BUTTON_HEIGHT),
+                "Copies and Moves",
+            )
+            .relative()
+            .cursor_pointer()
+            .hover(|s| s.bg(content(0.08)))
+            .child(theme::ring(progress(&shown), 14.))
+            .children(badge.map(|color| {
+                div()
+                    .absolute()
+                    .top(px(2.))
+                    .right(px(2.))
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(color)
+            })),
         )
     }
 
@@ -333,11 +336,14 @@ impl Jobs {
                     .text_size(px(theme::TEXT_BODY))
                     .child(div().flex_1().min_w_0().truncate().child(title(job)))
                     .children(close.map(|label| {
-                        row_icon_button(
-                            ElementId::NamedInteger("job-close".into(), id),
+                        theme::tip(
+                            row_icon_button(
+                                ElementId::NamedInteger("job-close".into(), id),
+                                label,
+                                "cancel-01",
+                                content(0.55),
+                            ),
                             label,
-                            "cancel-01",
-                            content(0.55),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if label == "Cancel" {

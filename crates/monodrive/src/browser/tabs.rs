@@ -500,12 +500,20 @@ impl Browser {
             .when(hovered && !alone, |d| {
                 d.child(
                     div().absolute().top(px(2.)).right(px(2.)).child(
-                        row_icon_button(("tab-close", ix), "Close Tab", "cancel-01", content(0.55))
-                            .debug_selector(move || format!("tab-close-{ix}"))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.close_tab(ix, window, cx)
-                            })),
+                        theme::tip_below(
+                            row_icon_button(
+                                ("tab-close", ix),
+                                "Close Tab",
+                                "cancel-01",
+                                content(0.55),
+                            ),
+                            "Close Tab",
+                        )
+                        .debug_selector(move || format!("tab-close-{ix}"))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.close_tab(ix, window, cx)),
+                        ),
                     ),
                 )
             })
@@ -548,18 +556,19 @@ impl Browser {
             .pl(px(lead))
             .pr_3()
             .child(
-                icon_button("back", "Back", "chevron-left", back).on_click(cx.listener(
-                    |this, _, window, cx| {
+                theme::tip_below(icon_button("back", "Back", "chevron-left", back), "Back")
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.pane().update(cx, |pane, cx| pane.go_back(window, cx));
-                    },
-                )),
+                    })),
             )
             .child(
-                icon_button("forward", "Forward", "chevron-right", forward).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.pane().update(cx, |pane, cx| pane.step_history(1, cx));
-                    },
-                )),
+                theme::tip_below(
+                    icon_button("forward", "Forward", "chevron-right", forward),
+                    "Forward",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.pane().update(cx, |pane, cx| pane.step_history(1, cx));
+                })),
             )
             .child(
                 div()
@@ -576,7 +585,7 @@ impl Browser {
             )
             .when(several, |d| {
                 d.child(
-                    icon_button("new-tab", "New Tab", "add-01", true)
+                    theme::tip_below(icon_button("new-tab", "New Tab", "add-01", true), "New Tab")
                         .debug_selector(|| "new-tab".into())
                         .on_click(
                             cx.listener(|this, _, window, cx| this.open_tab_here(window, cx)),

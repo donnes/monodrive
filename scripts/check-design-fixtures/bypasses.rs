@@ -38,3 +38,9 @@ fn motion() {
     div().with_animation("a", Animation::new(Duration::from_millis(300)), |d, t| d.opacity(t)); //~
     div().with_animation("b", motion::entrance().with_easing(ease_in), |d, t| d.opacity(t)); //~
 }
+
+fn unnamed_buttons() {
+    div().child(icon_button("back", "Back", "chevron-left", true)); //~
+    div().child(theme::row_icon_button(("close", ix), "Close", "cancel-01", ink)); //~
+    let ring = circle_button("ring", "Jobs", 24.); //~
+}

@@ -153,6 +153,7 @@ pub fn control(
             .on_click(|_, _, cx| cx.restart())
             .into_any_element(),
         Stage::Installing(fraction) => {
+            // design: hovering shows the update's card, which names it.
             circle_button("updates", "Downloading Update", theme::BUTTON_HEIGHT)
                 .aria_label(format!("Downloading Update, {:.0}%", fraction * 100.))
                 .relative()
@@ -192,6 +193,7 @@ pub fn control(
 /// A chrome button with `icon` and an accent dot, which says it waits on
 /// the user.
 fn marked(icon: &'static str, label: &'static str) -> Stateful<gpui::Div> {
+    // design: hovering shows the update's card, which names it.
     circle_button("updates", label, theme::BUTTON_HEIGHT)
         .relative()
         .cursor_pointer()
