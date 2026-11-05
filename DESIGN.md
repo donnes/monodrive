@@ -227,6 +227,7 @@ All in `theme.rs`, except motion, which `motion.rs` holds and Motion describes. 
 - `row_slot(id)`: where a stacked row's role and handlers go, gap included. `row(active)`: the row inside it, in a menu, picker or popover. `row_muted(active)` is its secondary ink. `destructive_row(active)` and `destructive_ink(active)` are the same for a command marked `destructive`.
 - `drop_outline()`: what a drop would land on, over it; the caller gives it the shape's radius. `insertion_line()`: where a drop would land between stacked rows, in the gap under the row above.
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
+- `tip(button, label)`, `tip_below(button, label)`: a button's name in a small card, above or below it while the pointer rests on it.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.
 - `key_cap(key)`: a shortcut in a 16 pt cap, in a sheet's footer or a row.
 - `icon(path, side)`, `section_label(label)`.

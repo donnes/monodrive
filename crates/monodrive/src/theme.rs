@@ -5,10 +5,12 @@
 use crate::palettes;
 use crate::preferences::{Preferences, Theme};
 use gpui::{
-    BoxShadow, Div, ElementId, FontWeight, Hsla, PathBuilder, Role, SharedString, Stateful, Svg,
-    WindowBackgroundAppearance, canvas, div, point, prelude::*, px, rgb, svg,
+    Bounds, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, PathBuilder, Pixels, Role,
+    SharedString, Stateful, Svg, Window, WindowBackgroundAppearance, canvas, div, point,
+    prelude::*, px, rgb, svg,
 };
 use std::cell::Cell;
+use std::rc::Rc;
 
 pub const UI_FONT: &str = ".SystemUIFont";
 pub const MONO_FONT: &str = "Menlo";
@@ -599,6 +601,63 @@ pub fn progress_fill(fraction: f32) -> Div {
         .w(gpui::relative(fraction))
         .rounded_full()
         .bg(accent())
+}
+
+/// A button's name in a small card, centered above it or below it. GPUI puts
+/// a tooltip under the pointer, which covers what's under a button, and
+/// nothing GPUI draws can sit over a video's layer.
+struct Tip {
+    label: &'static str,
+    over: Bounds<Pixels>,
+    below: bool,
+}
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let over = self.over;
+        let (y, anchor) = if self.below {
+            (over.bottom() + px(4.), gpui::Anchor::TopCenter)
+        } else {
+            (over.top() - px(4.), gpui::Anchor::BottomCenter)
+        };
+        gpui::anchored()
+            .position(point(over.center().x, y))
+            .anchor(anchor)
+            .snap_to_window_with_margin(px(8.))
+            .child(
+                floating(Elevation::Popover)
+                    .px_2()
+                    .py_1()
+                    .whitespace_nowrap()
+                    .text_size(px(TEXT_SMALL))
+                    .child(self.label),
+            )
+    }
+}
+
+/// `button`'s name, above it while the pointer rests on it.
+pub fn tip(button: Stateful<Div>, label: &'static str) -> Stateful<Div> {
+    tip_on(button, label, false)
+}
+
+/// `button`'s name, below it, for a button above something it mustn't cover.
+pub fn tip_below(button: Stateful<Div>, label: &'static str) -> Stateful<Div> {
+    tip_on(button, label, true)
+}
+
+fn tip_on(button: Stateful<Div>, label: &'static str, below: bool) -> Stateful<Div> {
+    let over = Rc::new(Cell::new(Bounds::default()));
+    let measured = over.clone();
+    button
+        .child(
+            canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        )
+        .tooltip(move |_, cx| {
+            let over = over.get();
+            cx.new(|_| Tip { label, over, below }).into()
+        })
 }
 
 #[cfg(test)]

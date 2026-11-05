@@ -1320,7 +1320,7 @@ impl Browser {
         let shown = self.updates_peek
             && self.sheet.is_none()
             && self.sidebar_open
-            && updates.read(cx).shown();
+            && updates.read(cx).has_update();
         shown.then(|| {
             div()
                 .id("updates-peek")

@@ -363,6 +363,16 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     mouse(&mut cx, window, vec![move_to(control)])?;
     cx.advance_clock(std::time::Duration::from_millis(300));
     save(&mut cx, window, out, "updates-peek")?;
+    // Nothing out: the control checks, and says so under the pointer.
+    cx.update(|cx| {
+        let updates = cx.new(|_| Updates::new(Channel::Stable, Vec::new(), Some(None)));
+        cx.set_global(updates::Shared(updates));
+    });
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    mouse(&mut cx, window, vec![move_to(control)])?;
+    cx.advance_clock(std::time::Duration::from_secs(1));
+    save(&mut cx, window, out, "updates-idle")?;
     cx.update(|cx| cx.remove_global::<updates::Shared>());
 
     let window = open(&mut cx, folder)?;

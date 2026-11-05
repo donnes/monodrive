@@ -1,10 +1,11 @@
-//! The updater: a control left of Settings while a newer release is out,
-//! which downloads it when pressed, and a card listing what's new, which
-//! shows while the pointer is on the control and for Check for Updates….
-//! The control then rings with the download's progress and counts down to
-//! the restart that runs it. One `Updates` serves every window. Only a
+//! The updater: a control left of Settings that checks for updates, or once
+//! a newer release is out downloads it when pressed, and a card listing
+//! what's new, which shows while the pointer is on the control and for Check
+//! for Updates…. The control then rings with the download's progress and
+//! counts down to the restart that runs it. One `Updates` serves every window. Only a
 //! signed release checks, so debug builds and tests never reach the network.
 
+use crate::browser::CheckForUpdates;
 use crate::menu;
 use crate::preferences::Preferences;
 use crate::theme::{self, ButtonLook, accent, circle_button, content, danger, text_button};
@@ -98,9 +99,9 @@ pub fn start(cx: &mut App) {
     cx.set_global(Shared(updates));
 }
 
-/// The sidebar's control left of Settings, while there's an update to act
-/// on: a download icon with a dot while one is out, which downloads it, a
-/// ring of the download's progress, a countdown to the restart, and a
+/// The sidebar's control left of Settings: a refresh icon that checks for
+/// updates, a download icon with a dot while one is out, which downloads it,
+/// a ring of the download's progress, a countdown to the restart, and a
 /// restart icon once Later put it off. `hover` hears the pointer come and
 /// go, so the browser can show the card.
 pub fn control(
@@ -109,9 +110,6 @@ pub fn control(
 ) -> Option<AnyElement> {
     let entity = cx.try_global::<Shared>()?.0.clone();
     let updates = entity.read(cx);
-    if !updates.shown() {
-        return None;
-    }
     let install = {
         let entity = entity.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -170,6 +168,12 @@ pub fn control(
                 )
                 .into_any_element()
         }
+        _ if !updates.has_update() => theme::tip(
+            theme::icon_button("updates", "Check for Updates", "rotate-cw", true),
+            "Check for Updates",
+        )
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(CheckForUpdates), cx))
+        .into_any_element(),
         _ => marked("download", "Update Available")
             .on_click(install)
             .into_any_element(),
@@ -220,8 +224,8 @@ impl Updates {
         }
     }
 
-    /// Whether the sidebar shows the control: an update is out or on its way.
-    pub fn shown(&self) -> bool {
+    /// Whether an update is out or on its way in.
+    pub fn has_update(&self) -> bool {
         !self.pending.is_empty() || matches!(self.stage, Stage::Installing(_) | Stage::Ready(_))
     }
 
