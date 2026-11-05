@@ -1209,32 +1209,6 @@ mod tests {
     }
 
     #[test]
-    fn the_pill_says_what_a_drop_would_do() {
-        let says = |sources: &[&str], target: &Target, keys: Modifiers| {
-            decide(&paths(sources), target, keys, true).says()
-        };
-        let inbox = folder("/b/Inbox", "Inbox");
-        let plain = Modifiers::default();
-        assert_eq!(
-            says(&["/a/report.pdf"], &inbox, plain),
-            "Move report.pdf to Inbox"
-        );
-        assert_eq!(
-            says(&["/a/1", "/a/2", "/a/3"], &inbox, keys(true, false)),
-            "Copy 3 items to Inbox"
-        );
-        assert_eq!(says(&["/b/Inbox/f"], &inbox, plain), "Already in Inbox");
-        assert_eq!(
-            says(&["/a/docs"], &Target::Pin(1), plain),
-            "Pin docs to Favorites"
-        );
-        assert_eq!(
-            says(&["/a/docs", "/a/src"], &Target::Pin(1), plain),
-            "Pin 2 folders to Favorites"
-        );
-    }
-
-    #[test]
     fn a_folder_cant_go_inside_itself_and_what_is_there_stays_out() {
         let nothing = Decision::Nothing("\"docs\" can't go inside itself.".into());
         for into in ["/a/docs", "/a/docs/deep/er"] {

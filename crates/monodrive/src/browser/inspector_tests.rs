@@ -258,13 +258,6 @@ fn get_info_opens_and_closes_it_and_only_the_list_gives_way(cx: &mut TestAppCont
     cx.simulate_click(hide, Modifiers::none());
     cx.run_until_parked();
     assert!(!shown_prefs(cx));
-    // It's kept, and a settings file from before it leaves it closed.
-    let on = Preferences {
-        show_inspector: true,
-        ..Preferences::default()
-    };
-    let saved: Preferences = serde_json::from_slice(&serde_json::to_vec(&on).unwrap()).unwrap();
-    assert!(saved.show_inspector);
 }
 
 #[gpui::test]

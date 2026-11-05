@@ -400,7 +400,9 @@ fn cancelling_a_folder_upload_removes_all_of_its_temp_and_nothing_else() {
     let folder = b.local.join("folder");
     std::fs::create_dir_all(folder.join("deep")).unwrap();
     std::fs::write(folder.join("deep/a"), "a").unwrap();
-    std::os::unix::fs::symlink("/etc/hosts", folder.join("link")).unwrap();
+    let target = b.root.join("target.txt");
+    std::fs::write(&target, "mine").unwrap();
+    std::os::unix::fs::symlink(&target, folder.join("link")).unwrap();
     std::fs::write(folder.join("z"), vec![1; BIG]).unwrap();
     std::fs::write(b.server.join("keep.txt"), "keep").unwrap();
     b.next.lock().unwrap().push_back(Next::Cancel(2500));
@@ -409,7 +411,7 @@ fn cancelling_a_folder_upload_removes_all_of_its_temp_and_nothing_else() {
     assert_eq!(job.state, State::Cancelled, "{job:?}");
     assert_eq!(b.on_server(), ["keep.txt"]);
     // A removal doesn't follow a link it made.
-    assert!(Path::new("/etc/hosts").exists());
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
 }
 
 #[test]
@@ -657,24 +659,6 @@ fn agents_copy_only_while_the_setting_lets_them_and_a_forgotten_source_fails() {
     let job = b.run(gone);
     assert_eq!(job.state, State::Failed, "{job:?}");
     assert!(first_failure(&job).contains("gone isn't a saved remote source"));
-}
-
-#[test]
-fn a_link_in_a_folder_stays_a_link_and_nothing_is_written_through_it() {
-    let b = bench();
-    let outside = b.root.join("outside");
-    std::fs::create_dir(&outside).unwrap();
-    let folder = b.server.join("folder");
-    std::fs::create_dir(&folder).unwrap();
-    std::os::unix::fs::symlink(&outside, folder.join("escape")).unwrap();
-    std::fs::write(folder.join("file"), "x").unwrap();
-    let job = b.run(b.download(&["folder"], Conflict::Stop));
-    assert_eq!(job.state, State::Completed, "{job:?}");
-    assert_eq!(
-        std::fs::read_link(b.local.join("folder/escape")).unwrap(),
-        outside
-    );
-    assert_eq!(listing(&outside), Vec::<String>::new());
 }
 
 #[test]

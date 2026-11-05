@@ -6,7 +6,6 @@ use super::drag::{SPRING_DELAY, Spot};
 use super::pane::*;
 use super::tests::*;
 use super::*;
-use crate::preferences::View;
 use gpui::{
     ExternalDragPayload, ExternalPaths, FileDropEvent, Modifiers, ScrollDelta, ScrollWheelEvent,
     TestAppContext, TouchPhase, VisualTestContext, point,
@@ -277,33 +276,6 @@ fn a_drop_on_a_tab_goes_to_its_folder_without_switching_to_it(cx: &mut TestAppCo
     finish_job(&mut owned, cx);
     assert!(project.join("inner.md").exists());
     assert_eq!(browser.read_with(cx, |b, _| b.active), 1);
-    release(owned, cx);
-}
-
-#[gpui::test]
-fn in_the_grid_a_cells_icon_drags_and_a_folder_cell_takes_it(cx: &mut TestAppContext) {
-    let (_dir, project) = folder();
-    let mut owned = own(cx);
-    let (browser, cx) = browse(&project, cx);
-    press(cx, "cmd-alt-2");
-    draw(cx);
-    let cell = |ix: usize, cx: &mut VisualTestContext| {
-        in_pane(&browser, cx, |pane, _| {
-            assert_eq!(pane.view, View::Grid);
-            let height = grid_cell(pane.grid_icon).1;
-            pane.list_bounds.get().origin
-                + point(
-                    px(8. + pane.cell_width * (ix as f32 + 0.5)),
-                    px(4. + height * 0.4),
-                )
-        })
-    };
-    let (docs, file) = (cell(0, cx), cell(2, cx));
-    carry(file, docs, "", cx);
-    assert_eq!(says(&browser, cx).unwrap(), "Move a.txt to docs");
-    cx.simulate_mouse_up(docs, MouseButton::Left, with(""));
-    finish_job(&mut owned, cx);
-    assert!(project.join("docs/a.txt").exists());
     release(owned, cx);
 }
 

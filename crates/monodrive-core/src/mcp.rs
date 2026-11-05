@@ -3290,7 +3290,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_tools_write_beside_the_original_and_replace_goes_through_undo() {
+    fn edit_image_writes_beside_the_original_and_a_bad_step_leaves_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let paths = ops::Paths {
             state: dir.path().join("state"),
@@ -3942,7 +3942,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholders_say_so_and_downloads_never_happen_unasked() {
+    fn placeholders_say_so_and_a_local_file_needs_no_download() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("notes.txt");
         std::fs::write(&file, "hello").unwrap();
