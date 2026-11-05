@@ -392,14 +392,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_closed_sidebar_is_kept_and_older_files_open_it() {
+    fn the_sidebar_and_inspector_are_kept_and_older_files_show_only_the_sidebar() {
         let closed = Preferences {
             show_sidebar: false,
+            show_inspector: true,
             ..Default::default()
         };
         let saved = serde_json::to_vec(&closed).unwrap();
         let read: Preferences = serde_json::from_slice(&saved).unwrap();
         assert!(!read.show_sidebar);
+        assert!(read.show_inspector);
         let older: Preferences = serde_json::from_slice(b"{}").unwrap();
         assert!(older.show_sidebar);
         assert!(!older.show_inspector);

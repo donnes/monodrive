@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quarter_turn_swaps_the_sides_and_a_trim_shortens_without_reencoding() {
+    fn a_quarter_turn_swaps_the_sides_and_a_trim_shortens() {
         let dir = tempfile::tempdir().unwrap();
         let source = fixture("rotated.mp4");
         let turned = dir.path().join("turned.mov");
@@ -494,7 +494,7 @@ mod tests {
         // SAFETY: a plain property of a local asset.
         let length = unsafe { asset(&trimmed).duration().seconds() };
         assert!(length > 0. && length < 0.9, "{length}");
-        assert!(
+        assert_eq!(
             export(
                 &source,
                 &[Clip::Trim {
@@ -503,8 +503,8 @@ mod tests {
                 }],
                 &dir.path().join("bad.mp4"),
                 &|| false
-            )
-            .is_err()
+            ),
+            Err("A trim's end must come after its start.".into())
         );
         // Two trims would otherwise drop one without saying so.
         let twice = [
@@ -517,7 +517,10 @@ mod tests {
                 end: 0.2,
             },
         ];
-        assert!(export(&source, &twice, &dir.path().join("twice.mp4"), &|| false).is_err());
+        assert_eq!(
+            export(&source, &twice, &dir.path().join("twice.mp4"), &|| false),
+            Err("A video can only be trimmed once at a time.".into())
+        );
     }
 
     #[test]
@@ -537,6 +540,7 @@ mod tests {
     fn a_format_macos_cannot_open_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.mp4");
-        assert!(export(&fixture("clip.mkv"), &[Clip::Mute], &out, &|| false).is_err());
+        let error = export(&fixture("clip.mkv"), &[Clip::Mute], &out, &|| false).unwrap_err();
+        assert!(error.contains("has no video macOS can read"), "{error}");
     }
 }

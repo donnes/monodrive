@@ -560,7 +560,7 @@ fn what_ssh_says_is_told_apart() {
 }
 
 #[test]
-fn a_program_that_fails_as_ssh_does_reports_why_and_is_reaped() {
+fn a_program_that_fails_as_ssh_does_reports_why() {
     for (said, check) in [
         (
             "me@nas: Permission denied (publickey,password).",

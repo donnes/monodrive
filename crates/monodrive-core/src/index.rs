@@ -654,6 +654,12 @@ mod tests {
         assert!(takes("size:1kb..2kb", all, sized(2000)));
         assert!(!takes("size:1kb..2kb", all, sized(2001)));
         assert!(!takes("size:<1kb", all, sized(1000)));
+        assert!(takes("size:<1.5mb", all, sized(1_499_999)));
+        assert!(!takes("size:<1.5mb", all, sized(1_500_000)));
+        assert!(takes("size:<=1gb", all, sized(1_000_000_000)));
+        assert!(!takes("size:<=1gb", all, sized(1_000_000_001)));
+        assert!(takes("size:512", all, sized(512)));
+        assert!(!takes("size:512", all, sized(513)));
 
         let aged = |seconds| ("/f/a.txt", KIND_FILE, 1, NOW - seconds);
         assert!(takes("modified:7d", all, aged(7 * 86_400)));

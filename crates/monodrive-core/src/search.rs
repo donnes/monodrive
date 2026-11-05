@@ -884,20 +884,6 @@ mod tests {
     }
 
     #[test]
-    fn sizes_are_decimal_and_each_comparison_keeps_its_edge() {
-        let bytes = |text: &str| match &Query::parse(text).unwrap().terms[0] {
-            Term::Size(size) => size.bytes(),
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(bytes("size:>1kb"), (1001, i64::MAX));
-        assert_eq!(bytes("size:>=1kb"), (1000, i64::MAX));
-        assert_eq!(bytes("size:<1.5mb"), (i64::MIN, 1_499_999));
-        assert_eq!(bytes("size:<=1gb"), (i64::MIN, 1_000_000_000));
-        assert_eq!(bytes("size:1mb..2mb"), (1_000_000, 2_000_000));
-        assert_eq!(bytes("size:512"), (512, 512));
-    }
-
-    #[test]
     fn ages_count_back_from_now_and_days_are_whole_local_days() {
         let seconds = |text: &str, now| match &Query::parse(text).unwrap().terms[0] {
             Term::Modified(modified) => modified.seconds(now),

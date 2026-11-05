@@ -416,12 +416,22 @@ mod tests {
 
     #[test]
     fn what_has_nothing_to_say_keeps_its_name() {
-        assert!(named("a.txt", &[1, 0, 2, 0, 3], Style::Hyphens).is_err());
-        assert!(hyphens("a.txt", "$$$ 1234 %%% ### 99\n").is_err());
-        assert!(hyphens("a.txt", "").is_err());
-        assert!(hyphens("a.jpg", "Looks like a title\n").is_err());
+        let nothing = Err("It has no text that reads as a name.".to_string());
+        assert_eq!(
+            named("a.txt", &[1, 0, 2, 0, 3], Style::Hyphens),
+            Err("It isn't text.".into())
+        );
+        assert_eq!(hyphens("a.txt", "$$$ 1234 %%% ### 99\n"), nothing);
+        assert_eq!(hyphens("a.txt", ""), nothing);
+        assert_eq!(
+            hyphens("a.jpg", "Looks like a title\n"),
+            Err("Only text-based files get suggestions.".into())
+        );
         let dir = tempfile::tempdir().unwrap();
-        assert!(suggest(dir.path(), Style::Hyphens).is_err());
+        assert_eq!(
+            suggest(dir.path(), Style::Hyphens),
+            Err("Only files get suggestions.".into())
+        );
     }
 
     #[test]

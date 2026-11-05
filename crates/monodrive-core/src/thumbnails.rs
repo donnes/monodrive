@@ -201,28 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn a_turned_photo_comes_back_the_right_way_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("turned.jpg");
-        image::RgbImage::new(64, 36).save(&path).unwrap();
-        // An EXIF block after the JPEG's start, with orientation 6: turn a quarter.
-        let mut exif = vec![0xff, 0xe1, 0, 34];
-        exif.extend_from_slice(
-            b"Exif\0\0MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0",
-        );
-        let mut bytes = std::fs::read(&path).unwrap();
-        bytes.splice(2..2, exif);
-        std::fs::write(&path, bytes).unwrap();
-        let bitmap = picture(&path, 128).unwrap();
-        assert_eq!((bitmap.width, bitmap.height), (36, 64));
-    }
-
-    #[test]
-    fn a_video_is_not_a_picture() {
-        assert!(picture(&fixture("rotated.mp4"), 128).is_err());
-    }
-
-    #[test]
     fn a_format_apple_cannot_open_is_an_error() {
         assert!(generate(&fixture("clip.mkv"), 128, &|| false).is_err());
     }

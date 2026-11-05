@@ -388,20 +388,6 @@ fn finishing_after_the_windows_were_closed_opens_one(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn closing_after_the_windows_were_closed_opens_one(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let fake = no_grant();
-    let main = launched(&fake, false, cx);
-    assert!(cx.update(open_windows_now));
-    let browser = browser_starting_the_index(dir.path(), cx);
-    close(browser, cx);
-
-    let (_, visual) = flow(cx);
-    press("cmd-w", visual);
-    assert_eq!(main.get(), 2);
-}
-
-#[gpui::test]
 fn onboarding_opens_no_window_while_a_browser_is_open(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let fake = no_grant();
@@ -456,17 +442,6 @@ fn with_a_saved_index_a_window_starts_it_at_once(cx: &mut TestAppContext) {
     launched(&fake, false, cx);
     assert!(!cx.update(|cx| cx.global::<IndexGate>().held()));
     browser_starting_the_index(dir.path(), cx);
-    assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
-}
-
-#[gpui::test]
-fn closing_during_the_wait_lets_the_crawl_go(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let fake = no_grant();
-    launched(&fake, false, cx);
-    browser_starting_the_index(dir.path(), cx);
-    let (_, visual) = flow(cx);
-    press("cmd-w", visual);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
 }
 

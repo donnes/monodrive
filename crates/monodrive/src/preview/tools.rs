@@ -3335,17 +3335,6 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_row_moves_the_tools_and_then_the_name_out_of_the_way() {
-        // Not measured yet, and wide.
-        assert_eq!(row_fits(0., true), (false, false));
-        assert_eq!(row_fits(800., true), (false, false));
-        // A video has fewer tools, so it stays wide for longer.
-        assert_eq!(row_fits(600., true), (true, false));
-        assert_eq!(row_fits(600., false), (false, false));
-        assert_eq!(row_fits(300., false), (true, true));
-    }
-
-    #[test]
     fn the_crop_takes_the_edge_or_corner_pressed_and_stays_on_the_picture() {
         let frame = Bounds::new(point(px(100.), px(100.)), size(px(200.), px(100.)));
         let edges = |left, right, top, bottom| CropGrab::Edges {

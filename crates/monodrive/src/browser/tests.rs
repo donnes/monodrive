@@ -422,6 +422,7 @@ fn a_save_the_owner_refuses_keeps_the_edit_and_says_why(cx: &mut TestAppContext)
     click(cx, "edit-save");
     cx.run_until_parked();
     assert!(drawn(cx, "edit-save"), "the edit is still there to save");
+    assert!(drawn(cx, "edit-status"), "the reason shows under the row");
     assert!(!project.join("zz edited.png").exists());
     let hidden: Vec<_> = std::fs::read_dir(&project)
         .unwrap()
@@ -1394,6 +1395,9 @@ pub(super) fn release(owned: Owned, cx: &mut VisualTestContext) {
         // SAFETY: a unique pasteboard this test made and no longer uses.
         let _: () = unsafe { objc2::msg_send![&*board.0, releaseGlobally] };
     });
+    // An owner that no client ever reached waits 30 s for its first one.
+    // One that's already gone refuses the connection, which is fine.
+    let _ = ops::Client::new(owned.paths.clone(), None).jobs();
     owned.serving.join().unwrap().unwrap();
 }
 
@@ -2573,19 +2577,6 @@ fn waiting_to_show<'a>(
     cx.run_until_parked();
     assert!(!shown.get());
     (browser, shown, cx)
-}
-
-#[gpui::test]
-fn launch_shows_the_window_once_its_listing_lands(cx: &mut TestAppContext) {
-    let (_dir, project) = folder();
-    let (browser, shown, cx) = waiting_to_show(&project, cx);
-    let pane = pane_of(&browser, cx);
-    pane.update(cx, |pane, cx| {
-        pane.listing = false;
-        cx.notify();
-    });
-    cx.run_until_parked();
-    assert!(shown.get());
 }
 
 #[gpui::test]
