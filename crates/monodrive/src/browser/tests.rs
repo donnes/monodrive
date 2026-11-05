@@ -914,11 +914,26 @@ pub(super) fn blank(
     row(browser, ix, cx) + gpui::point(px(240.), px(0.))
 }
 
-/// Presses the button at `at` and rests there long enough for a drag to
-/// draw a rectangle.
-fn press_and_hold(at: Point<Pixels>, keys: &str, cx: &mut VisualTestContext) {
-    cx.simulate_mouse_down(at, MouseButton::Left, with(keys));
-    cx.executor().advance_clock(MARQUEE_HOLD);
+/// A press and release at `at` in one frame, without running the executor,
+/// as a quick tap arrives.
+pub(super) fn click_unanswered(cx: &mut VisualTestContext, at: Point<Pixels>) {
+    let press = gpui::MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    };
+    let release = gpui::MouseUpEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    };
+    cx.update(|window, cx| {
+        window.dispatch_event(gpui::PlatformInput::MouseDown(press), cx);
+        window.dispatch_event(gpui::PlatformInput::MouseUp(release), cx);
+    });
 }
 
 pub(super) fn with(modifiers: &str) -> Modifiers {
@@ -1001,13 +1016,7 @@ fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
     let (_dir, folder) = sized();
     let (browser, cx) = browse(&folder, cx);
     let (from, to) = (blank(&browser, 0, cx), blank(&browser, 2, cx));
-    // A press that moves straight away is a click that slipped, not a
-    // rectangle.
     cx.simulate_mouse_down(from, MouseButton::Left, with(""));
-    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
-    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
-    assert!(shown(&browser, cx).1.is_empty());
-    press_and_hold(from, "", cx);
     cx.simulate_mouse_move(to, MouseButton::Left, with(""));
     cx.simulate_mouse_up(to, MouseButton::Left, with(""));
     assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "c.txt"]);
@@ -1019,7 +1028,7 @@ fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
     let last = row(&browser, 3, cx);
     cx.simulate_click(last, with(""));
     let (from, to) = (blank(&browser, 0, cx), blank(&browser, 1, cx));
-    press_and_hold(from, "cmd", cx);
+    cx.simulate_mouse_down(from, MouseButton::Left, with("cmd"));
     cx.simulate_mouse_move(to, MouseButton::Left, with("cmd"));
     cx.simulate_mouse_up(to, MouseButton::Left, with("cmd"));
     assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "d.txt"]);
@@ -1027,7 +1036,7 @@ fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
     // that would toggle that row back out.
     let start = blank(&browser, 2, cx);
     let end = start + gpui::point(px(80.), px(0.));
-    press_and_hold(start, "cmd", cx);
+    cx.simulate_mouse_down(start, MouseButton::Left, with("cmd"));
     cx.simulate_mouse_move(end, MouseButton::Left, with("cmd"));
     cx.simulate_mouse_up(end, MouseButton::Left, with("cmd"));
     assert_eq!(shown(&browser, cx).1, ["a.txt", "b.txt", "c.txt", "d.txt"]);
@@ -1050,10 +1059,31 @@ fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
     // Beside the icon, in the blank part of its cell.
     let margin = in_pane(&browser, cx, |browser, _| browser.cell_width / 2. - 2.);
     let from = from - gpui::point(px(margin), px(0.));
-    press_and_hold(from, "", cx);
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
     cx.simulate_mouse_move(to, MouseButton::Left, with(""));
     cx.simulate_mouse_up(to, MouseButton::Left, with(""));
     assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
+}
+
+/// A tap releases before the frame that follows the press is drawn. It
+/// still lets go of the selection, and moving the pointer afterwards, with
+/// the button up, selects nothing.
+#[gpui::test]
+fn a_quick_tap_on_blank_space_never_leaves_a_rectangle_behind(cx: &mut TestAppContext) {
+    let (_dir, folder) = sized();
+    let (browser, cx) = browse(&folder, cx);
+    let last = row(&browser, 3, cx);
+    cx.simulate_click(last, with(""));
+    assert_eq!(shown(&browser, cx).1, ["d.txt"]);
+    // Below the rows, where a click selects no row.
+    let (from, to) = (row(&browser, 6, cx), blank(&browser, 2, cx));
+    click_unanswered(cx, from);
+    cx.run_until_parked();
+    assert!(shown(&browser, cx).1.is_empty());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.simulate_mouse_move(to, None, with(""));
+    assert!(shown(&browser, cx).1.is_empty());
 }
 
 #[gpui::test]
@@ -1097,7 +1127,7 @@ fn a_drag_past_the_bottom_scrolls_and_keeps_selecting(cx: &mut TestAppContext) {
     let below = in_pane(&browser, cx, |browser, _| {
         browser.list_bounds.get().bottom_left()
     }) + gpui::point(px(60.), px(80.));
-    press_and_hold(start, "", cx);
+    cx.simulate_mouse_down(start, MouseButton::Left, with(""));
     cx.simulate_mouse_move(below, MouseButton::Left, with(""));
     let first = shown(&browser, cx).1.len();
     // The test platform draws no frames on its own; deliver the ones
