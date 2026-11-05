@@ -1755,7 +1755,7 @@ fn going_to_a_dotfile_does_not_open_the_trash_or_applications_to_hidden_files(
         let pane = pane_of(&browser, cx);
         let (folder, file) = (folder.to_path_buf(), folder.join(file));
         pane.update_in(cx, |pane, window, cx| {
-            pane.go_to(folder, Some(file), window, cx)
+            pane.go_to(folder, vec![file], window, cx)
         });
         cx.run_until_parked();
     };

@@ -65,6 +65,9 @@ if [[ ! -f "$icon/Assets.car" || ! -f "$icon/app-icon.icns" ]]; then
 fi
 mv -f "$icon/Assets.car" "$icon/app-icon.icns" "$app/Contents/Resources/"
 
+# NSServices puts Open in Monodrive in Finder's right-click menu, answered by
+# finder.rs under the bundle ID. An empty NSRequiredContext shows it without
+# switching it on in System Settings first.
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -81,6 +84,13 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSServices</key><array><dict>
+  <key>NSMenuItem</key><dict><key>default</key><string>Open in $name</string></dict>
+  <key>NSMessage</key><string>openInMonodrive</string>
+  <key>NSPortName</key><string>$id</string>
+  <key>NSRequiredContext</key><dict/>
+  <key>NSSendFileTypes</key><array><string>public.item</string></array>
+</dict></array>
 </dict></plist>
 PLIST
 

@@ -32,20 +32,28 @@ impl Pasteboard {
         self.0.writeObjects(&NSArray::from_retained_slice(&urls));
     }
 
-    /// The files on the pasteboard, whichever app put them there. Finder's
-    /// file reference URLs resolve to paths.
+    /// The files on the pasteboard, whichever app put them there.
     pub fn files(&self) -> Vec<PathBuf> {
-        let Some(items) = self.0.pasteboardItems() else {
-            return Vec::new();
-        };
-        // SAFETY: AppKit's constant, read once AppKit is loaded.
-        let file_url = unsafe { NSPasteboardTypeFileURL };
-        items
-            .iter()
-            .filter_map(|item| {
-                let url = NSURL::URLWithString(&*item.stringForType(file_url)?)?;
-                Some(PathBuf::from(url.filePathURL()?.path()?.to_string()))
-            })
-            .collect()
+        files_on(&self.0)
     }
+}
+
+/// The files on `pasteboard`, as Copy or a service request carries them.
+/// Finder's file reference URLs resolve to paths.
+pub fn files_on(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
+    let Some(items) = pasteboard.pasteboardItems() else {
+        return Vec::new();
+    };
+    // SAFETY: AppKit's constant, read once AppKit is loaded.
+    let file_url = unsafe { NSPasteboardTypeFileURL };
+    items
+        .iter()
+        .filter_map(|item| path_of(&*item.stringForType(file_url)?))
+        .collect()
+}
+
+/// The path a `file://` URL's text names, resolving a file reference URL.
+pub fn path_of(url: &NSString) -> Option<PathBuf> {
+    let url = NSURL::URLWithString(url)?;
+    Some(PathBuf::from(url.filePathURL()?.path()?.to_string()))
 }
