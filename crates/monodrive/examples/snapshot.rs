@@ -488,7 +488,8 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
 /// The Overview, from saved totals on a made-up Mac: `overview-low.png` under
 /// 20% free, with suggestions, a scanned drive, an unscanned share and a drive
 /// that's gone; `overview-roomy.png` over it; `overview-locations.png` with the
-/// drives on screen, and `overview-one-drive.png` with nothing else to say.
+/// drives on screen, `overview-one-drive.png` with nothing else to say, and
+/// the low one again in a 900×600 window and the smallest, 720×440.
 fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
     const GB: u64 = 1_000_000_000;
     cx.update(|cx| cx.set_global(base.clone()));
@@ -518,17 +519,34 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
         ),
         (
             "overview-locations",
-            vec![startup(178), backup, media],
+            vec![startup(178), backup.clone(), media.clone()],
             true,
             false,
         ),
         ("overview-one-drive", vec![startup(178)], false, true),
+        // The smallest window macOS lets it shrink to, and one in between.
+        (
+            "overview-smallest",
+            vec![startup(44), backup.clone(), media.clone()],
+            true,
+            true,
+        ),
+        (
+            "overview-medium",
+            vec![startup(44), backup.clone(), media.clone()],
+            true,
+            true,
+        ),
     ];
     for (name, volumes, more, folders) in cases {
         let home = tempfile::tempdir()?;
         let places = overview_fixture(home.path(), volumes, more, folders)?;
         cx.update(|cx| cx.set_global(places));
-        let window = open(cx, folder)?;
+        let window = match name {
+            "overview-smallest" => open_at(cx, folder, 720., 440.)?,
+            "overview-medium" => open_at(cx, folder, 900., 600.)?,
+            _ => open(cx, folder)?,
+        };
         dispatch(cx, window, &GoOverview)?;
         save(cx, window, out, name)?;
         // Before its fixture goes, so nothing reads a folder that's gone.
@@ -1154,8 +1172,17 @@ fn settle() {
 }
 
 fn open(cx: &mut Cx, folder: &Path) -> gpui::Result<gpui::WindowHandle<Browser>> {
+    open_at(cx, folder, 1100., 700.)
+}
+
+fn open_at(
+    cx: &mut Cx,
+    folder: &Path,
+    width: f32,
+    height: f32,
+) -> gpui::Result<gpui::WindowHandle<Browser>> {
     let folder = folder.to_path_buf();
-    cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+    cx.open_window(size(px(width), px(height)), |_, cx| {
         cx.new(|cx| Browser::new(folder, cx))
     })
 }
