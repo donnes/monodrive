@@ -654,11 +654,6 @@ impl Browser {
             .then(|| monodrive_core::volumes::holding(&self.sidebar.volumes, pane.folder()))
             .flatten();
         Chrome {
-            jobs: if pane.showing_overview() {
-                self.jobs.read(cx).lines()
-            } else {
-                Vec::new()
-            },
             width,
             focused,
             covered: self.sheet_open() || self.menu.is_some(),

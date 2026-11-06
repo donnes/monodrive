@@ -24,7 +24,6 @@ use crate::commands::Scope;
 use crate::feedback::{self, Sound};
 use crate::file_icons;
 use crate::jobs;
-use crate::jobs::JobLine;
 use crate::onboarding::IndexGate;
 use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, View, WorkspaceStyle};
@@ -139,8 +138,6 @@ pub(super) struct Chrome {
     pub(super) space: Option<String>,
     /// The volume to eject for the folder shown, if any.
     pub(super) ejectable: Option<PathBuf>,
-    /// The copies and moves going, for the Overview.
-    pub(super) jobs: Vec<JobLine>,
 }
 
 /// Where a new pane starts.

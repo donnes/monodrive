@@ -1,18 +1,16 @@
 //! The Overview page, which takes the pane's list while it's on screen: how
 //! much is free and what could free more, the user's things across every
-//! location, and what's happening now. Everything it says comes from
+//! location, and where each location stands. Everything it says comes from
 //! `monodrive_core::overview`, read off the UI thread; opening it draws what's
 //! saved at once and measures what's due behind it, and leaving stops that.
 
 use super::pane::Pane;
 use super::sidebar::Places;
 use super::{ConnectToServer, EmptyTrash, Operations, lock, with_owner};
-use crate::jobs::JobLine;
 use crate::theme::{
     self, ButtonLook, accent, content, dither_bar, icon, row_icon_button, section_label,
     text_button,
 };
-use chrono::{DateTime, Local};
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, MouseButton, Role, Task, Window, div, prelude::*, px,
 };
@@ -36,14 +34,22 @@ const MEASURING: usize = 2;
 /// How far back the page says what agents changed, and how many.
 const CHANGES_SINCE: u64 = 24 * 60 * 60;
 const CHANGES_SHOWN: usize = 5;
-/// Narrower than this, "Right now" goes under "Your stuff".
-const SIDE_BY_SIDE: f32 = 720.;
-const RIGHT_NOW_WIDTH: f32 = 300.;
+/// From this pane width the suggestions sit side by side as cards, and
+/// from the next the locations take a column beside the list.
+const CARDS_ACROSS: f32 = 720.;
+const SIDE_COLUMN: f32 = 820.;
+const SIDE_WIDTH: f32 = 280.;
+/// Wider than this, the page stops growing, so sizes stay near their names.
+const MAX_WIDTH: f32 = 1040.;
 const STUFF_ROW_HEIGHT: f32 = 34.;
-/// A row's title line, which a "Right now" mark centers on.
 const TITLE_LINE: f32 = 16.;
-const DISPLAY_LINE: f32 = 26.;
-const BASELINE_LIFT: f32 = 0.5;
+/// A row's own side padding, which puts its text on the pane's inset.
+const ROW_INSET: f32 = 8.;
+/// The trailing columns every row of the list keeps, filled or not.
+const SIZE_SLOT: f32 = 72.;
+const ACTION_SLOT: f32 = 20.;
+/// A narrow pane's suggestion rows lead with what each frees.
+const RECLAIMS_SLOT: f32 = 52.;
 
 /// What the page shows, as last read.
 #[derive(Default)]
@@ -354,7 +360,7 @@ impl Pane {
         let about = self.overview.about.clone().unwrap_or_default();
         let measuring = self.overview.reading.is_some();
         let now = overview::now();
-        let wide = self.chrome.width >= SIDE_BY_SIDE;
+        let width = self.chrome.width;
 
         let reclaimable: u64 = about.suggestions.iter().map(|s| s.size.unshared).sum();
         let partial = about.suggestions.iter().any(|s| !s.size.complete);
@@ -362,16 +368,57 @@ impl Pane {
             .headline
             .as_ref()
             .map(|disk| self.headline(disk, about.suggestions.len(), reclaimable, partial, cx));
-        let cards = (!about.suggestions.is_empty()).then(|| {
-            div().flex().when(!wide, |d| d.flex_col()).gap_3().children(
-                about
-                    .suggestions
-                    .iter()
-                    .map(|suggestion| self.suggestion_card(suggestion, now, cx)),
-            )
+        // The cards' edges sit on the text's edge, with the headline and bar.
+        let suggestions = (!about.suggestions.is_empty()).then(|| {
+            if width >= CARDS_ACROSS {
+                div()
+                    .mx(px(ROW_INSET))
+                    .flex()
+                    .items_stretch()
+                    .gap_3()
+                    .children(
+                        about
+                            .suggestions
+                            .iter()
+                            .map(|suggestion| self.suggestion_card(suggestion, now, cx)),
+                    )
+                    .into_any_element()
+            } else {
+                card()
+                    .mx(px(ROW_INSET))
+                    .flex()
+                    .flex_col()
+                    .children(
+                        about
+                            .suggestions
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, suggestion)| {
+                                self.suggestion_row(suggestion, now, cx)
+                                    .when(ix > 0, |d| d.border_t_1().border_color(content(0.08)))
+                            }),
+                    )
+                    .into_any_element()
+            }
         });
         let stuff = self.stuff(&about, measuring, now, cx);
-        let right_now = self.right_now(&about, now, cx);
+        let side = self.side(&about, now, cx);
+        let body = match side {
+            Some(side) if width >= SIDE_COLUMN => div()
+                .flex()
+                .items_start()
+                .gap(px(24.))
+                .child(div().flex_1().min_w_0().child(stuff))
+                .child(div().flex_shrink_0().w(px(SIDE_WIDTH)).child(side))
+                .into_any_element(),
+            side => div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(stuff)
+                .children(side)
+                .into_any_element(),
+        };
         Some(
             div()
                 .debug_selector(|| "overview-page".into())
@@ -396,42 +443,28 @@ impl Pane {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .px(px(theme::PANE_INSET))
+                        // Rows pad themselves by 8 pt, so every text starts on
+                        // the pane's inset, as the footer's does.
+                        .px(px(theme::PANE_INSET - ROW_INSET))
                         .py_4()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .children(headline)
-                        .children(cards)
-                        .child(if wide {
+                        .child(
                             div()
-                                .flex()
-                                .items_start()
-                                .gap(px(24.))
-                                .child(div().flex_1().min_w_0().child(stuff))
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .w(px(RIGHT_NOW_WIDTH))
-                                        .child(right_now),
-                                )
-                                .into_any_element()
-                        } else {
-                            div()
+                                .w_full()
+                                .max_w(px(MAX_WIDTH))
                                 .flex()
                                 .flex_col()
                                 .gap_4()
-                                .child(stuff)
-                                .child(right_now)
-                                .into_any_element()
-                        }),
+                                .children(headline)
+                                .children(suggestions)
+                                .child(body),
+                        ),
                 )
                 .child(footer(&about, measuring, now))
                 .into_any_element(),
         )
     }
 
-    /// How much is free, in the page's one large line, what the suggestions
+    /// How much is free, in the page's one large figure, what the suggestions
     /// would make of it, and the bar: solid for what's used, dithered in the
     /// accent for what the suggestions and the Trash could give back.
     fn headline(
@@ -455,58 +488,37 @@ impl Pane {
         } else {
             ""
         };
+        let name = &disk.name;
         // Moving to the Trash frees nothing yet, so this says when it does.
         let promise = match (suggested, trash.is_some()) {
-            (0, false) => "on this Mac.".to_string(),
-            (0, true) => format!("on this Mac. Emptying the Trash gets you to {at_least}{reach}."),
+            (0, false) => format!("On {name}."),
+            (0, true) => format!("On {name}. Emptying the Trash gets you to {at_least}{reach}."),
             (1, _) => {
-                format!("on this Mac. This gets you to {at_least}{reach} after emptying the Trash.")
+                format!("On {name}. This gets you to {at_least}{reach} after emptying the Trash.")
             }
-            (n, _) => {
-                format!(
-                    "on this Mac. These {n} get you to {at_least}{reach} after emptying the Trash."
-                )
-            }
+            (n, _) => format!(
+                "On {name}. These {n} get you to {at_least}{reach} after emptying the Trash."
+            ),
         };
         div()
+            .px(px(ROW_INSET))
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_1()
             .debug_selector(|| "overview-headline".into())
             .child(
                 div()
                     .flex()
                     .items_center()
+                    .justify_between()
                     .gap_2()
                     .child(
-                        // Bottom-aligned, then lifted by the difference in where
-                        // each size's baseline sits in its line, so the two
-                        // read as one sentence.
                         div()
-                            .flex_1()
                             .min_w_0()
-                            .flex()
-                            .items_end()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .line_height(px(DISPLAY_LINE))
-                                    .text_size(px(theme::TEXT_DISPLAY))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("{} free", amount(disk.free))),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .mb(px(BASELINE_LIFT))
-                                    .line_height(px(TITLE_LINE))
-                                    .text_size(px(theme::TEXT_BODY))
-                                    .text_color(content(0.65))
-                                    .child(promise),
-                            ),
+                            .truncate()
+                            .text_size(px(theme::TEXT_DISPLAY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("{} free", amount(disk.free))),
                     )
                     .when(trash.is_some(), |d| {
                         d.child(
@@ -524,72 +536,131 @@ impl Pane {
                         )
                     }),
             )
-            .child(dither_bar(share(used - conditional), share(conditional)))
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_BODY))
+                    .text_color(content(0.65))
+                    .child(promise),
+            )
+            .child(
+                div()
+                    .pt_2()
+                    .child(dither_bar(share(used - conditional), share(conditional))),
+            )
     }
 
+    /// A suggestion as a card of its own, for when three fit side by side.
+    /// The buttons sit at the cards' feet, so they line up.
     fn suggestion_card(
         &self,
         suggestion: &Suggestion,
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let dir = suggestion.path.clone();
-        let path = &suggestion.path;
         let evidence = &suggestion.evidence;
-        let mut size = amount(suggestion.size.unshared);
-        if !suggestion.size.complete {
-            size.push('+');
-        }
-        let mut why = evidence.why();
-        if let Some(age) = suggestion.size.age(now) {
-            why += &format!(" Measured {age}.");
-        }
-        div()
-            .id(format!("overview-suggestion-{}", path.display()))
+        card()
+            .id(format!("overview-suggestion-{}", suggestion.path.display()))
             .role(Role::Group)
             .aria_label(evidence.title())
             .flex_1()
             .min_w_0()
             .p_4()
-            .rounded(px(theme::RADIUS_CARD))
-            .border_1()
-            .border_color(content(0.12))
-            .bg(content(0.03))
             .flex()
             .flex_col()
             .gap_1()
-            .child(div().text_size(px(theme::TEXT_TITLE)).child(size))
             .child(
                 div()
-                    .truncate()
                     .text_size(px(theme::TEXT_TITLE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(reclaims(suggestion)),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_BODY))
                     .font_weight(FontWeight::MEDIUM)
                     .child(evidence.title()),
             )
             .child(
                 div()
+                    .flex_1()
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(content(0.65))
-                    .child(why),
+                    .child(why(suggestion, now)),
             )
-            .child(
-                div().pt_2().flex().child(
-                    text_button(
-                        format!("overview-clean-{}", path.display()),
-                        evidence.action(),
-                        ButtonLook::Primary,
-                    )
-                    .debug_selector(|| "overview-clean".into())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.clean_suggestion(dir.clone(), window, cx)
-                    })),
-                ),
-            )
+            .child(div().pt_2().flex().child(self.clean_button(suggestion, cx)))
             .into_any_element()
     }
 
-    /// Everything in one ranking, whichever location holds it: the startup
-    /// disk's rows and each scanned drive's.
+    /// A suggestion as a row of the one card they share in a narrow pane:
+    /// what it frees, what it is and why it's safe, then its button.
+    fn suggestion_row(
+        &self,
+        suggestion: &Suggestion,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let evidence = &suggestion.evidence;
+        div()
+            .id(format!("overview-suggestion-{}", suggestion.path.display()))
+            .role(Role::Group)
+            .aria_label(evidence.title())
+            .px_3()
+            .py_2()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(RECLAIMS_SLOT))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_end()
+                    .text_size(px(theme::TEXT_TITLE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(reclaims(suggestion)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(theme::TEXT_BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(evidence.title()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme::TEXT_SMALL))
+                            .text_color(content(0.65))
+                            .child(why(suggestion, now)),
+                    ),
+            )
+            .child(self.clean_button(suggestion, cx).flex_shrink_0())
+    }
+
+    fn clean_button(
+        &self,
+        suggestion: &Suggestion,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let dir = suggestion.path.clone();
+        text_button(
+            format!("overview-clean-{}", dir.display()),
+            suggestion.evidence.action(),
+            ButtonLook::Primary,
+        )
+        .debug_selector(|| "overview-clean".into())
+        .on_click(
+            cx.listener(move |this, _, window, cx| this.clean_suggestion(dir.clone(), window, cx)),
+        )
+    }
+
+    /// Everything in one ranking, largest first, whichever location holds
+    /// it: the startup disk's rows and each scanned drive's.
     fn stuff(
         &self,
         about: &Overview,
@@ -622,24 +693,29 @@ impl Pane {
         }
         // Stable, so a project's copies stay under it.
         ranked.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
-        let rest = about.everything_else.filter(|rest| *rest > 0).map(|rest| {
-            stuff_row(
-                ("hard-drive", content(0.55)),
-                "Everything else".to_string(),
-                "What no row above explains.".to_string(),
-                amount(rest),
-            )
-        });
+        // Only the startup disk is measured whole, so the rest is its rest,
+        // apart from the ranking.
+        let rest = about
+            .everything_else
+            .filter(|rest| *rest > 0)
+            .zip(about.headline.as_ref())
+            .map(|(rest, disk)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(hairline().my_1())
+                    .child(still(stuff_row(
+                        ("hard-drive", content(0.55)),
+                        "Everything else".to_string(),
+                        format!("On {}, outside the folders above.", disk.name),
+                        amount(rest),
+                        None,
+                    )))
+            });
         div()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(section_label("Your stuff, everywhere").px_0())
-                    .child(section_label("Largest first").px_0()),
-            )
+            .child(section_label("Your stuff, everywhere"))
             .children(ranked.into_iter().map(|(_, row)| row))
             .children(rest)
     }
@@ -694,6 +770,7 @@ impl Pane {
                             .any(|spot| spot.size.is_none_or(|size| !size.complete)),
                         measuring,
                     ),
+                    None,
                 )
                 .group_hover(theme::ROW_GROUP, |s| s.bg(content(0.08))),
             )
@@ -722,29 +799,32 @@ impl Pane {
         let path = spot.path.clone();
         let label = name.clone();
         let id = format!("overview-spot-{}", path.display());
-        let row = stuff_row(
-            look(group),
-            name,
-            said,
-            size_label(spot.size.map(|size| size.on_disk), partial, measuring),
-        );
-        let row = row.when(group.kind == GroupKind::Cloud && spot.reachable, |d| {
+        let action = (group.kind == GroupKind::Cloud && spot.reachable).then(|| {
             let path = path.clone();
-            d.child(
+            theme::tip(
                 row_icon_button(
                     format!("overview-remove-download-{}", path.display()),
                     "Remove Download",
                     "cloud",
                     content(0.55),
-                )
-                .occlude()
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.remove_downloads(path.clone(), window, cx)
-                })),
+                ),
+                "Remove Download",
             )
+            .occlude()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.remove_downloads(path.clone(), window, cx)
+            }))
+            .into_any_element()
         });
+        let row = stuff_row(
+            look(group),
+            name,
+            said,
+            size_label(spot.size.map(|size| size.on_disk), partial, measuring),
+            action,
+        );
         if !spot.reachable {
-            return row.into_any_element();
+            return still(row).into_any_element();
         }
         let selector = format!("overview-spot-{label}");
         theme::row_slot(id)
@@ -772,7 +852,7 @@ impl Pane {
             format!("{}, not connected", location.name)
         };
         if let Some(age) = row.size.age(now) {
-            said += &format!(". Scanned {age}.");
+            said += &format!(" · scanned {age}");
         }
         // A drive that's gone can't be opened, so its rows go faint.
         let ink = if location.mount.is_some() {
@@ -780,29 +860,33 @@ impl Pane {
         } else {
             content(0.3)
         };
+        let action =
+            location.takes_trash.then(|| {
+                let path = path.clone();
+                theme::tip(
+                    row_icon_button(
+                        format!("overview-trash-{}", path.display()),
+                        "Move to Trash",
+                        "trash",
+                        content(0.55),
+                    ),
+                    "Move to Trash",
+                )
+                .occlude()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.trash_scan_row(path.clone(), window, cx)
+                }))
+                .into_any_element()
+            });
         let shown = stuff_row(
             ("folder-01", ink),
             row.name.clone(),
             said,
             size_label(Some(row.size.on_disk), !row.size.complete, false),
+            action,
         );
-        let shown = shown.when(location.takes_trash, |d| {
-            let path = path.clone();
-            d.child(
-                row_icon_button(
-                    format!("overview-trash-{}", path.display()),
-                    "Move to Trash",
-                    "trash",
-                    content(0.55),
-                )
-                .occlude()
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.trash_scan_row(path.clone(), window, cx)
-                })),
-            )
-        });
         if location.mount.is_none() {
-            return shown.into_any_element();
+            return still(shown).into_any_element();
         }
         let selector = format!("overview-row-{}", row.name);
         theme::row_slot(format!("overview-row-{}", path.display()))
@@ -814,41 +898,39 @@ impl Pane {
             .into_any_element()
     }
 
-    fn right_now(
-        &self,
-        about: &Overview,
-        now: u64,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let quiet = self.chrome.jobs.is_empty() && self.overview.changes.is_empty();
-        div()
-            .flex()
-            .flex_col()
-            .child(section_label("Right now").px_0())
-            .when(quiet, |d| {
-                d.child(now_line(
-                    icon("clock", 16.).text_color(content(0.55)),
-                    "Nothing running".to_string(),
-                    "No copies, moves or agent changes.".to_string(),
-                ))
-            })
-            .children(self.chrome.jobs.iter().map(job_line))
-            .children(
-                self.overview
-                    .changes
-                    .iter()
-                    .map(|change| change_line(change, now)),
-            )
-            .children(
-                about
-                    .locations
-                    .iter()
-                    .map(|location| self.location_line(location, now, cx)),
-            )
+    /// Beside the list, or under it in a narrow pane: every location with
+    /// how it stands and its button, then what agents changed lately. Copies
+    /// and moves stay in the title bar's ring. `None` with nothing to show.
+    fn side(&self, about: &Overview, now: u64, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if about.locations.is_empty() && self.overview.changes.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .when(!about.locations.is_empty(), |d| {
+                    d.child(section_label("Locations")).children(
+                        about
+                            .locations
+                            .iter()
+                            .map(|location| self.location_row(location, now, cx)),
+                    )
+                })
+                .when(!self.overview.changes.is_empty(), |d| {
+                    d.child(section_label("Changed by agents")).children(
+                        self.overview
+                            .changes
+                            .iter()
+                            .map(|change| change_row(change, now)),
+                    )
+                }),
+        )
     }
 
-    /// A location: whether it's connected, what it can say, and its button.
-    fn location_line(
+    /// A location: how it stands, a line for each part so none is lost to
+    /// a wrap, and its button.
+    fn location_row(
         &self,
         location: &Location,
         now: u64,
@@ -862,21 +944,16 @@ impl Pane {
         });
         let action = match (&location.kind, &location.mount) {
             (_, Some(_)) if scanning => Some(
-                text_button("overview-cancel-scan", "Cancel Scan", ButtonLook::Secondary)
+                text_button("overview-cancel-scan", "Cancel Scan", ButtonLook::Ghost)
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_scan(cx))),
             ),
             (_, Some(mount)) => {
                 let mount = mount.clone();
-                let label = if location.scan.is_some() {
-                    "Scan Again"
-                } else {
-                    "Scan"
-                };
                 Some(
                     text_button(
                         format!("overview-scan-{}", mount.display()),
-                        label,
-                        ButtonLook::Secondary,
+                        "Scan",
+                        ButtonLook::Ghost,
                     )
                     .debug_selector(|| "overview-scan".into())
                     .on_click(
@@ -888,7 +965,7 @@ impl Pane {
                 text_button(
                     format!("overview-connect-{}", location.name),
                     "Connect…",
-                    ButtonLook::Secondary,
+                    ButtonLook::Ghost,
                 )
                 .on_click(cx.listener(|_, _, window, cx| {
                     window.dispatch_action(Box::new(ConnectToServer), cx);
@@ -905,13 +982,78 @@ impl Pane {
         } else {
             content(0.3)
         });
-        now_line(
-            mark,
-            location.name.clone(),
-            location_state(location, scanning, now),
+        // Top-aligned with the list's rows, so names line up across the
+        // columns. The mark and the button center on the first two lines, as
+        // a list row's do.
+        let beside = || {
+            div()
+                .h(px(2. * TITLE_LINE))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+        };
+        still(
+            div()
+                .min_h(px(STUFF_ROW_HEIGHT))
+                .px(px(ROW_INSET))
+                .py(px((STUFF_ROW_HEIGHT - 2. * TITLE_LINE) / 2.))
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(beside().child(mark))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(title_line(location.name.clone()))
+                        .children(location_state(location, scanning, now).into_iter().map(
+                            |line| {
+                                div()
+                                    .truncate()
+                                    .line_height(px(TITLE_LINE))
+                                    .text_size(px(theme::TEXT_SMALL))
+                                    .text_color(content(0.65))
+                                    .child(line)
+                            },
+                        )),
+                )
+                .children(action.map(|action| beside().child(action))),
         )
-        .children(action.map(|action| action.flex_shrink_0()))
     }
+}
+
+/// A rule between rows, from the text's edge to the size's.
+fn hairline() -> gpui::Div {
+    div().mx(px(ROW_INSET)).h(px(1.)).bg(content(0.08))
+}
+
+/// The frame both kinds of suggestion share.
+fn card() -> gpui::Div {
+    div()
+        .rounded(px(theme::RADIUS_CARD))
+        .border_1()
+        .border_color(content(0.12))
+        .bg(content(0.03))
+}
+
+/// What a suggestion frees, with a + when part of it couldn't be read.
+fn reclaims(suggestion: &Suggestion) -> String {
+    let mut size = amount(suggestion.size.unshared);
+    if !suggestion.size.complete {
+        size.push('+');
+    }
+    size
+}
+
+/// Why a suggestion is safe, and how old its size is when that matters.
+fn why(suggestion: &Suggestion, now: u64) -> String {
+    let mut why = suggestion.evidence.why();
+    if let Some(age) = suggestion.size.age(now) {
+        why += &format!(" Measured {age}.");
+    }
+    why
 }
 
 /// A group's glyph and its tint: the accent, or a kind of folder's own color,
@@ -926,17 +1068,76 @@ fn look(group: &Group) -> (&'static str, Hsla) {
     }
 }
 
-/// A row of "Your stuff": what it is, where it lives, and what it takes up.
-fn stuff_row(look: (&'static str, Hsla), title: String, detail: String, size: String) -> gpui::Div {
-    row_frame(STUFF_ROW_HEIGHT)
-        .child(icon(look.0, 16.).flex_shrink_0().text_color(look.1))
-        .child(two_lines(title, detail))
+/// A row of "Your stuff": what it is, where it lives, what it takes up, and
+/// its button. Every row keeps the button's room, so the sizes line up.
+fn stuff_row(
+    look: (&'static str, Hsla),
+    title: String,
+    detail: String,
+    size: String,
+    action: Option<AnyElement>,
+) -> gpui::Div {
+    entry_row(look, title, detail)
         .child(
             div()
+                .w(px(SIZE_SLOT))
                 .flex_shrink_0()
+                .flex()
+                .justify_end()
                 .text_size(px(theme::TEXT_BODY))
                 .child(size),
         )
+        .child(
+            div()
+                .w(px(ACTION_SLOT))
+                .flex_shrink_0()
+                .flex()
+                .justify_center()
+                .children(action),
+        )
+}
+
+/// A row's mark, title and detail, on the list's grid.
+fn entry_row(look: (&'static str, Hsla), title: String, detail: String) -> gpui::Div {
+    div()
+        .h(px(STUFF_ROW_HEIGHT))
+        .flex_shrink_0()
+        .px(px(ROW_INSET))
+        .rounded(px(theme::RADIUS_ROW))
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(icon(look.0, 16.).flex_shrink_0().text_color(look.1))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(title_line(title))
+                .child(
+                    div()
+                        .truncate()
+                        .line_height(px(TITLE_LINE))
+                        .text_size(px(theme::TEXT_SMALL))
+                        .text_color(content(0.65))
+                        .child(detail),
+                ),
+        )
+}
+
+/// A row nothing opens, spaced as a pressable one is.
+fn still(row: gpui::Div) -> gpui::Div {
+    div().flex_shrink_0().pb(px(theme::ROW_GAP)).child(row)
+}
+
+fn title_line(title: String) -> gpui::Div {
+    div()
+        .truncate()
+        .h(px(TITLE_LINE))
+        .line_height(px(TITLE_LINE))
+        .text_size(px(theme::TEXT_BODY))
+        .child(title)
 }
 
 fn size_label(on_disk: Option<u64>, partial: bool, measuring: bool) -> String {
@@ -967,83 +1168,49 @@ fn amount(bytes: u64) -> String {
     }
 }
 
-/// What a location can say about itself, in a line.
-fn location_state(location: &Location, scanning: bool, now: u64) -> String {
+/// What a location can say about itself, a line each: whether it's away,
+/// its space, and its scan. The mark already says a connected one is.
+fn location_state(location: &Location, scanning: bool, now: u64) -> Vec<String> {
     let mut said = Vec::new();
+    if !location.connected {
+        said.push("Not connected".to_string());
+    }
     if let Some((total, free)) = location.capacity {
         said.push(format!("{} free of {}", amount(free), amount(total)));
     }
-    said.insert(
-        0,
-        if location.connected {
-            "Connected"
-        } else {
-            "Not connected"
-        }
-        .to_string(),
-    );
     if scanning {
         said.push("Scanning…".to_string());
     } else {
         match &location.scan {
             Some(scan) => said.push(match scan.total.age(now) {
-                Some(age) => format!("scanned {age}"),
-                None => "scanned just now".to_string(),
+                Some(age) => format!("Scanned {age}"),
+                None => "Scanned just now".to_string(),
             }),
             None if location.mount.is_some() => said.push("Not scanned".to_string()),
             None => {}
         }
     }
-    said.join(" · ")
+    said
 }
 
-/// A line of "Right now": a mark, what it is, and how it stands, over a
-/// hairline. Marks center on both lines, as the folders' do.
-fn now_line(mark: impl IntoElement, title: String, detail: String) -> gpui::Div {
-    div()
-        .py_2()
-        .border_t_1()
-        .border_color(content(0.06))
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .w(px(16.))
-                .flex_shrink_0()
-                .flex()
-                .justify_center()
-                .child(mark),
-        )
-        .child(two_lines(title, detail))
-}
-
-fn job_line(job: &JobLine) -> impl IntoElement + use<> {
-    let by = if job.agent { ", by an agent" } else { "" };
-    now_line(
-        theme::ring(job.done, 14.),
-        job.title.clone(),
-        format!("{:.0}%, {}{by}", job.done * 100., job.state),
-    )
-}
-
-fn change_line(change: &AgentChange, now: u64) -> impl IntoElement + use<> {
+fn change_row(change: &AgentChange, now: u64) -> impl IntoElement + use<> {
     let items = match change.items {
         1 => "1 item".to_string(),
         n => format!("{n} items"),
     };
     let when = overview::age(change.at, now).unwrap_or_else(|| "just now".to_string());
-    now_line(
-        icon("bot", 16.).text_color(accent()),
+    still(entry_row(
+        ("bot", accent()),
         change
             .client
             .clone()
             .unwrap_or_else(|| "An agent".to_string()),
         format!("{}, {items}, {when}", change.title),
-    )
+    ))
 }
 
-/// The bar under the page: how old what it's showing is, on each side.
+/// The bar under the page: how old the startup disk's sizes are. Each other
+/// location says its own scan's age.
 fn footer(about: &Overview, measuring: bool, now: u64) -> impl IntoElement + use<> {
     let startup = about.headline.as_ref().map(|disk| {
         let oldest = about
@@ -1063,26 +1230,13 @@ fn footer(about: &Overview, measuring: bool, now: u64) -> impl IntoElement + use
             None => format!("{} not measured yet", disk.name),
         }
     });
-    let scanned = about
-        .locations
-        .iter()
-        .filter_map(|location| Some((location, location.scan.as_ref()?.total.at)))
-        .max_by_key(|(_, at)| *at)
-        .map(|(location, at)| {
-            let day = DateTime::from_timestamp(at as i64, 0)
-                .map(|at| at.with_timezone(&Local).format("%b %-d").to_string())
-                .unwrap_or_default();
-            format!("{} scanned {day}", location.name)
-        });
     theme::pane_bar(theme::PATH_BAR_HEIGHT)
         .flex_shrink_0()
-        .justify_between()
         .border_t_1()
         .border_color(content(0.06))
         .text_size(px(theme::TEXT_SMALL))
         .text_color(content(0.65))
-        .child(div().children(startup))
-        .child(div().children(scanned))
+        .child(div().min_w_0().truncate().children(startup))
 }
 
 fn quoted(path: &Path) -> String {
@@ -1093,39 +1247,4 @@ fn quoted(path: &Path) -> String {
             |n| n.to_string_lossy().into_owned()
         )
     )
-}
-
-fn row_frame(height: f32) -> gpui::Div {
-    div()
-        .h(px(height))
-        .flex_shrink_0()
-        .px_2()
-        .rounded(px(theme::RADIUS_ROW))
-        .flex()
-        .items_center()
-        .gap_2()
-}
-
-fn two_lines(title: String, detail: String) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .truncate()
-                .h(px(TITLE_LINE))
-                .line_height(px(TITLE_LINE))
-                .text_size(px(theme::TEXT_BODY))
-                .child(title),
-        )
-        .child(
-            div()
-                .truncate()
-                .line_height(px(TITLE_LINE))
-                .text_size(px(theme::TEXT_SMALL))
-                .text_color(content(0.65))
-                .child(detail),
-        )
 }
