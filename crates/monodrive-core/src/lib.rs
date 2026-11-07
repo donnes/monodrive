@@ -11,6 +11,7 @@ pub mod info;
 pub mod mcp;
 pub mod naming;
 pub mod ops;
+pub mod overview;
 pub mod paths;
 pub mod places;
 pub mod preview;

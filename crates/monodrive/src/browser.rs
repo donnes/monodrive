@@ -6,6 +6,7 @@ mod drag;
 mod inspector;
 mod open_with;
 mod organize;
+mod overview;
 mod pane;
 mod searches;
 mod sidebar;
@@ -150,6 +151,7 @@ actions!(
         Eject,
         ClearRecents,
         PutBack,
+        GoOverview,
         GoRecents,
         GoTrash,
         GoFavorite1,

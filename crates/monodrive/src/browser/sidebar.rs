@@ -1,6 +1,6 @@
-//! The sidebar: Recents and the favorites from `places::Store`, the cloud
-//! folders and the mounted volumes with how full each is, and the Trash and
-//! Settings at its foot.
+//! The sidebar: the Overview, Recents and the favorites from `places::Store`,
+//! the cloud folders and the mounted volumes with how full each is, and the
+//! Trash and Settings at its foot.
 //! Everything shown is read off the UI thread and read again when a watch
 //! hears a change, so nothing here polls.
 
@@ -18,6 +18,7 @@ use crate::commands::{self, Scope};
 use crate::feedback::{self, Haptic};
 use crate::motion::Slide;
 use crate::preferences::{Preferences, SIDEBAR_WIDTHS};
+use crate::session::Shows;
 use crate::theme::{
     self, ButtonLook, accent, content, icon, icon_button, row_icon_button, section_label,
 };
@@ -40,6 +41,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+
+/// The Overview and Recents come first.
+const FIRST_FAVORITE: usize = 2;
 
 /// The sky behind a nightly's sidebar, as drawn in its SVG.
 const NIGHT_SKY_HEIGHT: f32 = 150.;
@@ -189,6 +193,7 @@ pub(super) struct Sidebar {
 /// A row the sidebar's keys can land on, in order on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Row {
+    Overview,
     Recents,
     Favorite(usize),
     Cloud(usize),
@@ -198,6 +203,7 @@ pub(super) enum Row {
 /// What a sidebar row stands for, wherever the rows above it have gone.
 #[derive(PartialEq)]
 pub(super) enum RowTarget {
+    Overview,
     Recents,
     Favorite(PathBuf),
     Cloud(PathBuf),
@@ -207,14 +213,14 @@ pub(super) enum RowTarget {
 /// Where the pane that commands act on is, for marking its row.
 struct Here {
     folder: PathBuf,
-    recents: bool,
+    shows: Shows,
     searching: bool,
     in_trash: bool,
 }
 
 impl Here {
     fn showing_folder(&self) -> bool {
-        !self.searching && !self.recents
+        !self.searching && self.shows == Shows::Folder
     }
 }
 
@@ -517,11 +523,14 @@ impl Browser {
         let favorites = self.sidebar.places.len();
         let cloud = self.sidebar.cloud.len();
         match ix {
-            0 => Some(Row::Recents),
-            ix if ix <= favorites => Some(Row::Favorite(ix - 1)),
-            ix if ix <= favorites + cloud => Some(Row::Cloud(ix - favorites - 1)),
+            0 => Some(Row::Overview),
+            1 => Some(Row::Recents),
+            ix if ix < FIRST_FAVORITE + favorites => Some(Row::Favorite(ix - FIRST_FAVORITE)),
+            ix if ix < FIRST_FAVORITE + favorites + cloud => {
+                Some(Row::Cloud(ix - favorites - FIRST_FAVORITE))
+            }
             ix => {
-                let volume = ix - favorites - cloud - 1;
+                let volume = ix - favorites - cloud - FIRST_FAVORITE;
                 (volume < self.sidebar.volumes.len()).then_some(Row::Volume(volume))
             }
         }
@@ -530,6 +539,7 @@ impl Browser {
     /// What the row the sidebar's keys are on stands for.
     pub(super) fn sidebar_target(&self) -> Option<RowTarget> {
         Some(match self.row_at(self.sidebar_cursor)? {
+            Row::Overview => RowTarget::Overview,
             Row::Recents => RowTarget::Recents,
             Row::Favorite(ix) => {
                 RowTarget::Favorite(self.sidebar.places.get(ix)?.favorite.path.clone())
@@ -578,6 +588,9 @@ impl Browser {
     /// Opens the row the sidebar's keys are on.
     pub(super) fn open_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.row_at(self.sidebar_cursor) {
+            Some(Row::Overview) => self
+                .pane()
+                .update(cx, |pane, cx| pane.open_page(Shows::Overview, window, cx)),
             Some(Row::Recents) => self
                 .pane()
                 .update(cx, |pane, cx| pane.open_recents(window, cx)),
@@ -618,9 +631,14 @@ impl Browser {
     /// Open in New Tab from the sidebar: the row the keys are on.
     fn open_place_in_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let stop = match self.row_at(self.sidebar_cursor) {
+            Some(Row::Overview) => {
+                let mut stop = Stop::folder(self.pane().read(cx).folder().to_path_buf());
+                stop.shows = Shows::Overview;
+                stop
+            }
             Some(Row::Recents) => {
                 let mut stop = Stop::folder(self.pane().read(cx).folder().to_path_buf());
-                stop.recents = true;
+                stop.shows = Shows::Recents;
                 stop
             }
             Some(Row::Favorite(ix)) => {
@@ -667,8 +685,11 @@ impl Browser {
     /// Tabbing into the sidebar starts on the place that's open, if any.
     pub(super) fn cursor_on_folder(&self, cx: &App) -> Option<usize> {
         let pane = self.pane().read(cx);
-        if pane.showing_recents() {
+        if pane.showing_overview() {
             return Some(0);
+        }
+        if pane.showing_recents() {
+            return Some(1);
         }
         let folder = pane.folder();
         let favorite = self
@@ -676,8 +697,8 @@ impl Browser {
             .places
             .iter()
             .position(|place| place.at() == Some(folder))
-            .map(|ix| ix + 1);
-        let after_favorites = self.sidebar.places.len() + 1;
+            .map(|ix| ix + FIRST_FAVORITE);
+        let after_favorites = self.sidebar.places.len() + FIRST_FAVORITE;
         let cloud = || {
             let ix = self.sidebar.cloud.iter().position(|c| c.path == folder)?;
             Some(ix + after_favorites)
@@ -801,24 +822,24 @@ impl Browser {
         })
     }
 
-    fn recents_row(
-        &self,
-        here: &Here,
+    /// A row at the top that opens a page.
+    fn page_row(
+        ix: usize,
+        name: &'static str,
+        glyph: &'static str,
+        selected: bool,
         cursor: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let selected = !here.searching && here.recents;
-        Self::slot(0, selected, true, cx)
-            .aria_label("Recents")
-            .child(
-                Self::row(0, selected, true, cursor)
-                    .h(px(ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(icon("clock", 16.).text_color(content(if selected { 1. } else { 0.55 })))
-                    .child(div().flex_1().truncate().child("Recents")),
-            )
+        Self::slot(ix, selected, true, cx).aria_label(name).child(
+            Self::row(ix, selected, true, cursor)
+                .h(px(ROW_HEIGHT))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(icon(glyph, 16.).text_color(content(if selected { 1. } else { 0.55 })))
+                .child(div().flex_1().truncate().child(name)),
+        )
     }
 
     fn favorite_row(
@@ -829,7 +850,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let place = &self.sidebar.places[fav];
-        let ix = fav + 1;
+        let ix = fav + FIRST_FAVORITE;
         let label = label_of(&place.favorite.path);
         let glyph = glyph_of(&place.favorite.path);
         let selected = here.showing_folder() && place.at() == Some(here.folder.as_path());
@@ -936,7 +957,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let folder = &self.sidebar.cloud[at];
-        let ix = at + 1 + self.sidebar.places.len();
+        let ix = at + FIRST_FAVORITE + self.sidebar.places.len();
         let selected = here.showing_folder() && here.folder == folder.path;
         let row = Self::row(ix, selected, true, cursor)
             .h(px(ROW_HEIGHT))
@@ -960,7 +981,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let volume = &self.sidebar.volumes[vol];
-        let ix = vol + 1 + self.sidebar.places.len() + self.sidebar.cloud.len();
+        let ix = vol + FIRST_FAVORITE + self.sidebar.places.len() + self.sidebar.cloud.len();
         let selected = here.showing_folder() && here.folder == volume.mount;
         let mount = volume.mount.clone();
         let glyph = if volume.network {
@@ -1227,14 +1248,14 @@ impl Browser {
         let pane = self.pane().read(cx);
         let here = Here {
             folder: pane.folder().to_path_buf(),
-            recents: pane.showing_recents(),
+            shows: pane.stop().shows,
             searching: !pane.query.is_empty(),
             in_trash: pane.in_trash(cx),
         };
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
         let last_row =
-            self.sidebar.places.len() + self.sidebar.cloud.len() + self.sidebar.volumes.len();
+            self.sidebar.places.len() + self.sidebar.cloud.len() + self.sidebar.volumes.len() + 1;
         div()
             .relative()
             .w(px(width))
@@ -1366,7 +1387,22 @@ impl Browser {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .child(self.recents_row(&here, cursor, cx))
+                    .child(Self::page_row(
+                        0,
+                        "Overview",
+                        "hard-drive",
+                        !here.searching && here.shows == Shows::Overview,
+                        cursor,
+                        cx,
+                    ))
+                    .child(Self::page_row(
+                        1,
+                        "Recents",
+                        "clock",
+                        !here.searching && here.shows == Shows::Recents,
+                        cursor,
+                        cx,
+                    ))
                     .child(self.favorites_header(cx))
                     .children(self.sidebar.error.clone().map(|why| {
                         div()

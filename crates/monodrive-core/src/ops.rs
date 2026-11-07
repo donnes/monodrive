@@ -497,6 +497,9 @@ enum Record {
         creates: Vec<PathBuf>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         temps: Vec<Temp>,
+        /// When, in seconds since 1970; 0 in journals from before.
+        #[serde(default)]
+        at: u64,
     },
     /// How it ended: the items it moved, or for undo and redo all of the
     /// target's items as they are now.
@@ -668,6 +671,7 @@ impl Engine {
                 steps,
                 creates,
                 temps,
+                at: _,
             } => {
                 self.next = self.next.max(op + 1);
                 self.begun.insert(
@@ -1154,6 +1158,7 @@ impl Engine {
             steps,
             creates,
             temps,
+            at: crate::overview::now(),
         };
         self.write(&record)?;
         self.fold(&record);
@@ -1698,6 +1703,78 @@ fn erase(path: &Path) -> Result<(), String> {
         std::fs::remove_file(path)
     };
     erased.map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A change an agent made, as the journal has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentChange {
+    /// The name its MCP client gave.
+    pub client: Option<String>,
+    /// "Rename", or "Copy".
+    pub title: String,
+    pub items: usize,
+    /// When, in seconds since 1970.
+    pub at: u64,
+}
+
+/// What agents changed since `since`, newest first, at most `limit`. Reads the
+/// journal and needs no owner, so looking starts nothing; a line being written
+/// or one it can't read is skipped, since this is only a report.
+pub fn agent_changes(paths: &Paths, since: u64, limit: usize) -> Vec<AgentChange> {
+    let Ok(bytes) = std::fs::read(paths.state.join(JOURNAL)) else {
+        return Vec::new();
+    };
+    let client = |submission: &Submission| match &submission.origin {
+        Origin::Agent { client } => Some(client.clone()),
+        Origin::Window => None,
+    };
+    let mut begun = HashMap::new();
+    let mut changes = Vec::new();
+    for record in bytes
+        .split(|&b| b == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Record>(line).ok())
+    {
+        match record {
+            Record::Begin {
+                op, submission, at, ..
+            } => {
+                if let Some(client) = client(&submission).filter(|_| at >= since) {
+                    begun.insert(op, (client, at));
+                }
+            }
+            Record::End { op, outcome, .. } => {
+                if let Some((client, at)) = begun.remove(&op) {
+                    changes.push(AgentChange {
+                        client,
+                        title: outcome.title,
+                        items: outcome.items.iter().filter(|i| i.result.is_ok()).count(),
+                        at,
+                    });
+                }
+            }
+            Record::Job { submission, at, .. } => {
+                let (title, items) = match &submission.request {
+                    Request::Copy { paths, .. } => ("Copy", paths.len()),
+                    Request::Move { paths, .. } => ("Move", paths.len()),
+                    Request::Compress { paths } => ("Compress", paths.len()),
+                    Request::Extract { .. } => ("Extract", 1),
+                    _ => continue,
+                };
+                if let Some(client) = client(&submission).filter(|_| at >= since) {
+                    changes.push(AgentChange {
+                        client,
+                        title: title.to_string(),
+                        items,
+                        at,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    changes.sort_by_key(|change| std::cmp::Reverse(change.at));
+    changes.truncate(limit);
+    changes
 }
 
 /// What's in the Trash at `trash`, as Empty Trash would erase it. Finder's

@@ -6,12 +6,13 @@
 use super::batch_rename::BatchRename;
 use super::drag::{Drag, Spot, Target, offers};
 use super::organize::Review;
+use super::overview::OverviewPage;
 use super::searches::{CONTENT_SETTLE, Matches};
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, EditPreview,
     Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
     FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
-    GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder,
+    GoOverview, GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder,
     NewFolderWithSelection, OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places,
     PutBack, Redo, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
     SearchContents, SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious,
@@ -27,7 +28,7 @@ use crate::onboarding::IndexGate;
 use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, View, WorkspaceStyle};
 use crate::selection::Selection;
-use crate::session::{PaneState, StopState};
+use crate::session::{PaneState, Shows, StopState};
 use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, accent, content, danger, icon, on_accent, text_button};
 use crate::thumbnails::{self, Thumb};
@@ -177,7 +178,7 @@ pub struct Pane {
     reselect: Option<PathBuf>,
     pub(super) search: Entity<TextField>,
     /// Started with the window; searches wait on it.
-    index: Arc<OnceLock<Result<Index, String>>>,
+    pub(super) index: Arc<OnceLock<Result<Index, String>>>,
     pub(super) history: Vec<Stop>,
     /// Position in `history` of what's on screen.
     pub(super) at: usize,
@@ -287,6 +288,8 @@ pub struct Pane {
     partly_downloaded: HashSet<PathBuf>,
     /// Asking macOS which folders those are. A new listing drops these.
     asking: Vec<Task<()>>,
+    /// The Overview, as last read.
+    pub(super) overview: OverviewPage,
     backdrop: Entity<Backdrop>,
     pub(super) chrome: Chrome,
     /// The window's drag of files.
@@ -392,6 +395,7 @@ impl Pane {
             missing: HashSet::new(),
             partly_downloaded: HashSet::new(),
             asking: Vec::new(),
+            overview: OverviewPage::default(),
             backdrop: cx.new(|_| Backdrop::default()),
             chrome: Chrome::default(),
             drag,
@@ -407,6 +411,7 @@ impl Pane {
             self.refresh = None;
             self.held.clear();
             self.marquee = None;
+            self.leave_overview();
         }
     }
 
@@ -478,7 +483,7 @@ impl Pane {
             .map(|stop| {
                 Some(StopState {
                     place: stop.place.clone()?,
-                    recents: stop.recents,
+                    shows: stop.shows,
                 })
             })
             .collect::<Option<_>>()?;
@@ -565,6 +570,8 @@ impl Pane {
                 SearchScope::Everywhere => "Search results".to_string(),
                 SearchScope::Folder(folder) => format!("Search results in {}", level_name(folder)),
             }
+        } else if self.showing_overview() {
+            "Overview".to_string()
         } else if self.showing_recents() {
             "Recents".to_string()
         } else if self.in_trash(cx) {
@@ -690,6 +697,11 @@ impl Pane {
         if !self.showing_folder() {
             self.partly_downloaded.clear();
         }
+        if self.showing_overview() {
+            self.read_overview(cx);
+        } else {
+            self.leave_overview();
+        }
         let mut folder = self.folder().to_path_buf();
         let query = self.query.clone();
         let search = self.current_search();
@@ -698,6 +710,7 @@ impl Pane {
             .then(|| cx.background_executor().timer(CONTENT_SETTLE));
         let index = self.index.clone();
         let gate = cx.try_global::<IndexGate>().cloned();
+        let overview = self.showing_overview();
         let recents = self
             .showing_recents()
             .then(|| cx.try_global::<Places>().map(|places| places.store.clone()));
@@ -706,7 +719,7 @@ impl Pane {
             .stop()
             .place
             .clone()
-            .filter(|_| self.stop().unverified && !self.showing_recents() && query.is_empty());
+            .filter(|_| self.stop().unverified && self.showing_folder());
         let drives = cx
             .try_global::<Places>()
             .map(|places| places.drives.clone());
@@ -749,6 +762,16 @@ impl Pane {
                     HashSet::new(),
                     None,
                     matches,
+                ));
+            }
+            if overview {
+                return Ok((
+                    Vec::new(),
+                    HashMap::new(),
+                    Watch::default(),
+                    HashSet::new(),
+                    None,
+                    Matches::default(),
                 ));
             }
             if let Some(store) = recents {
@@ -2499,7 +2522,10 @@ impl Pane {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
-        if !cx.global::<Preferences>().show_path_bar || self.unavailable.is_some() {
+        if !cx.global::<Preferences>().show_path_bar
+            || self.unavailable.is_some()
+            || self.showing_overview()
+        {
             return None;
         }
         // As Finder's status bar: what's selected and the size of its files.
@@ -2980,11 +3006,11 @@ pub(super) struct Renaming {
     _blur: Subscription,
 }
 
-/// A place in the history: a folder, or Recents in front of one.
+/// A place in the history: a folder, or a page in front of one.
 #[derive(Clone)]
 pub(super) struct Stop {
     pub(super) folder: PathBuf,
-    pub(super) recents: bool,
+    pub(super) shows: Shows,
     /// How it's saved, from the first save on.
     place: Option<Favorite>,
     /// It came from a saved session and hasn't been checked since: its drive
@@ -2996,7 +3022,7 @@ impl Stop {
     pub(super) fn folder(folder: PathBuf) -> Self {
         Self {
             folder,
-            recents: false,
+            shows: Shows::Folder,
             place: None,
             unverified: false,
         }
@@ -3005,7 +3031,7 @@ impl Stop {
     pub(super) fn restored(state: StopState) -> Self {
         Self {
             folder: state.place.path.clone(),
-            recents: state.recents,
+            shows: state.shows,
             place: Some(state.place),
             unverified: true,
         }
@@ -3508,6 +3534,9 @@ impl Pane {
                 .on_action(
                     cx.listener(|this, _: &GoRecents, window, cx| this.open_recents(window, cx)),
                 )
+                .on_action(cx.listener(|this, _: &GoOverview, window, cx| {
+                    this.open_page(Shows::Overview, window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &GoTrash, window, cx| this.open_trash(window, cx)))
                 .on_action(cx.listener(|this, _: &GoDesktop, window, cx| {
                     this.go(home().join("Desktop"), window, cx)
@@ -3861,7 +3890,7 @@ impl Pane {
                 )
             })
             .on_action(cx.listener(|this, _: &ShowContextMenu, _, cx| {
-                if !this.changing_names() {
+                if !this.changing_names() && !this.showing_overview() {
                     let at = this.menu_point(cx);
                     let scopes = this.scopes();
                     cx.emit(PaneEvent::Menu { scopes, at });
@@ -3910,6 +3939,7 @@ impl Pane {
             .flex_col()
             .child(
                 self.organize_page(cx)
+                    .or_else(|| self.overview_page(cx))
                     .or_else(|| {
                         // Until it has something to show, so it never
                         // appears in pieces.
@@ -3989,7 +4019,8 @@ impl Render for Pane {
                 self.layout() == View::List
                     && self.unavailable.is_none()
                     && self.organizing.is_none()
-                    && self.preview.is_none(),
+                    && self.preview.is_none()
+                    && !self.showing_overview(),
                 |d| {
                     d.child(
                         theme::pane_bar(theme::ROW_HEIGHT)

@@ -400,6 +400,17 @@ impl Client {
         self.ask(&Message::CancelRun { run })
     }
 
+    /// What agents changed since `since`. Read here, not by the owner, so it
+    /// needs no connection.
+    pub fn agent_changes(&self, since: u64, limit: usize) -> Vec<super::AgentChange> {
+        super::agent_changes(&self.paths, since, limit)
+    }
+
+    /// Where Empty Trash looks.
+    pub fn trash(&self) -> &Path {
+        &self.paths.trash
+    }
+
     /// The Agents setting, for changes outside the owner, such as Eject.
     pub fn agents_change_files(&self) -> bool {
         super::agents_change_files(&self.paths)

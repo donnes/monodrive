@@ -319,7 +319,7 @@ fn state(stop: &str) -> WindowState {
                         path: stop.into(),
                         volume: None,
                     },
-                    recents: false,
+                    shows: Default::default(),
                 }],
                 at: 0,
                 view: View::List,

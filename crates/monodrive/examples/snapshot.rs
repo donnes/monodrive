@@ -20,7 +20,7 @@
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
 //! `sidebar-keys.png`, `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png`,
-//! `recents.png` and `recents-grid.png`, then `updates.png`. Then `palette.png`, `palette-query.png`, the palette's pages
+//! `recents.png` and `recents-grid.png`, then `updates.png`. The Overview's are last: see `shoot_overview`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
 //! `palette-favorites.png`), `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
 //! `settings-<page>.png` for each Settings page, `background.png`, the list
@@ -71,16 +71,16 @@ use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives, EditFavorites,
     EditPreview, EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch,
-    GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations,
-    OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast, SelectNext,
-    ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo, ViewAsGrid,
-    ViewAsList,
+    GoOverview, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith,
+    Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast,
+    SelectNext, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo,
+    ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
 use monodrive::native::{self, Native, SizeDone};
 use monodrive::onboarding::{Onboarding, Setup, Step};
 use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
-use monodrive::session::{PaneState, StopState, TabState, WindowState};
+use monodrive::session::{PaneState, Shows, StopState, TabState, WindowState};
 use monodrive::updates::{self, Updates};
 use monodrive_core::apps::App as MacApp;
 use monodrive_core::cloud::{Availability, CloudFolder};
@@ -481,7 +481,260 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     shoot_tabs(&mut cx, out, folder, &base)?;
     shoot_drags(&mut cx, out, folder, &base)?;
     shoot_batch_rename(&mut cx, out, folder, &base)?;
-    shoot_inspector(&mut cx, out, folder, &base)
+    shoot_inspector(&mut cx, out, folder, &base)?;
+    shoot_overview(&mut cx, out, folder, &base)
+}
+
+/// The Overview, from saved totals on a made-up Mac: `overview-low.png` under
+/// 20% free, with suggestions, a scanned drive, an unscanned share and a drive
+/// that's gone; `overview-roomy.png` over it; `overview-locations.png` with the
+/// drives on screen, `overview-one-drive.png` with nothing else to say, and
+/// the low one again in a 900×600 window and the smallest, 720×440.
+fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
+    const GB: u64 = 1_000_000_000;
+    cx.update(|cx| cx.set_global(base.clone()));
+    let startup = |free: u64| Volume {
+        mount: "/".into(),
+        startup: true,
+        ..disk("Macintosh HD", 460 * GB, free * GB)
+    };
+    let backup = disk("Backup", 2000 * GB, 340 * GB);
+    let media = Volume {
+        network: true,
+        id: Some(VolumeId::Url("smb://nas.local/media".into())),
+        ..disk("media", 8000 * GB, 5100 * GB)
+    };
+    let cases = [
+        (
+            "overview-low",
+            vec![startup(44), backup.clone(), media.clone()],
+            true,
+            true,
+        ),
+        (
+            "overview-roomy",
+            vec![startup(178), backup.clone(), media.clone()],
+            true,
+            true,
+        ),
+        (
+            "overview-locations",
+            vec![startup(178), backup.clone(), media.clone()],
+            true,
+            false,
+        ),
+        ("overview-one-drive", vec![startup(178)], false, true),
+        // The smallest window macOS lets it shrink to, and one in between.
+        (
+            "overview-smallest",
+            vec![startup(44), backup.clone(), media.clone()],
+            true,
+            true,
+        ),
+        (
+            "overview-medium",
+            vec![startup(44), backup.clone(), media.clone()],
+            true,
+            true,
+        ),
+    ];
+    for (name, volumes, more, folders) in cases {
+        let home = tempfile::tempdir()?;
+        let places = overview_fixture(home.path(), volumes, more, folders)?;
+        cx.update(|cx| cx.set_global(places));
+        let window = match name {
+            "overview-smallest" => open_at(cx, folder, 720., 440.)?,
+            "overview-medium" => open_at(cx, folder, 900., 600.)?,
+            _ => open(cx, folder)?,
+        };
+        dispatch(cx, window, &GoOverview)?;
+        save(cx, window, out, name)?;
+        // Before its fixture goes, so nothing reads a folder that's gone.
+        cx.update_window(window.into(), |_, window, _| window.remove_window())?;
+        cx.run_until_parked();
+    }
+    Ok(())
+}
+
+fn disk(name: &str, total: u64, free: u64) -> Volume {
+    Volume {
+        name: name.into(),
+        mount: Path::new("/Volumes").join(name),
+        disk: None,
+        id: Some(VolumeId::Uuid(name.into())),
+        total,
+        free,
+        read_only: false,
+        network: false,
+        ejectable: true,
+        removable: true,
+        startup: false,
+    }
+}
+
+/// A made-up home with what the Overview looks for, and saved totals that are
+/// fresh, so the sizes drawn are these and not the fixture's few bytes.
+fn overview_fixture(
+    home: &Path,
+    volumes: Vec<Volume>,
+    more: bool,
+    folders: bool,
+) -> gpui::Result<Places> {
+    const GB: u64 = 1_000_000_000;
+    let home = home.canonicalize()?;
+    let trash = home.join(".Trash");
+    std::fs::create_dir(&trash)?;
+    let store = Store {
+        places: home.join("places.json"),
+        recents: home.join("recents.json"),
+    };
+    let now = monodrive_core::overview::now();
+    let size = |gb: u64, at: u64, complete: bool| {
+        serde_json::json!({
+            "on_disk": gb * GB, "unshared": gb * GB, "at": at, "complete": complete
+        })
+    };
+    let mut totals = serde_json::Map::new();
+    let mut total = |path: &Path, gb: u64| {
+        totals.insert(path.display().to_string(), size(gb, now, true));
+    };
+    for (name, gb) in [
+        ("Documents", 62),
+        ("Downloads", 28),
+        ("Pictures", 41),
+        ("Movies", 17),
+    ]
+    .into_iter()
+    .filter(|_| folders)
+    {
+        std::fs::create_dir(home.join(name))?;
+        total(&home.join(name), gb);
+    }
+    let project = home.join("Work/monodrive");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target)?;
+    std::fs::create_dir(project.join(".git"))?;
+    std::fs::write(project.join("Cargo.toml"), "")?;
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )?;
+    std::fs::write(
+        project.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:you/monodrive.git\n",
+    )?;
+    store
+        .register_repository(monodrive_core::worktrees::Registration {
+            common_dir: project.join(".git"),
+            path: project.clone(),
+        })
+        .map_err(std::io::Error::other)?;
+    total(&project, 48);
+    total(&target, 38);
+    let cache = home.join("Library/Developer/Xcode/DerivedData");
+    std::fs::create_dir_all(&cache)?;
+    total(&cache, 21);
+    let brew = home.join("Library/Caches/Homebrew");
+    std::fs::create_dir_all(&brew)?;
+    total(&brew, 6);
+    total(&trash, 9);
+    let scans = if more {
+        store
+            .save_server("smb://studio.local/projects")
+            .map_err(std::io::Error::other)?;
+        store
+            .add_remote("build-box", None, None)
+            .map_err(std::io::Error::other)?;
+        let row = |name: &str, gb: u64, remote: Option<&str>| {
+            serde_json::json!({
+                "name": name,
+                "path": format!("/Volumes/Backup/{name}"),
+                "size": size(gb, now - 2 * 86_400, true),
+                "remote": remote,
+            })
+        };
+        vec![
+            serde_json::json!({
+                "volume": {"id": {"uuid": "Backup"}},
+                "name": "Backup",
+                "total": size(1600, now - 2 * 86_400, true),
+                "rows": [
+                    row("Photos", 900, None),
+                    row("Archive", 512, None),
+                    row("monodrive-copy", 44, Some("github.com/you/monodrive")),
+                ],
+            }),
+            serde_json::json!({
+                "volume": {"id": {"uuid": "Old Drive"}},
+                "name": "Old Drive",
+                "total": size(240, now - 40 * 86_400, false),
+                "rows": [{
+                    "name": "Projects",
+                    "path": "/Volumes/Old Drive/Projects",
+                    "size": size(240, now - 40 * 86_400, false),
+                }],
+            }),
+        ]
+    } else {
+        Vec::new()
+    };
+    let saved = serde_json::json!({
+        "version": 1,
+        "totals": totals,
+        "scans": scans,
+    });
+    std::fs::write(home.join("overview.json"), serde_json::to_vec(&saved)?)?;
+    Ok(Places {
+        store,
+        trash,
+        applications: Vec::new(),
+        drives: Arc::new(Disks(volumes)),
+    })
+}
+
+/// `MadeUp`, with these volumes and no cloud folders.
+struct Disks(Vec<Volume>);
+
+impl Drives for Disks {
+    fn list(&self) -> Vec<Volume> {
+        self.0.clone()
+    }
+
+    fn eject(&self, mount: &Path, ops: &mut ops::Client) -> Result<String, String> {
+        MadeUp.eject(mount, ops)
+    }
+
+    fn mount(&self, address: &str, cancel: &Arc<Cancel>) -> Result<PathBuf, String> {
+        MadeUp.mount(address, cancel)
+    }
+
+    fn open(&self, _: &Path, _: &gpui::App) {}
+
+    fn needs_consent(&self, _: &Path) -> bool {
+        false
+    }
+
+    fn cloud(&self) -> Vec<CloudFolder> {
+        Vec::new()
+    }
+
+    fn find_files(
+        &self,
+        _: &OnceLock<Result<Index, String>>,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<Entry>, String> {
+        Ok(Vec::new())
+    }
+
+    fn search<'a>(
+        &self,
+        started: &dyn Fn() -> Result<&'a Index, String>,
+        search: &Search,
+        limit: usize,
+    ) -> Result<Found, String> {
+        MadeUp.search(started, search, limit)
+    }
 }
 
 /// The last five rows selected, in the bar that renames them.
@@ -841,7 +1094,7 @@ fn shoot_tabs(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpu
             panes: vec![PaneState {
                 history: vec![StopState {
                     place,
-                    recents: false,
+                    shows: Shows::Folder,
                 }],
                 at: 0,
                 view: View::List,
@@ -919,8 +1172,17 @@ fn settle() {
 }
 
 fn open(cx: &mut Cx, folder: &Path) -> gpui::Result<gpui::WindowHandle<Browser>> {
+    open_at(cx, folder, 1100., 700.)
+}
+
+fn open_at(
+    cx: &mut Cx,
+    folder: &Path,
+    width: f32,
+    height: f32,
+) -> gpui::Result<gpui::WindowHandle<Browser>> {
     let folder = folder.to_path_buf();
-    cx.open_window(size(px(1100.), px(700.)), |_, cx| {
+    cx.open_window(size(px(width), px(height)), |_, cx| {
         cx.new(|cx| Browser::new(folder, cx))
     })
 }
