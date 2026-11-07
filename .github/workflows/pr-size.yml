@@ -33,7 +33,7 @@ jobs:
               ["size:XL", 1000],
               ["size:XXL", Infinity],
             ];
-            const generated = /^(vendor\/|Cargo\.lock$)/;
+            const generated = /^(vendor\/|Cargo\.lock$|website\/bun\.lock$)/;
             const test = /(^|\/)(tests\/|(\w+_)?tests\.rs$)/;
 
             const files = await github.paginate(github.rest.pulls.listFiles, {

@@ -1,0 +1,251 @@
+---
+import Base from "../layouts/Base.astro";
+import AppIcon from "../components/AppIcon.astro";
+import WindowDemo from "../components/WindowDemo.astro";
+import WindowHints from "../components/WindowHints.astro";
+import AgentsSection from "../components/AgentsSection.astro";
+
+const RELEASES = "https://github.com/donnes/monodrive/releases";
+const REPO = "https://github.com/donnes/monodrive";
+---
+
+<Base title="Monodrive: a fast file manager for macOS">
+  <main class="page-f">
+    <section class="morph" data-morph>
+      <div class="cta-sentinel" data-cta aria-hidden="true"></div>
+      <div class="morph-sticky">
+        <div class="morph-frame" data-frame>
+          <div class="morph-win" data-mwin inert>
+            <WindowDemo background="/backgrounds/starship-dither.webp" />
+          </div>
+          <div class="morph-icon" data-micon>
+            <AppIcon size={200} area=".morph" />
+          </div>
+        </div>
+        <div class="morph-copy" data-copy>
+          <h1 class="display" data-rise style="--i:2">Finder, minus<br />the waiting.</h1>
+          <p class="lede" data-rise style="--i:3">
+            A native file manager for macOS, written in Rust. It finds any file on your disk by name in about a
+            millisecond, and your coding agents search the same index.
+          </p>
+          <div class="cta" data-rise style="--i:4">
+            <a class="btn btn-primary" href={RELEASES}>Download for macOS</a>
+            <a class="btn btn-ghost" href={REPO}>View source</a>
+          </div>
+          <p class="meta" data-rise style="--i:5">Apple silicon · macOS 14 or later · MIT licensed</p>
+        </div>
+        <div class="morph-hints" data-mhints>
+          <WindowHints />
+        </div>
+      </div>
+    </section>
+
+    <AgentsSection />
+  </main>
+</Base>
+
+<script>
+  import { reducedMotion } from "../lib/spring";
+
+  // Scrolling through the section grows the icon's frame into the app window.
+  // The frame follows the scroll position 1:1, so scrolling back reverses it
+  // exactly; only the frame's size changes, and the window inside is laid out
+  // once at full size.
+  const section = document.querySelector<HTMLElement>("[data-morph]")!;
+  const frame = section.querySelector<HTMLElement>("[data-frame]")!;
+  const win = section.querySelector<HTMLElement>("[data-mwin]")!;
+  const icon = section.querySelector<HTMLElement>("[data-micon]")!;
+  const copy = section.querySelector<HTMLElement>("[data-copy]")!;
+  const hints = section.querySelector<HTMLElement>("[data-mhints]")!;
+
+  const ICON = 200;
+  const clamp = (v: number) => Math.max(0, Math.min(1, v));
+  const span = (p: number, from: number, to: number) => clamp((p - from) / (to - from));
+  const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+  let vw = 0;
+  let vh = 0;
+  let W = 0;
+  let H = 0;
+  const measure = () => {
+    vw = innerWidth;
+    vh = innerHeight;
+    W = Math.min(1120, vw - 32);
+    H = Math.max(420, Math.min(620, vh - 200));
+    win.style.width = `${W}px`;
+    win.style.height = `${H}px`;
+    win.querySelector<HTMLElement>(".win")!.style.height = `${H}px`;
+  };
+
+  let frameReq = 0;
+  const paint = () => {
+    frameReq = 0;
+    const travel = section.offsetHeight - vh;
+    const p = clamp(-section.getBoundingClientRect().top / travel);
+    const grow = easeInOut(span(p, 0.08, 0.85));
+    const w = lerp(ICON, W, grow);
+    const h = lerp(ICON, H, grow);
+    const startY = Math.max(96, vh * 0.12) + ICON / 2;
+    const endY = 60 + (vh - 60 - 56) / 2;
+    frame.style.width = `${w}px`;
+    frame.style.height = `${h}px`;
+    frame.style.borderRadius = `${lerp(ICON * 0.225, 16, grow)}px`;
+    frame.style.transform = `translate3d(-50%, ${lerp(startY, endY, grow) - h / 2}px, 0)`;
+
+    const fadeIcon = span(p, 0.04, 0.26);
+    icon.style.opacity = String(1 - fadeIcon);
+    // Faded out, it would still sit over the window and take its clicks.
+    icon.style.visibility = fadeIcon >= 1 ? "hidden" : "";
+    icon.style.transform = `translate(-50%, -50%) scale(${1 - 0.12 * fadeIcon})`;
+    const fadeCopy = span(p, 0, 0.18);
+    copy.style.opacity = String(1 - fadeCopy);
+    copy.style.transform = `translate3d(-50%, ${-48 * fadeCopy}px, 0)`;
+    copy.style.visibility = fadeCopy >= 1 ? "hidden" : "visible";
+    // The window shows early and the growing frame reveals the rest of it, so
+    // the icon reads as opening into the window rather than swapping for it.
+    win.style.opacity = String(span(p, 0.08, 0.3));
+    win.inert = p < 0.85;
+    hints.style.opacity = String(span(p, 0.85, 0.97));
+    hints.style.transform = `translate3d(-50%, ${endY + H / 2 + 16 + 8 * (1 - span(p, 0.85, 0.97))}px, 0)`;
+    hints.inert = p < 0.9;
+  };
+  const schedule = () => {
+    if (!frameReq) frameReq = requestAnimationFrame(paint);
+  };
+
+  if (reducedMotion()) {
+    section.classList.add("static");
+    win.inert = false;
+  } else {
+    measure();
+    paint();
+    addEventListener("scroll", schedule, { passive: true });
+    addEventListener("resize", () => {
+      measure();
+      schedule();
+    });
+  }
+</script>
+
+<style is:global>
+  .page-f {
+    padding-bottom: 160px;
+  }
+  .morph {
+    position: relative;
+    height: 280vh;
+  }
+  .cta-sentinel {
+    position: absolute;
+    top: 0;
+    height: 45vh;
+    width: 1px;
+  }
+  .morph-sticky {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow: hidden;
+  }
+  .morph-frame {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: 200px;
+    height: 200px;
+    border-radius: 45px;
+    overflow: hidden;
+    background: #000;
+    box-shadow:
+      inset 0 0 0 1px rgb(255 255 255 / 0.1),
+      0 40px 100px rgb(0 0 0 / 0.6);
+    will-change: transform;
+  }
+  .morph-win {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    translate: -50% -50%;
+    opacity: 0;
+  }
+  .morph-win .win {
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .morph-icon {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+  }
+  .morph-copy {
+    position: absolute;
+    left: 50%;
+    top: calc(max(96px, 12vh) + 200px + 44px);
+    width: min(720px, 100% - 32px);
+    transform: translateX(-50%);
+    display: grid;
+    justify-items: center;
+    text-align: center;
+    gap: 18px;
+  }
+  .morph-copy .lede {
+    max-width: 560px;
+  }
+  .morph-copy .cta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 6px;
+  }
+  .morph-copy .meta {
+    margin: 0;
+    font-size: 13px;
+    color: var(--ink-55);
+  }
+  .morph-hints {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: min(1120px, 100% - 32px);
+    opacity: 0;
+  }
+  .morph-hints .hints {
+    margin-top: 0;
+  }
+
+  /* Reduce Motion: no morph. The icon, the copy and the window sit in order. */
+  .morph.static {
+    height: auto;
+  }
+  .morph.static .morph-sticky {
+    position: static;
+    height: auto;
+    overflow: visible;
+    display: grid;
+    justify-items: center;
+    gap: 40px;
+    padding-top: 48px;
+  }
+  .morph.static :is(.morph-frame, .morph-copy, .morph-hints, .morph-win, .morph-icon) {
+    position: static;
+    transform: none;
+    translate: none;
+    opacity: 1;
+  }
+  .morph.static .morph-frame {
+    display: contents;
+  }
+  .morph.static .morph-win {
+    order: 3;
+    width: min(1120px, 100vw - 32px);
+  }
+  .morph.static .morph-copy {
+    order: 2;
+  }
+  .morph.static .morph-hints {
+    order: 4;
+  }
+</style>

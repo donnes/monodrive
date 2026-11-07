@@ -1,0 +1,1007 @@
+---
+// The app's window, laid out as DESIGN.md sets it, over sample files.
+import { markSvg } from "../lib/icons";
+
+interface Props {
+  /** A picture behind the file list, as Settings > Appearance sets one. */
+  background?: string;
+  /** Its strength, 0 to 1. The app's default is 24%. */
+  backgroundOpacity?: number;
+}
+
+const { background, backgroundOpacity = 0.24 } = Astro.props;
+
+const PLACES = [
+  { id: "recents", label: "Recents", icon: "clock" },
+  { id: "/Applications", label: "Applications", icon: "apps" },
+  { id: "~", label: "Home", icon: "home" },
+  { id: "~/Desktop", label: "Desktop", icon: "folder" },
+  { id: "~/Documents", label: "Documents", icon: "folder" },
+  { id: "~/Downloads", label: "Downloads", icon: "download" },
+];
+const GLYPHS: Record<string, string> = {
+  clock: `<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>`,
+  apps: `<rect x="2.5" y="2.5" width="11" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 10.5 8 5l2.5 5.5M6.3 8.8h3.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>`,
+  home: `<path d="M2.8 7.2 8 3l5.2 4.2V13H2.8z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>`,
+  folder: `<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" fill="none" stroke="currentColor" stroke-width="1.3"/>`,
+  download: `<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v5.5M5.8 8.5 8 10.7l2.2-2.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>`,
+  disk: `<rect x="2" y="4" width="12" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11" cy="8" r=".9" fill="currentColor"/>`,
+};
+const glyph = (name: string) => `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${GLYPHS[name]}</svg>`;
+---
+
+<div class="win" tabindex="0" data-win aria-label="Monodrive window demo. Click inside, then use the keyboard.">
+  <aside class="side" data-side>
+    <label class="side-search">
+      <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.8" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path d="m10.6 10.6 3.4 3.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path></svg>
+      <input data-search placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search" />
+      <span class="side-kbd">⌘F</span>
+    </label>
+    <div class="side-head"><span>Favorites</span><span>Edit</span></div>
+    <nav class="side-rows">
+      {
+        PLACES.map((p) => (
+          <button type="button" class="side-row" data-place={p.id}>
+            <span set:html={glyph(p.icon)} />
+            {p.label}
+          </button>
+        ))
+      }
+    </nav>
+    <div class="side-head"><span>Locations</span></div>
+    <button type="button" class="side-row disk" data-place="/">
+      <span set:html={glyph("disk")} />
+      <span class="disk-text">
+        Macintosh HD
+        <i class="meter"><i style="width:72%"></i></i>
+      </span>
+    </button>
+    <div class="side-foot">
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"></path></svg>
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"></circle><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"></path></svg>
+    </div>
+  </aside>
+
+  <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+  <button type="button" class="icon-btn toggle" data-action="sidebar" aria-label="Hide the sidebar">
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.3"></rect><path d="M6 3v10" stroke="currentColor" stroke-width="1.3"></path></svg>
+  </button>
+
+  <div class="main" data-main>
+    <div class="top" data-top>
+      <button type="button" class="icon-btn" data-action="back" aria-label="Back"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
+      <button type="button" class="icon-btn" data-action="forward" aria-label="Forward"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
+      <span class="title" data-title>Home</span>
+    </div>
+    <div class="pane">
+      {background && <div class="pane-bg" style={`background-image:url(${background});opacity:${backgroundOpacity}`} aria-hidden="true" />}
+      <div class="grid" data-grid role="listbox" aria-label="Files"></div>
+      <div class="toast" data-toast role="status" hidden>
+        <span data-toast-text></span>
+        <button type="button" data-action="undo">Undo</button>
+      </div>
+      <div class="pathbar">
+        <span class="crumbs" data-crumbs></span>
+        <span class="status" data-status></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim" data-palette hidden>
+    <div class="palette" role="dialog" aria-label="Command palette">
+      <label class="pal-field">
+        <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.8" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path d="m10.6 10.6 3.4 3.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path></svg>
+        <input data-pal-input placeholder="Search commands, places, and files…" spellcheck="false" autocomplete="off" aria-label="Search commands" />
+      </label>
+      <div class="pal-rows" data-pal-rows></div>
+      <div class="pal-foot"><span class="kbd">↑</span><span class="kbd">↓</span> Navigate <span class="kbd">↩</span> Select <span class="kbd">esc</span> Close</div>
+    </div>
+  </div>
+</div>
+
+<template id="mark-icon"><Fragment set:html={markSvg(30)} /></template>
+
+<script>
+  import { FrameLoop, Spring, reducedMotion } from "../lib/spring";
+  import { SAMPLES, formatBytes, highlight, search, type Sample } from "../lib/files";
+  import { icon, type Kind } from "../lib/icons";
+
+  type Item = { name: string; kind: Kind; bytes: number; age: number; folder: string };
+
+  // A small file tree built from the shared samples, plus the folders between them.
+  const tree = new Map<string, Item[]>();
+  const add = (folder: string, item: Item) => {
+    const list = tree.get(folder) ?? [];
+    if (!list.some((i) => i.name === item.name)) list.push(item);
+    tree.set(folder, list);
+  };
+  const ensureFolder = (path: string) => {
+    if (path === "~" || path === "/" || path === "/Applications") return;
+    const cut = path.lastIndexOf("/");
+    const parent = path.slice(0, cut);
+    add(parent, { name: path.slice(cut + 1), kind: "folder", bytes: 0, age: 1, folder: parent });
+    ensureFolder(parent);
+  };
+  for (const s of SAMPLES) {
+    if (s.kind === "folder") continue;
+    add(s.folder, { ...s });
+    ensureFolder(s.folder);
+  }
+  for (const name of ["Movies", "Music", "Pictures", "Desktop", "Documents", "Downloads"]) ensureFolder(`~/${name}`);
+  const APPS = ["Monodrive", "Terminal", "Xcode", "Preview", "Notes", "Calendar", "Music", "Photos", "Safari", "Mail"];
+  tree.set("/Applications", APPS.map((name) => ({ name: `${name}.app`, kind: "app", bytes: 0, age: 30, folder: "/Applications" })));
+  tree.set("/", ["Applications", "Library", "System", "Users"].map((name) => ({ name, kind: "folder", bytes: 0, age: 30, folder: "/" })));
+
+  const NAMES: Record<string, string> = { recents: "Recents", "~": "Home", "/": "Macintosh HD", search: "Search" };
+  const titleOf = (path: string) => NAMES[path] ?? path.slice(path.lastIndexOf("/") + 1);
+  const childPath = (folder: string, name: string) => (folder === "/" ? `/${name}` : `${folder}/${name}`);
+
+  const win = document.querySelector<HTMLElement>("[data-win]")!;
+  const side = win.querySelector<HTMLElement>("[data-side]")!;
+  const main = win.querySelector<HTMLElement>("[data-main]")!;
+  const top = win.querySelector<HTMLElement>("[data-top]")!;
+  const grid = win.querySelector<HTMLElement>("[data-grid]")!;
+  const title = win.querySelector<HTMLElement>("[data-title]")!;
+  const crumbs = win.querySelector<HTMLElement>("[data-crumbs]")!;
+  const status = win.querySelector<HTMLElement>("[data-status]")!;
+  const searchInput = win.querySelector<HTMLInputElement>("[data-search]")!;
+  const markIcon = document.querySelector<HTMLTemplateElement>("#mark-icon")!.innerHTML;
+
+  let path = "~";
+  let back: string[] = [];
+  let forward: string[] = [];
+  let items: Item[] = [];
+  let selected = -1;
+  const trashed: { item: Item; at: number }[] = [];
+
+  const listing = (where: string): Item[] => {
+    if (where === "recents")
+      return [...tree.values()].flat().filter((i) => i.kind !== "folder" && i.kind !== "app").sort((a, b) => a.age - b.age).slice(0, 14);
+    if (where === "search") return search(searchInput.value).map((h) => h.file as Sample).slice(0, 30);
+    const list = tree.get(where) ?? [];
+    // Folders first, then names as people read them, as Finder sorts.
+    return [...list].sort((a, b) => Number(b.kind === "folder") - Number(a.kind === "folder") || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  };
+
+  const appIcon = (name: string, i: number) => {
+    if (name === "Monodrive.app") return `<span class="app-tile mono">${markIcon}</span>`;
+    const hues = [210, 25, 200, 145, 45, 0, 330, 280, 195, 220];
+    return `<span class="app-tile" style="--h:${hues[i % hues.length]}"></span>`;
+  };
+
+  const render = () => {
+    items = listing(path);
+    selected = Math.min(selected, items.length - 1);
+    const searching = path === "search";
+    grid.classList.toggle("as-list", searching);
+    grid.innerHTML = items.length
+      ? items
+          .map(
+            (item, i) => `<div class="cell" role="option" data-i="${i}" aria-selected="${i === selected}">
+              <span class="cell-icon">${item.kind === "app" ? appIcon(item.name, i) : icon(item.kind)}</span>
+              <span class="cell-name">${searching ? highlight(item.name, search(searchInput.value).find((h) => h.file.name === item.name)?.hits ?? []) : item.name.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</span>
+              ${searching ? `<span class="cell-where">${item.folder}</span>` : ""}
+            </div>`,
+          )
+          .join("")
+      : `<div class="empty">${searching ? "No sample file matches." : "This folder is empty."}</div>`;
+    title.textContent = searching ? `“${searchInput.value}”` : titleOf(path);
+    const parts = path.startsWith("~") ? ["Macintosh HD", "Users", "you", ...path.slice(2).split("/").filter(Boolean)] : path === "/" ? ["Macintosh HD"] : path.startsWith("/") ? ["Macintosh HD", ...path.slice(1).split("/")] : [titleOf(path)];
+    crumbs.innerHTML = searching ? "" : parts.map((p, i) => `<span class="${i === parts.length - 1 ? "here" : ""}">${p}</span>`).join(`<svg width="10" height="10" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`);
+    updateStatus();
+    win.querySelectorAll<HTMLElement>("[data-place]").forEach((row) => row.toggleAttribute("data-here", row.dataset.place === path));
+    win.querySelector<HTMLElement>('[data-action="back"]')!.toggleAttribute("disabled", !back.length);
+    win.querySelector<HTMLElement>('[data-action="forward"]')!.toggleAttribute("disabled", !forward.length);
+  };
+
+  const updateStatus = () => {
+    const count = `${items.length} ${items.length === 1 ? "item" : "items"}`;
+    const item = items[selected];
+    status.textContent = path === "search" ? count : item ? `1 of ${items.length} selected${item.bytes ? `, ${formatBytes(item.bytes)}` : ""} · 52.3 GB free` : `${count} · 52.3 GB free`;
+  };
+
+  const select = (i: number) => {
+    selected = i;
+    grid.querySelectorAll<HTMLElement>(".cell").forEach((cell) => cell.setAttribute("aria-selected", String(Number(cell.dataset.i) === i)));
+    grid.querySelector(`[data-i="${i}"]`)?.scrollIntoView({ block: "nearest" });
+    updateStatus();
+  };
+
+  const go = (to: string, record = true) => {
+    if (to === path) return;
+    if (record) {
+      back.push(path);
+      forward = [];
+    }
+    path = to;
+    selected = -1;
+    render();
+  };
+
+  const open = (i: number) => {
+    const item = items[i];
+    if (item?.kind === "folder") go(path === "search" ? childPath(item.folder, item.name) : childPath(path, item.name));
+  };
+
+  // The sidebar rides a critically damped spring, as in the app: it looks done
+  // in about 130 ms, settles by 280 ms, and a second press partway reverses it
+  // from where it is, at its speed.
+  const SIDE = 220;
+  const still = reducedMotion();
+  const sidebar = new Spring(1, { response: 0.27, damping: 1, precision: 0.001 });
+  const layoutSidebar = () => {
+    const v = sidebar.value;
+    side.style.transform = `translate3d(${(v - 1) * SIDE}px, 0, 0)`;
+    side.style.opacity = String(Math.max(0, Math.min(1, v * 1.4 - 0.4)));
+    main.style.left = `${SIDE * v}px`;
+    top.style.paddingLeft = `${Math.max(12, 118 - SIDE * v)}px`;
+  };
+  const sideLoop = new FrameLoop((dt) => {
+    sidebar.step(dt);
+    layoutSidebar();
+    return !sidebar.settled;
+  });
+  const toggleSidebar = () => {
+    sidebar.target = sidebar.target ? 0 : 1;
+    if (still) sidebar.set(sidebar.target);
+    win.querySelector(".toggle")!.setAttribute("aria-label", sidebar.target ? "Hide the sidebar" : "Show the sidebar");
+    sideLoop.start();
+    layoutSidebar();
+  };
+  if (matchMedia("(max-width: 720px)").matches) sidebar.set(0);
+  layoutSidebar();
+
+  // A toast rises 8 pt as it fades in, and sinks half as far as it leaves. A new
+  // one while one is up takes its words without moving.
+  const toast = win.querySelector<HTMLElement>("[data-toast]")!;
+  const toastText = toast.querySelector<HTMLElement>("[data-toast-text]")!;
+  let toastTimer = 0;
+  const showToast = (text: string, undo: boolean) => {
+    toastText.textContent = text;
+    toast.querySelector("button")!.hidden = !undo;
+    clearTimeout(toastTimer);
+    if (toast.hidden) {
+      toast.hidden = false;
+      toast.getAnimations().forEach((a) => a.cancel());
+      toast.animate(still ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: "translate(-50%, 8px)" }, { opacity: 1, transform: "translate(-50%, 0)" }], { duration: 200, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+    }
+    toastTimer = window.setTimeout(hideToast, 4000);
+  };
+  const hideToast = () => {
+    if (toast.hidden) return;
+    const out = toast.animate(still ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: "translate(-50%, 0)" }, { opacity: 0, transform: "translate(-50%, 4px)" }], { duration: 150, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+    out.onfinish = () => (toast.hidden = true);
+  };
+
+  const trash = () => {
+    const item = items[selected];
+    if (!item || path === "search" || path === "recents" || path === "/" || path === "/Applications") {
+      showToast(item ? "In this demo, Move to Trash works in your folders" : "Select something first", false);
+      return;
+    }
+    const list = tree.get(path)!;
+    list.splice(list.indexOf(item), 1);
+    trashed.push({ item, at: selected });
+    render();
+    select(Math.min(selected, items.length - 1));
+    showToast(`Moved “${item.name}” to the Trash`, true);
+  };
+  const undo = () => {
+    const last = trashed.pop();
+    if (!last) return showToast("Nothing to undo", false);
+    add(last.item.folder, last.item);
+    if (path !== last.item.folder) go(last.item.folder);
+    render();
+    select(items.findIndex((i) => i.name === last.item.name));
+    showToast(`Put back “${last.item.name}”`, false);
+  };
+
+  // The command palette opens and closes at once, as it does in the app:
+  // something used a hundred times a day shouldn't make anyone wait.
+  const scrim = win.querySelector<HTMLElement>("[data-palette]")!;
+  const palInput = win.querySelector<HTMLInputElement>("[data-pal-input]")!;
+  const palRows = win.querySelector<HTMLElement>("[data-pal-rows]")!;
+  type Cmd = { group: string; label: string; keys: string; run: () => void; danger?: boolean };
+  const goCmd = (label: string, where: string, keys: string): Cmd => ({ group: "Go to", label, keys, run: () => go(where) });
+  const appOnly = (label: string, keys: string, danger = false): Cmd => ({ group: "Actions", label, keys, danger, run: () => showToast(`${label.replace("…", "")} works in the app`, false) });
+  const CMDS: Cmd[] = [
+    appOnly("New Folder", "⇧⌘N"),
+    { group: "Actions", label: "Move to Trash", keys: "⌘⌫", run: trash },
+    { group: "Actions", label: "Undo", keys: "⌘Z", run: undo },
+    { group: "Actions", label: "Hide Sidebar", keys: "⌃⌘S", run: toggleSidebar },
+    appOnly("Go to Folder…", "⇧⌘G"),
+    appOnly("Connect to Server…", "⇧⌘K"),
+    appOnly("Empty Trash…", "⇧⌘⌫", true),
+    goCmd("Recents", "recents", "⇧⌘F"),
+    goCmd("Home", "~", "⇧⌘H"),
+    goCmd("Desktop", "~/Desktop", "⇧⌘D"),
+    goCmd("Documents", "~/Documents", "⇧⌘O"),
+    goCmd("Downloads", "~/Downloads", "⌥⌘L"),
+    goCmd("Applications", "/Applications", "⇧⌘A"),
+  ];
+  let palShown: Cmd[] = [];
+  let palSel = 0;
+  const renderPalette = () => {
+    const q = palInput.value.trim().toLowerCase();
+    palShown = CMDS.filter((c) => !q || c.label.toLowerCase().includes(q));
+    palSel = Math.min(palSel, Math.max(0, palShown.length - 1));
+    let group = "";
+    palRows.innerHTML = palShown.length
+      ? palShown
+          .map((c, i) => {
+            const head = c.group !== group ? `<div class="pal-group">${(group = c.group)}</div>` : "";
+            return `${head}<div class="pal-row${c.danger ? " danger" : ""}" data-i="${i}" aria-selected="${i === palSel}"><span>${c.label}</span><span class="pal-keys">${c.keys}</span></div>`;
+          })
+          .join("")
+      : `<div class="pal-group">No commands match</div>`;
+  };
+  const openPalette = () => {
+    scrim.hidden = false;
+    palInput.value = "";
+    palSel = 0;
+    renderPalette();
+    palInput.focus();
+  };
+  const closePalette = () => {
+    scrim.hidden = true;
+    win.focus();
+  };
+  palInput.addEventListener("input", () => {
+    palSel = 0;
+    renderPalette();
+  });
+  palInput.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      palSel = Math.max(0, Math.min(palShown.length - 1, palSel + (e.key === "ArrowDown" ? 1 : -1)));
+      renderPalette();
+    } else if (e.key === "Enter") {
+      const cmd = palShown[palSel];
+      closePalette();
+      cmd?.run();
+    } else if (e.key === "Escape") {
+      e.stopPropagation();
+      closePalette();
+    }
+  });
+  palRows.addEventListener("pointerdown", (e) => {
+    const row = (e.target as HTMLElement).closest<HTMLElement>("[data-i]");
+    if (!row) return;
+    e.preventDefault();
+    const cmd = palShown[Number(row.dataset.i)];
+    closePalette();
+    cmd?.run();
+  });
+  scrim.addEventListener("pointerdown", (e) => {
+    if (e.target === scrim) closePalette();
+  });
+
+  // Search lives in the sidebar, as in the app; Esc leaves it.
+  let beforeSearch = "~";
+  searchInput.addEventListener("input", () => {
+    if (searchInput.value.trim()) {
+      if (path !== "search") beforeSearch = path;
+      path = "search";
+      selected = items.length ? 0 : -1;
+    } else path = beforeSearch;
+    render();
+    if (path === "search" && items.length) select(0);
+  });
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      searchInput.value = "";
+      path = beforeSearch;
+      render();
+      win.focus();
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      select(Math.max(0, Math.min(items.length - 1, selected + (e.key === "ArrowDown" ? 1 : -1))));
+    } else if (e.key === "Enter") open(selected);
+  });
+  const focusSearch = () => {
+    if (sidebar.target === 0) toggleSidebar();
+    searchInput.focus();
+    searchInput.select();
+  };
+
+  const ACTIONS: Record<string, () => void> = {
+    palette: openPalette,
+    sidebar: toggleSidebar,
+    trash,
+    undo,
+    search: focusSearch,
+    back: () => back.length && go((forward.push(path), back.pop()!), false),
+    forward: () => forward.length && go((back.push(path), forward.pop()!), false),
+  };
+  document.querySelectorAll<HTMLElement>("[data-action]").forEach((el) =>
+    el.addEventListener("click", () => {
+      if (el.closest("[data-hints]") && el.dataset.action !== "palette" && el.dataset.action !== "search") win.focus();
+      if (el.closest("[data-hints]") && el.dataset.action === "trash" && selected < 0 && items.length) select(0);
+      ACTIONS[el.dataset.action!]?.();
+    }),
+  );
+  win.querySelectorAll<HTMLElement>("[data-place]").forEach((row) =>
+    row.addEventListener("click", () => {
+      searchInput.value = "";
+      go(row.dataset.place!);
+    }),
+  );
+  grid.addEventListener("pointerdown", (e) => {
+    const cell = (e.target as HTMLElement).closest<HTMLElement>(".cell");
+    select(cell ? Number(cell.dataset.i) : -1);
+  });
+  grid.addEventListener("dblclick", (e) => {
+    const cell = (e.target as HTMLElement).closest<HTMLElement>(".cell");
+    if (cell) open(Number(cell.dataset.i));
+  });
+
+  const columns = () => {
+    if (grid.classList.contains("as-list")) return 1;
+    const cells = grid.querySelectorAll<HTMLElement>(".cell");
+    if (cells.length < 2) return 1;
+    const first = cells[0].offsetTop;
+    let n = 0;
+    while (n < cells.length && cells[n].offsetTop === first) n++;
+    return n;
+  };
+
+  // A shortcut pressed in the window lights its button under the window, so the
+  // key and what it did read as one thing.
+  const run = (name: string) => {
+    const hint = document.querySelector<HTMLElement>(`[data-hints] [data-action="${name}"]`);
+    if (hint) {
+      hint.classList.add("lit");
+      setTimeout(() => hint.classList.remove("lit"), 180);
+    }
+    ACTIONS[name]();
+  };
+
+  // ⌘↑: up one folder, from ~/Desktop to ~ and from /Applications to /.
+  const up = () => {
+    const cut = path.lastIndexOf("/");
+    if (cut < 0 || path === "/") return;
+    go(path.startsWith("~") ? (cut === 1 ? "~" : path.slice(0, cut)) : path.slice(0, cut) || "/");
+  };
+
+  win.addEventListener("keydown", (e) => {
+    // Shortcuts work from anything in the window but its fields, which handle
+    // their own keys. Plain keys need the window itself focused, so Enter on a
+    // focused button still presses that button.
+    const target = e.target as HTMLElement;
+    if (target.closest("input")) return;
+    const cmd = e.metaKey;
+    if (!cmd && target !== win) return;
+    const key = e.key.toLowerCase();
+    const step: Record<string, number> = { arrowleft: -1, arrowright: 1, arrowup: -columns(), arrowdown: columns() };
+    if (cmd && key === "k") run("palette");
+    else if (cmd && e.ctrlKey && key === "s") run("sidebar");
+    else if (cmd && key === "f") run("search");
+    else if (cmd && key === "backspace") run("trash");
+    else if (cmd && key === "z") run("undo");
+    else if (cmd && key === "[") run("back");
+    else if (cmd && key === "]") run("forward");
+    else if (cmd && key === "arrowup") up();
+    else if ((cmd && key === "arrowdown") || key === "enter") open(selected);
+    else if (!cmd && key in step) select(selected < 0 ? 0 : Math.max(0, Math.min(items.length - 1, selected + step[key])));
+    else return;
+    e.preventDefault();
+  });
+
+  render();
+</script>
+
+<style is:global>
+  .win {
+    --side: 220px;
+    position: relative;
+    height: min(620px, 78vh);
+    min-height: 460px;
+    border-radius: 16px;
+    background: #161618;
+    box-shadow:
+      inset 0 0 0 1px rgb(255 255 255 / 0.1),
+      0 0 0 1px rgb(0 0 0 / 0.8),
+      0 40px 100px rgb(0 0 0 / 0.6),
+      0 12px 30px rgb(0 0 0 / 0.35);
+    overflow: hidden;
+    font-size: 13px;
+    user-select: none;
+    -webkit-user-select: none;
+    outline: none;
+  }
+  .win:focus-visible {
+    box-shadow:
+      inset 0 0 0 1px rgb(255 255 255 / 0.1),
+      0 0 0 3px rgb(10 132 255 / 0.6),
+      0 40px 100px rgb(0 0 0 / 0.6);
+  }
+
+  .side {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--side);
+    padding: 44px 8px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    will-change: transform, opacity;
+  }
+  .lights {
+    position: absolute;
+    top: 14px;
+    left: 16px;
+    display: flex;
+    gap: 8px;
+    z-index: 3;
+  }
+  .lights i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #ff5f57;
+  }
+  .lights i:nth-child(2) {
+    background: #febc2e;
+  }
+  .lights i:nth-child(3) {
+    background: #28c840;
+  }
+  .icon-btn {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-55);
+    transition:
+      background-color 120ms ease,
+      color 120ms ease;
+  }
+  .icon-btn:active:not([disabled]) {
+    background: var(--ink-20);
+  }
+  .icon-btn[disabled] {
+    color: var(--ink-30);
+    cursor: default;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .icon-btn:hover:not([disabled]) {
+      background: var(--ink-08);
+      color: var(--ink-1);
+    }
+  }
+  .toggle {
+    position: absolute;
+    top: 8px;
+    left: 82px;
+    z-index: 3;
+  }
+
+  .side-search {
+    height: 28px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 6px 0 10px;
+    margin-bottom: 10px;
+    border-radius: 999px;
+    background: var(--ink-06);
+    color: var(--ink-55);
+  }
+  .side-search:focus-within {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  .side-search input {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: 0;
+    outline: 0;
+    color: var(--ink-1);
+    font: 13px var(--font);
+  }
+  .side-search input::placeholder {
+    color: var(--ink-55);
+  }
+  .side-kbd {
+    font-size: 11px;
+    color: var(--ink-55);
+    padding: 0 4px;
+  }
+  .side-head {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 8px 4px;
+    font-size: 11px;
+    font-weight: 560;
+    color: var(--ink-55);
+  }
+  .side-row {
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 0 8px;
+    border-radius: var(--radius-row);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--ink-1);
+    text-align: left;
+    width: 100%;
+  }
+  .side-row > span:first-child {
+    display: flex;
+    color: var(--ink-55);
+  }
+  .side-row[data-here] {
+    background: var(--ink-14);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .side-row:not([data-here]):hover {
+      background: var(--ink-08);
+    }
+  }
+  .side-row.disk {
+    height: 40px;
+  }
+  .disk-text {
+    flex: 1;
+    display: grid;
+    gap: 5px;
+  }
+  .meter {
+    display: block;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--ink-14);
+    overflow: hidden;
+  }
+  .meter i {
+    display: block;
+    height: 100%;
+    background: var(--ink-55);
+  }
+  .side-foot {
+    margin-top: auto;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px;
+    color: var(--ink-55);
+  }
+
+  .main {
+    position: absolute;
+    inset: 0 0 0 var(--side);
+    display: flex;
+    flex-direction: column;
+    padding: 0 8px 8px 0;
+  }
+  .top {
+    height: 40px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding-left: 12px;
+  }
+  .title {
+    margin-left: 8px;
+    font-weight: 650;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pane {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-radius: var(--radius-card);
+    background: #1e1e21;
+    box-shadow: inset 0 0 0 1px var(--ink-06);
+    overflow: hidden;
+  }
+  .pane-bg {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    pointer-events: none;
+  }
+  .pane > .grid,
+  .pane > .pathbar {
+    position: relative;
+  }
+  .grid {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    align-content: start;
+    gap: 6px 4px;
+    padding: 16px;
+    scrollbar-width: thin;
+  }
+  .cell {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    padding: 4px 2px;
+    cursor: default;
+  }
+  .cell-icon {
+    width: 64px;
+    height: 64px;
+    padding: 6px;
+    border-radius: var(--radius-row);
+    display: flex;
+  }
+  .cell-icon > svg {
+    width: 100%;
+    height: 100%;
+  }
+  .cell-name {
+    max-width: 100%;
+    padding: 1px 6px;
+    border-radius: 5px;
+    font-size: 12px;
+    line-height: 16px;
+    text-align: center;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .cell[aria-selected="true"] .cell-icon {
+    background: var(--ink-14);
+  }
+  .cell[aria-selected="true"] .cell-name {
+    background: var(--ink-14);
+  }
+  .win:focus .cell[aria-selected="true"] .cell-name {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .grid.as-list {
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding: 8px;
+  }
+  .as-list .cell {
+    grid-template-columns: 22px minmax(0, auto) minmax(0, 1fr);
+    justify-items: start;
+    align-items: center;
+    gap: 10px;
+    height: 30px;
+    padding: 0 10px;
+    border-radius: var(--radius-row);
+  }
+  .as-list .cell-icon {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+  }
+  .as-list .cell-name {
+    padding: 0;
+    text-align: left;
+    -webkit-line-clamp: 1;
+    font-size: 13px;
+    color: var(--ink-65);
+  }
+  .as-list .cell-name b {
+    color: var(--ink-1);
+    font-weight: 620;
+  }
+  .as-list .cell-where {
+    font-size: 12px;
+    color: var(--ink-30);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .as-list .cell[aria-selected="true"] {
+    background: var(--accent);
+  }
+  .as-list .cell[aria-selected="true"] :is(.cell-name, .cell-name b, .cell-where) {
+    background: none;
+    color: var(--on-accent);
+  }
+  .as-list .cell[aria-selected="true"] .cell-icon {
+    background: none;
+  }
+  .app-tile {
+    width: 100%;
+    height: 100%;
+    border-radius: 22%;
+    background: linear-gradient(160deg, hsl(var(--h) 70% 62%), hsl(var(--h) 65% 42%));
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25);
+  }
+  .app-tile.mono {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    color: #fff;
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.14);
+  }
+  .empty {
+    grid-column: 1 / -1;
+    padding: 40px;
+    text-align: center;
+    color: var(--ink-55);
+  }
+
+  .pathbar {
+    height: 28px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 16px;
+    border-top: 1px solid var(--ink-06);
+    font-size: 11px;
+    color: var(--ink-65);
+  }
+  .crumbs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .crumbs span {
+    padding: 0 4px;
+  }
+  .crumbs .here {
+    color: var(--ink-1);
+    font-weight: 560;
+  }
+  .crumbs svg {
+    color: var(--ink-30);
+    flex: none;
+  }
+  .status {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .toast {
+    position: absolute;
+    left: 50%;
+    bottom: 40px;
+    transform: translate(-50%, 0);
+    height: 36px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 8px 0 16px;
+    border-radius: 999px;
+    background: rgb(46 46 50);
+    box-shadow:
+      inset 0 0 0 1px var(--ink-12),
+      0 10px 30px rgb(0 0 0 / 0.45);
+    white-space: nowrap;
+    font-size: 13px;
+  }
+  .toast[hidden] {
+    display: none;
+  }
+  .toast button {
+    height: 24px;
+    padding: 0 12px;
+    border-radius: 999px;
+    background: var(--ink-08);
+    font-weight: 560;
+    font-size: 12px;
+  }
+  .toast button[hidden] {
+    display: none;
+  }
+  .toast:not(:has(button:not([hidden]))) {
+    padding-right: 16px;
+  }
+
+  .scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: rgb(0 0 0 / 0.35);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 90px;
+  }
+  .scrim[hidden] {
+    display: none;
+  }
+  /* Opaque on purpose: a backdrop blur nested in the window blanked the page in Chromium. */
+  .palette {
+    width: min(520px, 92%);
+    border-radius: var(--radius-card);
+    background: rgb(38 38 42);
+    box-shadow:
+      inset 0 0 0 1px var(--ink-12),
+      0 30px 80px rgb(0 0 0 / 0.6);
+    overflow: hidden;
+  }
+  .pal-field {
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
+    color: var(--ink-55);
+    border-bottom: 1px solid var(--ink-06);
+  }
+  .pal-field input {
+    flex: 1;
+    background: none;
+    border: 0;
+    outline: 0;
+    color: var(--ink-1);
+    font: 14px var(--font);
+  }
+  .pal-rows {
+    max-height: 252px;
+    overflow-y: auto;
+    padding: 4px 6px 6px;
+  }
+  .pal-group {
+    padding: 10px 10px 4px;
+    font-size: 11px;
+    font-weight: 560;
+    color: var(--ink-55);
+  }
+  .pal-row {
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px;
+    border-radius: var(--radius-row);
+    cursor: default;
+  }
+  .pal-row[aria-selected="true"] {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .pal-row.danger {
+    color: var(--danger);
+  }
+  .pal-row.danger[aria-selected="true"] {
+    background: var(--danger);
+    color: #fff;
+  }
+  .pal-keys {
+    font-size: 11px;
+    opacity: 0.65;
+  }
+  .pal-row[aria-selected="true"] .pal-keys {
+    opacity: 1;
+  }
+  .pal-foot {
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 16px;
+    border-top: 1px solid var(--ink-06);
+    font-size: 11px;
+    color: var(--ink-65);
+  }
+  .pal-foot .kbd + .kbd {
+    margin-left: -2px;
+  }
+  .pal-foot .kbd:not(:first-child) {
+    margin-left: 6px;
+  }
+
+</style>

@@ -1,0 +1,114 @@
+---
+// What an agent sees: a find_files call typing itself out, then the paths it gets back.
+---
+
+<section class="wrap block agents">
+  <div>
+    <h2 class="h2">Your agents get the same index.</h2>
+    <p class="lede">
+      Monodrive runs as an MCP server, so Claude Code, Codex and Cursor search your disk through the same index instead
+      of shelling out to <code>find</code>.
+    </p>
+  </div>
+  <div class="term" data-term aria-label="An agent calling find_files">
+    <div class="term-bar"><i></i><i></i><i></i></div>
+    <pre><span class="dim">agent ›</span> <span data-type>find_files("invoice kind:document modified:60d")</span><span class="caret"></span>
+<span class="out" data-out>/Users/you/Documents/Invoices/Invoice 2026-10 Northwind.pdf
+/Users/you/Documents/Invoices/Invoice 2026-09 Northwind.pdf</span></pre>
+  </div>
+</section>
+
+<script>
+  // The agent's call types itself once it's on screen, then the paths land.
+  const term = document.querySelector<HTMLElement>("[data-term]")!;
+  const typed = term.querySelector<HTMLElement>("[data-type]")!;
+  const call = typed.textContent ?? "";
+  typed.textContent = "";
+  term.querySelector<HTMLElement>("[data-out]")!.style.opacity = "0";
+  new IntersectionObserver(
+    (entries, observer) => {
+      if (!entries[0].isIntersecting) return;
+      observer.disconnect();
+      let i = 0;
+      const tick = () => {
+        typed.textContent = call.slice(0, ++i);
+        if (i < call.length) setTimeout(tick, 28);
+        else
+          setTimeout(() => {
+            term.classList.add("done");
+          }, 260);
+      };
+      setTimeout(tick, 300);
+    },
+    { threshold: 0.7 },
+  ).observe(term);
+</script>
+
+<style is:global>
+  .agents {
+    display: grid;
+    grid-template-columns: 1fr 1.1fr;
+    gap: 56px;
+    align-items: center;
+  }
+  .agents .lede {
+    margin-top: 16px;
+  }
+  .term {
+    border-radius: var(--radius-card);
+    background: var(--bg-sunk);
+    box-shadow: inset 0 0 0 1px var(--ink-08);
+    overflow: hidden;
+  }
+  .term-bar {
+    display: flex;
+    gap: 7px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--ink-06);
+  }
+  .term-bar i {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--ink-14);
+  }
+  .term pre {
+    margin: 0;
+    padding: 20px;
+    min-height: 150px;
+    font: 13px/1.75 var(--mono);
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--ink-1);
+  }
+  .dim {
+    color: var(--ink-55);
+  }
+  .caret {
+    display: inline-block;
+    width: 7px;
+    height: 15px;
+    margin-left: 2px;
+    vertical-align: -2px;
+    background: var(--ink-65);
+  }
+  .term.done .caret {
+    opacity: 0;
+  }
+  .out {
+    display: block;
+    margin-top: 8px;
+    color: var(--ink-65);
+    transition: opacity 300ms var(--ease-out);
+  }
+  .term.done .out {
+    opacity: 1 !important;
+  }
+
+  @media (max-width: 860px) {
+    .agents {
+      grid-template-columns: 1fr;
+      gap: 32px;
+    }
+  }
+</style>

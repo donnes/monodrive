@@ -1,0 +1,244 @@
+---
+// The app icon as assets/prod draws it: the folder of squares on a black
+// rounded square with a glass rim. The rim catches light from the pointer, so
+// the corner nearest it shines; `tilt` also leans the icon toward the pointer.
+import { MARK } from "../lib/icons";
+
+interface Props {
+  size: number;
+  tilt?: boolean;
+  /** Where the pointer is tracked. Defaults to the icon's section. */
+  area?: string;
+}
+
+const { size, tilt = false, area } = Astro.props;
+---
+
+<div class="appicon" data-appicon data-tilt={tilt || undefined} data-area={area} style={`--s:${size}px`}>
+  <button class="ai-body" aria-label="Monodrive's icon">
+    <span class="ai-grid" aria-hidden="true">
+      {
+        MARK.map((s) => (
+          <i style={`--c:${s.col};--r:${s.row};--a:${s.alpha}`} class={s.col + s.row === 0 ? "flat" : undefined}>
+            <b />
+          </i>
+        ))
+      }
+    </span>
+    <span class="ai-rim" aria-hidden="true"><i></i></span>
+    <span class="ai-shine" aria-hidden="true"><i><b></b></i></span>
+  </button>
+</div>
+
+<script>
+  import { FrameLoop, Spring, reducedMotion } from "../lib/spring";
+
+  const still = reducedMotion();
+
+  document.querySelectorAll<HTMLElement>("[data-appicon]").forEach((icon) => {
+    const body = icon.querySelector<HTMLElement>(".ai-body")!;
+    const rim = icon.querySelector<HTMLElement>(".ai-rim")!;
+    const shine = icon.querySelector<HTMLElement>(".ai-shine")!;
+    const blob = shine.querySelector<HTMLElement>("b")!;
+    const tilts = icon.hasAttribute("data-tilt") && !still;
+    const area = (icon.dataset.area && document.querySelector<HTMLElement>(icon.dataset.area)) || icon.closest("section") || document.body;
+
+    const squares = [...icon.querySelectorAll<HTMLElement>(".ai-grid > i")].map((el) => ({
+      el,
+      glow: el.querySelector<HTMLElement>("b")!,
+      col: Number(el.style.getPropertyValue("--c")),
+      row: Number(el.style.getPropertyValue("--r")),
+      alpha: Number(el.style.getPropertyValue("--a")),
+      lift: new Spring(0, { response: 0.4, damping: 0.85, precision: 0.002 }),
+    }));
+    const mx = new Spring(0.5, { response: 0.3, damping: 1, precision: 0.001 });
+    const my = new Spring(0.5, { response: 0.3, damping: 1, precision: 0.001 });
+    const light = new Spring(0, { response: 0.3, damping: 1, precision: 0.002 });
+    const rx = new Spring(0, { response: 0.55, damping: 0.75, precision: 0.01 });
+    const ry = new Spring(0, { response: 0.55, damping: 0.75, precision: 0.01 });
+    const springs = [mx, my, light, rx, ry, ...squares.map((s) => s.lift)];
+
+    let size = icon.offsetWidth;
+    addEventListener("resize", () => (size = icon.offsetWidth));
+
+    const loop = new FrameLoop((dt) => {
+      springs.forEach((s) => s.step(dt));
+      // The light is a soft blob under the rim's mask; moving it is only a transform.
+      const d = size * 0.9;
+      blob.style.transform = `translate3d(${mx.value * size - d / 2}px, ${my.value * size - d / 2}px, 0)`;
+      shine.style.opacity = String(light.value);
+      rim.style.opacity = String(0.7 + 0.3 * light.value);
+      if (tilts) body.style.transform = `rotateX(${rx.value}deg) rotateY(${ry.value}deg)`;
+      for (const s of squares) s.glow.style.opacity = String(s.lift.value * (1 - s.alpha) * 0.9);
+      return springs.some((s) => !s.settled);
+    });
+
+    area.addEventListener("pointermove", (e) => {
+      if (e.pointerType !== "mouse") return;
+      const r = icon.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width;
+      const py = (e.clientY - r.top) / r.height;
+      // Past the icon the light keeps tracking the pointer's direction but dims.
+      const outside = Math.hypot(Math.max(0, Math.abs(px - 0.5) - 0.5), Math.max(0, Math.abs(py - 0.5) - 0.5));
+      const near = Math.max(0, 1 - outside / 0.9);
+      mx.target = Math.max(-0.15, Math.min(1.15, px));
+      my.target = Math.max(-0.15, Math.min(1.15, py));
+      light.target = near;
+      if (tilts) {
+        ry.target = (Math.max(0, Math.min(1, px)) - 0.5) * 18 * near;
+        rx.target = -(Math.max(0, Math.min(1, py)) - 0.5) * 18 * near;
+      }
+      for (const s of squares) {
+        const cx = 0.168 + 0.117 * (s.col + 0.5) + 0.0195 * s.col;
+        const cy = 0.236 + 0.117 * (s.row + 0.5) + 0.0195 * s.row;
+        s.lift.target = Math.max(0, 1 - Math.hypot(px - cx, py - cy) / 0.32) ** 1.4;
+      }
+      loop.start();
+    });
+    area.addEventListener("pointerleave", () => {
+      light.target = 0;
+      rx.target = 0;
+      ry.target = 0;
+      squares.forEach((s) => (s.lift.target = 0));
+      loop.start();
+    });
+
+    // First paint: the icon settles in, then its squares light up along the diagonal.
+    body.animate(still ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, scale: "0.94" }, { opacity: 1, scale: "1" }], {
+      duration: 800,
+      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+      fill: "backwards",
+    });
+    squares.forEach((s) =>
+      s.el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 500, delay: 250 + (s.col + s.row) * 55, easing: "ease-out", fill: "backwards" }),
+    );
+
+    // A press sends a wave of light out from the square under the pointer.
+    body.addEventListener("pointerdown", (e) => {
+      const r = body.getBoundingClientRect();
+      const col = ((e.clientX - r.left) / r.width - 0.168) / 0.1365;
+      const row = ((e.clientY - r.top) / r.height - 0.236) / 0.1365;
+      for (const s of squares) {
+        const delay = Math.hypot(s.col + 0.5 - col, s.row + 0.5 - row) * 55;
+        s.glow.animate([{ opacity: 0 }, { opacity: 0.85, offset: 0.25 }, { opacity: 0 }], { duration: 480, delay, easing: "ease-out" });
+        if (!still) s.el.animate([{ scale: "1" }, { scale: "0.86", offset: 0.3 }, { scale: "1" }], { duration: 480, delay, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+      }
+    });
+  });
+</script>
+
+<style is:global>
+  .appicon {
+    --s: 200px;
+    width: var(--s);
+    height: var(--s);
+    perspective: calc(var(--s) * 4);
+    flex: none;
+  }
+  .ai-body {
+    position: relative;
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 22.5%;
+    background: #000;
+    box-shadow:
+      0 calc(var(--s) * 0.05) calc(var(--s) * 0.14) rgb(0 0 0 / 0.55),
+      0 0 0 1px rgb(255 255 255 / 0.05);
+    will-change: transform;
+    -webkit-tap-highlight-color: transparent;
+    transition: scale 160ms var(--ease-out);
+  }
+  .ai-body:active {
+    scale: 0.97;
+  }
+
+  /* The mark sits where folder.svg puts it on its 1024 canvas. */
+  .ai-grid {
+    position: absolute;
+    left: 16.8%;
+    top: 23.6%;
+    width: 66.4%;
+    height: 52.7%;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    grid-template-rows: repeat(4, 1fr);
+    gap: calc(var(--s) * 0.0195);
+  }
+  .ai-grid i {
+    position: relative;
+    grid-column: calc(var(--c) + 1);
+    grid-row: calc(var(--r) + 1);
+    background: rgb(255 255 255 / var(--a));
+    /* Liquid Glass bevels each square: light on the top left, shade on the bottom right. */
+    box-shadow:
+      inset calc(var(--s) * 0.006) calc(var(--s) * 0.006) 0 rgb(255 255 255 / 0.4),
+      inset calc(var(--s) * -0.006) calc(var(--s) * -0.006) 0 rgb(0 0 0 / 0.22);
+  }
+  .ai-grid i.flat {
+    box-shadow: none;
+  }
+  .ai-grid b {
+    position: absolute;
+    inset: 0;
+    background: #fff;
+    opacity: 0;
+  }
+
+  /* The rim: a ring masked out of the body, blurred by its wrapper so it glows inward. */
+  .ai-rim,
+  .ai-shine {
+    position: absolute;
+    inset: 0;
+    border-radius: 22.5%;
+    pointer-events: none;
+    filter: blur(calc(var(--s) * 0.006));
+  }
+  .ai-rim i,
+  .ai-shine i {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: calc(var(--s) * 0.022);
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    overflow: hidden;
+  }
+  .ai-rim {
+    opacity: 0.7;
+  }
+  .ai-rim i {
+    background:
+      radial-gradient(circle at 6% 6%, rgb(255 255 255 / 0.85), transparent 22%),
+      radial-gradient(circle at 94% 94%, rgb(255 255 255 / 0.6), transparent 22%),
+      radial-gradient(circle at 94% 6%, rgb(255 255 255 / 0.35), transparent 20%),
+      radial-gradient(circle at 6% 94%, rgb(255 255 255 / 0.35), transparent 20%),
+      rgb(255 255 255 / 0.16);
+  }
+  .ai-shine {
+    opacity: 0;
+    filter: blur(calc(var(--s) * 0.004));
+  }
+  .ai-shine b {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 90%;
+    height: 90%;
+    border-radius: 50%;
+    background: radial-gradient(closest-side, rgb(255 255 255), rgb(255 255 255 / 0.5) 45%, transparent);
+    will-change: transform;
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .ai-shine {
+      display: none;
+    }
+  }
+</style>

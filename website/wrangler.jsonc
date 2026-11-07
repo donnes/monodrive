@@ -1,0 +1,10 @@
+// The site is static: a Worker serves the Astro build from dist/ on monodrive.app.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "monodrive-website",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist"
+  },
+  "routes": [{ "pattern": "monodrive.app", "custom_domain": true }]
+}

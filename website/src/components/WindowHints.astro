@@ -1,0 +1,72 @@
+---
+// Buttons that run the window demo's commands, for people who don't know the keys yet.
+const HINTS = [
+  { keys: "⌘K", label: "Command palette", action: "palette" },
+  { keys: "⌃⌘S", label: "Hide the sidebar", action: "sidebar" },
+  { keys: "⌘⌫", label: "Move to Trash", action: "trash" },
+  { keys: "⌘Z", label: "Undo", action: "undo" },
+  { keys: "⌘F", label: "Search", action: "search" },
+];
+---
+
+<div class="hints" data-hints>
+  {
+    HINTS.map((h) => (
+      <button type="button" class="hint" data-action={h.action}>
+        <span class="kbd">{h.keys}</span>
+        {h.label}
+      </button>
+    ))
+  }
+</div>
+
+<style is:global>
+  .hints {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 20px;
+  }
+  .hint {
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px 0 6px;
+    border-radius: 999px;
+    background: var(--ink-06);
+    color: var(--ink-65);
+    font-size: 13px;
+    transition:
+      background-color 160ms ease,
+      color 160ms ease,
+      transform 160ms var(--ease-out);
+  }
+  .hint .kbd {
+    height: 22px;
+    min-width: 30px;
+    background: var(--ink-08);
+    color: var(--ink-1);
+  }
+  /* Lit at once when its shortcut runs in the window, then fading back. */
+  .hint.lit {
+    background: var(--accent);
+    color: var(--on-accent);
+    transition-duration: 0ms;
+  }
+  .hint.lit .kbd {
+    background: rgb(255 255 255 / 0.22);
+    color: var(--on-accent);
+  }
+  .hint:active {
+    transform: scale(0.97);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .hint:hover {
+      background: var(--ink-12);
+      color: var(--ink-1);
+    }
+  }
+
+</style>
