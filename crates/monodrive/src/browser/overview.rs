@@ -44,9 +44,9 @@ const SIZE_SLOT: f32 = 72.;
 const ACTION_SLOT: f32 = 20.;
 /// Suggestion rows lead with what each frees.
 const RECLAIMS_SLOT: f32 = 56.;
-/// The disk's bar, and each square of its key.
+/// The disk's bar, and each dot of its key.
 const BAR_HEIGHT: f32 = 12.;
-const SWATCH: f32 = 10.;
+const SWATCH: f32 = 8.;
 const CHIP_MIN_WIDTH: f32 = 330.;
 const CHIP_HEIGHT: f32 = 48.;
 
@@ -1058,27 +1058,29 @@ fn parts(about: &Overview, disk: &Headline) -> Vec<(Part, u64)> {
         .collect()
 }
 
-/// The startup disk as one bar: each part in its color, then the free space
-/// as track.
+/// The startup disk as one pill of touching parts: each part in its color,
+/// then the free space as track. Only the pill's two ends are round, since
+/// a parent can't clip its children to its corners.
 fn disk_bar(parts: &[(Part, u64)], disk: &Headline) -> impl IntoElement + use<> {
-    let segment = |grow: u64| {
+    let segment = |grow: u64, color: Hsla| {
         div()
             .h_full()
             .flex_basis(px(0.))
             .flex_grow(grow as f32)
             .min_w(px(3.))
-            .rounded(px(theme::RADIUS_THUMB))
+            .bg(color)
     };
     div()
         .h(px(BAR_HEIGHT))
         .flex()
-        .gap(px(2.))
-        .children(
-            parts
-                .iter()
-                .map(|(part, bytes)| segment(*bytes).bg(part_color(*part))),
+        .children(parts.iter().enumerate().map(|(ix, (part, bytes))| {
+            segment(*bytes, part_color(*part)).when(ix == 0, |d| d.rounded_l_full())
+        }))
+        .child(
+            segment(disk.free, content(0.14))
+                .rounded_r_full()
+                .when(parts.is_empty(), |d| d.rounded_l_full()),
         )
-        .child(segment(disk.free).bg(content(0.14)))
 }
 
 fn part_color(part: Part) -> Hsla {
@@ -1089,12 +1091,12 @@ fn part_color(part: Part) -> Hsla {
     }
 }
 
-/// A part's square in the bar's key.
+/// A part's dot in the bar's key.
 fn swatch(part: Part) -> impl IntoElement {
     div()
         .size(px(SWATCH))
         .flex_shrink_0()
-        .rounded(px(theme::RADIUS_THUMB))
+        .rounded_full()
         .bg(part_color(part))
 }
 
