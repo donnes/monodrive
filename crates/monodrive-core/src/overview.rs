@@ -163,14 +163,6 @@ impl Evidence {
         }
     }
 
-    /// What its button says.
-    pub fn action(&self) -> &'static str {
-        match self {
-            Evidence::BuildOutput { .. } => "Clean",
-            Evidence::ToolCache { .. } => "Clear",
-        }
-    }
-
     /// Why it's safe.
     pub fn why(&self) -> String {
         match self {

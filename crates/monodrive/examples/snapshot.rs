@@ -538,6 +538,8 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
             true,
         ),
     ];
+    // Paths under the made-up home read as they would on a Mac, from `~`.
+    let real_home = std::env::var_os("HOME");
     for (name, volumes, more, folders) in cases {
         let home = tempfile::tempdir()?;
         let places = overview_fixture(home.path(), volumes, more, folders)?;
@@ -547,11 +549,18 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
             "overview-medium" => open_at(cx, folder, 900., 600.)?,
             _ => open(cx, folder)?,
         };
+        // SAFETY: the headless app is parked between shots, and nothing else
+        // in this process reads the environment while it changes.
+        unsafe { std::env::set_var("HOME", home.path().canonicalize()?) };
         dispatch(cx, window, &GoOverview)?;
         save(cx, window, out, name)?;
         // Before its fixture goes, so nothing reads a folder that's gone.
         cx.update_window(window.into(), |_, window, _| window.remove_window())?;
         cx.run_until_parked();
+        if let Some(home) = &real_home {
+            // SAFETY: as above.
+            unsafe { std::env::set_var("HOME", home) };
+        }
     }
     Ok(())
 }
@@ -588,6 +597,21 @@ fn overview_fixture(
         places: home.join("places.json"),
         recents: home.join("recents.json"),
     };
+    // The usual favorites, with the real home's folders this one lacks:
+    // `HOME` points here while the shot is drawn.
+    let real = std::env::var_os("HOME").map(PathBuf::from);
+    let favorites: Vec<_> = std::iter::once(home.clone())
+        .chain(
+            real.iter()
+                .flat_map(|real| ["Desktop", "Documents", "Downloads"].map(|name| real.join(name))),
+        )
+        .chain([PathBuf::from("/Applications")])
+        .map(|path| serde_json::json!({ "path": path }))
+        .collect();
+    std::fs::write(
+        &store.places,
+        serde_json::to_vec(&serde_json::json!({ "favorites": favorites }))?,
+    )?;
     let now = monodrive_core::overview::now();
     let size = |gb: u64, at: u64, complete: bool| {
         serde_json::json!({
