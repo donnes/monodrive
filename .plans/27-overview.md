@@ -4,9 +4,10 @@ Status: steps 1 to 4 done. Step 5 waits for plan 22's delete review.
 
 Decisions made while building it:
 
-- The page follows the picked Desk mockup, whose image the maintainer holds, with two changes. On 2026-11-03 the maintainer picked outlined icons, tinted like the folders, in place of colored dots, so both columns use one kind of mark. On 2026-11-06 the side column's Right now split in two. Locations lists every location with its state and its Scan or Connect… button. Changed by agents appears only when an agent changed something in the last day. Copies and moves left the page, because the title bar's ring shows them. The page adds one thing the mockup lacks: the disk bar under the headline, from Monocode's charts through `theme::dither_bar`. Solid is what's taken, and the accent, dithered, is what the suggestions and the Trash could give back. It has no motion, glow or hover repaint.
-- "Your stuff" ranks largest first, not the mockup's recently active first, because nothing records activity.
-- The layout follows the pane's width, which a design council checked down to the smallest window. From 720 pt the suggestions are three cards; narrower, they are rows in one card. From 820 pt the side column sits beside the list; narrower, it goes under it. Every text starts on the pane's 16 pt inset, and every list row keeps its size and button slots, so the sizes line up.
+- The page started from the picked Desk mockup. On 2026-11-06 the maintainer rejected that layout and picked direction A, the storage map, from three mockups. The disk is drawn by what fills it: Documents (Desktop, Documents and Downloads), Projects, Pictures, Movies and music, and Cloud, each in a fixed tint that its rows' icons and bars share, then what the suggestions and the Trash could give back, dithered in the accent, then Other. A key under the bar names each part. Nothing is counted twice: a folder inside another counts in the outer one, and what a suggestion frees leaves the kind that holds it. The tints are fixed rather than the accent, so no accent makes two kinds look alike. It has no motion, glow or hover repaint.
+- Under the bar come "Free up", a row per suggestion, then "Largest on" the startup disk and on each scanned drive, each list with bars against its own largest, since drives share no space. A project with copies elsewhere ranks by what it takes on the startup disk. "Other locations" are tiles, as many across as fit 330 pt each. "Changed by agents" appears only when an agent changed something in the last day. Copies and moves stay in the title bar's ring.
+- The lists rank largest first, not the mockup's recently active first, because nothing records activity.
+- Every text starts on the pane's 16 pt inset, and every list row keeps its bar, size and button slots, so they line up at any width down to the smallest window.
 - A project on several locations lists each copy under its row on a press, in place of a page of its own.
 - Suggestions only move to the Trash. No tool's own cleanup command runs, so tools that own their cleanup, npm among them, aren't suggested.
 - A share gets no Trash button, because nothing says cheaply whether it has a Trash.
@@ -14,7 +15,7 @@ Decisions made while building it:
 
 ## Goal
 
-A page that answers three things on opening: what should I do, where is my stuff, and where each location stands. It is about the user's things across every location, not a list of drives. The sidebar already lists drives.
+A page that answers three things on opening: what fills the disk and what should I do, where is my stuff, and what the other locations hold. It is about the user's things across every location, not a list of drives. The sidebar already lists drives.
 
 Today's measurements on the maintainer's Mac are why it leads with actions: 44 GB free of 460 GB, 92.4 GB in build outputs and package stores, 12.4 GB in worktrees. Worktrees alone would miss most of what can be recovered.
 
@@ -22,9 +23,9 @@ Today's measurements on the maintainer's Mac are why it leads with actions: 44 G
 
 From the top, in one pane, as a place in Back history:
 
-1. **Headline and suggestions.** Free space on the startup disk, then up to 3 suggestions, each with what it frees, why it's safe, and one button.
-2. **Your stuff, everywhere.** Projects and kinds of things, each row saying where it lives. A row opens its folder, or a page when it spans locations.
-3. **Locations, and what agents changed.** Each location's connection, space and scan, and what agents changed in the last day.
+1. **Headline, disk bar and suggestions.** Free space on the startup disk and what fills it, then up to 3 suggestions, each with what it frees, why it's safe, and one button.
+2. **Largest.** Projects and kinds of things on the startup disk, then each scanned drive's largest folders. A row opens its folder, or lists its copies when it spans locations.
+3. **Other locations, and what agents changed.** Each location's connection, space and scan, and what agents changed in the last day.
 
 Rules that apply everywhere:
 

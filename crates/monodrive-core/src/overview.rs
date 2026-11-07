@@ -175,7 +175,7 @@ impl Evidence {
     pub fn why(&self) -> String {
         match self {
             Evidence::BuildOutput { .. } => {
-                "Its target folder is tagged as a cache. The next build recompiles it.".to_string()
+                "Tagged as a cache. The next build makes it again.".to_string()
             }
             Evidence::ToolCache { tool } => {
                 format!("{tool} downloads it again when it needs it.")

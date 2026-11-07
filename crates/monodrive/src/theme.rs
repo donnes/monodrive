@@ -147,7 +147,16 @@ pub fn success() -> Hsla {
     rgb(if is_light() { 0x059669 } else { 0x10b981 }).into()
 }
 
-/// What tints a kind of folder on the Overview, at 3:1 on the theme's panes.
+/// What tints a kind of thing on the Overview, at 3:1 on the theme's panes:
+/// its icon, its part of the disk's bar and its row's bar.
+pub fn tint_blue() -> Hsla {
+    rgb(if is_light() { 0x2563eb } else { 0x60a5fa }).into()
+}
+
+pub fn tint_cyan() -> Hsla {
+    rgb(if is_light() { 0x0e7490 } else { 0x22d3ee }).into()
+}
+
 pub fn tint_orange() -> Hsla {
     rgb(if is_light() { 0xc2620e } else { 0xf0954f }).into()
 }
@@ -305,7 +314,7 @@ pub fn key_cap(key: impl Into<SharedString>) -> Div {
         .child(key.into())
 }
 
-pub fn section_label(label: &'static str) -> Div {
+pub fn section_label(label: impl Into<SharedString>) -> Div {
     div()
         .h(px(28.))
         .px_2()
@@ -315,7 +324,7 @@ pub fn section_label(label: &'static str) -> Div {
         .text_size(px(TEXT_SMALL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(content(0.65))
-        .child(label)
+        .child(label.into())
 }
 
 pub fn icon(path: &'static str, side: f32) -> Svg {
