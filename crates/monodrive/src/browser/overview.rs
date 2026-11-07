@@ -720,19 +720,31 @@ impl Pane {
             );
         }
         let name = group.name.clone();
-        let places = group
+        // Where it is on the startup disk, whose list this is and whose size
+        // the row shows, then what each other copy takes.
+        let startup = self
+            .overview
+            .about
+            .as_ref()
+            .and_then(|about| about.headline.as_ref())
+            .map(|disk| disk.name.as_str());
+        let (on_startup, elsewhere): (Vec<&Spot>, Vec<&Spot>) = group
             .spots
             .iter()
-            .map(|spot| match spot.size {
+            .partition(|spot| Some(spot.location.as_str()) == startup);
+        let places = on_startup
+            .iter()
+            .map(|spot| paths::abbreviate(&spot.path))
+            .chain(elsewhere.iter().map(|spot| match spot.size {
                 Some(size) => format!(
                     "{} on {}",
                     size_label(Some(size.on_disk), !size.complete, false),
                     spot.location
                 ),
                 None => format!("Not measured on {}", spot.location),
-            })
+            }))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(" · ");
         let selector = format!("overview-spot-{name}");
         let tint = Kind::of(group).tint();
         let open = self.overview.open.contains(&name);
@@ -988,7 +1000,7 @@ impl Pane {
             .child(marked(
                 mark,
                 location.name.clone(),
-                location_state(location, scanning, now),
+                Detail::Line(location_state(location, scanning, now)),
             ))
             .children(action.map(|action| action.flex_shrink_0()))
     }
@@ -1173,7 +1185,20 @@ fn free_row(
     size: String,
     button: impl IntoElement,
 ) -> gpui::Div {
-    entry_row((glyph, theme::tint_green()), title, detail)
+    // Its detail is why it's safe, so it wraps rather than lose its end.
+    div()
+        .min_h(px(ROW_HEIGHT))
+        .flex_shrink_0()
+        .px(px(ROW_INSET))
+        .rounded(px(theme::RADIUS_ROW))
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(marked(
+            icon(glyph, 16.).text_color(theme::tint_green()),
+            title,
+            Detail::Wraps(detail),
+        ))
         .child(size_slot(size))
         .child(
             div()
@@ -1265,11 +1290,23 @@ fn entry_row(look: (&'static str, Hsla), title: String, detail: String) -> gpui:
         .flex()
         .items_center()
         .gap_2()
-        .child(marked(icon(look.0, 16.).text_color(look.1), title, detail))
+        .child(marked(
+            icon(look.0, 16.).text_color(look.1),
+            title,
+            Detail::Line(detail),
+        ))
+}
+
+/// The muted text under a title.
+enum Detail {
+    /// Cut short at the row's end.
+    Line(String),
+    /// On as many lines as it takes.
+    Wraps(String),
 }
 
 /// A mark on its title's line, with the detail under the title.
-fn marked(mark: impl IntoElement, title: String, detail: String) -> gpui::Div {
+fn marked(mark: impl IntoElement, title: String, detail: Detail) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
@@ -1287,23 +1324,28 @@ fn marked(mark: impl IntoElement, title: String, detail: String) -> gpui::Div {
         .child(two_lines(title, detail))
 }
 
-/// A title over a muted line, each cut short rather than wrapped.
-fn two_lines(title: String, detail: String) -> gpui::Div {
-    let line = |text: String| {
-        div()
-            .truncate()
-            .h(px(TITLE_LINE))
-            .line_height(px(TITLE_LINE))
-            .child(text)
+/// A title, cut short rather than wrapped, over its detail.
+fn two_lines(title: String, detail: Detail) -> gpui::Div {
+    let detail = match detail {
+        Detail::Line(text) => div().truncate().h(px(TITLE_LINE)).child(text),
+        Detail::Wraps(text) => div().child(text),
     };
     div()
         .flex_1()
         .min_w_0()
         .flex()
         .flex_col()
-        .child(line(title).text_size(px(theme::TEXT_BODY)))
         .child(
-            line(detail)
+            div()
+                .truncate()
+                .h(px(TITLE_LINE))
+                .line_height(px(TITLE_LINE))
+                .text_size(px(theme::TEXT_BODY))
+                .child(title),
+        )
+        .child(
+            detail
+                .line_height(px(TITLE_LINE))
                 .text_size(px(theme::TEXT_SMALL))
                 .text_color(content(0.65)),
         )
