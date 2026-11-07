@@ -21,7 +21,7 @@ Someone moving through files fast, mostly from the keyboard, who chose this over
 | Cards, sheets, popovers, toasts, the content pane, Settings plates, code boxes | 14 pt | `RADIUS_CARD` |
 | Thumbnails and color swatches, which are pictures and not controls | 4 pt | `RADIUS_THUMB` |
 | The marquee, which matches Finder's | Square | none |
-| A dither bar, whose cells are the shape, and the Overview's disk bar beside it | Square | none |
+| The Overview's disk bar and the squares of its key | 4 pt | `RADIUS_THUMB` |
 
 The header of a sheet with a query (palette, Go to Folder, Connect) is a bare field with no outline, as in Spotlight: there is no shape to round. Any field with a visible outline is a pill.
 
@@ -148,7 +148,7 @@ Ink is the theme's content color at a fixed alpha, through `content()`. Nothing 
 | 0.06 | Hairlines between regions and Settings rows |
 | 0.03 | List stripes and Settings plates |
 
-- On the Overview, each kind of thing has a fixed tint that its part of the disk's bar, its icons and its rows' bars share: `tint_blue()` for Documents, Desktop and Downloads, `tint_pink()` for projects, `tint_orange()` for Pictures, `tint_purple()` for Movies and Music, and `tint_cyan()` for cloud folders. Other drives' rows are content ink, `success()` marks a connected location, and 0.3 what's away. That page alone.
+- On the Overview, each kind of thing has a fixed tint that its part of the disk's bar, its icons and its rows' bars share: `tint_blue()` for Documents, Desktop and Downloads, `tint_pink()` for projects, `tint_orange()` for Pictures, `tint_purple()` for Movies and Music, and `tint_cyan()` for cloud folders. In the disk's bar, `tint_green()` is what the suggestions and the Trash could free. Other drives' rows are content ink, `success()` marks a connected location, and 0.3 what's away. That page alone.
 - `accent()` with `on_accent()` is for the selection, the row under the keys, primary buttons, switches and focus. Text on the accent stays opaque, secondary text included: at 0.8 it falls to 3.7:1 on some presets.
 - `danger()` is for what failed or can't be undone, and only that. `success()` is for what's done.
 - A command that trashes or erases files is marked `destructive` in `commands.rs`: today Move to Trash and Empty Trash, and not Remove from Sidebar, which only forgets a bookmark. In the context menu and the palette its title and shortcut are `danger()`. Under the keys, its row fills with `danger_fill()` and all its text is `on_danger()`, at 4.5:1 or better in both themes. The native menu bar stays native.
@@ -235,7 +235,6 @@ All in `theme.rs`, except motion, which `motion.rs` holds and Motion describes. 
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.
 - `tip(button, label)`, `tip_below(button, label)`: a button's name in a small card, above or below it while the pointer rests on it. Every icon button takes one.
 - `progress_track()`, `progress_fill(fraction)`: a 4 pt bar.
-- `dither_bar(certain, conditional)`: a 9 pt meter of 3 pt cells over a 0.14 track, from Monocode's charts. Solid ink at 0.55 is space that's taken for certain; the accent, dithered, is space that depends on a choice, such as what Empty Trash would free. Dither means only that. It paints when the view does and never animates.
 - `key_cap(key)`: a shortcut in a 16 pt cap, in a sheet's footer or a row.
 - `icon(path, side)`, `section_label(label)`.
 
