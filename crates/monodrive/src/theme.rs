@@ -7,7 +7,7 @@ use crate::preferences::{Preferences, Theme};
 use gpui::{
     Bounds, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, PathBuilder, Pixels, Role,
     SharedString, Stateful, Svg, Window, WindowBackgroundAppearance, canvas, div, point,
-    prelude::*, px, rgb, size, svg,
+    prelude::*, px, rgb, svg,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -155,6 +155,10 @@ pub fn tint_blue() -> Hsla {
 
 pub fn tint_cyan() -> Hsla {
     rgb(if is_light() { 0x0e7490 } else { 0x22d3ee }).into()
+}
+
+pub fn tint_green() -> Hsla {
+    rgb(if is_light() { 0x15803d } else { 0x4ade80 }).into()
 }
 
 pub fn tint_orange() -> Hsla {
@@ -684,110 +688,9 @@ fn tip_on(button: Stateful<Div>, label: &'static str, below: bool) -> Stateful<D
         })
 }
 
-/// A dither cell's side, and how many rows make a [`dither_bar`].
-const DITHER_CELL: f32 = 3.;
-const DITHER_ROWS: i32 = 3;
-const BAYER: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
-/// The dithered part's share of inked cells, flat so its look says one thing.
-const DITHER_TONE: f32 = 0.5;
-
-/// Whether the cell at (col, row) is inked for `tone`, through a 4×4 Bayer
-/// matrix. Thresholds sit halfway between steps, so 0.25 inks exactly a quarter.
-fn dither_inked(col: i32, row: i32, tone: f32) -> bool {
-    tone > (BAYER[((row & 3) * 4 + (col & 3)) as usize] as f32 + 0.5) / 16.
-}
-
-/// Where a bar of `cols` columns stops being solid and stops being dithered.
-/// Anything more than nothing shows as at least a column.
-fn dither_stops(cols: i32, certain: f32, conditional: f32) -> (i32, i32) {
-    let columns = |share: f32| match share {
-        ..=0. => 0,
-        _ => ((cols as f32 * share).round() as i32).max(1),
-    };
-    let solid = columns(certain).min(cols);
-    (solid, (solid + columns(conditional)).min(cols))
-}
-
-/// A meter drawn in square cells, 9 pt high: solid ink for space that's certain,
-/// the accent dithered after it for space that depends on a choice (`certain`
-/// and `conditional` are shares of the whole), and a track for the rest. It
-/// paints only when the view does, and never moves on its own.
-pub fn dither_bar(certain: f32, conditional: f32) -> impl IntoElement {
-    let height = DITHER_CELL * DITHER_ROWS as f32;
-    canvas(
-        |_, _, _| {},
-        move |bounds, _, window, _| {
-            let origin = point(
-                px(bounds.origin.x.as_f32().round()),
-                px(bounds.origin.y.as_f32().round()),
-            );
-            let cols = (bounds.size.width.as_f32() / DITHER_CELL).floor() as i32;
-            let (solid, dithered) = dither_stops(cols, certain, conditional);
-            let (ink, choice, track) = (content(0.55), accent(), content(0.14));
-            for row in 0..DITHER_ROWS {
-                // One quad per run of a color, not per cell.
-                let mut run: Option<(i32, Hsla)> = None;
-                for col in 0..=cols {
-                    let color = (col < cols).then(|| {
-                        if col < solid {
-                            ink
-                        } else if col < dithered && dither_inked(col, row, DITHER_TONE) {
-                            choice
-                        } else {
-                            track
-                        }
-                    });
-                    if let (Some((_, a)), Some(b)) = (run, color)
-                        && a == b
-                    {
-                        continue;
-                    }
-                    if let Some((start, color)) = run {
-                        window.paint_quad(gpui::fill(
-                            Bounds::new(
-                                origin
-                                    + point(
-                                        px(start as f32 * DITHER_CELL),
-                                        px(row as f32 * DITHER_CELL),
-                                    ),
-                                size(px((col - start) as f32 * DITHER_CELL), px(DITHER_CELL)),
-                            ),
-                            color,
-                        ));
-                    }
-                    run = color.map(|c| (col, c));
-                }
-            }
-        },
-    )
-    .w_full()
-    .h(px(height))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_tone_inks_its_share_of_a_tile() {
-        for steps in 0..=16 {
-            let tone = steps as f32 / 16.;
-            let inked = (0..4)
-                .flat_map(|row| (0..4).map(move |col| (col, row)))
-                .filter(|&(col, row)| dither_inked(col, row, tone))
-                .count();
-            assert_eq!(inked, steps);
-        }
-    }
-
-    #[test]
-    fn a_dither_bar_never_hides_a_part_or_runs_past_its_end() {
-        assert_eq!(dither_stops(100, 0.5, 0.25), (50, 75));
-        assert_eq!(dither_stops(100, 0., 0.), (0, 0));
-        assert_eq!(dither_stops(100, 0.001, 0.001), (1, 2), "a sliver shows");
-        assert_eq!(dither_stops(100, 0.9, 0.4), (90, 100));
-        assert_eq!(dither_stops(100, 1.2, 0.1), (100, 100));
-    }
 
     /// The contrast of `ink`, blended over the opaque `paper`.
     fn contrast(ink: Hsla, paper: Hsla) -> f32 {

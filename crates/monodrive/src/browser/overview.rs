@@ -7,10 +7,7 @@
 use super::pane::Pane;
 use super::sidebar::Places;
 use super::{ConnectToServer, EmptyTrash, Operations, lock, with_owner};
-use crate::theme::{
-    self, ButtonLook, accent, content, dither_bar, icon, row_icon_button, section_label,
-    text_button,
-};
+use crate::theme::{self, ButtonLook, content, icon, row_icon_button, section_label, text_button};
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, MouseButton, Role, Task, Window, div, prelude::*, px,
     relative,
@@ -47,8 +44,9 @@ const SIZE_SLOT: f32 = 72.;
 const ACTION_SLOT: f32 = 20.;
 /// Suggestion rows lead with what each frees.
 const RECLAIMS_SLOT: f32 = 56.;
-/// The disk's bar, as high as a dither bar so its freeable part fits.
-const BAR_HEIGHT: f32 = 9.;
+/// The disk's bar, and each square of its key.
+const BAR_HEIGHT: f32 = 12.;
+const SWATCH: f32 = 10.;
 const CHIP_MIN_WIDTH: f32 = 330.;
 const CHIP_HEIGHT: f32 = 48.;
 
@@ -1060,9 +1058,8 @@ fn parts(about: &Overview, disk: &Headline) -> Vec<(Part, u64)> {
         .collect()
 }
 
-/// The startup disk as one bar of square parts, as a dither bar's cells are:
-/// each part in its color, what can be freed dithered in the accent, as a
-/// choice is, and the free space as track.
+/// The startup disk as one bar: each part in its color, then the free space
+/// as track.
 fn disk_bar(parts: &[(Part, u64)], disk: &Headline) -> impl IntoElement + use<> {
     let segment = |grow: u64| {
         div()
@@ -1070,36 +1067,35 @@ fn disk_bar(parts: &[(Part, u64)], disk: &Headline) -> impl IntoElement + use<> 
             .flex_basis(px(0.))
             .flex_grow(grow as f32)
             .min_w(px(3.))
+            .rounded(px(theme::RADIUS_THUMB))
     };
     div()
         .h(px(BAR_HEIGHT))
         .flex()
         .gap(px(2.))
-        .children(parts.iter().map(|(part, bytes)| {
-            let piece = segment(*bytes);
-            match part {
-                Part::Freeable => piece.child(dither_bar(0., 1.)).into_any_element(),
-                part => piece.bg(part_color(*part)).into_any_element(),
-            }
-        }))
+        .children(
+            parts
+                .iter()
+                .map(|(part, bytes)| segment(*bytes).bg(part_color(*part))),
+        )
         .child(segment(disk.free).bg(content(0.14)))
 }
 
 fn part_color(part: Part) -> Hsla {
     match part {
         Part::Kind(kind) => kind.tint(),
-        Part::Freeable => accent(),
+        Part::Freeable => theme::tint_green(),
         Part::Other => content(0.3),
     }
 }
 
-/// A part's square in the bar's key, drawn as its part is.
-fn swatch(part: Part) -> AnyElement {
-    let square = div().size(px(BAR_HEIGHT)).flex_shrink_0();
-    match part {
-        Part::Freeable => square.child(dither_bar(0., 1.)).into_any_element(),
-        part => square.bg(part_color(part)).into_any_element(),
-    }
+/// A part's square in the bar's key.
+fn swatch(part: Part) -> impl IntoElement {
+    div()
+        .size(px(SWATCH))
+        .flex_shrink_0()
+        .rounded(px(theme::RADIUS_THUMB))
+        .bg(part_color(part))
 }
 
 /// What a suggestion frees, with a + when part of it couldn't be read.
