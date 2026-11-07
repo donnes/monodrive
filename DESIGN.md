@@ -16,12 +16,11 @@ Someone moving through files fast, mostly from the keyboard, who chose this over
 |---|---|---|
 | Text buttons, text fields, segmented controls, dropdown triggers | Fully rounded | `rounded_full` |
 | Icon buttons and icon tiles | Circles | `rounded_full` |
-| Toggles, badges, dots, chips, progress bars | Fully rounded | `rounded_full` |
+| Toggles, badges, dots, chips, progress bars | Fully rounded | `rounded_full`, or `rounded_l_full` and `rounded_r_full` on the ends of a bar of touching parts, such as the Overview's disk bar |
 | List, menu and sidebar rows; every highlight behind content, including the grid's icon and name | 8 pt | `RADIUS_ROW` |
 | Cards, sheets, popovers, toasts, the content pane, Settings plates, code boxes | 14 pt | `RADIUS_CARD` |
 | Thumbnails and color swatches, which are pictures and not controls | 4 pt | `RADIUS_THUMB` |
 | The marquee, which matches Finder's | Square | none |
-| The Overview's disk bar and the squares of its key | 4 pt | `RADIUS_THUMB` |
 
 The header of a sheet with a query (palette, Go to Folder, Connect) is a bare field with no outline, as in Spotlight: there is no shape to round. Any field with a visible outline is a pill.
 

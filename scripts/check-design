@@ -62,7 +62,7 @@ sub problems_in {
 
     $each->(qr/\.rounded\s*\(\s*+(?!px\s*\(\s*+(?:theme::)?RADIUS_(?:ROW|CARD|THUMB)\b)/,
         "radius outside the scale, use RADIUS_ROW, RADIUS_CARD or RADIUS_THUMB");
-    $each->(qr/\.rounded_(?!full\b)\w*\s*\(/,
+    $each->(qr/\.rounded_(?!(?:[lrtb]_)?full\b)\w*\s*\(/,
         "radius outside the scale, use RADIUS_ROW, RADIUS_CARD, RADIUS_THUMB or rounded_full");
     $each->(qr/\bgpui\s*::\s*(?:$RAW_COLOR)\b/, "raw color, use a token from theme.rs");
     $each->(qr/(?<![\w.:])(?:rgb|rgba|hsl|hsla)\s*\(/, "raw color, use a token from theme.rs");
