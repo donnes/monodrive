@@ -29,8 +29,8 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            // Files that no build, lint or test reads.
-            const docs = /(\.md$|^\.plans\/|^public\/|^assets\/|^LICENSE$|^NOTICE$)/;
+            // Files that no build, lint or test of the app reads. website/ has its own workflow.
+            const docs = /(\.md$|^\.plans\/|^public\/|^assets\/|^website\/|^LICENSE$|^NOTICE$)/;
             const files = await github.paginate(github.rest.pulls.listFiles, {
               ...context.repo,
               pull_number: context.payload.pull_request.number,

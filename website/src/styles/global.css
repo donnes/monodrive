@@ -1,0 +1,209 @@
+/* Tokens follow DESIGN.md: one ink color at fixed alphas, pill controls,
+   8 pt rows, 14 pt cards, and the app's quintic ease-out. */
+:root {
+  color-scheme: dark;
+  --bg: #0a0a0b;
+  --bg-raised: #121214;
+  --bg-sunk: #070708;
+  --ink: 255 255 255;
+  --ink-1: rgb(var(--ink) / 1);
+  --ink-65: rgb(var(--ink) / 0.65);
+  --ink-55: rgb(var(--ink) / 0.55);
+  --ink-30: rgb(var(--ink) / 0.3);
+  --ink-20: rgb(var(--ink) / 0.2);
+  --ink-14: rgb(var(--ink) / 0.14);
+  --ink-12: rgb(var(--ink) / 0.12);
+  --ink-08: rgb(var(--ink) / 0.08);
+  --ink-06: rgb(var(--ink) / 0.06);
+  --ink-03: rgb(var(--ink) / 0.03);
+  --accent: #0a84ff;
+  --on-accent: #fff;
+  --success: #32d74b;
+  --danger: #ff453a;
+
+  --radius-row: 8px;
+  --radius-card: 14px;
+  --radius-thumb: 4px;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --enter: 200ms;
+  --exit: 150ms;
+
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  color: var(--ink-1);
+  font: 15px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--bg);
+  overflow-x: hidden;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+::selection {
+  background: rgb(10 132 255 / 0.45);
+}
+
+:focus-visible {
+  outline: 2.5px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wrap {
+  width: min(1120px, 100% - 32px);
+  margin-inline: auto;
+}
+
+/* Display type tightens as it grows; body stays near 0. */
+.display {
+  font-size: clamp(2.5rem, 6.4vw, 4.75rem);
+  line-height: 1.02;
+  letter-spacing: -0.035em;
+  font-weight: 650;
+  margin: 0;
+  text-wrap: balance;
+}
+
+.h2 {
+  font-size: clamp(1.75rem, 3.6vw, 2.75rem);
+  line-height: 1.08;
+  letter-spacing: -0.028em;
+  font-weight: 620;
+  margin: 0;
+  text-wrap: balance;
+}
+
+.lede {
+  font-size: clamp(1rem, 1.6vw, 1.1875rem);
+  line-height: 1.55;
+  color: var(--ink-65);
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+/* Buttons answer on press, not on release. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 20px;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 560;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  transition:
+    transform 160ms var(--ease-out),
+    background-color 160ms ease,
+    opacity 160ms ease;
+}
+.btn:active {
+  transform: scale(0.97);
+  transition-duration: 80ms;
+}
+.btn-primary {
+  background: #f4f4f2;
+  color: #0b0b0c;
+}
+.btn-ghost {
+  background: var(--ink-08);
+  color: var(--ink-1);
+  box-shadow: inset 0 0 0 1px var(--ink-06);
+}
+@media (hover: hover) and (pointer: fine) {
+  .btn-primary:hover {
+    background: #fff;
+  }
+  .btn-ghost:hover {
+    background: var(--ink-14);
+  }
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--ink-08);
+  color: var(--ink-65);
+  font: 500 11px/1 var(--font);
+}
+
+/* One rise-in for first paint; reduced motion turns it into a fade. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+[data-rise] {
+  animation: rise 700ms var(--ease-out) backwards;
+  animation-delay: calc(var(--i, 0) * 70ms + 60ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+  }
+  [data-rise] {
+    animation-name: fade;
+    animation-duration: 300ms;
+  }
+}
+
+/* Sections below the hero. */
+.block {
+  padding-top: 120px;
+}
+.block-head {
+  display: grid;
+  gap: 14px;
+  max-width: 620px;
+  margin-bottom: 36px;
+}
+code {
+  font: 0.92em var(--mono);
+  color: var(--ink-1);
+  background: var(--ink-08);
+  padding: 1px 6px;
+  border-radius: 999px;
+}

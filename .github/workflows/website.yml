@@ -1,0 +1,46 @@
+name: Website
+
+on:
+  push:
+    branches: [main]
+    paths: [website/**, .github/workflows/website.yml]
+  pull_request:
+    paths: [website/**, .github/workflows/website.yml]
+  # The page shows the repo's star count, read at build time, so it's rebuilt daily.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-${{ github.event.pull_request.number || github.ref }}
+  # A deploy that has started finishes; the next one waits for it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  site:
+    name: Website
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run check
+      - name: Build
+        run: bun run build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Deploy to monodrive.app
+        if: github.event_name != 'pull_request'
+        run: bunx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
