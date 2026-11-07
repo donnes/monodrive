@@ -930,8 +930,8 @@ impl Pane {
             .items_center()
             .gap_2()
             .when(!location.connected, |d| d.text_color(content(0.65)))
-            .child(mark)
-            .child(two_lines(
+            .child(marked(
+                mark,
                 location.name.clone(),
                 location_state(location, scanning, now),
             ))
@@ -1167,7 +1167,25 @@ fn entry_row(look: (&'static str, Hsla), title: String, detail: String) -> gpui:
         .flex()
         .items_center()
         .gap_2()
-        .child(icon(look.0, 16.).flex_shrink_0().text_color(look.1))
+        .child(marked(icon(look.0, 16.).text_color(look.1), title, detail))
+}
+
+/// A mark on its title's line, with the detail under the title.
+fn marked(mark: impl IntoElement, title: String, detail: String) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_start()
+        .gap_2()
+        .child(
+            div()
+                .h(px(TITLE_LINE))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .child(mark),
+        )
         .child(two_lines(title, detail))
 }
 
