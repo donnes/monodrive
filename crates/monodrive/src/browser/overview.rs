@@ -1,6 +1,6 @@
 //! The Overview page, which takes the pane's list while it's on screen: how
-//! much is free and what could free more, the user's things across every
-//! location, and where each location stands. Everything it says comes from
+//! much is free and what fills the startup disk, what could free more, the
+//! user's largest things across every location, and the other locations. Everything it says comes from
 //! `monodrive_core::overview`, read off the UI thread; opening it draws what's
 //! saved at once and measures what's due behind it, and leaving stops that.
 
@@ -13,6 +13,7 @@ use crate::theme::{
 };
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, MouseButton, Role, Task, Window, div, prelude::*, px,
+    relative,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::ops::{self, AgentChange, Origin, Request};
@@ -34,22 +35,22 @@ const MEASURING: usize = 2;
 /// How far back the page says what agents changed, and how many.
 const CHANGES_SINCE: u64 = 24 * 60 * 60;
 const CHANGES_SHOWN: usize = 5;
-/// From this pane width the suggestions sit side by side as cards, and
-/// from the next the locations take a column beside the list.
-const CARDS_ACROSS: f32 = 720.;
-const SIDE_COLUMN: f32 = 820.;
-const SIDE_WIDTH: f32 = 280.;
 /// Wider than this, the page stops growing, so sizes stay near their names.
-const MAX_WIDTH: f32 = 1040.;
-const STUFF_ROW_HEIGHT: f32 = 34.;
+const MAX_WIDTH: f32 = 880.;
+/// A row holds a title over a detail, 16 pt each.
+const ROW_HEIGHT: f32 = 34.;
 const TITLE_LINE: f32 = 16.;
 /// A row's own side padding, which puts its text on the pane's inset.
 const ROW_INSET: f32 = 8.;
 /// The trailing columns every row of the list keeps, filled or not.
 const SIZE_SLOT: f32 = 72.;
 const ACTION_SLOT: f32 = 20.;
-/// A narrow pane's suggestion rows lead with what each frees.
-const RECLAIMS_SLOT: f32 = 52.;
+/// Suggestion rows lead with what each frees.
+const RECLAIMS_SLOT: f32 = 56.;
+/// The disk's bar, as high as a dither bar so its freeable part fits.
+const BAR_HEIGHT: f32 = 9.;
+const CHIP_MIN_WIDTH: f32 = 330.;
+const CHIP_HEIGHT: f32 = 48.;
 
 /// What the page shows, as last read.
 #[derive(Default)]
@@ -360,65 +361,64 @@ impl Pane {
         let about = self.overview.about.clone().unwrap_or_default();
         let measuring = self.overview.reading.is_some();
         let now = overview::now();
-        let width = self.chrome.width;
 
-        let reclaimable: u64 = about.suggestions.iter().map(|s| s.size.unshared).sum();
-        let partial = about.suggestions.iter().any(|s| !s.size.complete);
         let headline = about
             .headline
             .as_ref()
-            .map(|disk| self.headline(disk, about.suggestions.len(), reclaimable, partial, cx));
-        // The cards' edges sit on the text's edge, with the headline and bar.
+            .map(|disk| self.headline(&about, disk, cx));
         let suggestions = (!about.suggestions.is_empty()).then(|| {
-            if width >= CARDS_ACROSS {
-                div()
-                    .mx(px(ROW_INSET))
-                    .flex()
-                    .items_stretch()
-                    .gap_3()
-                    .children(
-                        about
-                            .suggestions
-                            .iter()
-                            .map(|suggestion| self.suggestion_card(suggestion, now, cx)),
-                    )
-                    .into_any_element()
-            } else {
-                card()
-                    .mx(px(ROW_INSET))
-                    .flex()
-                    .flex_col()
-                    .children(
-                        about
-                            .suggestions
-                            .iter()
-                            .enumerate()
-                            .map(|(ix, suggestion)| {
-                                self.suggestion_row(suggestion, now, cx)
-                                    .when(ix > 0, |d| d.border_t_1().border_color(content(0.08)))
-                            }),
-                    )
-                    .into_any_element()
+            let partial = about.suggestions.iter().any(|s| !s.size.complete);
+            let total: u64 = about.suggestions.iter().map(|s| s.size.unshared).sum();
+            let mut total = amount(total);
+            if partial {
+                total.push('+');
             }
-        });
-        let stuff = self.stuff(&about, measuring, now, cx);
-        let side = self.side(&about, now, cx);
-        let body = match side {
-            Some(side) if width >= SIDE_COLUMN => div()
-                .flex()
-                .items_start()
-                .gap(px(24.))
-                .child(div().flex_1().min_w_0().child(stuff))
-                .child(div().flex_shrink_0().w(px(SIDE_WIDTH)).child(side))
-                .into_any_element(),
-            side => div()
+            div()
                 .flex()
                 .flex_col()
-                .gap_4()
-                .child(stuff)
-                .children(side)
-                .into_any_element(),
-        };
+                .child(section_label(format!("Free up {total}")))
+                .children(
+                    about
+                        .suggestions
+                        .iter()
+                        .map(|suggestion| self.suggestion_row(suggestion, cx)),
+                )
+        });
+        let largest = self.largest(&about, measuring, now, cx);
+        // As many tiles across as fit whole, each as wide as the others.
+        let inside = (self.chrome.width - 2. * theme::PANE_INSET).min(MAX_WIDTH - 2. * ROW_INSET);
+        let across = ((inside / CHIP_MIN_WIDTH).floor() as u16).max(1);
+        let locations = (!about.locations.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .child(section_label("Other locations"))
+                .child(
+                    div()
+                        .mx(px(ROW_INSET))
+                        .grid()
+                        .grid_cols(across)
+                        .gap_2()
+                        .children(
+                            about
+                                .locations
+                                .iter()
+                                .map(|location| self.location_chip(location, now, cx)),
+                        ),
+                )
+        });
+        let changes = (!self.overview.changes.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .child(section_label("Changed by agents"))
+                .children(
+                    self.overview
+                        .changes
+                        .iter()
+                        .map(|change| change_row(change, now)),
+                )
+        });
         Some(
             div()
                 .debug_selector(|| "overview-page".into())
@@ -453,10 +453,12 @@ impl Pane {
                                 .max_w(px(MAX_WIDTH))
                                 .flex()
                                 .flex_col()
-                                .gap_4()
+                                .gap_2()
                                 .children(headline)
                                 .children(suggestions)
-                                .child(body),
+                                .child(largest)
+                                .children(locations)
+                                .children(changes),
                         ),
                 )
                 .child(footer(&about, measuring, now))
@@ -464,63 +466,69 @@ impl Pane {
         )
     }
 
-    /// How much is free, in the page's one large figure, what the suggestions
-    /// would make of it, and the bar: solid for what's used, dithered in the
-    /// accent for what the suggestions and the Trash could give back.
+    /// How much is free, in the page's one large figure, and the disk drawn
+    /// by what fills it, with a key.
     fn headline(
         &self,
+        about: &Overview,
         disk: &Headline,
-        suggested: usize,
-        reclaimable: u64,
-        partial: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let trash = disk.trash.filter(|trash| trash.unshared > 0);
-        let in_trash = trash.map_or(0, |trash| trash.unshared);
-        let share = |bytes: u64| bytes as f32 / disk.total.max(1) as f32;
-        let used = disk.total.saturating_sub(disk.free);
-        let conditional = (reclaimable + in_trash).min(used);
-        let reach = amount(disk.free + reclaimable + in_trash);
-        // A Trash that couldn't be read whole may hold more than it showed, even
-        // when it showed nothing.
-        let at_least = if partial || disk.trash.is_some_and(|trash| !trash.complete) {
-            "at least "
+        let has_trash = disk.trash.is_some_and(|trash| trash.unshared > 0);
+        let parts = parts(about, disk);
+        let freeable_name = if about.suggestions.is_empty() {
+            "In the Trash"
         } else {
-            ""
+            "Can be freed"
         };
-        let name = &disk.name;
-        // Moving to the Trash frees nothing yet, so this says when it does.
-        let promise = match (suggested, trash.is_some()) {
-            (0, false) => format!("On {name}."),
-            (0, true) => format!("On {name}. Emptying the Trash gets you to {at_least}{reach}."),
-            (1, _) => {
-                format!("On {name}. This gets you to {at_least}{reach} after emptying the Trash.")
-            }
-            (n, _) => format!(
-                "On {name}. These {n} get you to {at_least}{reach} after emptying the Trash."
-            ),
-        };
+        let key = parts.iter().map(|(part, bytes)| {
+            let name = match part {
+                Part::Kind(kind) => kind.name(),
+                Part::Freeable => freeable_name,
+                Part::Other => "Other",
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(swatch(*part))
+                .child(div().text_color(content(0.65)).child(name))
+                .child(amount(*bytes))
+        });
         div()
             .px(px(ROW_INSET))
             .flex()
             .flex_col()
-            .gap_1()
             .debug_selector(|| "overview-headline".into())
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap_2()
+                    .gap_3()
                     .child(
                         div()
                             .min_w_0()
-                            .truncate()
-                            .text_size(px(theme::TEXT_DISPLAY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{} free", amount(disk.free))),
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(theme::TEXT_DISPLAY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("{} free", amount(disk.free))),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(theme::TEXT_BODY))
+                                    .text_color(content(0.65))
+                                    .child(format!("of {} on {}", amount(disk.total), disk.name)),
+                            ),
                     )
-                    .when(trash.is_some(), |d| {
+                    .when(has_trash, |d| {
                         d.child(
                             text_button(
                                 "overview-empty-trash",
@@ -536,188 +544,138 @@ impl Pane {
                         )
                     }),
             )
+            .child(div().mt_3().child(disk_bar(&parts, disk)))
             .child(
                 div()
-                    .text_size(px(theme::TEXT_BODY))
-                    .text_color(content(0.65))
-                    .child(promise),
-            )
-            .child(
-                div()
-                    .pt_2()
-                    .child(dither_bar(share(used - conditional), share(conditional))),
-            )
-    }
-
-    /// A suggestion as a card of its own, for when three fit side by side.
-    /// The buttons sit at the cards' feet, so they line up.
-    fn suggestion_card(
-        &self,
-        suggestion: &Suggestion,
-        now: u64,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let evidence = &suggestion.evidence;
-        card()
-            .id(format!("overview-suggestion-{}", suggestion.path.display()))
-            .role(Role::Group)
-            .aria_label(evidence.title())
-            .flex_1()
-            .min_w_0()
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .text_size(px(theme::TEXT_TITLE))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(reclaims(suggestion)),
-            )
-            .child(
-                div()
-                    .text_size(px(theme::TEXT_BODY))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(evidence.title()),
-            )
-            .child(
-                div()
-                    .flex_1()
+                    .mt_2()
+                    .flex()
+                    .flex_wrap()
+                    .gap_x(px(14.))
+                    .gap_y_1()
                     .text_size(px(theme::TEXT_SMALL))
-                    .text_color(content(0.65))
-                    .child(why(suggestion, now)),
+                    .children(key),
             )
-            .child(div().pt_2().flex().child(self.clean_button(suggestion, cx)))
-            .into_any_element()
     }
 
-    /// A suggestion as a row of the one card they share in a narrow pane:
-    /// what it frees, what it is and why it's safe, then its button.
+    /// A suggestion as a row: what it frees, what it is and why it's safe,
+    /// then its button.
     fn suggestion_row(
         &self,
         suggestion: &Suggestion,
-        now: u64,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> impl IntoElement + use<> {
         let evidence = &suggestion.evidence;
-        div()
-            .id(format!("overview-suggestion-{}", suggestion.path.display()))
-            .role(Role::Group)
-            .aria_label(evidence.title())
-            .px_3()
-            .py_2()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(
-                div()
-                    .w(px(RECLAIMS_SLOT))
-                    .flex_shrink_0()
-                    .flex()
-                    .justify_end()
-                    .text_size(px(theme::TEXT_TITLE))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(reclaims(suggestion)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(theme::TEXT_BODY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(evidence.title()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(theme::TEXT_SMALL))
-                            .text_color(content(0.65))
-                            .child(why(suggestion, now)),
-                    ),
-            )
-            .child(self.clean_button(suggestion, cx).flex_shrink_0())
-    }
-
-    fn clean_button(
-        &self,
-        suggestion: &Suggestion,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
         let dir = suggestion.path.clone();
-        text_button(
+        let button = text_button(
             format!("overview-clean-{}", dir.display()),
-            suggestion.evidence.action(),
+            evidence.action(),
             ButtonLook::Primary,
         )
         .debug_selector(|| "overview-clean".into())
         .on_click(
             cx.listener(move |this, _, window, cx| this.clean_suggestion(dir.clone(), window, cx)),
+        );
+        still(
+            div()
+                .id(format!("overview-suggestion-{}", suggestion.path.display()))
+                .role(Role::Group)
+                .aria_label(evidence.title())
+                .h(px(ROW_HEIGHT))
+                .px(px(ROW_INSET))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(RECLAIMS_SLOT))
+                        .flex_shrink_0()
+                        .text_size(px(theme::TEXT_BODY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(reclaims(suggestion)),
+                )
+                .child(two_lines(evidence.title(), evidence.why()))
+                .child(button.flex_shrink_0()),
         )
     }
 
-    /// Everything in one ranking, largest first, whichever location holds
-    /// it: the startup disk's rows and each scanned drive's.
-    fn stuff(
+    /// The largest things on the startup disk, then on each scanned drive,
+    /// each list with bars against its own largest, since a backup's folders
+    /// and the startup disk's don't share any space.
+    fn largest(
         &self,
         about: &Overview,
         measuring: bool,
         now: u64,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let startup = about.headline.as_ref().map(|disk| disk.name.as_str());
+        // A project with copies elsewhere ranks by what it takes here; its
+        // detail says what the others take.
+        let here = |group: &Group| {
+            group
+                .spots
+                .iter()
+                .filter(|spot| Some(spot.location.as_str()) == startup)
+                .filter_map(|spot| spot.size.map(|size| size.on_disk))
+                .reduce(|all, size| all + size)
+        };
+        let most = about.stuff.iter().filter_map(here).max().unwrap_or(0);
+        let share =
+            |size: Option<u64>, most: u64| size.map_or(0., |size| size as f32 / most.max(1) as f32);
         let mut ranked: Vec<(Option<u64>, AnyElement)> = Vec::new();
         for group in &about.stuff {
-            let size = group.on_disk();
-            ranked.push((size, self.group_row(group, measuring, now, cx)));
+            let size = here(group);
+            ranked.push((
+                size,
+                self.group_row(group, size, share(size, most), measuring, now, cx),
+            ));
             if self.overview.open.contains(&group.name) {
                 for spot in &group.spots {
-                    let copy =
-                        self.spot_row(spot.location.clone(), spot, group, measuring, now, cx);
+                    let copy = self.spot_row(
+                        spot.location.clone(),
+                        spot,
+                        group,
+                        share(spot.size.map(|size| size.on_disk), most),
+                        measuring,
+                        now,
+                        cx,
+                    );
                     ranked.push((size, div().pl(px(16.)).child(copy).into_any_element()));
                 }
             }
         }
-        for location in &about.locations {
-            let Some(scan) = &location.scan else {
-                continue;
-            };
-            for row in &scan.rows {
-                ranked.push((
-                    Some(row.size.on_disk),
-                    self.scan_row(row, location, now, cx),
-                ));
-            }
-        }
         // Stable, so a project's copies stay under it.
         ranked.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
-        // Only the startup disk is measured whole, so the rest is its rest,
-        // apart from the ranking.
-        let rest = about
-            .everything_else
-            .filter(|rest| *rest > 0)
-            .zip(about.headline.as_ref())
-            .map(|(rest, disk)| {
+        let title = startup.map_or("Largest".to_string(), |name| format!("Largest on {name}"));
+        let drives = about.locations.iter().filter_map(|location| {
+            let scan = location
+                .scan
+                .as_ref()
+                .filter(|scan| !scan.rows.is_empty())?;
+            let most = scan.rows.iter().map(|row| row.size.on_disk).max();
+            Some(
                 div()
                     .flex()
                     .flex_col()
-                    .child(hairline().my_1())
-                    .child(still(stuff_row(
-                        ("hard-drive", content(0.55)),
-                        "Everything else".to_string(),
-                        format!("On {}, outside the folders above.", disk.name),
-                        amount(rest),
-                        None,
-                    )))
-            });
+                    .child(section_label(format!("Largest on {}", location.name)))
+                    .children(scan.rows.iter().map(|row| {
+                        let share = share(Some(row.size.on_disk), most.unwrap_or(0));
+                        self.scan_row(row, location, share, now, cx)
+                    })),
+            )
+        });
         div()
             .flex()
             .flex_col()
-            .child(section_label("Your stuff, everywhere"))
-            .children(ranked.into_iter().map(|(_, row)| row))
-            .children(rest)
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(section_label(title))
+                    .children(ranked.into_iter().map(|(_, row)| row)),
+            )
+            .children(drives.collect::<Vec<_>>())
     }
 
     /// A group's row. With copies in several places it lists them on a press;
@@ -725,12 +683,14 @@ impl Pane {
     fn group_row(
         &self,
         group: &Group,
+        here: Option<u64>,
+        share: f32,
         measuring: bool,
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let [spot] = group.spots.as_slice() {
-            return self.spot_row(group.name.clone(), spot, group, measuring, now, cx);
+            return self.spot_row(group.name.clone(), spot, group, share, measuring, now, cx);
         }
         let name = group.name.clone();
         let places = group
@@ -747,6 +707,7 @@ impl Pane {
             .collect::<Vec<_>>()
             .join(", ");
         let selector = format!("overview-spot-{name}");
+        let tint = Kind::of(group).tint();
         theme::row_slot(format!("overview-group-{name}"))
             .role(Role::Button)
             .debug_selector(move || selector)
@@ -759,11 +720,12 @@ impl Pane {
             }))
             .child(
                 stuff_row(
-                    look(group),
+                    (Kind::of(group).glyph(), tint),
                     group.name.clone(),
                     places,
+                    (share, tint),
                     size_label(
-                        group.on_disk(),
+                        here,
                         group
                             .spots
                             .iter()
@@ -777,11 +739,13 @@ impl Pane {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spot_row(
         &self,
         name: String,
         spot: &Spot,
         group: &Group,
+        share: f32,
         measuring: bool,
         now: u64,
         cx: &mut Context<Self>,
@@ -816,10 +780,12 @@ impl Pane {
             }))
             .into_any_element()
         });
+        let kind = Kind::of(group);
         let row = stuff_row(
-            look(group),
+            (kind.glyph(), kind.tint()),
             name,
             said,
+            (share, kind.tint()),
             size_label(spot.size.map(|size| size.on_disk), partial, measuring),
             action,
         );
@@ -836,27 +802,28 @@ impl Pane {
             .into_any_element()
     }
 
-    /// A folder at the top of a drive's scan: what it took then, on which
-    /// drive, and how long ago. A drive that's gone only says so.
+    /// A folder at the top of a drive's scan: what it took then, and how long
+    /// ago. Not on the startup disk, so it's drawn in plain ink, and fainter
+    /// when the drive is gone.
     fn scan_row(
         &self,
         row: &ScanRow,
         location: &Location,
+        share: f32,
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let path = row.path.clone();
         let mut said = if location.mount.is_some() {
-            format!("On {}", location.name)
+            paths::abbreviate(&row.path)
         } else {
-            format!("{}, not connected", location.name)
+            "Not connected".to_string()
         };
         if let Some(age) = row.size.age(now) {
             said += &format!(" · scanned {age}");
         }
-        // A drive that's gone can't be opened, so its rows go faint.
         let ink = if location.mount.is_some() {
-            accent()
+            content(0.55)
         } else {
             content(0.3)
         };
@@ -882,6 +849,7 @@ impl Pane {
             ("folder-01", ink),
             row.name.clone(),
             said,
+            (share, ink),
             size_label(Some(row.size.on_disk), !row.size.complete, false),
             action,
         );
@@ -898,39 +866,9 @@ impl Pane {
             .into_any_element()
     }
 
-    /// Beside the list, or under it in a narrow pane: every location with
-    /// how it stands and its button, then what agents changed lately. Copies
-    /// and moves stay in the title bar's ring. `None` with nothing to show.
-    fn side(&self, about: &Overview, now: u64, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        if about.locations.is_empty() && self.overview.changes.is_empty() {
-            return None;
-        }
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .when(!about.locations.is_empty(), |d| {
-                    d.child(section_label("Locations")).children(
-                        about
-                            .locations
-                            .iter()
-                            .map(|location| self.location_row(location, now, cx)),
-                    )
-                })
-                .when(!self.overview.changes.is_empty(), |d| {
-                    d.child(section_label("Changed by agents")).children(
-                        self.overview
-                            .changes
-                            .iter()
-                            .map(|change| change_row(change, now)),
-                    )
-                }),
-        )
-    }
-
-    /// A location: how it stands, a line for each part so none is lost to
-    /// a wrap, and its button.
-    fn location_row(
+    /// Another location as a tile: its name, how it stands in a line, and its
+    /// button. The sidebar lists them too; this says what each holds.
+    fn location_chip(
         &self,
         location: &Location,
         now: u64,
@@ -944,7 +882,7 @@ impl Pane {
         });
         let action = match (&location.kind, &location.mount) {
             (_, Some(_)) if scanning => Some(
-                text_button("overview-cancel-scan", "Cancel Scan", ButtonLook::Ghost)
+                text_button("overview-cancel-scan", "Cancel", ButtonLook::Secondary)
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_scan(cx))),
             ),
             (_, Some(mount)) => {
@@ -953,7 +891,7 @@ impl Pane {
                     text_button(
                         format!("overview-scan-{}", mount.display()),
                         "Scan",
-                        ButtonLook::Ghost,
+                        ButtonLook::Secondary,
                     )
                     .debug_selector(|| "overview-scan".into())
                     .on_click(
@@ -965,7 +903,7 @@ impl Pane {
                 text_button(
                     format!("overview-connect-{}", location.name),
                     "Connect…",
-                    ButtonLook::Ghost,
+                    ButtonLook::Secondary,
                 )
                 .on_click(cx.listener(|_, _, window, cx| {
                     window.dispatch_action(Box::new(ConnectToServer), cx);
@@ -982,60 +920,186 @@ impl Pane {
         } else {
             content(0.3)
         });
-        // Top-aligned with the list's rows, so names line up across the
-        // columns. The mark and the button center on the first two lines, as
-        // a list row's do.
-        let beside = || {
-            div()
-                .h(px(2. * TITLE_LINE))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-        };
-        still(
-            div()
-                .min_h(px(STUFF_ROW_HEIGHT))
-                .px(px(ROW_INSET))
-                .py(px((STUFF_ROW_HEIGHT - 2. * TITLE_LINE) / 2.))
-                .flex()
-                .items_start()
-                .gap_2()
-                .child(beside().child(mark))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(title_line(location.name.clone()))
-                        .children(location_state(location, scanning, now).into_iter().map(
-                            |line| {
-                                div()
-                                    .truncate()
-                                    .line_height(px(TITLE_LINE))
-                                    .text_size(px(theme::TEXT_SMALL))
-                                    .text_color(content(0.65))
-                                    .child(line)
-                            },
-                        )),
-                )
-                .children(action.map(|action| beside().child(action))),
-        )
+        div()
+            .min_w_0()
+            .h(px(CHIP_HEIGHT))
+            .px_3()
+            .rounded(px(theme::RADIUS_ROW))
+            .border_1()
+            .border_color(content(0.08))
+            .bg(content(0.03))
+            .flex()
+            .items_center()
+            .gap_2()
+            .when(!location.connected, |d| d.text_color(content(0.65)))
+            .child(mark)
+            .child(two_lines(
+                location.name.clone(),
+                location_state(location, scanning, now),
+            ))
+            .children(action.map(|action| action.flex_shrink_0()))
     }
 }
 
-/// A rule between rows, from the text's edge to the size's.
-fn hairline() -> gpui::Div {
-    div().mx(px(ROW_INSET)).h(px(1.)).bg(content(0.08))
+/// What fills the startup disk, by the kind of thing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Kind {
+    Documents,
+    Projects,
+    Pictures,
+    Media,
+    Cloud,
 }
 
-/// The frame both kinds of suggestion share.
-fn card() -> gpui::Div {
+impl Kind {
+    fn of(group: &Group) -> Self {
+        match (group.kind, group.name.as_str()) {
+            (GroupKind::Project, _) => Kind::Projects,
+            (GroupKind::Cloud, _) => Kind::Cloud,
+            (GroupKind::Folder, "Pictures") => Kind::Pictures,
+            (GroupKind::Folder, "Movies" | "Music") => Kind::Media,
+            (GroupKind::Folder, _) => Kind::Documents,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Documents => "Documents",
+            Kind::Projects => "Projects",
+            Kind::Pictures => "Pictures",
+            Kind::Media => "Movies and music",
+            Kind::Cloud => "Cloud",
+        }
+    }
+
+    fn glyph(self) -> &'static str {
+        match self {
+            Kind::Cloud => "cloud",
+            _ => "folder-01",
+        }
+    }
+
+    /// Fixed, not the accent, so no accent can make two kinds look alike.
+    fn tint(self) -> Hsla {
+        match self {
+            Kind::Documents => theme::tint_blue(),
+            Kind::Projects => theme::tint_pink(),
+            Kind::Pictures => theme::tint_orange(),
+            Kind::Media => theme::tint_purple(),
+            Kind::Cloud => theme::tint_cyan(),
+        }
+    }
+}
+
+/// A part of the startup disk's bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Part {
+    Kind(Kind),
+    /// What the suggestions and the Trash would give back.
+    Freeable,
+    /// Used, and in none of the above or not measured yet.
+    Other,
+}
+
+/// What the startup disk's used space is made of, largest kind first, then
+/// what can be freed, then the rest. Nothing is counted twice: a folder inside
+/// another counts in the outer one, and what a suggestion frees leaves the
+/// kind that holds it.
+fn parts(about: &Overview, disk: &Headline) -> Vec<(Part, u64)> {
+    let spots: Vec<(&Path, Kind, u64)> = about
+        .stuff
+        .iter()
+        .flat_map(|group| group.spots.iter().map(move |spot| (group, spot)))
+        .filter(|(_, spot)| spot.location == disk.name)
+        .filter_map(|(group, spot)| {
+            Some((spot.path.as_path(), Kind::of(group), spot.size?.on_disk))
+        })
+        .collect();
+    let outer: Vec<_> = spots
+        .iter()
+        .filter(|(path, ..)| {
+            !spots
+                .iter()
+                .any(|(other, ..)| other != path && path.starts_with(other))
+        })
+        .collect();
+    let mut kinds: Vec<(Kind, u64)> = Vec::new();
+    for (_, kind, bytes) in &outer {
+        match kinds.iter_mut().find(|(k, _)| k == kind) {
+            Some((_, total)) => *total += bytes,
+            None => kinds.push((*kind, *bytes)),
+        }
+    }
+    for suggestion in &about.suggestions {
+        let holder = outer
+            .iter()
+            .find(|(path, ..)| suggestion.path.starts_with(path));
+        if let Some((_, kind, _)) = holder
+            && let Some((_, total)) = kinds.iter_mut().find(|(k, _)| k == kind)
+        {
+            *total = total.saturating_sub(suggestion.size.unshared);
+        }
+    }
+    kinds.retain(|(_, bytes)| *bytes > 0);
+    kinds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    let freeable = about
+        .suggestions
+        .iter()
+        .map(|suggestion| suggestion.size.unshared)
+        .sum::<u64>()
+        + disk.trash.map_or(0, |trash| trash.unshared);
+    let used = disk.total.saturating_sub(disk.free);
+    let known: u64 = kinds.iter().map(|(_, bytes)| bytes).sum();
+    let other = used.saturating_sub(known + freeable);
+    kinds
+        .into_iter()
+        .map(|(kind, bytes)| (Part::Kind(kind), bytes))
+        .chain((freeable > 0).then_some((Part::Freeable, freeable)))
+        .chain((other > 0).then_some((Part::Other, other)))
+        .collect()
+}
+
+/// The startup disk as one bar of square parts, as a dither bar's cells are:
+/// each part in its color, what can be freed dithered in the accent, as a
+/// choice is, and the free space as track.
+fn disk_bar(parts: &[(Part, u64)], disk: &Headline) -> impl IntoElement + use<> {
+    let segment = |grow: u64| {
+        div()
+            .h_full()
+            .flex_basis(px(0.))
+            .flex_grow(grow as f32)
+            .min_w(px(3.))
+    };
     div()
-        .rounded(px(theme::RADIUS_CARD))
-        .border_1()
-        .border_color(content(0.12))
-        .bg(content(0.03))
+        .h(px(BAR_HEIGHT))
+        .flex()
+        .gap(px(2.))
+        .children(parts.iter().map(|(part, bytes)| {
+            let piece = segment(*bytes);
+            match part {
+                Part::Freeable => piece.child(dither_bar(0., 1.)).into_any_element(),
+                part => piece.bg(part_color(*part)).into_any_element(),
+            }
+        }))
+        .child(segment(disk.free).bg(content(0.14)))
+}
+
+fn part_color(part: Part) -> Hsla {
+    match part {
+        Part::Kind(kind) => kind.tint(),
+        Part::Freeable => accent(),
+        Part::Other => content(0.3),
+    }
+}
+
+/// A part's square in the bar's key, drawn as its part is.
+fn swatch(part: Part) -> AnyElement {
+    let square = div().size(px(BAR_HEIGHT)).flex_shrink_0();
+    match part {
+        Part::Freeable => square.child(dither_bar(0., 1.)).into_any_element(),
+        part => square.bg(part_color(part)).into_any_element(),
+    }
 }
 
 /// What a suggestion frees, with a + when part of it couldn't be read.
@@ -1047,37 +1111,35 @@ fn reclaims(suggestion: &Suggestion) -> String {
     size
 }
 
-/// Why a suggestion is safe, and how old its size is when that matters.
-fn why(suggestion: &Suggestion, now: u64) -> String {
-    let mut why = suggestion.evidence.why();
-    if let Some(age) = suggestion.size.age(now) {
-        why += &format!(" Measured {age}.");
-    }
-    why
-}
-
-/// A group's glyph and its tint: the accent, or a kind of folder's own color,
-/// as Finder tells Pictures and Movies apart.
-fn look(group: &Group) -> (&'static str, Hsla) {
-    match (group.kind, group.name.as_str()) {
-        (GroupKind::Cloud, _) => ("cloud", accent()),
-        (GroupKind::Folder, "Pictures") => ("folder-01", theme::tint_orange()),
-        (GroupKind::Folder, "Movies") => ("folder-01", theme::tint_purple()),
-        (GroupKind::Folder, "Music") => ("folder-01", theme::tint_pink()),
-        _ => ("folder-01", accent()),
-    }
-}
-
-/// A row of "Your stuff": what it is, where it lives, what it takes up, and
-/// its button. Every row keeps the button's room, so the sizes line up.
+/// A row of the list: what it is, where it lives, a bar of its drive,
+/// what it takes up, and its button. Every row keeps the button's room, so
+/// the bars and sizes line up.
 fn stuff_row(
     look: (&'static str, Hsla),
     title: String,
     detail: String,
+    (share, ink): (f32, Hsla),
     size: String,
     action: Option<AnyElement>,
 ) -> gpui::Div {
     entry_row(look, title, detail)
+        .child(
+            div()
+                .w(relative(0.24))
+                .max_w(px(200.))
+                .flex_shrink_0()
+                .h(px(6.))
+                .rounded_full()
+                .bg(content(0.08))
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(share.clamp(0., 1.)))
+                        .when(share > 0., |d| d.min_w(px(3.)))
+                        .rounded_full()
+                        .bg(ink),
+                ),
+        )
         .child(
             div()
                 .w(px(SIZE_SLOT))
@@ -1100,7 +1162,7 @@ fn stuff_row(
 /// A row's mark, title and detail, on the list's grid.
 fn entry_row(look: (&'static str, Hsla), title: String, detail: String) -> gpui::Div {
     div()
-        .h(px(STUFF_ROW_HEIGHT))
+        .h(px(ROW_HEIGHT))
         .flex_shrink_0()
         .px(px(ROW_INSET))
         .rounded(px(theme::RADIUS_ROW))
@@ -1108,36 +1170,34 @@ fn entry_row(look: (&'static str, Hsla), title: String, detail: String) -> gpui:
         .items_center()
         .gap_2()
         .child(icon(look.0, 16.).flex_shrink_0().text_color(look.1))
+        .child(two_lines(title, detail))
+}
+
+/// A title over a muted line, each cut short rather than wrapped.
+fn two_lines(title: String, detail: String) -> gpui::Div {
+    let line = |text: String| {
+        div()
+            .truncate()
+            .h(px(TITLE_LINE))
+            .line_height(px(TITLE_LINE))
+            .child(text)
+    };
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(line(title).text_size(px(theme::TEXT_BODY)))
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(title_line(title))
-                .child(
-                    div()
-                        .truncate()
-                        .line_height(px(TITLE_LINE))
-                        .text_size(px(theme::TEXT_SMALL))
-                        .text_color(content(0.65))
-                        .child(detail),
-                ),
+            line(detail)
+                .text_size(px(theme::TEXT_SMALL))
+                .text_color(content(0.65)),
         )
 }
 
 /// A row nothing opens, spaced as a pressable one is.
-fn still(row: gpui::Div) -> gpui::Div {
+fn still(row: impl IntoElement) -> gpui::Div {
     div().flex_shrink_0().pb(px(theme::ROW_GAP)).child(row)
-}
-
-fn title_line(title: String) -> gpui::Div {
-    div()
-        .truncate()
-        .h(px(TITLE_LINE))
-        .line_height(px(TITLE_LINE))
-        .text_size(px(theme::TEXT_BODY))
-        .child(title)
 }
 
 fn size_label(on_disk: Option<u64>, partial: bool, measuring: bool) -> String {
@@ -1168,29 +1228,36 @@ fn amount(bytes: u64) -> String {
     }
 }
 
-/// What a location can say about itself, a line each: whether it's away,
-/// its space, and its scan. The mark already says a connected one is.
-fn location_state(location: &Location, scanning: bool, now: u64) -> Vec<String> {
-    let mut said = Vec::new();
-    if !location.connected {
-        said.push("Not connected".to_string());
-    }
-    if let Some((total, free)) = location.capacity {
-        said.push(format!("{} free of {}", amount(free), amount(total)));
-    }
-    if scanning {
-        said.push("Scanning…".to_string());
+/// How a location stands, in one line: whether it's away or its space, then
+/// its scan. The mark already says a connected one is.
+fn location_state(location: &Location, scanning: bool, now: u64) -> String {
+    let stands = match location.capacity {
+        _ if !location.connected => Some("Not connected".to_string()),
+        Some((_, free)) => Some(format!("{} free", amount(free))),
+        None => None,
+    };
+    let scan = if scanning {
+        Some("scanning…".to_string())
     } else {
         match &location.scan {
-            Some(scan) => said.push(match scan.total.age(now) {
-                Some(age) => format!("Scanned {age}"),
-                None => "Scanned just now".to_string(),
+            Some(scan) => Some(match scan.total.age(now) {
+                Some(age) => format!("scanned {age}"),
+                None => "scanned just now".to_string(),
             }),
-            None if location.mount.is_some() => said.push("Not scanned".to_string()),
-            None => {}
+            None if location.mount.is_some() => Some("not scanned".to_string()),
+            None => None,
         }
+    };
+    let said = [stands, scan]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let mut chars = said.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => said,
     }
-    said
 }
 
 fn change_row(change: &AgentChange, now: u64) -> impl IntoElement + use<> {
@@ -1200,7 +1267,7 @@ fn change_row(change: &AgentChange, now: u64) -> impl IntoElement + use<> {
     };
     let when = overview::age(change.at, now).unwrap_or_else(|| "just now".to_string());
     still(entry_row(
-        ("bot", accent()),
+        ("bot", content(0.55)),
         change
             .client
             .clone()
@@ -1247,4 +1314,69 @@ fn quoted(path: &Path) -> String {
             |n| n.to_string_lossy().into_owned()
         )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monodrive_core::overview::{Evidence, Measured};
+
+    fn measured(bytes: u64) -> Measured {
+        Measured {
+            on_disk: bytes,
+            unshared: bytes,
+            at: 0,
+            complete: true,
+        }
+    }
+
+    fn group(name: &str, kind: GroupKind, path: &str, bytes: u64) -> Group {
+        Group {
+            name: name.into(),
+            kind,
+            spots: vec![Spot {
+                location: "Macintosh HD".into(),
+                path: path.into(),
+                size: Some(measured(bytes)),
+                reachable: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_disk_bar_counts_nothing_twice() {
+        let disk = Headline {
+            name: "Macintosh HD".into(),
+            total: 100,
+            free: 20,
+            trash: Some(measured(4)),
+            low: true,
+        };
+        let about = Overview {
+            headline: Some(disk.clone()),
+            suggestions: vec![Suggestion {
+                path: "/h/app/target".into(),
+                evidence: Evidence::BuildOutput {
+                    project: "app".into(),
+                },
+                size: measured(5),
+            }],
+            stuff: vec![
+                group("Documents", GroupKind::Folder, "/h/Documents", 30),
+                // Inside Documents, so already in its 30.
+                group("notes", GroupKind::Project, "/h/Documents/notes", 10),
+                group("app", GroupKind::Project, "/h/app", 15),
+            ],
+            ..Overview::default()
+        };
+        assert_eq!(
+            parts(&about, &disk),
+            vec![
+                (Part::Kind(Kind::Documents), 30),
+                (Part::Kind(Kind::Projects), 10),
+                (Part::Freeable, 9),
+                (Part::Other, 31),
+            ]
+        );
+    }
 }
