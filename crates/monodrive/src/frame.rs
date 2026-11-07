@@ -1,9 +1,11 @@
 //! Window sizes: where a new window opens, and the resize when Default size
-//! changes in Settings.
+//! changes in Settings or the window moves to another display.
 
 use crate::preferences::{Frame, WindowSize};
 use crate::traffic_lights;
 use gpui::{App, Bounds, Pixels, Size, Window, point, px};
+use objc2_app_kit::NSEvent;
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 pub const MIN_WIDTH: f32 = 720.;
 pub const MIN_HEIGHT: f32 = 440.;
@@ -103,9 +105,19 @@ fn share(screen: Bounds<Pixels>, part: Size<f32>) -> Bounds<Pixels> {
     Bounds::centered_at(screen.center(), wanted)
 }
 
-/// Resizes `window` to `size` on the screen it's on. Last Used and a full
-/// screen window stay as they are.
+/// Resizes `window` to `size` on the screen it's on, centered there. Last
+/// Used and a full screen window stay as they are.
 pub fn apply(size: WindowSize, window: &Window, cx: &App) {
+    resize(size, false, window, cx);
+}
+
+/// Resizes `window` to `size` on the screen it moved to, around where it
+/// landed, so a window dragged to a smaller display still fits it.
+pub fn refit(size: WindowSize, window: &Window, cx: &App) {
+    resize(size, true, window, cx);
+}
+
+fn resize(size: WindowSize, in_place: bool, window: &Window, cx: &App) {
     let Some(part) = part(size) else {
         return;
     };
@@ -118,24 +130,55 @@ pub fn apply(size: WindowSize, window: &Window, cx: &App) {
     let Some(screen) = ns_window.screen() else {
         return;
     };
-    // AppKit's y axis points up, but a centered frame is centered either way.
-    let mut rect = screen.visibleFrame();
-    let fit = share(
-        Bounds::new(
-            point(px(rect.origin.x as f32), px(rect.origin.y as f32)),
-            gpui::size(px(rect.size.width as f32), px(rect.size.height as f32)),
+    // AppKit's y axis points up, but centering and keeping inside the screen
+    // work the same either way.
+    let at = in_place.then(|| bounds(ns_window.frame()));
+    let fit = placed(bounds(screen.visibleFrame()), part, at);
+    let rect = NSRect::new(
+        NSPoint::new(fit.origin.x.as_f32().into(), fit.origin.y.as_f32().into()),
+        NSSize::new(
+            fit.size.width.as_f32().into(),
+            fit.size.height.as_f32().into(),
         ),
-        part,
     );
-    rect.origin.x = fit.origin.x.as_f32().into();
-    rect.origin.y = fit.origin.y.as_f32().into();
-    rect.size.width = fit.size.width.as_f32().into();
-    rect.size.height = fit.size.height.as_f32().into();
     // AppKit tells GPUI about the resize at once, which GPUI drops while
     // it's busy with this update, so the resize waits until it's done.
     cx.foreground_executor()
         .spawn(async move { ns_window.setFrame_display_animate(rect, true, false) })
         .detach();
+}
+
+/// Whether a mouse button is down, as it is all through a window drag.
+pub fn mouse_held() -> bool {
+    NSEvent::pressedMouseButtons() != 0
+}
+
+fn bounds(rect: NSRect) -> Bounds<Pixels> {
+    Bounds::new(
+        point(px(rect.origin.x as f32), px(rect.origin.y as f32)),
+        gpui::size(px(rect.size.width as f32), px(rect.size.height as f32)),
+    )
+}
+
+/// `part` of `screen`, centered there, or centered on `at` and moved only as
+/// far as it takes to stay on `screen`.
+fn placed(screen: Bounds<Pixels>, part: Size<f32>, at: Option<Bounds<Pixels>>) -> Bounds<Pixels> {
+    let centered = share(screen, part);
+    let Some(at) = at else {
+        return centered;
+    };
+    let wanted = centered.size;
+    let start = Bounds::centered_at(at.center(), wanted).origin;
+    // `share` never makes the window bigger than the screen.
+    let inside =
+        |start: Pixels, len: Pixels, from: Pixels, to: Pixels| start.min(to - len).max(from);
+    Bounds::new(
+        point(
+            inside(start.x, wanted.width, screen.left(), screen.right()),
+            inside(start.y, wanted.height, screen.top(), screen.bottom()),
+        ),
+        wanted,
+    )
 }
 
 #[cfg(test)]
@@ -152,6 +195,19 @@ mod tests {
         assert_eq!(moved.origin, point(px(2558.), px(1438.)));
         assert_eq!(moved.size, window.size);
         assert_eq!(out_of_the_way(window, &[main, left]), moved);
+    }
+
+    #[test]
+    fn a_window_moved_to_another_display_takes_its_share_where_it_landed() {
+        let laptop = Bounds::new(point(px(2000.), px(0.)), size(px(1500.), px(900.)));
+        // Dropped from a bigger display, hanging off the laptop's right edge.
+        let dropped = Bounds::new(point(px(2900.), px(100.)), size(px(1400.), px(700.)));
+        let fit = placed(laptop, REASONABLE, Some(dropped));
+        assert_eq!(fit.size, size(px(1050.), px(630.)));
+        assert_eq!(fit.right(), laptop.right());
+        assert_eq!(fit.center().y, dropped.center().y);
+        // Without a place to keep, it centers, as Settings does.
+        assert_eq!(placed(laptop, REASONABLE, None), share(laptop, REASONABLE));
     }
 
     #[test]
