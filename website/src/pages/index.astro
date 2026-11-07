@@ -115,7 +115,6 @@ const REPO = "https://github.com/donnes/monodrive";
   };
 
   if (reducedMotion()) {
-    section.classList.add("static");
     win.inert = false;
   } else {
     measure();
@@ -155,6 +154,9 @@ const REPO = "https://github.com/donnes/monodrive";
     width: 200px;
     height: 200px;
     border-radius: 45px;
+    /* The script's starting position, so the first paint, before any script
+       runs, already puts the icon where the script will. */
+    transform: translate3d(-50%, max(96px, 12vh), 0);
     overflow: hidden;
     background: #000;
     box-shadow:
@@ -166,7 +168,9 @@ const REPO = "https://github.com/donnes/monodrive";
     position: absolute;
     left: 50%;
     top: 50%;
-    translate: -50% -50%;
+    /* transform, not translate: the minifier drops a `translate: none` reset
+       next to `transform: none`, so Reduce Motion couldn't undo it. */
+    transform: translate(-50%, -50%);
     opacity: 0;
   }
   .morph-win .win {
@@ -216,36 +220,39 @@ const REPO = "https://github.com/donnes/monodrive";
     margin-top: 0;
   }
 
-  /* Reduce Motion: no morph. The icon, the copy and the window sit in order. */
-  .morph.static {
-    height: auto;
-  }
-  .morph.static .morph-sticky {
-    position: static;
-    height: auto;
-    overflow: visible;
-    display: grid;
-    justify-items: center;
-    gap: 40px;
-    padding-top: 48px;
-  }
-  .morph.static :is(.morph-frame, .morph-copy, .morph-hints, .morph-win, .morph-icon) {
-    position: static;
-    transform: none;
-    translate: none;
-    opacity: 1;
-  }
-  .morph.static .morph-frame {
-    display: contents;
-  }
-  .morph.static .morph-win {
-    order: 3;
-    width: min(1120px, 100vw - 32px);
-  }
-  .morph.static .morph-copy {
-    order: 2;
-  }
-  .morph.static .morph-hints {
-    order: 4;
+  /* Reduce Motion: no morph. The icon, the copy and the window sit in order.
+     A media query rather than a class from the script, so the first paint
+     already has this layout. */
+  @media (prefers-reduced-motion: reduce) {
+    .morph {
+      height: auto;
+    }
+    .morph .morph-sticky {
+      position: static;
+      height: auto;
+      overflow: visible;
+      display: grid;
+      justify-items: center;
+      gap: 40px;
+      padding-top: 48px;
+    }
+    .morph :is(.morph-frame, .morph-copy, .morph-hints, .morph-win, .morph-icon) {
+      position: static;
+      transform: none;
+      opacity: 1;
+    }
+    .morph .morph-frame {
+      display: contents;
+    }
+    .morph .morph-win {
+      order: 3;
+      width: min(1120px, 100vw - 32px);
+    }
+    .morph .morph-copy {
+      order: 2;
+    }
+    .morph .morph-hints {
+      order: 4;
+    }
   }
 </style>

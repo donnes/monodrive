@@ -103,16 +103,6 @@ const { size, tilt = false, area } = Astro.props;
       loop.start();
     });
 
-    // First paint: the icon settles in, then its squares light up along the diagonal.
-    body.animate(still ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, scale: "0.94" }, { opacity: 1, scale: "1" }], {
-      duration: 800,
-      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
-      fill: "backwards",
-    });
-    squares.forEach((s) =>
-      s.el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 500, delay: 250 + (s.col + s.row) * 55, easing: "ease-out", fill: "backwards" }),
-    );
-
     // A press sends a wave of light out from the square under the pointer.
     body.addEventListener("pointerdown", (e) => {
       const r = body.getBoundingClientRect();
@@ -148,6 +138,26 @@ const { size, tilt = false, area } = Astro.props;
     will-change: transform;
     -webkit-tap-highlight-color: transparent;
     transition: scale 160ms var(--ease-out);
+    /* First paint: the icon settles in, then its squares light up along the
+       diagonal. CSS rather than script, so it starts on the first frame
+       instead of after a frame of the finished icon. */
+    animation: ai-settle 800ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  }
+  @keyframes ai-settle {
+    from {
+      opacity: 0;
+      scale: 0.94;
+    }
+  }
+  @keyframes ai-fade {
+    from {
+      opacity: 0;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ai-body {
+      animation-name: ai-fade;
+    }
   }
   .ai-body:active {
     scale: 0.97;
@@ -170,6 +180,8 @@ const { size, tilt = false, area } = Astro.props;
     grid-column: calc(var(--c) + 1);
     grid-row: calc(var(--r) + 1);
     background: rgb(255 255 255 / var(--a));
+    animation: ai-fade 500ms ease-out backwards;
+    animation-delay: calc(250ms + (var(--c) + var(--r)) * 55ms);
     /* Liquid Glass bevels each square: light on the top left, shade on the bottom right. */
     box-shadow:
       inset calc(var(--s) * 0.006) calc(var(--s) * 0.006) 0 rgb(255 255 255 / 0.4),
