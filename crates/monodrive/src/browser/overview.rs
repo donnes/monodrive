@@ -15,8 +15,8 @@ use gpui::{
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::ops::{self, AgentChange, Origin, Request};
 use monodrive_core::overview::{
-    self, Env, Group, GroupKind, Headline, Location, LocationKind, Overview, ScanRow, Spot,
-    Suggestion,
+    self, Env, Group, GroupKind, Headline, Location, LocationKind, Measured, Overview, ScanRow,
+    Spot, Suggestion,
 };
 use monodrive_core::paths;
 use monodrive_core::storage::{self, Stop};
@@ -42,8 +42,8 @@ const ROW_INSET: f32 = 8.;
 /// The trailing columns every row of the list keeps, filled or not.
 const SIZE_SLOT: f32 = 72.;
 const ACTION_SLOT: f32 = 20.;
-/// Suggestion rows lead with what each frees.
-const RECLAIMS_SLOT: f32 = 56.;
+/// Wide enough for "Free up"'s widest button.
+const FREE_ACTION_SLOT: f32 = 112.;
 /// The disk's bar, and each dot of its key.
 const BAR_HEIGHT: f32 = 12.;
 const SWATCH: f32 = 8.;
@@ -363,12 +363,23 @@ impl Pane {
         let headline = about
             .headline
             .as_ref()
-            .map(|disk| self.headline(&about, disk, cx));
-        let suggestions = (!about.suggestions.is_empty()).then(|| {
-            let partial = about.suggestions.iter().any(|s| !s.size.complete);
-            let total: u64 = about.suggestions.iter().map(|s| s.size.unshared).sum();
-            let mut total = amount(total);
-            if partial {
+            .map(|disk| self.headline(&about, disk));
+        // What the green part of the disk's bar is made of, so the section
+        // adds up to it.
+        let trash = about
+            .headline
+            .as_ref()
+            .and_then(|disk| disk.trash)
+            .filter(|trash| trash.unshared > 0);
+        let free_up = (!about.suggestions.is_empty() || trash.is_some()).then(|| {
+            let sizes: Vec<Measured> = about
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.size)
+                .chain(trash)
+                .collect();
+            let mut total = amount(sizes.iter().map(|size| size.unshared).sum());
+            if sizes.iter().any(|size| !size.complete) {
                 total.push('+');
             }
             div()
@@ -381,6 +392,7 @@ impl Pane {
                         .iter()
                         .map(|suggestion| self.suggestion_row(suggestion, cx)),
                 )
+                .children(trash.map(|trash| self.trash_row(trash, cx)))
         });
         let largest = self.largest(&about, measuring, now, cx);
         // As many tiles across as fit whole, each as wide as the others.
@@ -453,7 +465,7 @@ impl Pane {
                                 .flex_col()
                                 .gap_2()
                                 .children(headline)
-                                .children(suggestions)
+                                .children(free_up)
                                 .child(largest)
                                 .children(locations)
                                 .children(changes),
@@ -466,23 +478,12 @@ impl Pane {
 
     /// How much is free, in the page's one large figure, and the disk drawn
     /// by what fills it, with a key.
-    fn headline(
-        &self,
-        about: &Overview,
-        disk: &Headline,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let has_trash = disk.trash.is_some_and(|trash| trash.unshared > 0);
+    fn headline(&self, about: &Overview, disk: &Headline) -> impl IntoElement + use<> {
         let parts = parts(about, disk);
-        let freeable_name = if about.suggestions.is_empty() {
-            "In the Trash"
-        } else {
-            "Can be freed"
-        };
         let key = parts.iter().map(|(part, bytes)| {
             let name = match part {
                 Part::Kind(kind) => kind.name(),
-                Part::Freeable => freeable_name,
+                Part::Freeable => "Can be freed",
                 Part::Other => "Other",
             };
             div()
@@ -499,48 +500,32 @@ impl Pane {
             .flex_col()
             .debug_selector(|| "overview-headline".into())
             .child(
+                // GPUI lines up the boxes' bottoms, not the baselines, so
+                // each line is as tall as its text and the smaller one rises
+                // by what the larger one's descent adds.
                 div()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
+                    .items_end()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(theme::TEXT_DISPLAY))
+                            .line_height(px(theme::TEXT_DISPLAY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("{} free", amount(disk.free))),
+                    )
                     .child(
                         div()
                             .min_w_0()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(theme::TEXT_DISPLAY))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("{} free", amount(disk.free))),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(theme::TEXT_BODY))
-                                    .text_color(content(0.65))
-                                    .child(format!("of {} on {}", amount(disk.total), disk.name)),
-                            ),
-                    )
-                    .when(has_trash, |d| {
-                        d.child(
-                            text_button(
-                                "overview-empty-trash",
-                                "Empty Trash…",
-                                ButtonLook::Caution,
-                            )
-                            .flex_shrink_0()
-                            .on_click(cx.listener(
-                                |_, _, window, cx| {
-                                    window.dispatch_action(Box::new(EmptyTrash), cx);
-                                },
-                            )),
-                        )
-                    }),
+                            .truncate()
+                            .mb(px(2.))
+                            .text_size(px(theme::TEXT_BODY))
+                            .line_height(px(theme::TEXT_BODY))
+                            .text_color(content(0.65))
+                            .child(format!("of {} on {}", amount(disk.total), disk.name)),
+                    ),
             )
             .child(div().mt_3().child(disk_bar(&parts, disk)))
             .child(
@@ -555,7 +540,7 @@ impl Pane {
             )
     }
 
-    /// A suggestion as a row: what it frees, what it is and why it's safe,
+    /// A suggestion as a row: what it is and why it's safe, what it frees,
     /// then its button.
     fn suggestion_row(
         &self,
@@ -566,33 +551,45 @@ impl Pane {
         let dir = suggestion.path.clone();
         let button = text_button(
             format!("overview-clean-{}", dir.display()),
-            evidence.action(),
-            ButtonLook::Primary,
+            "Move to Trash",
+            ButtonLook::Secondary,
         )
         .debug_selector(|| "overview-clean".into())
         .on_click(
             cx.listener(move |this, _, window, cx| this.clean_suggestion(dir.clone(), window, cx)),
         );
         still(
-            div()
-                .id(format!("overview-suggestion-{}", suggestion.path.display()))
-                .role(Role::Group)
-                .aria_label(evidence.title())
-                .h(px(ROW_HEIGHT))
-                .px(px(ROW_INSET))
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(RECLAIMS_SLOT))
-                        .flex_shrink_0()
-                        .text_size(px(theme::TEXT_BODY))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(reclaims(suggestion)),
-                )
-                .child(two_lines(evidence.title(), evidence.why()))
-                .child(button.flex_shrink_0()),
+            free_row(
+                "folder-01",
+                evidence.title(),
+                evidence.why(),
+                size_of(suggestion.size),
+                button,
+            )
+            .id(format!("overview-suggestion-{}", suggestion.path.display()))
+            .role(Role::Group)
+            .aria_label(evidence.title()),
+        )
+    }
+
+    /// What's in the Trash, the last thing to free: trashing a suggestion
+    /// moves its size here.
+    fn trash_row(&self, trash: Measured, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let button = text_button("overview-empty-trash", "Empty Trash…", ButtonLook::Caution)
+            .on_click(cx.listener(|_, _, window, cx| {
+                window.dispatch_action(Box::new(EmptyTrash), cx);
+            }));
+        still(
+            free_row(
+                "trash",
+                "Items in the Trash".to_string(),
+                "Emptying the Trash gives their space back.".to_string(),
+                size_of(trash),
+                button,
+            )
+            .id("overview-trash")
+            .role(Role::Group)
+            .aria_label("Items in the Trash"),
         )
     }
 
@@ -620,12 +617,33 @@ impl Pane {
         let most = about.stuff.iter().filter_map(here).max().unwrap_or(0);
         let share =
             |size: Option<u64>, most: u64| size.map_or(0., |size| size as f32 / most.max(1) as f32);
+        // What "Free up" counts inside a spot on the startup disk, so its bar
+        // shows why the disk's key gives its kind less than it takes.
+        let freeable = |spot: &Spot| -> u64 {
+            if Some(spot.location.as_str()) != startup {
+                return 0;
+            }
+            about
+                .suggestions
+                .iter()
+                .filter(|suggestion| suggestion.path.starts_with(&spot.path))
+                .map(|suggestion| suggestion.size.unshared)
+                .sum()
+        };
         let mut ranked: Vec<(Option<u64>, AnyElement)> = Vec::new();
         for group in &about.stuff {
             let size = here(group);
+            let freed = group.spots.iter().map(freeable).sum::<u64>();
             ranked.push((
                 size,
-                self.group_row(group, size, share(size, most), measuring, now, cx),
+                self.group_row(
+                    group,
+                    size,
+                    (share(size, most), share(Some(freed), most)),
+                    measuring,
+                    now,
+                    cx,
+                ),
             ));
             if self.overview.open.contains(&group.name) {
                 for spot in &group.spots {
@@ -633,7 +651,10 @@ impl Pane {
                         spot.location.clone(),
                         spot,
                         group,
-                        share(spot.size.map(|size| size.on_disk), most),
+                        (
+                            share(spot.size.map(|size| size.on_disk), most),
+                            share(Some(freeable(spot)), most),
+                        ),
                         measuring,
                         now,
                         cx,
@@ -682,13 +703,21 @@ impl Pane {
         &self,
         group: &Group,
         here: Option<u64>,
-        share: f32,
+        (share, freeable): (f32, f32),
         measuring: bool,
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let [spot] = group.spots.as_slice() {
-            return self.spot_row(group.name.clone(), spot, group, share, measuring, now, cx);
+            return self.spot_row(
+                group.name.clone(),
+                spot,
+                group,
+                (share, freeable),
+                measuring,
+                now,
+                cx,
+            );
         }
         let name = group.name.clone();
         let places = group
@@ -706,6 +735,16 @@ impl Pane {
             .join(", ");
         let selector = format!("overview-spot-{name}");
         let tint = Kind::of(group).tint();
+        let open = self.overview.open.contains(&name);
+        let chevron = icon(
+            if open {
+                "chevron-down-hi"
+            } else {
+                "chevron-right"
+            },
+            12.,
+        )
+        .text_color(content(0.55));
         theme::row_slot(format!("overview-group-{name}"))
             .role(Role::Button)
             .debug_selector(move || selector)
@@ -721,7 +760,11 @@ impl Pane {
                     (Kind::of(group).glyph(), tint),
                     group.name.clone(),
                     places,
-                    (share, tint),
+                    Bar {
+                        share,
+                        freeable,
+                        ink: tint,
+                    },
                     size_label(
                         here,
                         group
@@ -730,7 +773,7 @@ impl Pane {
                             .any(|spot| spot.size.is_none_or(|size| !size.complete)),
                         measuring,
                     ),
-                    None,
+                    Some(chevron.into_any_element()),
                 )
                 .group_hover(theme::ROW_GROUP, |s| s.bg(content(0.08))),
             )
@@ -743,15 +786,22 @@ impl Pane {
         name: String,
         spot: &Spot,
         group: &Group,
-        share: f32,
+        (share, freeable): (f32, f32),
         measuring: bool,
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let where_ = paths::abbreviate(&spot.path);
         let age = spot.size.and_then(|size| size.age(now));
-        // A copy under its project is already named for its location.
-        let place = (name != spot.location).then(|| format!("on {}", spot.location));
+        // A copy under its project is already named for its location, and
+        // the list is the startup disk's.
+        let startup = self
+            .overview
+            .about
+            .as_ref()
+            .and_then(|about| about.headline.as_ref())
+            .is_some_and(|disk| disk.name == spot.location);
+        let place = (name != spot.location && !startup).then(|| format!("on {}", spot.location));
         let said = [Some(where_), place, age]
             .into_iter()
             .flatten()
@@ -783,7 +833,11 @@ impl Pane {
             (kind.glyph(), kind.tint()),
             name,
             said,
-            (share, kind.tint()),
+            Bar {
+                share,
+                freeable,
+                ink: kind.tint(),
+            },
             size_label(spot.size.map(|size| size.on_disk), partial, measuring),
             action,
         );
@@ -847,7 +901,11 @@ impl Pane {
             ("folder-01", ink),
             row.name.clone(),
             said,
-            (share, ink),
+            Bar {
+                share,
+                freeable: 0.,
+                ink,
+            },
             size_label(Some(row.size.on_disk), !row.size.complete, false),
             action,
         );
@@ -913,11 +971,8 @@ impl Pane {
             LocationKind::Share { .. } | LocationKind::Sftp { .. } => "server",
             LocationKind::Drive | LocationKind::Disconnected => "hard-drive",
         };
-        let mark = icon(glyph, 16.).text_color(if location.connected {
-            theme::success()
-        } else {
-            content(0.3)
-        });
+        let mark =
+            icon(glyph, 16.).text_color(content(if location.connected { 0.55 } else { 0.3 }));
         div()
             .min_w_0()
             .h(px(CHIP_HEIGHT))
@@ -962,7 +1017,7 @@ impl Kind {
 
     fn name(self) -> &'static str {
         match self {
-            Kind::Documents => "Documents",
+            Kind::Documents => "Documents, Desktop and Downloads",
             Kind::Projects => "Projects",
             Kind::Pictures => "Pictures",
             Kind::Media => "Movies and music",
@@ -1100,13 +1155,42 @@ fn swatch(part: Part) -> impl IntoElement {
         .bg(part_color(part))
 }
 
-/// What a suggestion frees, with a + when part of it couldn't be read.
-fn reclaims(suggestion: &Suggestion) -> String {
-    let mut size = amount(suggestion.size.unshared);
-    if !suggestion.size.complete {
+/// What trashing something frees, with a + when part of it couldn't be read.
+fn size_of(measured: Measured) -> String {
+    let mut size = amount(measured.unshared);
+    if !measured.complete {
         size.push('+');
     }
     size
+}
+
+/// A row of "Free up": what it is and why, what it frees, and its button,
+/// which takes the same room on every row so the sizes line up.
+fn free_row(
+    glyph: &'static str,
+    title: String,
+    detail: String,
+    size: String,
+    button: impl IntoElement,
+) -> gpui::Div {
+    entry_row((glyph, theme::tint_green()), title, detail)
+        .child(size_slot(size))
+        .child(
+            div()
+                .w(px(FREE_ACTION_SLOT))
+                .flex_shrink_0()
+                .flex()
+                .justify_end()
+                .child(button),
+        )
+}
+
+/// A row's bar: its `share` of the list's largest, in `ink`, ending in the
+/// `freeable` share that "Free up" counts, in that section's green.
+struct Bar {
+    share: f32,
+    freeable: f32,
+    ink: Hsla,
 }
 
 /// A row of the list: what it is, where it lives, a bar of its drive,
@@ -1116,37 +1200,40 @@ fn stuff_row(
     look: (&'static str, Hsla),
     title: String,
     detail: String,
-    (share, ink): (f32, Hsla),
+    bar: Bar,
     size: String,
     action: Option<AnyElement>,
 ) -> gpui::Div {
+    let share = bar.share.clamp(0., 1.);
+    let freeable = bar.freeable.clamp(0., share);
     entry_row(look, title, detail)
         .child(
-            div()
+            theme::progress_track()
                 .w(relative(0.24))
                 .max_w(px(200.))
                 .flex_shrink_0()
-                .h(px(6.))
-                .rounded_full()
-                .bg(content(0.08))
                 .child(
                     div()
                         .h_full()
-                        .w(relative(share.clamp(0., 1.)))
+                        .w(relative(share))
                         .when(share > 0., |d| d.min_w(px(3.)))
                         .rounded_full()
-                        .bg(ink),
+                        .bg(bar.ink)
+                        .flex()
+                        .justify_end()
+                        .when(freeable > 0., |d| {
+                            d.child(
+                                div()
+                                    .h_full()
+                                    .w(relative(freeable / share))
+                                    .bg(theme::tint_green())
+                                    .rounded_r_full()
+                                    .when(freeable >= share, |d| d.rounded_l_full()),
+                            )
+                        }),
                 ),
         )
-        .child(
-            div()
-                .w(px(SIZE_SLOT))
-                .flex_shrink_0()
-                .flex()
-                .justify_end()
-                .text_size(px(theme::TEXT_BODY))
-                .child(size),
-        )
+        .child(size_slot(size))
         .child(
             div()
                 .w(px(ACTION_SLOT))
@@ -1155,6 +1242,17 @@ fn stuff_row(
                 .justify_center()
                 .children(action),
         )
+}
+
+/// A row's size, flush right in its column.
+fn size_slot(size: String) -> gpui::Div {
+    div()
+        .w(px(SIZE_SLOT))
+        .flex_shrink_0()
+        .flex()
+        .justify_end()
+        .text_size(px(theme::TEXT_BODY))
+        .child(size)
 }
 
 /// A row's mark, title and detail, on the list's grid.
