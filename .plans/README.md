@@ -24,7 +24,7 @@ Update a plan's row when its work lands on `main`.
 | 14 Remote locations | Core on main; UI picked, not built | |
 | 17 Storage inspection | Core on main; UI picked, not built | |
 | 18 Cloud storage | Done; downloading and removing downloads from a real iCloud Drive or File Provider folder needs a person to check | |
-| 19 Column view | UI picked, not built | |
+| 19 Column view | Done; layout A with preview P1. Frame times need a quiet machine to record against the budget, and the privacy-prompt Open needs a person to check | |
 | 21 User commands | Core on main; UI picked, not built; parked | |
 | 22 Worktree management | Done: the disk-wide scan, the Worktrees page (option A) and removal through the Trash with undo, in core, MCP and the window. Creation through MCP is its own later milestone. Keeping a detached HEAD's commits alive with a ref while they're in the Trash needs a decision | |
 | 23 Agent features | Later | |

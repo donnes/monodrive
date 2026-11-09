@@ -95,6 +95,14 @@ When the selection moves to one item, the panel stays on the last until the new 
 
 A row with a submenu ends in a 12 pt chevron, in place of a shortcut. Hovering opens it at once with its first row level with its parent, overlapping by 2 pt, to the left where the window runs out. It closes 200 ms after the pointer settles on another row, so the way across doesn't close it. → and ↩ take the keys in, ← brings them out, and Esc closes the whole menu. A row that's waiting on the disk, such as `Loading…`, is at 0.65 and the keys skip it.
 
+### Column view
+
+⌥⌘3 shows a folder as Finder's columns. The column with the keys is the pane's folder, so the top bar, the path bar and every command act on it as they do in the list. Every column is 220 pt, with a 0.06 hairline between, and has no title. A folder's row ends in a 12 pt chevron at 0.55. The columns before the keys' are the folders it was reached through, each showing the one it leads to at 0.14, as a selection whose keys are elsewhere. The last column takes the rest of the pane, at least 280 pt, and hides below 120 pt. Once the chain is wider than the pane it scrolls sideways to keep the last columns in view.
+
+↑ and ↓ move in the keys' column. → goes into the selected folder and selects its first item; ← goes back a column with the folder just left selected, and past the first column the chain starts at the parent. Holding ← stops at the first column. A click in another column moves the keys there, onto what it hit. The chain starts at whatever was opened by other means, such as the sidebar, Go to Folder or a crumb.
+
+The last column lists the selected folder 100 ms after the selection rests, says `Empty folder` at 0.65 when there's nothing, and offers Open for a folder behind a privacy prompt instead of reading it. For a file it's the inspector's header at 128 pt, with Size and Modified; for several items, their count, kinds and size. Search results, Recents, the Trash and batch rename show as the list.
+
 ### Two panes
 
 Split View (⌥⌘S) puts two panes side by side, equal to begin with, each with its own column titles, files and path bar. In Rounded each is its own card with an 8 pt gap, and that gap is the divider; in Boxy they touch. Each pane has a 1 pt border: `accent()` on the one commands act on, 0.06 on the other, so turning it on moves nothing else. The divider drags, stops 240 pt from either side, and a double-click makes them equal again. A narrow list drops columns rather than the name, which keeps 160 pt: Kind goes first, then Date Modified, then Size.

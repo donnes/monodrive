@@ -4,6 +4,7 @@
 //! `Browser`, which a pane reaches through `PaneEvent`.
 
 use super::batch_rename::BatchRename;
+use super::columns::{COLUMN_WIDTH, Columns, chevron};
 use super::drag::{Drag, Spot, Target, offers};
 use super::organize::Review;
 use super::overview::OverviewPage;
@@ -18,8 +19,8 @@ use super::{
     OrganizeFolder, PageDown, PageUp, Places, PutBack, Redo, RemoveDownload, Rename,
     RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder,
     SelectFirst, SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowPackageContents,
-    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, Undo, ViewAsGrid, ViewAsList,
-    home, short_reason, sidebar, trash, with_owner,
+    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, Undo, ViewAsColumns,
+    ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -193,18 +194,24 @@ pub struct Pane {
     /// The folder's own entries, or the search results.
     root: Vec<Entry>,
     /// Folders expanded in place, as in Monocode's explorer.
-    expanded: HashSet<PathBuf>,
-    /// The last listing of each expanded folder.
-    children: HashMap<PathBuf, Vec<Entry>>,
-    /// Folder listings in flight for expanded folders, dropped if superseded.
-    expanding: HashMap<PathBuf, Task<()>>,
+    pub(super) expanded: HashSet<PathBuf>,
+    /// The last listing of each expanded folder, and of each column's.
+    pub(super) children: HashMap<PathBuf, Vec<Entry>>,
+    /// Folder listings in flight for expanded folders and columns, dropped if
+    /// superseded.
+    pub(super) expanding: HashMap<PathBuf, Task<()>>,
     /// A listing or search is on its way, so the rows on screen are about to
     /// change: the tree's keys wait rather than act on rows that are leaving.
     pub(super) listing: bool,
     /// What on disk the listing follows.
-    watch: Watch,
-    /// List or grid, and the grid's icon size, as the preferences last said.
+    pub(super) watch: Watch,
+    /// List, grid or columns, and the grid's icon size, as the preferences
+    /// last said.
     pub(super) view: View,
+    /// Column view's chain and its last column.
+    pub(super) columns: Columns,
+    /// The folder on screen is the Trash, which shows as a list.
+    trash_here: bool,
     pub(super) grid_icon: u32,
     /// How far the pane's width said by the window was from the grid's as
     /// last laid out.
@@ -218,7 +225,7 @@ pub struct Pane {
     /// Every thumbnail asked for and not yet given back, loaded or not.
     pub(super) thumbs: HashMap<Thumb, Option<Arc<RenderImage>>>,
     /// The thumbnails the last frame drew; the rest are given back.
-    drawn: HashSet<Thumb>,
+    pub(super) drawn: HashSet<Thumb>,
     /// Changes that arrived while a listing was on its way, checked against
     /// what that listing watches once it lands.
     held: Vec<(PathBuf, bool)>,
@@ -260,14 +267,14 @@ pub struct Pane {
     /// Keeps the results on screen as a recent search, once they've stayed.
     pub(super) remember: Task<()>,
     pub(super) selection: Selection,
-    scroll: UniformListScrollHandle,
+    pub(super) scroll: UniformListScrollHandle,
     /// The listing or search in flight. Replacing it drops the stale one.
     loading: Task<()>,
     /// Whether the listing on screen includes hidden files, and its order.
-    show_hidden: bool,
+    pub(super) show_hidden: bool,
     /// This folder shows its hidden files anyway, because Go to Folder was
     /// asked for one of them. Cleared on leaving the folder.
-    peek_hidden: bool,
+    pub(super) peek_hidden: bool,
     pub(super) sort: Sort,
     /// A rectangle being dragged over the listing to select.
     marquee: Option<Marquee>,
@@ -363,6 +370,8 @@ impl Pane {
             listing: false,
             watch: Watch::default(),
             view,
+            columns: Columns::default(),
+            trash_here: false,
             grid_icon,
             grid_inset: Rc::default(),
             across: 1,
@@ -529,6 +538,8 @@ impl Pane {
     fn set_view(&mut self, view: View) {
         if view != self.view {
             self.view = view;
+            // The chain starts at the folder it's switched in.
+            self.columns.root = None;
             self.rebuild();
             // The other layout put it somewhere else; the grid shows it
             // once it knows how many fit across.
@@ -566,7 +577,7 @@ impl Pane {
         }
     }
 
-    fn tidy_folders(&self, cx: &App) -> Vec<PathBuf> {
+    pub(super) fn tidy_folders(&self, cx: &App) -> Vec<PathBuf> {
         cx.try_global::<Places>()
             .map_or_else(Vec::new, Places::tidy_folders)
     }
@@ -695,8 +706,15 @@ impl Pane {
         self.refresh = None;
         self.held.clear();
         self.expanded.clear();
-        self.children.clear();
         self.expanding.clear();
+        if self.layout() == View::Columns {
+            // The folder being left may become a column; the next listing
+            // replaces what it keeps.
+            self.children
+                .insert(self.folder().to_path_buf(), self.root.clone());
+        } else {
+            self.children.clear();
+        }
     }
 
     /// Lists the folder and every folder expanded in it, or runs the search
@@ -750,6 +768,7 @@ impl Pane {
             None => Arc::new(sidebar::System),
         };
         let consented = std::mem::take(&mut self.consented);
+        self.trash_here = self.in_trash(cx);
         let show_hidden = cx.global::<Preferences>().show_hidden;
         self.show_hidden = show_hidden;
         let sort = self.sort;
@@ -758,7 +777,11 @@ impl Pane {
         // This listing covers the expanded folders too.
         self.expanding.clear();
         self.listing = true;
-        let open: Vec<PathBuf> = self.expanded.iter().cloned().collect();
+        let mut open: Vec<PathBuf> = self.expanded.iter().cloned().collect();
+        if self.layout() == View::Columns {
+            self.root_columns();
+            open.extend(self.column_folders());
+        }
         let work = cx.background_executor().spawn(async move {
             if !query.is_empty() {
                 if let Some(settle) = settle {
@@ -926,7 +949,7 @@ impl Pane {
     /// something not downloaded, and badges them when it answers. An answer
     /// replaces only what it was asked, so a folder opened in place while a
     /// listing's answer is on its way keeps its own.
-    fn ask_downloads<'a>(
+    pub(super) fn ask_downloads<'a>(
         &mut self,
         listed: impl IntoIterator<Item = &'a Entry>,
         cx: &mut Context<Self>,
@@ -961,11 +984,13 @@ impl Pane {
 
     /// The layout on screen: a content search's lines and a batch's new
     /// names only fit the list.
+    /// Search results, Recents and the Trash have no folders to chain, so
+    /// column view shows them as a list.
     pub(super) fn layout(&self) -> View {
-        if self.matches.is_empty() && self.batch.is_none() {
-            self.view
-        } else {
-            View::List
+        match self.view {
+            _ if !self.matches.is_empty() || self.batch.is_some() => View::List,
+            View::Columns if !self.showing_folder() || self.trash_here => View::List,
+            view => view,
         }
     }
 
@@ -973,9 +998,10 @@ impl Pane {
     /// so Enter opens it. A folder selects the one just left, else keeps its
     /// selection. Put back after a cancelled drag, the selection stays.
     pub(super) fn pick_selection(&mut self, left: Option<PathBuf>) {
+        let enter_first = std::mem::take(&mut self.columns.enter_first);
         let first = if std::mem::take(&mut self.keep_selection) {
             None
-        } else if self.query.is_empty() {
+        } else if self.query.is_empty() && !enter_first {
             left.and_then(|path| self.entries.iter().position(|e| e.path == path))
         } else {
             (!self.entries.is_empty()).then_some(0)
@@ -1015,7 +1041,7 @@ impl Pane {
     }
 
     /// Checks the changes held during a listing against what it watches.
-    fn recheck_held(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn recheck_held(&mut self, cx: &mut Context<Self>) {
         if self.listing || !self.expanding.is_empty() {
             return;
         }
@@ -1121,8 +1147,10 @@ impl Pane {
 
     /// → opens the selected folder in place, or steps into it if it's open.
     fn expand(&mut self, cx: &mut Context<Self>) {
-        if self.layout() == View::Grid {
-            return self.select(Move::By(1), false, cx);
+        match self.layout() {
+            View::Grid => return self.select(Move::By(1), false, cx),
+            View::Columns => return self.enter_column(cx),
+            View::List => {}
         }
         if !self.showing_folder() || self.listing {
             return;
@@ -1144,8 +1172,10 @@ impl Pane {
             return;
         }
         cx.stop_propagation();
-        if self.layout() == View::Grid {
-            return self.select(Move::By(-1), false, cx);
+        match self.layout() {
+            View::Grid => return self.select(Move::By(-1), false, cx),
+            View::Columns => return self.leave_column(event.is_held, cx),
+            View::List => {}
         }
         if !self.showing_folder() || self.listing {
             return;
@@ -1238,7 +1268,7 @@ impl Pane {
                     self.matches.last_row_of(ix)
                 }
             }
-            View::List => ix,
+            View::List | View::Columns => ix,
         };
         self.scroll.scroll_to_item(item, strategy);
     }
@@ -1386,7 +1416,7 @@ impl Pane {
             return corner;
         };
         let below = match self.layout() {
-            View::List => {
+            View::List | View::Columns => {
                 let height = cx.global::<Preferences>().row_size.metrics().0;
                 let row = self.matches.row_of(ix);
                 point(px(60.), px(4. + height * (row as f32 + 1.)))
@@ -1483,7 +1513,7 @@ impl Pane {
         // The list's padding, then in the grid each row's too.
         let (top, bottom) = (rect.top().as_f32() - 4., rect.bottom().as_f32() - 4.);
         match self.layout() {
-            View::List => {
+            View::List | View::Columns => {
                 let height = cx.global::<Preferences>().row_size.metrics().0;
                 let rows = span(top, bottom, height, self.matches.row_count(len));
                 self.matches.entries_in(rows)
@@ -1618,7 +1648,7 @@ impl Pane {
     }
 
     /// The rectangle, drawn over the listing where it is now.
-    fn marquee_overlay(&self) -> Option<impl IntoElement + use<>> {
+    pub(super) fn marquee_overlay(&self) -> Option<impl IntoElement + use<>> {
         let marquee = self.marquee.as_ref().filter(|m| m.dragging)?;
         let offset = self.scroll.0.borrow().base_handle.offset();
         let corner = marquee.start.min(&marquee.end) + offset;
@@ -1827,8 +1857,8 @@ impl Pane {
             return self.step_worktree(down, cx);
         }
         let step = match (self.layout(), down) {
-            (View::List, true) => Move::Next,
-            (View::List, false) => Move::Previous,
+            (View::List | View::Columns, true) => Move::Next,
+            (View::List | View::Columns, false) => Move::Previous,
             (View::Grid, _) => {
                 let across = self.grid_columns() as isize;
                 Move::By(if down { across } else { -across })
@@ -1858,8 +1888,10 @@ impl Pane {
         window.focus(&self.list_focus, cx);
     }
 
-    /// Opens a place and moves focus to its files.
+    /// Opens a place and moves focus to its files. Column view's chain starts
+    /// again there.
     pub(super) fn go(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.columns.root = None;
         self.navigate(path, cx);
         self.focus_list(window, cx);
     }
@@ -1947,6 +1979,8 @@ impl Pane {
                 None => {}
             }
         } else {
+            // Column view's chain starts again at what was asked for.
+            self.columns.root = None;
             self.navigate(folder, cx);
             if select.is_some() {
                 self.reselect = select;
@@ -2257,7 +2291,7 @@ impl Pane {
             .unwrap_or(name.len());
         let prefs = cx.global::<Preferences>();
         let size = match self.layout() {
-            View::List => prefs.row_size.metrics().2,
+            View::List | View::Columns => prefs.row_size.metrics().2,
             View::Grid => prefs.grid_label.metrics().2,
         };
         let field = cx.new(|cx| {
@@ -2657,7 +2691,7 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let prefs = cx.global::<Preferences>();
-        let (side, thumbs_on) = (prefs.grid_icon as f32, prefs.thumbnails);
+        let side = prefs.grid_icon as f32;
         let label = prefs.grid_label.metrics().2;
         let (cell, height) = (self.cell_width, grid_cell(prefs.grid_icon).1);
         let across = self.across;
@@ -2673,21 +2707,13 @@ impl Pane {
                         let entry = &self.entries[ix];
                         let selected = self.selection.contains(&entry.path);
                         let missing = self.missing.contains(&entry.path);
-                        let picture = (thumbs_on && thumbnails::wanted(entry))
-                            .then(|| Thumb {
-                                path: entry.path.clone(),
-                                side: pixels,
-                                modified: entry.modified,
-                            })
-                            .and_then(|thumb| {
-                                if !self.thumbs.contains_key(&thumb) {
-                                    thumbnails::hold(&thumb, cx);
-                                }
-                                let image = thumbnails::get(&thumb, window, cx);
-                                self.drawn.insert(thumb.clone());
-                                self.thumbs.insert(thumb, image.clone());
-                                image
-                            });
+                        let picture = thumbnail(
+                            (&mut self.thumbs, &mut self.drawn),
+                            entry,
+                            pixels,
+                            window,
+                            cx,
+                        );
                         let art = match picture {
                             // A square box: without one, `img` takes the
                             // picture's own shape, and a tall one spills
@@ -2794,8 +2820,14 @@ impl Pane {
         let searching = !self.showing_folder();
         // A grid pane's batch shows its rows as they are, flat.
         let tree = !searching && self.view == View::List;
+        let in_columns = self.layout() == View::Columns;
         let today = Local::now().date_naive();
-        let (date, size, kind) = columns(self.chrome.width);
+        let (date, size, kind) = if in_columns {
+            (false, false, false)
+        } else {
+            columns(self.chrome.width)
+        };
+        let name_room = if in_columns { COLUMN_WIDTH - 64. } else { 260. };
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
         self.list_row_height = row_height;
         // Finder greys the selection when the list isn't where keys go.
@@ -2828,8 +2860,9 @@ impl Pane {
                     content(0.65)
                 };
                 let rename = self
-                    .rename_field(&entry.path, 260., cx)
-                    .or_else(|| self.suggestion_field(&entry.path, 260., cx));
+                    .rename_field(&entry.path, name_room, cx)
+                    .or_else(|| self.suggestion_field(&entry.path, name_room, cx));
+                let chevron_here = in_columns && open.is_some();
                 let grabs = !missing && rename.is_none() && self.batch.is_none();
                 let new = self
                     .batch
@@ -2962,6 +2995,13 @@ impl Pane {
                                         .child(parent)
                                 })),
                         )
+                        .when(chevron_here, |d| {
+                            d.child(chevron(if selected {
+                                selected_ink
+                            } else {
+                                content(0.55)
+                            }))
+                        })
                         .when(date, |d| {
                             d.child(column(180., false).text_color(muted).child(if missing {
                                 "--".to_string()
@@ -3001,6 +3041,36 @@ impl Pane {
             })
             .collect()
     }
+}
+
+/// `entry`'s picture at `pixels`, if it has one and it's ready. A pane's
+/// `thumbs` hold it while each frame draws it, which `drawn` records, and give
+/// it back once a frame doesn't.
+pub(super) fn thumbnail(
+    (thumbs, drawn): (
+        &mut HashMap<Thumb, Option<Arc<RenderImage>>>,
+        &mut HashSet<Thumb>,
+    ),
+    entry: &Entry,
+    pixels: u32,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    if !(cx.global::<Preferences>().thumbnails && thumbnails::wanted(entry)) {
+        return None;
+    }
+    let thumb = Thumb {
+        path: entry.path.clone(),
+        side: pixels,
+        modified: entry.modified,
+    };
+    if !thumbs.contains_key(&thumb) {
+        thumbnails::hold(&thumb, cx);
+    }
+    let image = thumbnails::get(&thumb, window, cx);
+    drawn.insert(thumb.clone());
+    thumbs.insert(thumb, image.clone());
+    image
 }
 
 /// What a toast says once `request` has changed what `outcome` lists.
@@ -3187,7 +3257,7 @@ pub(super) fn grid_name(
 /// How wide the cloud badge is beside a grid label, and beside a list row's
 /// name.
 const GRID_BADGE: f32 = 12.;
-const LIST_BADGE: f32 = 14.;
+pub(super) const LIST_BADGE: f32 = 14.;
 
 /// The extension a cut name still shows. Past this many characters, or with
 /// a space, what follows the last dot is just more name, as in
@@ -3386,7 +3456,7 @@ pub(super) fn span(from: f32, to: f32, step: f32, count: usize) -> std::ops::Ran
 #[derive(Default)]
 pub(super) struct Watch {
     /// The folder and each open folder in it, by the path shown.
-    folders: HashMap<PathBuf, PathBuf>,
+    pub(super) folders: HashMap<PathBuf, PathBuf>,
     /// The folder's parent: renaming or deleting the folder changes it.
     parent: Option<PathBuf>,
 }
@@ -3678,6 +3748,9 @@ impl Pane {
         })
         .on_action(cx.listener(|this, _: &ViewAsList, _, cx| this.choose_view(View::List, cx)))
         .on_action(cx.listener(|this, _: &ViewAsGrid, _, cx| this.choose_view(View::Grid, cx)))
+        .on_action(
+            cx.listener(|this, _: &ViewAsColumns, _, cx| this.choose_view(View::Columns, cx)),
+        )
         .on_action(cx.listener(|this, _: &SortByName, _, cx| this.sort_by(SortBy::Name, cx)))
         .on_action(
             cx.listener(|this, _: &SortByModified, _, cx| this.sort_by(SortBy::Modified, cx)),
@@ -3800,9 +3873,16 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         // The list's rows don't depend on its width, so it shows at once.
-        if self.layout() == View::List {
+        if matches!(self.layout(), View::List | View::Columns) {
             self.take_pending_reveal();
         }
+        // Column view draws its own bounds and rectangle in the keys' column.
+        let in_columns = self.layout() == View::Columns
+            && self.error.is_none()
+            && self.unavailable.is_none()
+            && self.organizing.is_none()
+            && !self.showing_overview()
+            && self.preview.is_none();
         let list = match &self.error {
             _ if self.unavailable.is_some() => self.unavailable_view(cx).into_any_element(),
             Some(error) => div()
@@ -3858,6 +3938,7 @@ impl Pane {
                     )
                     .into_any_element()
             }
+            None if in_columns => self.columns_view(window, cx),
             None => uniform_list(
                 "entries",
                 self.matches.row_count(self.entries.len()),
@@ -4010,6 +4091,12 @@ impl Pane {
                     if std::mem::take(&mut this.grabbed) {
                         return;
                     }
+                    // In column view a rectangle selects in the keys' column.
+                    let elsewhere = this.layout() == View::Columns
+                        && !this.list_bounds.get().contains(&event.position);
+                    if elsewhere {
+                        return;
+                    }
                     let at = this.listing_point(event.position);
                     this.marquee = Some(Marquee {
                         start: at,
@@ -4051,13 +4138,15 @@ impl Pane {
                     })
                     .unwrap_or(list),
             )
-            .child({
+            .when(!in_columns, |d| {
                 let bounds = self.list_bounds.clone();
-                canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
-                    .absolute()
-                    .size_full()
+                d.child(
+                    canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+                .children(self.marquee_overlay())
             })
-            .children(self.marquee_overlay())
             .when(self.marquee.is_some(), |d| d.child(self.marquee_drag(cx)))
     }
 }
@@ -4072,6 +4161,7 @@ impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.follow_batch(window, cx);
         self.follow_organize(window, cx);
+        self.follow_columns(cx);
         self.preview_typing = false;
         if let Some(preview) = &self.preview {
             let covered = self.chrome.covered;

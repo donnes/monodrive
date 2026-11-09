@@ -20,7 +20,7 @@ use crate::browser::{
     Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder,
     ShowCopiesAndMoves, ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName,
     SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo,
-    ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -528,6 +528,12 @@ pub fn all() -> Vec<Command> {
                 Box::new(ViewAsGrid)
             }),
         ),
+        on(
+            FOLDER,
+            command("as Columns", View, &["cmd-alt-3"], None, || {
+                Box::new(ViewAsColumns)
+            }),
+        ),
         separated(command("Split View", View, &["cmd-alt-s"], BROWSER, || {
             Box::new(ToggleSplit)
         })),
@@ -896,6 +902,7 @@ pub(crate) fn checked(prefs: &Preferences) -> Vec<&'static str> {
     let view = match prefs.view {
         crate::preferences::View::List => ViewAsList.name(),
         crate::preferences::View::Grid => ViewAsGrid.name(),
+        crate::preferences::View::Columns => ViewAsColumns.name(),
     };
     let mut ids = vec![sort, view];
     if prefs.show_hidden {
@@ -1129,6 +1136,7 @@ mod tests {
                 "| Paste ⌘V",
                 "| ✓ as List ⌥⌘1",
                 "as Grid ⌥⌘2",
+                "as Columns ⌥⌘3",
                 "| Show Hidden Files ⌘>",
                 "| ✓ Sort by Name ⌃⌥⌘1",
                 "Sort by Date Modified ⌃⌥⌘2",

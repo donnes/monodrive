@@ -2515,3 +2515,36 @@ fn worktrees_has_a_sidebar_row_only_once_settings_shows_it(cx: &mut TestAppConte
         Some(Row::Favorite(0))
     ));
 }
+
+#[gpui::test]
+fn column_view_lists_a_folder_behind_a_privacy_prompt_only_when_asked(cx: &mut TestAppContext) {
+    let world = world(vec![startup()], cx);
+    let project = world.dir.path().canonicalize().unwrap().join("project");
+    let private = project.join("Private");
+    std::fs::create_dir_all(&private).unwrap();
+    std::fs::write(private.join("secret.txt"), "").unwrap();
+    std::fs::create_dir(project.join("Public")).unwrap();
+    world.fake.gated.lock().unwrap().push(private.clone());
+    let (browser, cx) = open(&world, &project, cx);
+    let listed = |dir: &Path, cx: &mut VisualTestContext| {
+        in_pane(&browser, cx, |pane, _| pane.children.contains_key(dir))
+    };
+    // Resting on it asks nothing of the disk; the last column offers Open.
+    press(cx, "cmd-alt-3 down");
+    cx.executor().advance_clock(super::inspector::READ_DELAY);
+    cx.run_until_parked();
+    assert_eq!(shown(&browser, cx).1, ["Private"]);
+    assert!(!listed(&private, cx));
+    let open = cx
+        .debug_bounds("column-open")
+        .expect("Open in the last column");
+    cx.simulate_click(open.center(), Modifiers::none());
+    cx.executor().advance_clock(super::inspector::READ_DELAY);
+    cx.run_until_parked();
+    assert!(listed(&private, cx));
+    // Its neighbor lists as soon as the selection rests on it.
+    press(cx, "down");
+    cx.executor().advance_clock(super::inspector::READ_DELAY);
+    cx.run_until_parked();
+    assert!(listed(&project.join("Public"), cx));
+}

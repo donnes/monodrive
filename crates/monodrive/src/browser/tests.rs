@@ -1842,6 +1842,7 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
         "Paste",
         "as List",
         "as Grid",
+        "as Columns",
         "Show Hidden Files",
         "Sort by Name",
         "Sort by Date Modified",
@@ -2607,4 +2608,85 @@ fn launch_waits_for_the_pane_without_focus_too(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(shown.get());
+}
+
+/// The names listed for `dir`'s column, if it's been listed.
+fn column_names(
+    browser: &Entity<Browser>,
+    dir: &Path,
+    cx: &mut VisualTestContext,
+) -> Option<Vec<String>> {
+    in_pane(browser, cx, |pane, _| {
+        let listed = pane.children.get(dir)?;
+        Some(listed.iter().map(|entry| entry.name.clone()).collect())
+    })
+}
+
+#[gpui::test]
+fn column_view_moves_the_keys_across_columns(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-alt-3 down");
+    assert_eq!(
+        in_pane(&browser, cx, |pane, _| pane.layout()),
+        View::Columns
+    );
+    assert_eq!(shown(&browser, cx).1, ["docs"]);
+    // The last column lists the selected folder once the selection rests.
+    cx.executor().advance_clock(super::inspector::READ_DELAY);
+    cx.run_until_parked();
+    let docs = project.join("docs");
+    assert_eq!(
+        column_names(&browser, &docs, cx),
+        Some(vec!["inner.md".into()])
+    );
+    // →: into it, with its first item selected and the folder a column back.
+    press(cx, "right");
+    assert_eq!(location(&browser, cx), docs);
+    assert_eq!(shown(&browser, cx).1, ["inner.md"]);
+    assert_eq!(
+        in_pane(&browser, cx, |pane, _| pane.trail()),
+        [project.as_path()]
+    );
+    // Commands act on the keys' column: New Folder makes one in docs.
+    press(cx, "cmd-shift-n");
+    assert!(docs.join("untitled folder").is_dir());
+    assert_eq!(
+        editing(&browser, cx),
+        Some(("untitled folder".into(), None))
+    );
+    press(cx, "escape");
+    // A click in the column back moves the keys there, onto what it hit.
+    let column = cx.debug_bounds("column-0").expect("the first column");
+    let height = Preferences::default().row_size.metrics().0;
+    let zeta = point(
+        column.left() + px(40.),
+        column.top() + px(4. + height * 1.5),
+    );
+    cx.simulate_click(zeta, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(location(&browser, cx), project);
+    assert_eq!(shown(&browser, cx).1, ["zeta"]);
+    // ←: back a column with the folder left selected, then past the first
+    // column, where the chain starts again.
+    press(cx, "up right left");
+    assert_eq!(location(&browser, cx), project);
+    assert_eq!(shown(&browser, cx).1, ["docs"]);
+    press(cx, "left");
+    assert_eq!(location(&browser, cx), project.parent().unwrap());
+    assert_eq!(shown(&browser, cx).1, ["project"]);
+    assert!(in_pane(&browser, cx, |pane, _| pane.trail()).is_empty());
+    press(cx, "cmd-[");
+    assert_eq!(location(&browser, cx), project);
+    // Opened by other means, as from the sidebar, a folder inside the chain
+    // starts one of its own.
+    press(cx, "down right");
+    assert_eq!(location(&browser, cx), docs);
+    assert!(!in_pane(&browser, cx, |pane, _| pane.trail()).is_empty());
+    let (pane, untitled) = (pane_of(&browser, cx), docs.join("untitled folder"));
+    cx.update(|window, cx| pane.update(cx, |pane, cx| pane.go(untitled, window, cx)));
+    cx.run_until_parked();
+    assert!(in_pane(&browser, cx, |pane, _| pane.trail()).is_empty());
+    release(owned, cx);
 }

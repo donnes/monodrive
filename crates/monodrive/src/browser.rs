@@ -3,6 +3,7 @@
 
 mod batch_rename;
 mod cloud;
+mod columns;
 mod drag;
 mod inspector;
 mod open_with;
@@ -120,6 +121,7 @@ actions!(
         CopyPath,
         ViewAsList,
         ViewAsGrid,
+        ViewAsColumns,
         SortByName,
         SortByModified,
         SortBySize,

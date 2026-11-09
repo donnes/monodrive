@@ -1122,7 +1122,12 @@ impl Browser {
 
 /// The picture, the name and the kind, centered at the top, and the cloud
 /// chip after the kind.
-fn header(art: AnyElement, name: AnyElement, kind: String, chip: Option<AnyElement>) -> AnyElement {
+pub(super) fn header(
+    art: AnyElement,
+    name: AnyElement,
+    kind: String,
+    chip: Option<AnyElement>,
+) -> AnyElement {
     div()
         .w_full()
         .pt(px(24.))
@@ -1195,7 +1200,7 @@ fn fact_row(label: &'static str) -> Div {
         )
 }
 
-fn fact(label: &'static str, value: String) -> AnyElement {
+pub(super) fn fact(label: &'static str, value: String) -> AnyElement {
     fact_ink(label, value, content(1.))
 }
 
