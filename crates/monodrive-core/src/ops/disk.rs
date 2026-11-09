@@ -1,9 +1,11 @@
 //! The system calls behind each operation: macOS's own Trash, renames that
 //! never replace, and copies that clone where APFS can.
 
+use crate::cloud::Availability;
+use crate::entries::{Kind, each_item};
 use objc2_foundation::{NSFileManager, NSString, NSURL};
 use serde::{Deserialize, Serialize};
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -64,19 +66,34 @@ pub fn stamp(path: &Path) -> io::Result<(FileId, Stamp)> {
         folders.push(path.to_path_buf());
     }
     while let Some(folder) = folders.pop() {
-        let Ok(items) = std::fs::read_dir(&folder) else {
-            continue;
-        };
-        for item in items.filter_map(Result::ok) {
-            // DirEntry::metadata doesn't follow links.
-            let Ok(meta) = item.metadata() else { continue };
+        let _unreadable_counts_as_empty = each_item(&folder, |item| {
+            let Ok(item) = item else { return Ok(()) };
+            let inside = folder.join(OsStr::from_bytes(item.name));
+            // Folders report no size in bulk, and the journal keeps stamps
+            // made with lstat's, so a folder's comes from lstat. Folders are
+            // about one item in ten.
+            let size = if item.kind == Kind::Dir {
+                match std::fs::symlink_metadata(&inside) {
+                    Ok(meta) => meta.size(),
+                    Err(_) => return Ok(()),
+                }
+            } else {
+                item.size
+            };
             stamp.entries += 1;
-            stamp.size += meta.size();
-            stamp.digest = stamp.digest.wrapping_add(mix(&meta));
-            if listable(&meta) {
-                folders.push(item.path());
+            stamp.size += size;
+            let (seconds, nanoseconds) = item.modified;
+            stamp.digest = stamp.digest.wrapping_add(mix_parts(
+                item.inode,
+                size,
+                seconds as u64,
+                nanoseconds as u64,
+            ));
+            if item.kind == Kind::Dir && Availability::from_flags(item.flags).is_local() {
+                folders.push(inside);
             }
-        }
+            Ok(())
+        });
     }
     Ok((id, stamp))
 }
@@ -100,16 +117,20 @@ pub fn stamp_open(file: &std::fs::File) -> io::Result<(FileId, Stamp)> {
 /// in doesn't matter; std's hasher isn't stable across releases, and the
 /// journal keeps stamps.
 fn mix(meta: &std::fs::Metadata) -> u64 {
-    [
+    mix_parts(
         meta.ino(),
         meta.size(),
         meta.mtime() as u64,
         meta.mtime_nsec() as u64,
-    ]
-    .into_iter()
-    .fold(0xcbf2_9ce4_8422_2325, |hash, part| {
-        (hash ^ part).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+    )
+}
+
+fn mix_parts(inode: u64, size: u64, seconds: u64, nanoseconds: u64) -> u64 {
+    [inode, size, seconds, nanoseconds]
+        .into_iter()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, part| {
+            (hash ^ part).wrapping_mul(0x0000_0100_0000_01b3)
+        })
 }
 
 /// Moves `path` to its volume's Trash and returns where it landed. Fails
@@ -434,16 +455,16 @@ pub fn tally(path: &Path) -> io::Result<(u64, u64)> {
         folders.push(path.to_path_buf());
     }
     while let Some(folder) = folders.pop() {
-        for item in std::fs::read_dir(&folder)? {
+        each_item(&folder, |item| {
             let item = item?;
-            let meta = item.metadata()?;
             tally.0 += 1;
-            if meta.is_file() {
-                tally.1 += meta.len();
-            } else if listable(&meta) {
-                folders.push(item.path());
+            if item.kind == Kind::File {
+                tally.1 += item.size;
+            } else if item.kind == Kind::Dir && Availability::from_flags(item.flags).is_local() {
+                folders.push(folder.join(OsStr::from_bytes(item.name)));
             }
-        }
+            Ok(())
+        })?;
     }
     Ok(tally)
 }
@@ -502,4 +523,80 @@ fn listable(meta: &std::fs::Metadata) -> bool {
 
 fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `stamp` and `tally` as they were before the bulk walk: `read_dir` and
+    /// an `lstat` per item. Stamps the journal kept were made this way.
+    fn by_lstat(path: &Path) -> (Stamp, (u64, u64)) {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        let mut stamp = Stamp {
+            entries: 0,
+            size: meta.size(),
+            digest: mix(&meta),
+        };
+        let mut tally = (0, 0);
+        let mut folders = vec![path.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            let Ok(items) = std::fs::read_dir(&folder) else {
+                continue;
+            };
+            for item in items.filter_map(Result::ok) {
+                let meta = item.metadata().unwrap();
+                stamp.entries += 1;
+                stamp.size += meta.size();
+                stamp.digest = stamp.digest.wrapping_add(mix(&meta));
+                tally.0 += 1;
+                if meta.is_file() {
+                    tally.1 += meta.len();
+                }
+                if listable(&meta) {
+                    folders.push(item.path());
+                }
+            }
+        }
+        (stamp, tally)
+    }
+
+    #[test]
+    fn the_bulk_walk_stamps_and_tallies_as_lstat_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("tree");
+        for folder in ["a/b/c", "a/empty", "d"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        for (i, file) in [
+            "a/one.txt",
+            "a/b/two.bin",
+            "a/b/c/three",
+            "d/four.md",
+            "five",
+        ]
+        .iter()
+        .enumerate()
+        {
+            std::fs::write(root.join(file), vec![7u8; 1_000 * i + 3]).unwrap();
+        }
+        std::os::unix::fs::symlink("one.txt", root.join("a/link")).unwrap();
+        std::os::unix::fs::symlink("a long way to nowhere", root.join("dangling")).unwrap();
+        let fifo = c_path(&root.join("d/pipe")).unwrap();
+        // SAFETY: a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        // Enough items in one folder for more than one bulk call's buffer.
+        for i in 0..3_000 {
+            std::fs::write(
+                root.join(format!("d/item with a fairly long name {i}")),
+                "x",
+            )
+            .unwrap();
+        }
+        let (stamp_before, tally_before) = by_lstat(&root);
+        let (_, now) = stamp(&root).unwrap();
+        assert_eq!(now, stamp_before);
+        assert_eq!(tally(&root).unwrap(), tally_before);
+        assert_eq!(now.entries, 3_013);
+    }
 }

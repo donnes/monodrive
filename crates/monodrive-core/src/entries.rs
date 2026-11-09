@@ -241,10 +241,31 @@ fn push_natural_key(name: &str, key: &mut Vec<u8>) {
 /// mid-listing are skipped, so one bad item never hides the rest. macOS's own
 /// `.DS_Store` and `.localized` stay out even with `show_hidden`.
 pub fn list_dir(dir: &Path, show_hidden: bool, order: Sort) -> std::io::Result<Vec<Entry>> {
-    let mut entries = read_folder(dir, |name| {
-        !(name == b".DS_Store"
+    use std::os::unix::ffi::OsStrExt;
+    let mut entries = Vec::new();
+    each_item(dir, |item| {
+        let Ok(item) = item else { return Ok(()) };
+        let name = item.name;
+        if name == b".DS_Store"
             || name == b".localized"
-            || (!show_hidden && name.first() == Some(&b'.')))
+            || (!show_hidden && name.first() == Some(&b'.'))
+        {
+            return Ok(());
+        }
+        // Sized once: `join` copies `dir` and then grows to fit the name.
+        let mut path = PathBuf::with_capacity(dir.as_os_str().len() + 1 + name.len());
+        path.push(dir);
+        // From the bytes, so a name that isn't UTF-8 still reaches its file.
+        path.push(std::ffi::OsStr::from_bytes(name));
+        entries.push(Entry {
+            path,
+            name: String::from_utf8_lossy(name).into_owned(),
+            kind: item.kind,
+            size: item.size,
+            modified: u64::try_from(item.modified.0).unwrap_or(0),
+            availability: Availability::from_flags(item.flags),
+        });
+        Ok(())
     })?;
     sort(&mut entries, order);
     Ok(entries)
@@ -257,11 +278,31 @@ const VREG: u32 = 1;
 const VDIR: u32 = 2;
 const VLNK: u32 = 5;
 
-/// The entries of `dir` whose names `keep` accepts. Each `getattrlistbulk`
-/// call hands back the name, type, size, date and flags of hundreds of
-/// entries, where `read_dir` takes an `lstat` per entry, which is most of
-/// the time a listing takes. Like `lstat`, it doesn't follow links.
-fn read_folder(dir: &Path, keep: impl Fn(&[u8]) -> bool) -> std::io::Result<Vec<Entry>> {
+/// One item of a folder, as `getattrlistbulk` reports it. Like `lstat`, it
+/// describes a link, not what it leads to.
+pub(crate) struct Item<'a> {
+    pub name: &'a [u8],
+    pub kind: Kind,
+    /// The bytes in a file or a link's target; 0 for a folder, whose size
+    /// `lstat` alone reports.
+    pub size: u64,
+    /// Seconds and nanoseconds since the Unix epoch.
+    pub modified: (i64, i64),
+    /// `st_flags`.
+    pub flags: u32,
+    pub inode: u64,
+}
+
+/// Calls `each` with every item in `dir`, or with why one couldn't be read,
+/// so one bad item never hides the rest; `each` can stop the walk with an
+/// error. Each `getattrlistbulk` call hands back hundreds of items' names,
+/// types, sizes, dates, flags and inodes, where `read_dir` takes an `lstat`
+/// per item, which is most of the time a listing takes. A volume that
+/// can't answer it is read with `read_dir` and `lstat` instead.
+pub(crate) fn each_item(
+    dir: &Path,
+    mut each: impl FnMut(std::io::Result<Item>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     let folder = std::fs::File::open(dir)?;
     let mut wanted = libc::attrlist {
@@ -272,14 +313,15 @@ fn read_folder(dir: &Path, keep: impl Fn(&[u8]) -> bool) -> std::io::Result<Vec<
             | libc::ATTR_CMN_NAME
             | libc::ATTR_CMN_OBJTYPE
             | libc::ATTR_CMN_MODTIME
-            | libc::ATTR_CMN_FLAGS,
+            | libc::ATTR_CMN_FLAGS
+            | libc::ATTR_CMN_FILEID,
         volattr: 0,
         dirattr: 0,
         fileattr: libc::ATTR_FILE_DATALENGTH,
         forkattr: 0,
     };
     let mut buffer = vec![0u8; 256 * 1024];
-    let mut entries = Vec::new();
+    let mut first = true;
     loop {
         // SAFETY: `wanted` and `buffer` outlive the call, and the kernel
         // writes no more than `buffer.len()` bytes.
@@ -293,14 +335,17 @@ fn read_folder(dir: &Path, keep: impl Fn(&[u8]) -> bool) -> std::io::Result<Vec<
             )
         };
         match count {
-            0 => return Ok(entries),
+            0 => return Ok(()),
             ..0 => {
                 let error = std::io::Error::last_os_error();
-                if error.kind() != std::io::ErrorKind::Interrupted {
-                    return Err(error);
+                match error.raw_os_error() {
+                    Some(libc::EINTR) => {}
+                    Some(libc::ENOTSUP) if first => return each_by_lstat(dir, each),
+                    _ => return Err(error),
                 }
             }
             _ => {
+                first = false;
                 let mut rest = buffer.as_slice();
                 for _ in 0..count {
                     let Some(length) = u32_at(rest, 0).map(|n| n as usize) else {
@@ -310,26 +355,52 @@ fn read_folder(dir: &Path, keep: impl Fn(&[u8]) -> bool) -> std::io::Result<Vec<
                         break;
                     };
                     rest = after;
-                    entries.extend(parse_record(dir, record, &keep));
+                    if let Some(item) = parse_record(record) {
+                        each(item)?;
+                    }
                 }
             }
         }
     }
 }
 
-/// One entry from `getattrlistbulk`'s buffer: its length, the attributes
-/// returned, then each one asked for that came back, in the order of their
-/// bits, 4-byte aligned.
-fn parse_record(dir: &Path, record: &[u8], keep: &impl Fn(&[u8]) -> bool) -> Option<Entry> {
+/// `each_item` the slow way, for a volume `getattrlistbulk` can't read.
+fn each_by_lstat(
+    dir: &Path,
+    mut each: impl FnMut(std::io::Result<Item>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    for item in std::fs::read_dir(dir)? {
+        let item = item.and_then(|item| Ok((item.file_name(), item.metadata()?)));
+        match item {
+            Err(error) => each(Err(error))?,
+            Ok((name, meta)) => each(Ok(Item {
+                name: name.as_bytes(),
+                kind: Kind::of(meta.file_type()),
+                size: if meta.is_dir() { 0 } else { meta.size() },
+                modified: (meta.mtime(), meta.mtime_nsec()),
+                flags: std::os::darwin::fs::MetadataExt::st_flags(&meta),
+                inode: meta.ino(),
+            }))?,
+        }
+    }
+    Ok(())
+}
+
+/// One item from `getattrlistbulk`'s buffer: its length, the attributes
+/// returned, then each one asked for that came back, in the order of their
+/// bits, 4-byte aligned. `None` for a record too short to hold a name.
+fn parse_record(record: &[u8]) -> Option<std::io::Result<Item<'_>>> {
     let returned = u32_at(record, 4)?;
     let file_returned = u32_at(record, 16)?;
     // After the length and the five words of `attribute_set_t`.
     let mut at = 24;
     let has = |bit: u32| returned & bit != 0;
     if has(ATTR_CMN_ERROR) {
-        if u32_at(record, at)? != 0 {
-            return None;
+        let error = u32_at(record, at)?;
+        if error != 0 {
+            return Some(Err(std::io::Error::from_raw_os_error(error as i32)));
         }
         at += 4;
     }
@@ -341,9 +412,6 @@ fn parse_record(dir: &Path, record: &[u8], keep: &impl Fn(&[u8]) -> bool) -> Opt
     let start = at.checked_add_signed(i32::from_ne_bytes(word(record, at)?) as isize)?;
     let length = u32_at(record, at + 4)? as usize;
     let name = record.get(start..start + length.checked_sub(1)?)?;
-    if !keep(name) {
-        return None;
-    }
     at += 8;
     let mut kind = Kind::Other;
     if has(libc::ATTR_CMN_OBJTYPE) {
@@ -355,35 +423,35 @@ fn parse_record(dir: &Path, record: &[u8], keep: &impl Fn(&[u8]) -> bool) -> Opt
         };
         at += 4;
     }
-    let mut modified = 0;
+    let mut modified = (0, 0);
     if has(libc::ATTR_CMN_MODTIME) {
         // A `timespec`: whole seconds, then nanoseconds.
-        modified = u64::try_from(i64_at(record, at)?).unwrap_or(0);
+        modified = (i64_at(record, at)?, i64_at(record, at + 8)?);
         at += 16;
     }
-    let mut availability = Availability::Local;
+    let mut flags = 0;
     if has(libc::ATTR_CMN_FLAGS) {
-        availability = Availability::from_flags(u32_at(record, at)?);
+        flags = u32_at(record, at)?;
         at += 4;
+    }
+    let mut inode = 0;
+    if has(libc::ATTR_CMN_FILEID) {
+        inode = u64::from_ne_bytes(record.get(at..at + 8)?.try_into().ok()?);
+        at += 8;
     }
     let size = if file_returned & libc::ATTR_FILE_DATALENGTH != 0 {
         u64::try_from(i64_at(record, at)?).unwrap_or(0)
     } else {
         0
     };
-    // Sized once: `join` copies `dir` and then grows to fit the name.
-    let mut path = PathBuf::with_capacity(dir.as_os_str().len() + 1 + name.len());
-    path.push(dir);
-    // From the bytes, so a name that isn't UTF-8 still reaches its file.
-    path.push(std::ffi::OsStr::from_bytes(name));
-    Some(Entry {
-        path,
-        name: String::from_utf8_lossy(name).into_owned(),
+    Some(Ok(Item {
+        name,
         kind,
         size,
         modified,
-        availability,
-    })
+        flags,
+        inode,
+    }))
 }
 
 fn word(bytes: &[u8], at: usize) -> Option<[u8; 4]> {
