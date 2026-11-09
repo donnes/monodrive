@@ -8,7 +8,7 @@ The last baselines before `scripts/bench`, on an M3 Pro: listing 10,000 entries 
 
 ## Listing
 
-A listing asks `getattrlistbulk` for each batch of entries' names, types, sizes, dates and flags, where `read_dir` needed an `lstat` per entry. The kernel reading each entry's inode is still most of the time: about 4.5 ms of the 10 ms for 10,000 entries. Sorting writes every entry's key into one buffer and its first eight bytes into a number, so most comparisons are one integer compare.
+A listing asks `getattrlistbulk` for each batch of entries' names, types, sizes, dates, flags and inodes, where `read_dir` needed an `lstat` per entry. A copy's checks walk with the same call: `tally` and `stamp`, which together walked a copied folder about four times, item by item. `stamp` still takes each folder's size from `lstat`, since the journal keeps stamps made with it and the bulk call reports none for folders. The kernel reading each entry's inode is still most of the time: about 4.5 ms of the 10 ms for 10,000 entries. Sorting writes every entry's key into one buffer and its first eight bytes into a number, so most comparisons are one integer compare.
 
 ## Launch
 
