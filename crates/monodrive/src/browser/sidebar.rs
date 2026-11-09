@@ -556,19 +556,52 @@ impl Browser {
         if self.sidebar.worktrees { 3 } else { 2 }
     }
 
+    /// How many volumes lead Locations, ahead of the cloud folders: the
+    /// startup disk, which `volumes::list` puts first.
+    fn startup_disks(&self) -> usize {
+        self.sidebar
+            .volumes
+            .iter()
+            .take_while(|v| v.startup)
+            .count()
+    }
+
+    /// The row of Locations' first: the startup disk.
+    fn first_location(&self) -> usize {
+        self.first_favorite() + self.sidebar.places.len()
+    }
+
+    /// The row of volume `vol`: the startup disk before the cloud folders,
+    /// the other drives after them.
+    fn volume_ix(&self, vol: usize) -> usize {
+        let cloud = if vol < self.startup_disks() {
+            0
+        } else {
+            self.sidebar.cloud.len()
+        };
+        self.first_location() + cloud + vol
+    }
+
+    /// The row of saved server `at`, after every drive.
+    fn server_ix(&self, at: usize) -> usize {
+        self.first_location() + self.sidebar.cloud.len() + self.sidebar.volumes.len() + at
+    }
+
     /// What the sidebar's keys are on.
     pub(super) fn row_at(&self, ix: usize) -> Option<Row> {
         let first = self.first_favorite();
-        let favorites = self.sidebar.places.len();
+        let locations = self.first_location();
+        let startup = self.startup_disks();
         let cloud = self.sidebar.cloud.len();
         match ix {
             0 => Some(Row::Overview),
             1 => Some(Row::Recents),
             2 if self.sidebar.worktrees => Some(Row::Worktrees),
-            ix if ix < first + favorites => Some(Row::Favorite(ix - first)),
-            ix if ix < first + favorites + cloud => Some(Row::Cloud(ix - favorites - first)),
+            ix if ix < locations => Some(Row::Favorite(ix - first)),
+            ix if ix < locations + startup => Some(Row::Volume(ix - locations)),
+            ix if ix < locations + startup + cloud => Some(Row::Cloud(ix - locations - startup)),
             ix => {
-                let volume = ix - favorites - cloud - first;
+                let volume = ix - locations - cloud;
                 let volumes = self.sidebar.volumes.len();
                 if volume < volumes {
                     return Some(Row::Volume(volume));
@@ -772,13 +805,7 @@ impl Browser {
         }
         if let Some(id) = pane.remote_source() {
             let ix = self.sidebar.remotes.iter().position(|s| s.id == id)?;
-            return Some(
-                self.first_favorite()
-                    + self.sidebar.places.len()
-                    + self.sidebar.cloud.len()
-                    + self.sidebar.volumes.len()
-                    + ix,
-            );
+            return Some(self.server_ix(ix));
         }
         let folder = pane.folder();
         let favorite = self
@@ -787,10 +814,9 @@ impl Browser {
             .iter()
             .position(|place| place.at() == Some(folder))
             .map(|ix| ix + self.first_favorite());
-        let after_favorites = self.sidebar.places.len() + self.first_favorite();
         let cloud = || {
             let ix = self.sidebar.cloud.iter().position(|c| c.path == folder)?;
-            Some(ix + after_favorites)
+            Some(self.first_location() + self.startup_disks() + ix)
         };
         let volume = || {
             let ix = self
@@ -798,7 +824,7 @@ impl Browser {
                 .volumes
                 .iter()
                 .position(|v| v.mount == folder)?;
-            Some(ix + after_favorites + self.sidebar.cloud.len())
+            Some(self.volume_ix(ix))
         };
         favorite.or_else(cloud).or_else(volume)
     }
@@ -1046,7 +1072,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let folder = &self.sidebar.cloud[at];
-        let ix = at + self.first_favorite() + self.sidebar.places.len();
+        let ix = self.first_location() + self.startup_disks() + at;
         let selected = here.showing_folder() && here.folder == folder.path;
         let row = Self::row(ix, selected, true, cursor)
             .h(px(ROW_HEIGHT))
@@ -1070,7 +1096,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let volume = &self.sidebar.volumes[vol];
-        let ix = vol + self.first_favorite() + self.sidebar.places.len() + self.sidebar.cloud.len();
+        let ix = self.volume_ix(vol);
         let selected = here.showing_folder() && here.folder == volume.mount;
         let mount = volume.mount.clone();
         let glyph = if volume.network {
@@ -1154,11 +1180,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let source = &self.sidebar.remotes[at];
-        let ix = at
-            + self.first_favorite()
-            + self.sidebar.places.len()
-            + self.sidebar.cloud.len()
-            + self.sidebar.volumes.len();
+        let ix = self.server_ix(at);
         let selected = here.server.as_deref() == Some(source.id.as_str());
         let link = remote::link(&source.id, cx).cloned();
         let failed = match &link {
@@ -1422,11 +1444,7 @@ impl Browser {
         };
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
-        let last_row = self.first_favorite() - 1
-            + self.sidebar.places.len()
-            + self.sidebar.cloud.len()
-            + self.sidebar.volumes.len()
-            + self.sidebar.remotes.len();
+        let last_row = self.server_ix(self.sidebar.remotes.len()) - 1;
         div()
             .relative()
             .w(px(width))
@@ -1614,12 +1632,17 @@ impl Browser {
                     )
                     .child(section_label("Locations").flex_shrink_0())
                     .children(
+                        (0..self.startup_disks())
+                            .map(|vol| self.volume_row(vol, &here, cursor, cx))
+                            .collect::<Vec<_>>(),
+                    )
+                    .children(
                         (0..self.sidebar.cloud.len())
                             .map(|ix| self.cloud_row(ix, &here, cursor, cx))
                             .collect::<Vec<_>>(),
                     )
                     .children(
-                        (0..self.sidebar.volumes.len())
+                        (self.startup_disks()..self.sidebar.volumes.len())
                             .map(|vol| self.volume_row(vol, &here, cursor, cx))
                             .collect::<Vec<_>>(),
                     )

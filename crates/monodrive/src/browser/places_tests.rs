@@ -301,7 +301,9 @@ fn drives_show_how_full_each_is_with_marks_and_follow_the_watch(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn cloud_folders_lead_locations_and_open_with_the_drives_after_them(cx: &mut TestAppContext) {
+fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
+    cx: &mut TestAppContext,
+) {
     let (_dir, project) = folder();
     let ext = tempfile::tempdir().unwrap();
     let drive = ext.path().canonicalize().unwrap();
@@ -319,7 +321,12 @@ fn cloud_folders_lead_locations_and_open_with_the_drives_after_them(cx: &mut Tes
     let owned = own(cx);
     let (browser, cx) = open(&world, &project, cx);
     let first = favorites(&browser, cx).len() + 2;
-    press_on(cx, &format!("place-{}", first + 1));
+    let rows: Vec<_> = (first..first + 4)
+        .map(|ix| browser.read_with(cx, |b, _| b.row_at(ix)))
+        .collect();
+    let expected = [Row::Volume(0), Row::Cloud(0), Row::Cloud(1), Row::Volume(1)];
+    assert_eq!(rows, expected.map(Some));
+    press_on(cx, &format!("place-{}", first + 2));
     assert_eq!(here(&browser, cx), project.join("zeta"));
     // From the cloud folder that's open, the keys go on to the drives.
     let focus_sidebar = |cx: &mut VisualTestContext| {
@@ -330,7 +337,7 @@ fn cloud_folders_lead_locations_and_open_with_the_drives_after_them(cx: &mut Tes
     press(cx, "up enter");
     assert_eq!(here(&browser, cx), project.join("docs"));
     focus_sidebar(cx);
-    press(cx, "down down down cmd-e");
+    press(cx, "down down cmd-e");
     assert_eq!(*world.fake.ejected.lock().unwrap(), vec![drive]);
     release(owned, cx);
 }
