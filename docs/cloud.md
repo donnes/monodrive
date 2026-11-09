@@ -27,10 +27,18 @@ We chose the private class over keeping our own copy of that answer, which would
 
 ## Copies refuse placeholders
 
-Copy, a move to another volume, Duplicate, Compress and Extract read contents, so the operation owner refuses any item that is a placeholder or holds one. The refusal names the path and says to download it first. A move within one volume is a rename and moves placeholders as they are. Downloading inside a job would make the job wait on the network with no progress to show. A separate, explicit download keeps that work visible and lets the job continue afterwards. Opening a file with an app and Quick Look leave downloading to macOS, as Finder does.
+Copy, a move to another volume, Duplicate, Compress and Extract read contents, so the operation owner refuses any item that is a placeholder or holds one. The refusal names the path and says to download it first. A move within one volume is a rename and moves placeholders as they are. Downloading inside a job would make the job wait on the network with no progress to show. A separate, explicit download keeps that work visible and lets the job continue afterwards. Quick Look leaves downloading to macOS, as Finder does.
 
 ## Download and remove download
 
 `cloud::download` asks `NSFileManager.startDownloadingUbiquitousItem(at:)`. On current macOS this covers iCloud Drive and File Provider domains alike: their items report the ubiquitous resource keys. It returns once macOS accepts the request; `info` then shows `Downloading` and, when the download fails, the provider's reason. An item outside iCloud Drive and File Provider folders is refused. A placeholder whose provider doesn't expose these keys gets "downloading is unsupported for this provider".
 
-`cloud::remove_download` is Finder's Remove Download, through `evictUbiquitousItem(at:)`. It refuses an item that isn't uploaded yet or has unresolved conflicts, because the local copy may be the only one. Downloading again reverses it. Agents can do either only while the Agents setting lets them change files.
+`cloud::remove_download` is Finder's Remove Download, through `evictUbiquitousItem(at:)`. It refuses an item that isn't uploaded yet or has unresolved conflicts, because the local copy may be the only one. Downloading again reverses it. Agents can do either only while the Agents setting lets them change files; the MCP server checks that before asking.
+
+## Downloads in the window
+
+macOS doesn't say when a download ends, so the app's `downloads` list checks each one it asked for with `cloud::progress` once a second while any are on their way, and not at all otherwise. A download is done when the item, and for a folder everything under it, is no longer a placeholder; it failed when the provider reports an error, which is how an interrupted download shows up, or when the item can't be read any more. Every pane, the inspector, the preview and the jobs popover read that one list, and whatever lists the item lists it again when it's done.
+
+The badge is the way in: clicking it downloads, it turns into a still downloading glyph, and a failure turns it red and tries again on a click. Download and Remove Download are commands, offered only where they run. Opening a placeholder downloads it first and opens it in its app once it's here, so the app never sits waiting on the network. The preview never downloads on its own, so arrowing through a cloud folder fetches nothing; it offers Download. A copy refused for a placeholder offers Download in its toast or in the jobs popover, where the job runs again once it lands. Remove Download's toast offers Download as the way back.
+
+There is no progress fraction: Foundation doesn't expose one for File Provider items that we can check without a real provider, and nothing in the window repaints continuously.

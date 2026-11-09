@@ -1361,17 +1361,20 @@ impl Server {
     fn ask_cloud(
         &self,
         paths: &[String],
-        ask: fn(&Path, &Origin, &ops::Client) -> Result<Asked, String>,
+        ask: fn(&Path) -> Result<Asked, String>,
         requested: &str,
         unneeded: &str,
     ) -> Result<String, String> {
-        let origin = Origin::Agent {
-            client: self.client.clone(),
-        };
+        if !self.ops.agents_change_files() {
+            return Err(
+                "Agents can't download or remove downloads: Let agents change files is off in Monodrive's Agents settings.\n"
+                    .into(),
+            );
+        }
         let mut failed = false;
-        let mut lines: Vec<String> = expand(paths)
+        let lines: Vec<String> = expand(paths)
             .iter()
-            .map(|path| match ask(path, &origin, &self.ops) {
+            .map(|path| match ask(path) {
                 Ok(Asked::Requested) => format!("{}: {requested}", path.display()),
                 Ok(Asked::Unneeded) => format!("{}: {unneeded}", path.display()),
                 Err(e) => {
@@ -1380,8 +1383,6 @@ impl Server {
                 }
             })
             .collect();
-        // The Agents setting refuses every path alike.
-        lines.dedup();
         let text = lines.join("\n") + "\n";
         if failed { Err(text) } else { Ok(text) }
     }

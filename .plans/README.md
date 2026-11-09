@@ -23,7 +23,7 @@ Update a plan's row when its work lands on `main`.
 | 13 Archives | Core on main; UI picked, not built | |
 | 14 Remote locations | Core on main; UI picked, not built | |
 | 17 Storage inspection | Core on main; UI picked, not built | |
-| 18 Cloud storage | Core on main; UI picked, not built | |
+| 18 Cloud storage | Done; downloading and removing downloads from a real iCloud Drive or File Provider folder needs a person to check | |
 | 19 Column view | UI picked, not built | |
 | 21 User commands | Core on main; UI picked, not built; parked | |
 | 22 Worktree management | Inventory on main; goal changed to one place to scan and manage all worktrees; deletion needs a design review | |
@@ -51,7 +51,7 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - 13: browse a ZIP like a folder, with a read-only header and Extract buttons.
 - 14: servers under Locations.
 - 17: a report of largest files and verified duplicates, with a review before anything goes to the Trash.
-- 18: a cloud badge at the end of the row or on a grid icon's corner; clicking it downloads.
+- 18: a cloud badge at the end of the row or on a grid icon's corner; clicking it downloads. The inspector shows where an item is as a chip by its kind, which is the button.
 - 19: columns with a preview in the last column.
 - 21: a Commands page in Settings.
 - 22: one place to manage all worktrees. The search index finds .git entries and Git confirms each repository. Delete moves the folder to the Trash, then removes Git's registration; refused if locked or the main worktree, and dirty or unpushed work needs an extra confirmation showing what's there.

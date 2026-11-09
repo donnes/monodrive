@@ -12,9 +12,11 @@ use crate::native::{MadeUp, Native, SizeDone};
 use crate::thumbnails::{Holders, Thumb};
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use monodrive_core::apps::App as MacApp;
+use monodrive_core::cloud::{Asked, Availability, Progress};
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::info::{self, Info};
 use monodrive_core::sizes::FolderSize;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A walk that hasn't finished.
@@ -33,7 +35,7 @@ impl Drop for Cancels {
 }
 
 #[derive(Default)]
-struct Fake {
+pub(super) struct Fake {
     reads: Mutex<Vec<PathBuf>>,
     gated: Mutex<Vec<PathBuf>>,
     walks: Mutex<Vec<Walk>>,
@@ -47,6 +49,15 @@ struct Fake {
     defaults: Mutex<Vec<(PathBuf, PathBuf)>>,
     /// What Other… picks.
     chosen: Mutex<Option<PathBuf>>,
+    /// What it says is in the cloud and not downloaded.
+    pub(super) placeholders: Mutex<HashSet<PathBuf>>,
+    /// What it was asked to download, and to remove the download of.
+    pub(super) downloads: Mutex<Vec<PathBuf>>,
+    pub(super) removed: Mutex<Vec<PathBuf>>,
+    /// Refuses to download these, as macOS would, with why.
+    pub(super) refuse: Mutex<HashMap<PathBuf, String>>,
+    /// How each download stands; not listed is running.
+    pub(super) progress: Mutex<HashMap<PathBuf, Progress>>,
 }
 
 fn app(name: &str) -> MacApp {
@@ -60,7 +71,12 @@ fn app(name: &str) -> MacApp {
 impl Native for Fake {
     fn info(&self, path: &Path) -> Result<Info, String> {
         self.reads.lock().unwrap().push(path.to_path_buf());
-        info::info(path)
+        let mut info = info::info(path)?;
+        if self.placeholders.lock().unwrap().contains(path) {
+            info.availability = Availability::Placeholder;
+            info.in_cloud = true;
+        }
+        Ok(info)
     }
 
     fn needs_consent(&self, path: &Path) -> bool {
@@ -132,6 +148,24 @@ impl Native for Fake {
 
     fn installed(&self, _: &str) -> bool {
         true
+    }
+
+    fn download(&self, path: &Path) -> Result<Asked, String> {
+        self.downloads.lock().unwrap().push(path.to_path_buf());
+        match self.refuse.lock().unwrap().get(path) {
+            Some(why) => Err(why.clone()),
+            None => Ok(Asked::Requested),
+        }
+    }
+
+    fn remove_download(&self, path: &Path) -> Result<Asked, String> {
+        self.removed.lock().unwrap().push(path.to_path_buf());
+        Ok(Asked::Requested)
+    }
+
+    fn download_progress(&self, path: &Path) -> Progress {
+        let progress = self.progress.lock().unwrap().get(path).cloned();
+        progress.unwrap_or(Progress::Running)
     }
 }
 

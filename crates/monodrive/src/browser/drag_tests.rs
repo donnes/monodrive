@@ -103,7 +103,7 @@ fn a_drop_on_a_folder_row_moves_only_on_release_and_undo_puts_it_back(cx: &mut T
         toast(&browser, cx),
         Some(("Moved \"a.txt\" to docs".into(), false, true))
     );
-    click(cx, "toast-undo");
+    click(cx, "toast-offer");
     assert!(project.join("a.txt").exists() && !project.join("docs/a.txt").exists());
     release(owned, cx);
 }

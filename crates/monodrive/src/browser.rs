@@ -2,6 +2,7 @@
 //! search over the whole-disk index.
 
 mod batch_rename;
+mod cloud;
 mod drag;
 mod inspector;
 mod open_with;
@@ -15,6 +16,8 @@ mod trash;
 
 #[cfg(test)]
 mod batch_rename_tests;
+#[cfg(test)]
+mod cloud_tests;
 #[cfg(test)]
 mod drag_tests;
 #[cfg(test)]
@@ -180,6 +183,8 @@ actions!(
         GetInfo,
         HideInspector,
         OpenWith,
+        Download,
+        RemoveDownload,
     ]
 );
 
@@ -493,6 +498,7 @@ impl Browser {
     }
 
     fn empty(cx: &mut Context<Self>) -> Self {
+        Self::follow_downloads(cx);
         let sidebar_open = cx.global::<Preferences>().show_sidebar;
         let jobs = cx.new(|_| Jobs::new());
         cx.subscribe(&jobs, |this, _, event: &JobsEvent, cx| match event {
@@ -673,7 +679,11 @@ impl Browser {
     /// What a pane asks of its window.
     fn pane_event(&mut self, pane: Entity<Pane>, event: &PaneEvent, cx: &mut Context<Self>) {
         match event {
-            PaneEvent::Toast { text, failed, undo } => self.toast(text.clone(), *failed, *undo, cx),
+            PaneEvent::Toast {
+                text,
+                failed,
+                offer,
+            } => self.toast(text.clone(), *failed, offer.clone(), cx),
             PaneEvent::ClearToast => self.toast = None,
             PaneEvent::Follow(job) => self.jobs.update(cx, |jobs, cx| jobs.follow(*job, cx)),
             PaneEvent::VolumesChanged => self.load_volumes(cx),
@@ -1554,7 +1564,7 @@ impl Browser {
     /// A paste or Move Here finished: what it made is selected, if it's
     /// here, and a toast offers Undo.
     fn job_finished(&mut self, job: Job, cx: &mut Context<Self>) {
-        let undo = job.undoable.then_some(job.run);
+        let undo = job.undoable.then_some(Offer::Undo(job.run));
         self.toast(jobs::title(&job), false, undo, cx);
         // A job's bytes may have moved between volumes.
         self.load_volumes(cx);
@@ -1707,22 +1717,29 @@ impl Browser {
                     .text_color(ink)
                     .child(toast.text.clone()),
             )
-            .when_some(toast.undo, |d, op| {
+            .when_some(toast.offer.clone(), |d, offer| {
+                let label = match &offer {
+                    Offer::Undo(_) => "Undo",
+                    Offer::Download(label, _) => label,
+                };
                 d.child(
-                    theme::text_button("toast-undo", "Undo", ButtonLook::Ghost)
-                        .debug_selector(|| "toast-undo".into())
+                    theme::text_button("toast-offer", label, ButtonLook::Ghost)
+                        .debug_selector(|| "toast-offer".into())
                         .relative()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(accent())
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.toast = None;
-                            this.pane().update(cx, |pane, cx| {
-                                pane.submit(Request::UndoOf { op }, window, cx)
+                            this.pane().update(cx, |pane, cx| match &offer {
+                                Offer::Undo(op) => {
+                                    pane.submit(Request::UndoOf { op: *op }, window, cx)
+                                }
+                                Offer::Download(_, paths) => pane.download(paths.clone(), cx),
                             });
                         })),
                 )
             })
-            .when(toast.undo.is_none(), |d| d.pr_3());
+            .when(toast.offer.is_none(), |d| d.pr_3());
         // The entrance plays when a toast appears, not when a new one takes
         // the place of one on screen. Both run once and skip with Reduce Motion.
         let card = if toast.leaving {
@@ -1743,9 +1760,9 @@ impl Browser {
     }
 
     /// Says `text` at the bottom of the files for `TOAST_FOR`, in red if
-    /// it's a failure, with Undo of operation `undo` if given. It replaces
-    /// the last one.
-    fn toast(&mut self, text: String, failed: bool, undo: Option<u64>, cx: &mut Context<Self>) {
+    /// it's a failure, with a button for `offer` if given. It replaces the
+    /// last one.
+    fn toast(&mut self, text: String, failed: bool, offer: Option<Offer>, cx: &mut Context<Self>) {
         let expire = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
             let leaves = this.update(cx, |this, cx| {
@@ -1770,7 +1787,7 @@ impl Browser {
         self.toast = Some(Toast {
             text,
             failed,
-            undo,
+            offer,
             leaving: false,
             _expire: expire,
         });
@@ -1887,9 +1904,10 @@ impl Render for Browser {
             }
         }));
         // What acts on a pane goes to the one the commands are for.
+        let cloud = self.sidebar.cloud.clone();
         let root = self
             .pane()
-            .update(cx, |pane, cx| pane.commands(root, sheet, cx));
+            .update(cx, |pane, cx| pane.commands(root, sheet, &cloud, cx));
         let root = self.inspector_commands(root, sheet, selected, &prefs, cx);
         root
             // While a sheet is open, its commands (from the menu bar too) wait.
@@ -2182,13 +2200,21 @@ struct MenuRequest {
     open_with: bool,
 }
 
+/// What a toast's button does.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Offer {
+    /// Undo of this operation, which the owner refuses once anything else
+    /// has changed files since.
+    Undo(u64),
+    /// Downloads these, under this label: Download, or Try Again.
+    Download(&'static str, Vec<PathBuf>),
+}
+
 /// A message after a change.
 struct Toast {
     text: String,
     failed: bool,
-    /// Offers Undo of this operation, which the owner refuses once
-    /// anything else has changed files since.
-    undo: Option<u64>,
+    offer: Option<Offer>,
     /// On its way out, for `motion::EXIT`.
     leaving: bool,
     _expire: Task<()>,
