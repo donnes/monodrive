@@ -4,12 +4,15 @@
 //! between builds of different commits, so change it only with `format::ROUND`.
 
 #[cfg(target_os = "macos")]
+pub mod compare;
+#[cfg(target_os = "macos")]
 pub mod core;
 #[cfg(target_os = "macos")]
 pub mod mcp;
 pub mod platform;
 #[cfg(target_os = "macos")]
 pub mod search;
+pub mod workload;
 
 use crate::format::Measured;
 use std::path::Path;
@@ -23,15 +26,25 @@ pub enum Suite {
     Search,
     #[cfg(target_os = "macos")]
     Mcp,
+    Workload,
+    #[cfg(target_os = "macos")]
+    Compare,
 }
 
 impl Suite {
     /// What `scripts/bench` runs with no suite named.
     pub fn defaults() -> Vec<Suite> {
         #[cfg(target_os = "macos")]
-        return vec![Suite::Platform, Suite::Core, Suite::Search, Suite::Mcp];
+        return vec![
+            Suite::Platform,
+            Suite::Core,
+            Suite::Search,
+            Suite::Mcp,
+            Suite::Workload,
+            Suite::Compare,
+        ];
         #[cfg(not(target_os = "macos"))]
-        return vec![Suite::Platform];
+        return vec![Suite::Platform, Suite::Workload];
     }
 
     pub fn name(self) -> &'static str {
@@ -43,6 +56,9 @@ impl Suite {
             Suite::Search => "search",
             #[cfg(target_os = "macos")]
             Suite::Mcp => "mcp",
+            Suite::Workload => "workload",
+            #[cfg(target_os = "macos")]
+            Suite::Compare => "compare",
         }
     }
 
@@ -55,6 +71,9 @@ impl Suite {
             "search" => Ok(Suite::Search),
             #[cfg(target_os = "macos")]
             "mcp" => Ok(Suite::Mcp),
+            "workload" => Ok(Suite::Workload),
+            #[cfg(target_os = "macos")]
+            "compare" => Ok(Suite::Compare),
             other => Err(format!(
                 "{other}: no such suite on {}",
                 std::env::consts::OS
@@ -81,6 +100,9 @@ impl Suite {
             Suite::Search => search::prepare(fixture, seed),
             #[cfg(target_os = "macos")]
             Suite::Mcp => mcp::prepare(fixture, seed),
+            Suite::Workload => workload::prepare(fixture, seed),
+            #[cfg(target_os = "macos")]
+            Suite::Compare => compare::prepare(fixture, seed, made.tree),
         }
     }
 
@@ -94,6 +116,9 @@ impl Suite {
             Suite::Search => search::round(fixture),
             #[cfg(target_os = "macos")]
             Suite::Mcp => mcp::round(fixture),
+            Suite::Workload => workload::round(fixture),
+            #[cfg(target_os = "macos")]
+            Suite::Compare => compare::round(fixture),
         }
     }
 
@@ -103,6 +128,8 @@ impl Suite {
         match self {
             #[cfg(target_os = "macos")]
             Suite::Core => core::finish(fixture),
+            #[cfg(target_os = "macos")]
+            Suite::Compare => compare::finish(fixture),
             _ => Ok(()),
         }
     }

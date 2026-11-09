@@ -28,7 +28,7 @@ Update a plan's row when its work lands on `main`.
 | 21 User commands | Core on main; UI picked, not built; parked | |
 | 22 Worktree management | Done: the disk-wide scan, the Worktrees page (option A) and removal through the Trash with undo, in core, MCP and the window. Creation through MCP is its own later milestone. Keeping a detached HEAD's commits alive with a ref while they're in the Trash needs a decision | |
 | 23 Agent features | Later | |
-| 24 Benchmarks and reports | In progress: the runner, report, budgets, `--against` and the platform, core, search and MCP suites are built; the real-workload suite, competitor comparisons, the counter gate and the quiet Mac remain | |
+| 24 Benchmarks and reports | Done; the quiet Mac needs buying and registering as the `bench` runner, and scrolling and launch still report outside `scripts/bench` | |
 | 25 Filesystem speed | Planned; needs plan 24's runner | |
 | 26 MCP contract v1 | Planned; tool map and profiles need review | |
 | 27 Overview | Done except step 5: worktree suggestions (one row for all clean worktrees, picked) wait for plan 22's view, and Free up's link waits for plan 17's report | 82cb1cf |

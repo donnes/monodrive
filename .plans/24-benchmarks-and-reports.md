@@ -1,6 +1,6 @@
 # Benchmarks and reports
 
-Status: steps 1 to 3 built. `scripts/bench` runs the platform, core, search and MCP suites in rounds, `--against <commit>` alternates with another commit's build, and the report, budgets and `search-real` work as described below; `docs/performance.md` says how to use them. The Spotlight comparison came first and is `scripts/bench spotlight`. Steps 4 and 5 remain: the real-workload suite, competitor comparisons for copies, the counter gate and the quiet Mac. The numbers behind plans 25 and 26 came from throwaway C programs in `target/fs-bench`, run on a Mac at load 13 to 28. They are good enough to choose work and not good enough to publish.
+Status: done, except the quiet Mac itself, which needs buying and setting up. `scripts/bench` runs the platform, core, search, MCP, workload and compare suites, `--against <commit>` alternates with another commit's build, and `docs/performance.md` says how to use them. The Spotlight comparison is `scripts/bench spotlight`. GitHub's macOS runners count no instructions, so the counter gate runs in `.github/workflows/bench.yml` on the quiet Mac, which stays off until the `BENCH_RUNNER` variable is set. The scrolling benchmark and launch profile still report outside it, since they don't write raw samples yet. The numbers behind plans 25 and 26 came from throwaway C programs in `target/fs-bench`, run on a Mac at load 13 to 28. They are good enough to choose work and not good enough to publish.
 
 ## Goal
 
