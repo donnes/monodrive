@@ -398,6 +398,26 @@ fn read_file_reads_a_range_and_says_when_its_binary() {
         format!("{}: bytes 6 to 9 of 11\nloc", shown(&text_file))
     );
     assert_eq!(data(&result)["next_offset"], 9);
+    // A read that ends inside a character leaves it to the next read.
+    let accented = dir.path().join("é.txt");
+    std::fs::write(&accented, "aé").unwrap();
+    let result = call(
+        &mut server,
+        "read_file",
+        json!({"path": accented, "limit": 2}),
+    );
+    assert_eq!(data(&result)["text"], "a");
+    assert_eq!(data(&result)["next_offset"], 1);
+    let result = call(
+        &mut server,
+        "read_file",
+        json!({"path": accented, "offset": 1}),
+    );
+    assert_eq!(data(&result)["text"], "é");
+    let broken = dir.path().join("broken.txt");
+    std::fs::write(&broken, b"a\xc3").unwrap();
+    let result = call(&mut server, "read_file", json!({"path": broken}));
+    assert!(data(&result).get("next_offset").is_none(), "{result}");
     let result = call(&mut server, "read_file", json!({"path": binary}));
     assert!(data(&result).get("text").is_none());
     assert!(text(&result).ends_with("(binary, not shown; copy takes it whole)\n"));
@@ -568,11 +588,14 @@ fn rename_dry_runs_then_runs_only_the_plan_it_showed() {
         json!({"paths": batch, "rule": rule, "skip_problems": true, "dry_run": true}),
     );
     let token = data(&result)["token"].as_str().unwrap().to_owned();
-    let result = call(&mut server, "rename", json!({"confirm": token}));
+    let confirm = json!({"confirm": token, "request_id": "test-trip"});
+    let result = call(&mut server, "rename", confirm.clone());
     assert_eq!(
         text(&result),
         format!("{}\n{}\n", at("Trip 1.jpg"), at("Trip 3"))
     );
+    // A lost reply's retry gets the same outcome; anything else is refused.
+    assert_eq!(call(&mut server, "rename", confirm), result);
     let result = call(&mut server, "rename", json!({"confirm": token}));
     assert_eq!(code(&result), "changed_since_preview", "a plan runs once");
     let result = call(&mut server, "undo", json!({}));
@@ -766,6 +789,16 @@ fn archives_list_like_folders_and_create_and_extract_as_jobs() {
     assert_eq!(data(&result)["items"][0]["name"], "a.txt");
     assert_eq!(data(&result)["items"][0]["size"], 5);
     assert_eq!(data(&result)["truncated"], true);
+    // An archive may name a folder only through the paths inside it.
+    let bare = dir.path().join("bare.zip");
+    crate::archives::tests::zip(
+        &bare,
+        &[("docs/readme.txt", crate::archives::tests::Item::File(b"hi"))],
+    );
+    let result = call(&mut server, "list_dir", json!({"path": bare}));
+    assert_eq!(text(&result), "docs/\n");
+    let result = call(&mut server, "list_dir", json!({"path": bare.join("docs")}));
+    assert_eq!(text(&result), "readme.txt\n");
     let result = call(&mut server, "stat", json!({"paths": [docs.join("a.txt")]}));
     assert_eq!(code(&result), "unsupported_on_source");
 
@@ -1325,6 +1358,13 @@ fn remote_paths_browse_read_and_copy_both_ways_through_the_same_tools() {
         json!({"paths": [qualified("made")], "name": "named"}),
     );
     assert_eq!(text(&result), format!("{}\n", qualified("named")));
+    let result = call(
+        &mut server,
+        "rename",
+        json!({"paths": [qualified("named")], "name": "dry", "dry_run": true}),
+    );
+    assert_eq!(code(&result), "unsupported_on_source");
+    assert!(far.join("named").is_dir() && !far.join("dry").exists());
     assert!(far.join("named").is_dir());
     for (name, arguments) in [
         ("trash", json!({"paths": [qualified("named")]})),

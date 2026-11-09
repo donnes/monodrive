@@ -812,13 +812,13 @@ impl Call for CleanupDuplicates {
 
     fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
         if let Some(token) = &self.confirm {
-            let Preview::Cleanup(plan) = server.kept(token)? else {
+            let Preview::Cleanup(plan) = server.kept(token, self.request_id.as_deref())? else {
                 return Err(ToolError::invalid("That token is another tool's plan."));
             };
             // Kept when the owner refuses it whole, such as while agents
             // may not change files, so it can be confirmed again.
             let done = server.change(plan.request(), self.request_id.as_deref())?;
-            server.spent(token);
+            server.spent(token, self.request_id.as_deref());
             return Ok(done.ran());
         }
         let (Some(path), true) = (&self.path, self.dry_run) else {

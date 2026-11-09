@@ -119,7 +119,7 @@ impl Call for Rename {
                 rule,
                 fingerprint,
                 skip_problems,
-            } = server.kept(token)?
+            } = server.kept(token, self.request_id.as_deref())?
             else {
                 return Err(ToolError::invalid("That token is another tool's plan."));
             };
@@ -130,7 +130,7 @@ impl Call for Rename {
                 skip_problems,
             };
             let done = server.change(request, request_id)?;
-            server.spent(token);
+            server.spent(token, self.request_id.as_deref());
             return Ok(done.ran());
         }
         let rule = match (self.name, self.rule) {
@@ -141,6 +141,12 @@ impl Call for Rename {
                     ));
                 };
                 if let Where::Remote(qualified) = locate(path) {
+                    if self.dry_run {
+                        return Err(ToolError::new(
+                            Code::UnsupportedOnSource,
+                            "A server's rename has no dry run: it renames at once, with no undo.",
+                        ));
+                    }
                     return remote_rename(server, &qualified, &name).map(Reply::ran);
                 }
                 if !self.dry_run {

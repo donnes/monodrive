@@ -333,27 +333,32 @@ fn archive_list(archive: &Path, inside: &str, page: &Page) -> Result<Listed, Too
     let opened = Archive::open(archive).map_err(|e| ToolError::from(e).at(shown(archive)))?;
     let folder = inside.trim_matches('/');
     let depth = folder.split('/').filter(|part| !part.is_empty()).count();
-    // Its own entries, not theirs: a folder's items show when it's listed.
-    let under: Vec<_> = opened
-        .under(folder)
-        .filter(|entry| entry.name.trim_end_matches('/').split('/').count() == depth + 1)
-        .collect();
-    let (under, next) = page.take(under);
-    let items = under
-        .iter()
-        .map(|entry| Item {
-            name: archives::printable(&entry.name)
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or_default()
-                .to_owned(),
-            kind: entry.kind.into(),
-            size: (entry.kind == entries::Kind::File).then_some(entry.size),
+    // Its own items, not theirs: a folder's show when it's listed. An
+    // archive may name a folder only through the paths inside it.
+    let mut items: Vec<Item> = Vec::new();
+    for entry in opened.under(folder) {
+        let name = archives::printable(&entry.name);
+        let parts: Vec<&str> = name.split('/').filter(|part| !part.is_empty()).collect();
+        let Some(&own) = parts.get(depth) else {
+            continue;
+        };
+        if items.iter().any(|item| item.name == own) {
+            continue;
+        }
+        let deeper = parts.len() > depth + 1;
+        items.push(Item {
+            name: own.to_owned(),
+            kind: if deeper {
+                Kind::Folder
+            } else {
+                entry.kind.into()
+            },
+            size: (!deeper && entry.kind == entries::Kind::File).then_some(entry.size),
             availability: None,
-            problem: entry.problem(),
-        })
-        .collect();
+            problem: if deeper { None } else { entry.problem() },
+        });
+    }
+    let (items, next) = page.take(items);
     let note = if opened.total > opened.entries.len() as u64 {
         format!(
             "(the archive lists {} entries; Monodrive read the first {})\n",
@@ -652,15 +657,21 @@ impl Call for ReadFile {
                 ));
             }
         };
-        let end = self.offset.saturating_add(data.len() as u64);
         let text = match std::str::from_utf8(&data) {
             Ok(text) if !text.contains('\0') => Some(text.to_owned()),
-            // A range can end partway through a character.
-            Err(e) if e.valid_up_to() + 4 > data.len() => {
+            // A range can end partway through a character: that character
+            // starts the next read. At the end of the file it never ends.
+            Err(e)
+                if e.error_len().is_none()
+                    && self.offset.saturating_add(data.len() as u64) < size
+                    && !data[..e.valid_up_to()].contains(&0) =>
+            {
                 Some(String::from_utf8_lossy(&data[..e.valid_up_to()]).into_owned())
             }
             _ => None,
         };
+        let read = text.as_ref().map_or(data.len(), String::len);
+        let end = self.offset.saturating_add(read as u64);
         let head = format!("{path}: bytes {} to {end} of {size}\n", self.offset);
         let body = text
             .clone()

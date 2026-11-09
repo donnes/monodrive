@@ -96,6 +96,9 @@ struct Kept {
     token: String,
     made: Instant,
     preview: Preview,
+    /// The request id that ran it, so a retry of that call reaches the
+    /// owner, which answers with what it did the first time.
+    ran: Option<String>,
 }
 
 impl Server {
@@ -289,18 +292,24 @@ impl Server {
             token: token.clone(),
             made: Instant::now(),
             preview,
+            ran: None,
         });
         token
     }
 
-    /// The plan a dry run kept under `token`. It stays kept until `spent`,
-    /// so a confirm the owner refuses whole can be sent again.
-    pub(super) fn kept(&mut self, token: &str) -> Result<Preview, ToolError> {
+    /// The plan a dry run kept under `token`, until it runs. It stays kept
+    /// when the owner refuses it whole, so it can be confirmed again, and a
+    /// run's own request id may send it again.
+    pub(super) fn kept(
+        &mut self,
+        token: &str,
+        request_id: Option<&str>,
+    ) -> Result<Preview, ToolError> {
         self.previews
             .retain(|kept| kept.made.elapsed() < PREVIEW_LIFE);
         self.previews
             .iter()
-            .find(|kept| kept.token == token)
+            .find(|kept| kept.token == token && (kept.ran.is_none() || kept.ran.as_deref() == request_id))
             .map(|kept| kept.preview.clone())
             .ok_or_else(|| {
                 ToolError::new(
@@ -310,8 +319,16 @@ impl Server {
             })
     }
 
-    pub(super) fn spent(&mut self, token: &str) {
-        self.previews.retain(|kept| kept.token != token);
+    /// Marks the plan under `token` as run by `request_id`.
+    pub(super) fn spent(&mut self, token: &str, request_id: Option<&str>) {
+        match request_id {
+            Some(id) => self
+                .previews
+                .iter_mut()
+                .filter(|kept| kept.token == token)
+                .for_each(|kept| kept.ran = Some(id.to_owned())),
+            None => self.previews.retain(|kept| kept.token != token),
+        }
     }
 
     pub(super) fn git(&mut self) -> Result<Git, ToolError> {

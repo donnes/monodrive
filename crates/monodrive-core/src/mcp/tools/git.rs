@@ -153,11 +153,11 @@ impl Call for RemoveWorktree {
     fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
         let request_id = self.request_id.as_deref();
         if let Some(token) = &self.confirm {
-            let Preview::Worktree(request) = server.kept(token)? else {
+            let Preview::Worktree(request) = server.kept(token, request_id)? else {
                 return Err(ToolError::invalid("That token is another tool's plan."));
             };
             let done = server.change(request, request_id)?;
-            server.spent(token);
+            server.spent(token, request_id);
             return Ok(done.ran());
         }
         let path = self.path.as_deref().ok_or_else(|| {

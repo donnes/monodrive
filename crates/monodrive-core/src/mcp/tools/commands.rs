@@ -109,7 +109,7 @@ impl Call for RunCommand {
     fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
         let (name, paths, token) = match &self.confirm {
             Some(token) => {
-                let Preview::Command { name, paths } = server.kept(token)? else {
+                let Preview::Command { name, paths } = server.kept(token, None)? else {
                     return Err(ToolError::invalid("That token is another tool's plan."));
                 };
                 (name, paths, Some(token.clone()))
@@ -163,7 +163,7 @@ impl Call for RunCommand {
         let origin = server.origin();
         let run = server.ops.run_command(origin, &name, paths)?;
         if let Some(token) = &token {
-            server.spent(token);
+            server.spent(token, None);
         }
         let started = server
             .ops

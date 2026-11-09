@@ -138,12 +138,12 @@ impl Call for Organize {
 
     fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
         if let Some(token) = &self.confirm {
-            let Preview::Organize(groups) = server.kept(token)? else {
+            let Preview::Organize(groups) = server.kept(token, self.request_id.as_deref())? else {
                 return Err(ToolError::invalid("That token is another tool's plan."));
             };
             // Kept if the owner refuses it, so it can be confirmed again.
             let done = server.change(Request::Organize { groups }, self.request_id.as_deref())?;
-            server.spent(token);
+            server.spent(token, self.request_id.as_deref());
             return Ok(done.ran());
         }
         let (Some(path), true) = (&self.path, self.dry_run) else {
