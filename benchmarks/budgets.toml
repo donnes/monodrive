@@ -9,32 +9,33 @@
 [[budget]]
 bench = "core/list_dir/10000"
 what = "List a folder of 10,000 entries"
-median_ms = 40
+median_ms = 20
 
 [[budget]]
 bench = "core/list_dir/100000"
 what = "List a folder of 100,000 entries"
-median_ms = 500
+median_ms = 150
+why = "Plan 25's target: donnes-pc lists 100,000 entries unsorted in about 150 ms. Monodrive took 127 ms, sort included, on 2026-11-03."
 
 [[budget]]
 bench = "core/sort/name"
 what = "Sort 10,000 shuffled entries by name"
-median_ms = 5
+median_ms = 3
 
 [[budget]]
 bench = "core/sort/kind"
 what = "Sort 10,000 shuffled entries by kind"
-median_ms = 5
+median_ms = 3
 
 [[budget]]
 bench = "core/sort/size"
 what = "Sort 10,000 shuffled entries by size"
-median_ms = 5
+median_ms = 3
 
 [[budget]]
 bench = "core/sort/modified"
 what = "Sort 10,000 shuffled entries by date"
-median_ms = 5
+median_ms = 3
 
 [[budget]]
 bench = "core/naming/suggest"

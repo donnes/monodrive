@@ -2622,8 +2622,10 @@ pub const TOOLS: [Tool; 69] = [
     },
     Tool {
         name: "trash",
-        description: "Move files or folders to the Trash; never deletes. Prints where each went in \
-    the Trash. put_back or undo restores them.",
+        description: "Move files or folders to the Trash; never deletes. One rename per item, so a big \
+    folder such as node_modules goes faster than rm -rf. Prints where each went in the Trash. \
+    put_back or undo restores them. Only a person empties the Trash, so the space stays used until \
+    then.",
         input_schema: paths_schema,
     },
     Tool {
