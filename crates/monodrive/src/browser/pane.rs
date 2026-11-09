@@ -3,6 +3,7 @@
 //! What's window-wide (toasts, sheets, the jobs ring, the sidebar) belongs to
 //! `Browser`, which a pane reaches through `PaneEvent`.
 
+use super::archive;
 use super::batch_rename::BatchRename;
 use super::columns::{COLUMN_WIDTH, Columns, chevron};
 use super::drag::{Drag, Spot, Target, offers};
@@ -11,16 +12,17 @@ use super::overview::OverviewPage;
 use super::searches::{CONTENT_SETTLE, Matches};
 use super::worktrees::WorktreesPage;
 use super::{
-    Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Download, Duplicate,
-    EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious,
-    ExtendRight, FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments,
-    GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveHere,
-    MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected,
-    OrganizeFolder, PageDown, PageUp, Places, PutBack, Redo, RemoveDownload, Rename,
-    RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder,
-    SelectFirst, SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowPackageContents,
-    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, Undo, ViewAsColumns,
-    ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
+    Back, CancelRename, ClearRecents, CommitRename, Compress, CopyPath, DeselectAll, Download,
+    Duplicate, EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext,
+    ExtendPrevious, ExtendRight, Extract, FocusSearch, Forward, GoApplications, GoComputer,
+    GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash,
+    GoWorktrees, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, Offer,
+    OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places, PutBack, Redo,
+    RemoveDownload, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
+    SearchContents, SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+    ShowContextMenu, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
+    SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash,
+    with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -142,6 +144,9 @@ pub(super) struct Chrome {
     pub(super) space: Option<String>,
     /// The volume to eject for the folder shown, if any.
     pub(super) ejectable: Option<PathBuf>,
+    /// The folder the other pane shows, when it takes files: where Extract
+    /// puts things.
+    pub(super) extract_to: Option<PathBuf>,
 }
 
 /// Where a new pane starts.
@@ -306,6 +311,8 @@ pub struct Pane {
     pub(super) overview: OverviewPage,
     /// The worktrees, as last scanned.
     pub(super) worktrees: WorktreesPage,
+    /// The archive on screen, as last read; dropped on leaving it.
+    pub(super) archived: Option<archive::Archived>,
     backdrop: Entity<Backdrop>,
     pub(super) chrome: Chrome,
     /// The window's drag of files.
@@ -418,6 +425,7 @@ impl Pane {
             open_after_download: HashSet::new(),
             overview: OverviewPage::default(),
             worktrees: WorktreesPage::default(),
+            archived: None,
             backdrop: cx.new(|_| Backdrop::default()),
             chrome: Chrome::default(),
             drag,
@@ -483,7 +491,7 @@ impl Pane {
         self.history
             .iter()
             .filter(|stop| stop.place.is_none())
-            .map(|stop| stop.folder.clone())
+            .map(|stop| stop.saved_folder().to_path_buf())
             .collect()
     }
 
@@ -491,7 +499,7 @@ impl Pane {
     pub(super) fn place_stops(&mut self, placed: &HashMap<PathBuf, Favorite>) {
         for stop in &mut self.history {
             if stop.place.is_none() {
-                stop.place = placed.get(&stop.folder).cloned();
+                stop.place = placed.get(stop.saved_folder()).cloned();
             }
         }
     }
@@ -505,7 +513,10 @@ impl Pane {
             .map(|stop| {
                 Some(StopState {
                     place: stop.place.clone()?,
-                    shows: stop.shows,
+                    shows: match stop.shows {
+                        Shows::Archive => Shows::Folder,
+                        shows => shows,
+                    },
                 })
             })
             .collect::<Option<_>>()?;
@@ -626,11 +637,27 @@ impl Pane {
         &self.history[self.at].folder
     }
 
+    /// The folder on the disk: inside an archive, the one holding it. What
+    /// leaves the pane for another app, a page or a search starts here.
+    pub(super) fn disk_folder(&self) -> &Path {
+        self.stop().saved_folder()
+    }
+
+    /// Goes to `folder`, which stays in the archive on screen when it's
+    /// inside it.
     pub(super) fn navigate(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        let stop = match &self.stop().archive {
+            Some(archive) if folder.starts_with(archive) => Stop::inside(archive.clone(), folder),
+            _ => Stop::folder(folder),
+        };
+        self.push_stop(stop, cx);
+    }
+
+    pub(super) fn push_stop(&mut self, stop: Stop, cx: &mut Context<Self>) {
         self.reselect = Some(self.folder().to_path_buf());
         self.collapse_all();
         self.history.truncate(self.at + 1);
-        self.history.push(Stop::folder(folder));
+        self.history.push(stop);
         self.at = self.history.len() - 1;
         self.show_folder(cx);
     }
@@ -774,6 +801,10 @@ impl Pane {
         let sort = self.sort;
         let tidy = self.tidy_folders(cx);
         let peek = self.peek_hidden;
+        let archive = self.stop().archive.clone().filter(|_| self.wants_archive());
+        let cached = archive
+            .as_deref()
+            .and_then(|archive| self.cached_archive(archive));
         // This listing covers the expanded folders too.
         self.expanding.clear();
         self.listing = true;
@@ -807,6 +838,7 @@ impl Pane {
                     HashSet::new(),
                     None,
                     matches,
+                    None,
                 ));
             }
             if overview {
@@ -817,6 +849,39 @@ impl Pane {
                     HashSet::new(),
                     None,
                     Matches::default(),
+                    None,
+                ));
+            }
+            if let Some(path) = archive {
+                // Its name is enough: the path bar has the rest.
+                let (open, stamp) = archive::read(&path, cached)
+                    .map_err(|why| short_reason(&why, path.parent()))?;
+                let inside = folder.strip_prefix(&path).unwrap_or(Path::new(""));
+                let mut level = open.level(&inside.to_string_lossy());
+                level
+                    .entries
+                    .retain(|entry| show_hidden || peek || !entry.name.starts_with('.'));
+                entries::sort(&mut level.entries, sort);
+                // The folder holding it changes when the archive does.
+                let watch = Watch {
+                    parent: path.parent().map(real),
+                    folders: HashMap::new(),
+                };
+                let archived = archive::Archived {
+                    refusal: open.refusal(),
+                    claimed: open.claimed(),
+                    open,
+                    stamp,
+                    problems: level.problems,
+                };
+                return Ok((
+                    level.entries,
+                    HashMap::new(),
+                    watch,
+                    HashSet::new(),
+                    None,
+                    Matches::default(),
+                    Some(archived),
                 ));
             }
             if let Some(store) = recents {
@@ -828,6 +893,7 @@ impl Pane {
                     missing,
                     None,
                     Matches::default(),
+                    None,
                 ));
             }
             let mut verified = None;
@@ -878,6 +944,7 @@ impl Pane {
                 HashSet::new(),
                 verified,
                 Matches::default(),
+                None,
             ))
         });
         self.loading = cx.spawn(async move |this, cx| {
@@ -885,7 +952,8 @@ impl Pane {
             let _ = this.update(cx, |this, cx| {
                 this.listing = false;
                 match result {
-                    Ok((root, children, watch, missing, verified, matches)) => {
+                    Ok((root, children, watch, missing, verified, matches, archived)) => {
+                        this.archived = archived;
                         if this.showing_folder() {
                             let listed = root.iter().chain(children.values().flatten());
                             this.ask_downloads(listed, cx);
@@ -904,6 +972,7 @@ impl Pane {
                         }
                     }
                     Err(failed) => {
+                        this.archived = None;
                         this.root.clear();
                         this.matches = Matches::default();
                         this.children.clear();
@@ -989,7 +1058,13 @@ impl Pane {
     pub(super) fn layout(&self) -> View {
         match self.view {
             _ if !self.matches.is_empty() || self.batch.is_some() => View::List,
-            View::Columns if !self.showing_folder() || self.trash_here => View::List,
+            // An archive's rows stay a list until the folder's listing
+            // replaces them.
+            View::Columns
+                if !self.showing_folder() || self.trash_here || self.showing_archive() =>
+            {
+                View::List
+            }
             view => view,
         }
     }
@@ -1020,7 +1095,7 @@ impl Pane {
     /// Refreshes the listing shortly after the disk changes under a folder on
     /// screen.
     pub(super) fn disk_changed(&mut self, batch: &[(PathBuf, bool)], cx: &mut Context<Self>) {
-        if !self.showing_folder() {
+        if !self.showing_folder() && !self.wants_archive() {
             return;
         }
         // What a pending listing will watch isn't known until it lands, and
@@ -1067,7 +1142,7 @@ impl Pane {
                 this.refresh = None;
                 // A listing that started since reads the disk after the
                 // change; it rechecks what it holds when it lands.
-                if this.showing_folder() && !this.listing {
+                if (this.showing_folder() || this.wants_archive()) && !this.listing {
                     this.list(true, cx);
                 }
             });
@@ -1370,7 +1445,7 @@ impl Pane {
     /// another package: what Show Package Contents goes into. Each frame
     /// asks, so the answer is kept for the entry it was worked out for.
     pub(super) fn package(&mut self) -> Option<PathBuf> {
-        let only = self.selection.only()?;
+        let only = self.selection.only().filter(|_| !self.showing_archive())?;
         if self.package.as_ref().is_none_or(|(path, _)| path != only) {
             let is = workspace::is_package(only)
                 && self
@@ -1389,7 +1464,7 @@ impl Pane {
     /// one: what Add to Sidebar pins. Each frame asks, so the answer is kept
     /// for the entry it was worked out for.
     pub(super) fn lone_folder(&mut self) -> Option<PathBuf> {
-        let only = self.selection.only()?;
+        let only = self.selection.only().filter(|_| !self.showing_archive())?;
         if self
             .lone_folder
             .as_ref()
@@ -1460,7 +1535,7 @@ impl Pane {
             }
         }
         if folders.is_empty() {
-            folders.push(self.folder().to_path_buf());
+            folders.push(self.disk_folder().to_path_buf());
         }
         let terminal = cx.global::<Preferences>().terminal;
         if let Err(e) = workspace::open_in_terminal(&folders, &terminal) {
@@ -1723,11 +1798,23 @@ impl Pane {
             }
             return;
         }
+        if self.showing_archive() {
+            let said = "Extract them to open them.".to_string();
+            return self.toast(said, false, None, cx);
+        }
+        // An archive opens here, and only one at a time: in its app it
+        // would be extracted outside the owner, with no Undo.
+        let zips = chosen.iter().any(|entry| archive::opens_here(entry));
         let files: Vec<PathBuf> = chosen
             .into_iter()
             .filter(|entry| entry.kind != Kind::Dir || workspace::is_package(&entry.path))
+            .filter(|entry| !archive::opens_here(entry))
             .map(|entry| entry.path.clone())
             .collect();
+        if zips {
+            let said = "Archives open one at a time.".to_string();
+            self.toast(said, false, None, cx);
+        }
         if files.len() <= OPEN_WITHOUT_ASKING {
             for file in files {
                 self.open_or_download(file, cx);
@@ -1791,6 +1878,30 @@ impl Pane {
         };
         let path = entry.path.clone();
         let kind = entry.kind;
+        if self.showing_archive() {
+            return match kind {
+                // Only within the archive asked for: on the way out, or to
+                // another archive, the folder would be looked for on the disk.
+                Kind::Dir
+                    if self.wants_archive()
+                        && self
+                            .stop()
+                            .archive
+                            .as_ref()
+                            .is_some_and(|archive| path.starts_with(archive)) =>
+                {
+                    self.navigate(path, cx)
+                }
+                Kind::Dir => {}
+                _ => {
+                    let said = format!("Extract {} to open it.", jobs::quoted(&path));
+                    self.toast(said, false, None, cx)
+                }
+            };
+        }
+        if archive::opens_here(entry) {
+            return self.open_archive(path, cx);
+        }
         if !matches!(kind, Kind::Dir | Kind::Link) {
             return self.open_or_download(path, cx);
         }
@@ -2482,7 +2593,7 @@ impl Pane {
         }
         let chosen = self.selection.in_order(&self.entries);
         let text = if chosen.is_empty() {
-            self.folder().display().to_string()
+            self.disk_folder().display().to_string()
         } else {
             let paths: Vec<String> = chosen
                 .iter()
@@ -2554,7 +2665,12 @@ impl Pane {
                         let here = ix == last;
                         let spot = Spot::Crumb(id, ix);
                         let outlined = self.drag.outlines(&spot);
-                        let drops = dragging && (!here || takes_here);
+                        let in_archive = self
+                            .stop()
+                            .archive
+                            .as_ref()
+                            .is_some_and(|archive| path.starts_with(archive));
+                        let drops = dragging && !in_archive && (!here || takes_here);
                         let target = drops.then(|| Target::Folder {
                             spot,
                             path: path.clone(),
@@ -2657,19 +2773,18 @@ impl Pane {
         let width = self.chrome.width - PATH_BAR_CHROME;
         let most = width.max(0.);
         let taken = text_width(&status, theme::TEXT_SMALL, FontWeight::NORMAL, window) + 2. * 12.;
+        let crumbs = self.showing_folder() || self.showing_archive();
         Some(
             theme::pane_bar(theme::PATH_BAR_HEIGHT)
                 .debug_selector(|| "path-bar".into())
                 // The first crumb's padding is part of the inset, so its text
                 // lines up with the bars above.
-                .when(self.showing_folder(), |d| {
-                    d.pl(px(theme::PANE_INSET - theme::CRUMB_INSET))
-                })
+                .when(crumbs, |d| d.pl(px(theme::PANE_INSET - theme::CRUMB_INSET)))
                 .gap_3()
                 .border_t_1()
                 .border_color(content(0.06))
                 .text_size(px(theme::TEXT_SMALL))
-                .when(self.showing_folder(), |d| {
+                .when(crumbs, |d| {
                     d.child(self.crumbs(most - taken, most, window, cx))
                 })
                 .child(div().flex_1())
@@ -2692,11 +2807,13 @@ impl Pane {
     ) -> Vec<gpui::AnyElement> {
         let prefs = cx.global::<Preferences>();
         let side = prefs.grid_icon as f32;
+        // An archive's entries have no file on the disk to picture or drag.
+        let archive = self.showing_archive();
         let label = prefs.grid_label.metrics().2;
         let (cell, height) = (self.cell_width, grid_cell(prefs.grid_icon).1);
         let across = self.across;
         let active = self.list_active(window, cx);
-        let drops = self.drag.active() && !self.in_trash(cx);
+        let drops = self.drag.active() && !self.in_trash(cx) && !archive;
         let id = cx.entity_id();
         // Sharp on Retina screens.
         let pixels = (side * window.scale_factor()).ceil() as u32;
@@ -2707,13 +2824,17 @@ impl Pane {
                         let entry = &self.entries[ix];
                         let selected = self.selection.contains(&entry.path);
                         let missing = self.missing.contains(&entry.path);
-                        let picture = thumbnail(
-                            (&mut self.thumbs, &mut self.drawn),
-                            entry,
-                            pixels,
-                            window,
-                            cx,
-                        );
+                        let picture = if archive {
+                            None
+                        } else {
+                            thumbnail(
+                                (&mut self.thumbs, &mut self.drawn),
+                                entry,
+                                pixels,
+                                window,
+                                cx,
+                            )
+                        };
                         let art = match picture {
                             // A square box: without one, `img` takes the
                             // picture's own shape, and a tall one spills
@@ -2724,10 +2845,11 @@ impl Pane {
                                 .object_fit(gpui::ObjectFit::Contain)
                                 .rounded(px(theme::RADIUS_THUMB))
                                 .into_any_element(),
+                            None if archive => file_icons::kind_icon(entry, side, window, cx),
                             None => file_icons::icon(entry, side, window, cx),
                         };
                         let rename = self.rename_field(&entry.path, cell - 8., cx);
-                        let grabs = !missing && rename.is_none();
+                        let grabs = !missing && rename.is_none() && !archive;
                         let badge = self.cloud_badge(
                             entry,
                             ix,
@@ -2817,9 +2939,11 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let searching = !self.showing_folder();
-        // A grid pane's batch shows its rows as they are, flat.
-        let tree = !searching && self.view == View::List;
+        let archived = self.archived.as_ref();
+        let searching = !self.showing_folder() && archived.is_none();
+        // A grid pane's batch shows its rows as they are, flat. An archive's
+        // folders open as Back can leave them, not in place.
+        let tree = self.showing_folder() && self.view == View::List;
         let in_columns = self.layout() == View::Columns;
         let today = Local::now().date_naive();
         let (date, size, kind) = if in_columns {
@@ -2832,7 +2956,7 @@ impl Pane {
         self.list_row_height = row_height;
         // Finder greys the selection when the list isn't where keys go.
         let active = self.list_active(window, cx);
-        let drops = self.drag.active() && !self.in_trash(cx);
+        let drops = self.drag.active() && !self.in_trash(cx) && archived.is_none();
         let id = cx.entity_id();
         range
             .filter_map(|row| {
@@ -2863,7 +2987,9 @@ impl Pane {
                     .rename_field(&entry.path, name_room, cx)
                     .or_else(|| self.suggestion_field(&entry.path, name_room, cx));
                 let chevron_here = in_columns && open.is_some();
-                let grabs = !missing && rename.is_none() && self.batch.is_none();
+                let grabs =
+                    !missing && rename.is_none() && self.batch.is_none() && archived.is_none();
+                let problem = archived.and_then(|archived| archived.problems.get(&entry.path));
                 let new = self
                     .batch
                     .as_ref()
@@ -2912,7 +3038,11 @@ impl Pane {
                                         .items_center()
                                         .gap_2()
                                         .when(grabs && !selected, |d| Self::grab(d, ix, cx))
-                                        .child(file_icons::icon(entry, icon_size, window, cx))
+                                        .child(if archived.is_some() {
+                                            file_icons::kind_icon(entry, icon_size, window, cx)
+                                        } else {
+                                            file_icons::icon(entry, icon_size, window, cx)
+                                        })
                                         // The badge sits closer to the name than the
                                         // name to its icon.
                                         .child(
@@ -3017,11 +3147,17 @@ impl Pane {
                             )
                         })
                         .when(kind, |d| {
-                            d.child(column(110., false).text_color(muted).child(if missing {
-                                "Missing".to_string()
-                            } else {
-                                entry.kind_label()
-                            }))
+                            d.child(match problem {
+                                // Selecting it shows why in the archive's bar.
+                                Some(_) => column(110., false)
+                                    .text_color(if selected { selected_ink } else { danger() })
+                                    .child("Can't extract"),
+                                None => column(110., false).text_color(muted).child(if missing {
+                                    "Missing".to_string()
+                                } else {
+                                    entry.kind_label()
+                                }),
+                            })
                         })
                         .when(missing, |d| d.opacity(0.5))
                         .when(grabs && selected, |d| Self::grab(d, ix, cx))
@@ -3156,8 +3292,12 @@ pub(super) struct Renaming {
 /// A place in the history: a folder, or a page in front of one.
 #[derive(Clone)]
 pub(super) struct Stop {
+    /// Inside an archive, the archive's path joined with the folder's
+    /// names in it, which isn't on the disk.
     pub(super) folder: PathBuf,
     pub(super) shows: Shows,
+    /// The ZIP archive `folder` is in, for `Shows::Archive`.
+    pub(super) archive: Option<PathBuf>,
     /// How it's saved, from the first save on.
     place: Option<Favorite>,
     /// It came from a saved session and hasn't been checked since: its drive
@@ -3170,6 +3310,18 @@ impl Stop {
         Self {
             folder,
             shows: Shows::Folder,
+            archive: None,
+            place: None,
+            unverified: false,
+        }
+    }
+
+    /// `folder`, inside `archive` or the archive itself.
+    pub(super) fn inside(archive: PathBuf, folder: PathBuf) -> Self {
+        Self {
+            folder,
+            shows: Shows::Archive,
+            archive: Some(archive),
             place: None,
             unverified: false,
         }
@@ -3179,8 +3331,17 @@ impl Stop {
         Self {
             folder: state.place.path.clone(),
             shows: state.shows,
+            archive: None,
             place: Some(state.place),
             unverified: true,
+        }
+    }
+
+    /// The folder on the disk it's saved as: the one holding its archive.
+    pub(super) fn saved_folder(&self) -> &Path {
+        match &self.archive {
+            Some(archive) => archive.parent().unwrap_or(archive),
+            None => &self.folder,
         }
     }
 }
@@ -3650,14 +3811,19 @@ impl Pane {
         cloud: &[CloudFolder],
         cx: &mut Context<Self>,
     ) -> Div {
+        // What's in an archive isn't on the disk for macOS or other apps to
+        // reach.
+        let on_disk = !self.showing_archive();
         let package = self.package().is_some();
-        let download = self.can_download(cx);
-        let remove_download = !self.removable(cloud).is_empty();
+        let download = on_disk && self.can_download(cx);
+        let remove_download = on_disk && !self.removable(cloud).is_empty();
         // Nothing new goes in search results, Recents or the Trash.
         let can_make_here = self.takes_files(cx);
         let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
         let selected = !self.selection.is_empty();
         let renaming = self.changing_names();
+        let can_extract = self.can_extract(cx);
+        let can_compress = self.can_compress(cx);
         // While a sheet is open, its commands (from the menu bar too) wait.
         root.when(!sheet, |d| {
             d.on_action(cx.listener(|this, _: &Back, window, cx| this.go_back(window, cx)))
@@ -3716,16 +3882,20 @@ impl Pane {
                 .on_action(cx.listener(|this, _: &SearchContents, window, cx| {
                     this.toggle_contents(window, cx)
                 }))
-                .on_action(cx.listener(|this, _: &SearchThisFolder, window, cx| {
-                    this.toggle_this_folder(window, cx)
-                }))
                 .on_action(cx.listener(|this, _: &DeselectAll, _, cx| {
                     this.selection.clear();
                     cx.notify();
                 }))
-                .on_action(cx.listener(|this, _: &CopyPath, _, cx| this.copy_path(cx)))
-                .on_action(cx.listener(|this, _: &OpenInTerminal, _, cx| this.open_in_terminal(cx)))
-                .when(selected, |d| {
+                .when(on_disk, |d| {
+                    d.on_action(cx.listener(|this, _: &SearchThisFolder, window, cx| {
+                        this.toggle_this_folder(window, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &CopyPath, _, cx| this.copy_path(cx)))
+                    .on_action(
+                        cx.listener(|this, _: &OpenInTerminal, _, cx| this.open_in_terminal(cx)),
+                    )
+                })
+                .when(selected && on_disk, |d| {
                     d.on_action(cx.listener(|this, _: &RevealInFinder, _, _| {
                         workspace::reveal(&this.chosen())
                     }))
@@ -3773,6 +3943,12 @@ impl Pane {
             .on_action(
                 cx.listener(|this, _: &Redo, window, cx| this.submit(Request::Redo, window, cx)),
             )
+            .when(can_extract, |d| {
+                d.on_action(cx.listener(|this, _: &Extract, window, cx| this.extract(window, cx)))
+            })
+            .when(can_compress, |d| {
+                d.on_action(cx.listener(|this, _: &Compress, window, cx| this.compress(window, cx)))
+            })
             .when(can_make_here, |d| {
                 d.on_action(
                     cx.listener(|this, _: &NewFolder, window, cx| this.new_item(true, window, cx)),
@@ -3963,6 +4139,8 @@ impl Pane {
             thumbnails::release(&thumb, image, Some(&mut *window), cx);
         }
         let can_make_here = self.takes_files(cx);
+        // Nothing in an archive changes, and its rows aren't files to copy.
+        let writable = !self.showing_archive();
         div()
             .id("file-list")
             .key_context("FileList")
@@ -4005,7 +4183,7 @@ impl Pane {
             }))
             // Copy and Paste are AppKit's actions, as Select All is: here
             // they're files. Leaving one out turns its menu item off.
-            .when(!self.selection.is_empty(), |d| {
+            .when(!self.selection.is_empty() && writable, |d| {
                 d.on_action(cx.listener(|this, _: &text_field::Copy, _, cx| this.copy_files(cx)))
             })
             .when(can_make_here, |d| {
@@ -4027,34 +4205,42 @@ impl Pane {
                     }))
                 },
             )
-            .when(!self.changing_names() && !self.selection.is_empty(), |d| {
-                d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
-                    let paths = this.chosen();
-                    this.submit(Request::Trash { paths }, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &Duplicate, window, cx| {
-                    let paths = this.chosen();
-                    this.submit(Request::Duplicate { paths }, window, cx)
-                }))
-                .on_action(cx.listener(
-                    |this, _: &NewFolderWithSelection, window, cx| {
-                        this.new_folder_with_selection(window, cx)
-                    },
-                ))
-            })
-            .when(self.renaming.is_none() && !self.selection.is_empty(), |d| {
-                d.on_action(
-                    cx.listener(|this, _: &Rename, window, cx| this.rename_selected(window, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &SuggestNames, window, cx| {
-                        this.suggest_names(window, cx)
-                    }),
-                )
-            })
-            .on_action(
-                cx.listener(|this, _: &OrganizeFolder, window, cx| this.start_organize(window, cx)),
+            .when(
+                writable && !self.changing_names() && !self.selection.is_empty(),
+                |d| {
+                    d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
+                        let paths = this.chosen();
+                        this.submit(Request::Trash { paths }, window, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &Duplicate, window, cx| {
+                        let paths = this.chosen();
+                        this.submit(Request::Duplicate { paths }, window, cx)
+                    }))
+                    .on_action(cx.listener(
+                        |this, _: &NewFolderWithSelection, window, cx| {
+                            this.new_folder_with_selection(window, cx)
+                        },
+                    ))
+                },
             )
+            .when(
+                writable && self.renaming.is_none() && !self.selection.is_empty(),
+                |d| {
+                    d.on_action(
+                        cx.listener(|this, _: &Rename, window, cx| {
+                            this.rename_selected(window, cx)
+                        }),
+                    )
+                    .on_action(cx.listener(
+                        |this, _: &SuggestNames, window, cx| this.suggest_names(window, cx),
+                    ))
+                },
+            )
+            .when(writable, |d| {
+                d.on_action(cx.listener(|this, _: &OrganizeFolder, window, cx| {
+                    this.start_organize(window, cx)
+                }))
+            })
             .when(self.preview.is_some(), |d| {
                 d.on_action(
                     cx.listener(|this, _: &EditPreview, window, cx| this.edit_preview(window, cx)),
@@ -4171,7 +4357,7 @@ impl Render for Pane {
         let prefs = cx.global::<Preferences>();
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
         // Search results stay in relevance order, so no column shows a sort.
-        let sort_shown = self.showing_folder().then_some(self.sort);
+        let sort_shown = (self.showing_folder() || self.showing_archive()).then_some(self.sort);
         let empty = self.root.is_empty() && self.error.is_none();
         let look = prefs.background.clone().map(|path| Look {
             path,
@@ -4204,6 +4390,7 @@ impl Render for Pane {
             .child(self.backdrop.clone())
             .children(self.trash_bar(cx))
             .children(self.recents_bar(cx))
+            .children(self.archive_bar(cx))
             .children(self.batch_bar(window, cx))
             // The grid sorts from the View menu and Settings.
             .when(

@@ -201,7 +201,7 @@ impl Pane {
     /// Search This Folder, or back to everywhere.
     pub(super) fn toggle_this_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let scope = match self.search_scope {
-            Where::Everywhere => Where::Folder(self.folder().to_path_buf()),
+            Where::Everywhere => Where::Folder(self.disk_folder().to_path_buf()),
             Where::Folder(_) => Where::Everywhere,
         };
         self.set_search_mode(self.looks, scope, cx);

@@ -17,7 +17,7 @@ use gpui::{
     div, prelude::*, px,
 };
 use monodrive_core::cloud;
-use monodrive_core::ops::{Conflict, Done, Job, Origin, Request, State};
+use monodrive_core::ops::{self, Conflict, Done, Job, Origin, Request, State};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -36,7 +36,8 @@ pub const LINGER: Duration = Duration::from_secs(3);
 const WIDTH: f32 = 320.;
 
 pub enum JobsEvent {
-    /// One of the window's own copies or moves finished.
+    /// One of the window's own copies or moves finished, or its own
+    /// extraction or compression was cancelled.
     Finished(Job),
     /// One of the window's own jobs stopped at a name that's taken, or failed.
     NeedsYou,
@@ -156,6 +157,11 @@ impl Jobs {
             if self.followed.remove(&id) {
                 match job.state {
                     State::Completed => cx.emit(JobsEvent::Finished(job.clone())),
+                    // Cancelling an extraction or compression says what it
+                    // kept, and Undo can take that back.
+                    State::Cancelled if matches!(job.title.as_str(), "Extract" | "Compress") => {
+                        cx.emit(JobsEvent::Finished(job.clone()))
+                    }
                     State::Waiting | State::Failed | State::Interrupted => {
                         cx.emit(JobsEvent::NeedsYou)
                     }
@@ -333,7 +339,7 @@ impl Jobs {
                 .map(|task| {
                     let taken = format!(
                         "{} is already in {}",
-                        quoted(&task.source),
+                        item_name(task),
                         folder_name(&job.into)
                     );
                     (taken, content(0.65))
@@ -496,22 +502,60 @@ impl Render for Jobs {
     }
 }
 
-/// "Copying 3 items to Inbox", or "Copied" once it's done.
+/// "Copying 3 items to Inbox", or "Copied" once it's done: what it does,
+/// to what, and where.
 pub fn title(job: &Job) -> String {
-    let moving = job.title == "Move";
-    let verb = match (job.state, moving) {
-        (State::Completed, false) => "Copied",
-        (State::Completed, true) => "Moved",
-        (State::Cancelled, false) => "Stopped copying",
-        (State::Cancelled, true) => "Stopped moving",
-        (_, false) => "Copying",
-        (_, true) => "Moving",
+    let (doing, done, stopped) = match job.title.as_str() {
+        "Move" => ("Moving", "Moved", "Stopped moving"),
+        "Compress" => ("Compressing", "Compressed", "Stopped compressing"),
+        "Extract" => ("Extracting", "Extracted", "Stopped extracting"),
+        _ => ("Copying", "Copied", "Stopped copying"),
     };
+    let verb = match job.state {
+        State::Completed => done,
+        State::Cancelled => stopped,
+        _ => doing,
+    };
+    if job.title == "Compress" {
+        // Its one task is the item, or the folder of several.
+        return match job.tasks.first() {
+            Some(ops::Task {
+                done: Some(Done::To(archive)),
+                ..
+            }) => format!("{verb} into {}", quoted(archive)),
+            Some(task) if task.source != job.into => format!("{verb} {}", quoted(&task.source)),
+            _ => format!("{verb} items in {}", folder_name(&job.into)),
+        };
+    }
     let what = match job.tasks.as_slice() {
-        [one] => quoted(&one.source),
+        [one] => item_name(one),
         tasks => format!("{} items", tasks.len()),
     };
     format!("{verb} {what} to {}", folder_name(&job.into))
+}
+
+/// What a job's toast says once it ends: its title, and for a stopped one
+/// what it left in the Trash.
+pub fn report(job: &Job) -> String {
+    let said = title(job);
+    // Core's words for an unfinished item it trashed, the only way a task
+    // says so.
+    let trashed = job.tasks.iter().any(
+        |task| matches!(&task.done, Some(Done::Failed(why)) if why.contains("went to the Trash")),
+    );
+    if job.state == State::Cancelled && trashed {
+        format!("{said}. What was partway went to the Trash.")
+    } else {
+        said
+    }
+}
+
+/// The name an item takes where it goes, quoted.
+fn item_name(task: &ops::Task) -> String {
+    match &task.name {
+        Some(name) => format!("\"{name}\""),
+        None => quoted(&task.source),
+    }
 }
 
 pub fn quoted(path: &Path) -> String {
@@ -572,6 +616,7 @@ mod tests {
             tasks: vec![Item {
                 source: "/Users/me/draft.txt".into(),
                 done: None,
+                name: None,
             }],
             bytes: 0,
             total_bytes: 0,

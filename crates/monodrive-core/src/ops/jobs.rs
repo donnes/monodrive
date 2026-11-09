@@ -126,6 +126,10 @@ pub struct Task {
     pub source: PathBuf,
     /// `None` until the item is done, or for good if the job stopped first.
     pub done: Option<Done>,
+    /// The name it takes in `into`, when that isn't the source's: the
+    /// folder extracting all of an archive makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// How one item ended. Messages name the paths involved.
@@ -261,7 +265,14 @@ impl Spec {
                     into: into.clone(),
                     conflict: *conflict,
                     ids: vec![id; items.len()],
-                    sources: items.iter().map(|item| archive.join(item)).collect(),
+                    // All of it, in a folder of its own, is the archive itself.
+                    sources: items
+                        .iter()
+                        .map(|item| match item.as_str() {
+                            "" => archive.clone(),
+                            item => archive.join(item),
+                        })
+                        .collect(),
                     archive: Some(archive.clone()),
                     remote: Vec::new(),
                 })
@@ -493,6 +504,13 @@ impl Entry {
                 .map(|work| Task {
                     source: work.source.clone(),
                     done: work.done.clone(),
+                    name: (self.spec.kind == Kind::Extract
+                        && self.spec.entry(&work.source) == Some(""))
+                    .then(|| {
+                        archives::folder_name(&work.source)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
                 })
                 .collect(),
             bytes: finished + live,
@@ -948,7 +966,11 @@ impl Item<'_> {
             Err(e) => return fail(e),
         };
         let source = self.work.source.clone();
-        let (Some(entry), Some(name)) = (spec.entry(&source), source.file_name()) else {
+        let name = match spec.entry(&source) {
+            Some("") => Some(archives::folder_name(path)),
+            _ => source.file_name().map(ToOwned::to_owned),
+        };
+        let (Some(entry), Some(name)) = (spec.entry(&source), name) else {
             return fail(format!(
                 "{}: isn't in {}.",
                 source.display(),

@@ -61,6 +61,9 @@ pub enum Shows {
     Recents,
     Overview,
     Worktrees,
+    /// A folder inside a ZIP archive, read only. Saved as the folder that
+    /// holds the archive, so it's never saved itself.
+    Archive,
 }
 
 /// Sessions saved before Overview said `"recents": true`.

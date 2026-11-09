@@ -14,7 +14,7 @@ use objc2_app_kit::{
     NSWorkspace,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-use objc2_uniform_type_identifiers::{UTType, UTTypeData};
+use objc2_uniform_type_identifiers::{UTType, UTTypeData, UTTypeFolder};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,6 +26,8 @@ enum Art {
     Type(String),
     /// This folder or link.
     Path(PathBuf),
+    /// Any folder.
+    Folder,
 }
 
 /// One icon at one size in device pixels.
@@ -51,6 +53,9 @@ impl Asset for Raster {
                 let icon = match &raster.art {
                     Art::Type(extension) => type_icon(extension),
                     Art::Path(path) => path_icon(path)?,
+                    Art::Folder => {
+                        NSWorkspace::sharedWorkspace().iconForContentType(unsafe { UTTypeFolder })
+                    }
                 };
                 draw(&icon, raster.pixels)
             })
@@ -240,16 +245,30 @@ fn raster(art: Art, side: f32, window: &mut Window, cx: &mut App) -> AnyElement 
 pub fn icon(entry: &Entry, side: f32, window: &mut Window, cx: &mut App) -> AnyElement {
     let art = match entry.kind {
         Kind::Dir | Kind::Link => Art::Path(entry.path.clone()),
-        Kind::File | Kind::Other => Art::Type(
-            entry
-                .path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .unwrap_or_default()
-                .to_lowercase(),
-        ),
+        Kind::File | Kind::Other => by_extension(entry),
     };
     raster(art, side, window, cx)
+}
+
+/// The icon for what an entry is, without looking on the disk: for an
+/// archive's entries, which aren't there.
+pub fn kind_icon(entry: &Entry, side: f32, window: &mut Window, cx: &mut App) -> AnyElement {
+    let art = match entry.kind {
+        Kind::Dir => Art::Folder,
+        Kind::File | Kind::Link | Kind::Other => by_extension(entry),
+    };
+    raster(art, side, window, cx)
+}
+
+fn by_extension(entry: &Entry) -> Art {
+    Art::Type(
+        entry
+            .path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_lowercase(),
+    )
 }
 
 #[cfg(test)]

@@ -1776,7 +1776,7 @@ pub(super) fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
     cx.simulate_mouse_up(at, MouseButton::Right, with(""));
 }
 
-const ON_A_FILE: [&str; 13] = [
+const ON_A_FILE: [&str; 14] = [
     "Open",
     "Open With",
     "Reveal in Finder",
@@ -1787,6 +1787,7 @@ const ON_A_FILE: [&str; 13] = [
     "Duplicate",
     "Quick Look",
     "Open in Quick Look",
+    "Compress",
     "Move to Trash",
     "Copy",
     "Copy Path",
@@ -2688,5 +2689,112 @@ fn column_view_moves_the_keys_across_columns(cx: &mut TestAppContext) {
     cx.update(|window, cx| pane.update(cx, |pane, cx| pane.go(untitled, window, cx)));
     cx.run_until_parked();
     assert!(in_pane(&browser, cx, |pane, _| pane.trail()).is_empty());
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn a_compressed_folder_opens_read_only_and_extracts_beside_itself(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let mut owned = own(cx);
+    let (browser, cx) = browse(&project, cx);
+    let offered = |cx: &mut VisualTestContext, action: &dyn gpui::Action| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.is_action_available(action, cx))
+    };
+    // A folder that takes files compresses its selection beside it.
+    press(cx, "down");
+    assert!(offered(cx, &Compress) && !offered(cx, &Extract));
+    cx.dispatch_action(Compress);
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Compressed into \"docs.zip\"".into(), false, true))
+    );
+    assert_eq!(shown(&browser, cx).1, ["docs.zip"]);
+    assert!(offered(cx, &Extract));
+
+    // Opening it goes in, like a folder, and changes nothing.
+    press(cx, "cmd-down");
+    let zip = project.join("docs.zip");
+    let title = browser.read_with(cx, |b, cx| b.pane().read(cx).title(cx));
+    assert_eq!(title, "docs.zip");
+    assert_eq!(shown(&browser, cx).0, ["docs"]);
+    press(cx, "down");
+    for action in [
+        &MoveToTrash as &dyn gpui::Action,
+        &Rename,
+        &Duplicate,
+        &text_field::Copy,
+        &Compress,
+        &NewFolder,
+        &RevealInFinder,
+        &QuickLook,
+    ] {
+        assert!(!offered(cx, action), "{}", action.name());
+    }
+    assert!(offered(cx, &Extract));
+    press(cx, "cmd-down");
+    assert_eq!(shown(&browser, cx).0, ["inner.md"]);
+    // A file inside doesn't open: it isn't on the disk.
+    press(cx, "down cmd-down");
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Extract \"inner.md\" to open it.".into(), false, false))
+    );
+    // The way out, one level at a time.
+    press(cx, "cmd-[");
+    assert_eq!(
+        shown(&browser, cx),
+        (vec!["docs".into()], vec!["docs".into()])
+    );
+
+    // Extract All lands beside the archive, where "docs" is taken: the job
+    // waits, and Keep Both finishes it.
+    press(cx, "escape");
+    cx.dispatch_action(Extract);
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Jobs))));
+    click(cx, "job-Keep Both");
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
+    assert!(project.join("docs 2/inner.md").is_file());
+    assert!(zip.exists());
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Extracted \"docs\" to project".into(), false, true))
+    );
+    // Back leaves the archive for the folder holding it, once the popover
+    // has closed. Until the folder's listing lands, the rows on screen are
+    // still the archive's, and stay read only.
+    press(cx, "escape down");
+    on_pane(&browser, cx, |pane, cx| pane.step_history(-1, cx));
+    assert!(in_pane(&browser, cx, |pane, cx| pane.showing_archive()
+        && !pane.can_compress(cx)));
+    // Its folder row doesn't open either: it isn't on the disk.
+    cx.simulate_keystrokes("cmd-down");
+    cx.run_until_parked();
+    assert_eq!(shown(&browser, cx).1, ["docs.zip"]);
+    assert!(!in_pane(&browser, cx, |pane, _| pane.showing_archive()));
+    // Two archives at once don't go to another app, which would extract
+    // them outside the owner. Nor does a link to one, which opens here.
+    std::fs::copy(&zip, project.join("e.zip")).unwrap();
+    std::os::unix::fs::symlink(&zip, project.join("f.zip")).unwrap();
+    on_pane(&browser, cx, |pane, cx| pane.list(true, cx));
+    cx.run_until_parked();
+    press(cx, "shift-down cmd-down");
+    assert_eq!(shown(&browser, cx).1, ["docs.zip", "e.zip"]);
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Archives open one at a time.".into(), false, false))
+    );
+    press(cx, "down cmd-down");
+    assert_eq!(shown(&browser, cx).0, ["docs"]);
+    assert!(in_pane(&browser, cx, |pane, _| pane.showing_archive()));
     release(owned, cx);
 }

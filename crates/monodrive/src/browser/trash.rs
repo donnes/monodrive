@@ -113,7 +113,7 @@ impl Pane {
         if self.stop().shows != shows {
             self.collapse_all();
             self.history.truncate(self.at + 1);
-            let mut stop = Stop::folder(self.folder().to_path_buf());
+            let mut stop = Stop::folder(self.disk_folder().to_path_buf());
             stop.shows = shows;
             self.history.push(stop);
             self.at = self.history.len() - 1;

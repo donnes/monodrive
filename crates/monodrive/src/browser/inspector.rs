@@ -53,6 +53,8 @@ struct Key {
     pane: EntityId,
     folder: PathBuf,
     showing_folder: bool,
+    /// The rows are an archive's, about which nothing is read.
+    archive: bool,
     only: Option<PathBuf>,
     count: usize,
     bytes: u64,
@@ -65,6 +67,7 @@ impl Key {
             pane: id,
             folder: pane.folder().to_path_buf(),
             showing_folder: pane.shows_a_real_folder(),
+            archive: pane.showing_archive(),
             only: pane.selection.only().map(Path::to_path_buf),
             count: pane.selection.len(),
             bytes: pane.selection.size(),
@@ -76,6 +79,7 @@ impl Key {
         self.pane == id
             && self.folder == pane.folder()
             && self.showing_folder == pane.shows_a_real_folder()
+            && self.archive == pane.showing_archive()
             && self.only.as_deref() == pane.selection.only()
             && self.count == pane.selection.len()
             && self.bytes == pane.selection.size()
@@ -267,7 +271,8 @@ pub(super) fn touches(real: &Path, changed: &Path, below: bool) -> bool {
 }
 
 fn subject_of(pane: &Pane) -> Subject {
-    if !pane.shows_a_real_folder() && pane.selection.is_empty() {
+    // An archive's entries aren't on the disk to read.
+    if pane.showing_archive() || (!pane.shows_a_real_folder() && pane.selection.is_empty()) {
         return Subject::Nothing;
     }
     let chosen = pane.selection.in_order(&pane.entries);
@@ -699,7 +704,13 @@ impl Browser {
                     .text_center()
                     .text_size(px(theme::TEXT_BODY))
                     .text_color(content(0.65))
-                    .child("Nothing selected.")
+                    .child(
+                        if pane.read(cx).showing_archive() && !pane.read(cx).selection.is_empty() {
+                            "Extract it to see more."
+                        } else {
+                            "Nothing selected."
+                        },
+                    )
                     .into_any_element(),
             ],
             Subject::One { entry, selected } => {

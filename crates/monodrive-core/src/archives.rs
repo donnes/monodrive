@@ -102,6 +102,45 @@ impl Entry {
     }
 }
 
+/// Whether extracting `items` takes `entry`. A name that isn't a path
+/// inside counts when all of it was asked for, so it refuses the
+/// extraction rather than being skipped.
+fn takes(items: &[Vec<&str>], all: bool, entry: &Entry) -> bool {
+    match parts(&entry.name) {
+        Ok(parts) => items.iter().any(|item| parts.starts_with(item)),
+        Err(_) => all,
+    }
+}
+
+/// Why extracting all of an archive would be refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// It has more than `MAX_ENTRIES` entries.
+    TooMany,
+    /// This many of its entries can't be extracted.
+    Unextractable(usize),
+    /// It claims to expand by more than deflate can, as zip bombs do.
+    TooLarge,
+}
+
+/// One folder of an archive, from `Archive::level`.
+#[derive(Debug, Default)]
+pub struct Level {
+    pub entries: Vec<crate::entries::Entry>,
+    /// Why Monodrive won't extract an entry, by its path in `entries`.
+    pub problems: HashMap<PathBuf, String>,
+}
+
+/// The folder extracting all of an archive makes when it holds several
+/// items: its name without the extension, as Archive Utility names it.
+pub fn folder_name(archive: &Path) -> std::ffi::OsString {
+    archive
+        .file_stem()
+        .or_else(|| archive.file_name())
+        .unwrap_or_default()
+        .to_os_string()
+}
+
 /// `name` with control characters escaped, so it prints on one line.
 pub fn printable(name: &str) -> Cow<'_, str> {
     if name.chars().any(char::is_control) {
@@ -180,9 +219,10 @@ impl Archive {
     }
 
     /// The items extracting `selected` makes in the destination, as entry
-    /// names: one per selected entry or folder, or one per top-level name
-    /// when none are. Refuses the whole extraction when the archive has
-    /// more entries than Monodrive reads, when an entry it takes can't be
+    /// names: one per selected entry or folder. With none selected, the one
+    /// top-level name, or `""` for all of it in a folder named
+    /// `folder_name` when there are several. Refuses the whole extraction
+    /// when the archive has more entries than Monodrive reads, when an entry it takes can't be
     /// extracted, when it needs more than the `free` bytes, or when the
     /// archive claims to expand by more than deflate can.
     pub(crate) fn plan(
@@ -199,14 +239,7 @@ impl Archive {
         }
         let mut items: Vec<Vec<&str>> = Vec::new();
         if selected.is_empty() {
-            let mut seen = HashSet::new();
-            for entry in &self.entries {
-                if let Ok(parts) = parts(&entry.name)
-                    && seen.insert(parts[0])
-                {
-                    items.push(vec![parts[0]]);
-                }
-            }
+            items = self.everything();
         } else {
             for name in selected {
                 let want = split(name);
@@ -233,14 +266,13 @@ impl Archive {
                 }
             }
         }
-        let taken = |entry: &&Entry| {
-            selected.is_empty()
-                || parts(&entry.name)
-                    .is_ok_and(|parts| items.iter().any(|item| parts.starts_with(item)))
-        };
         let mut bytes = 0u64;
         let mut problems = Vec::new();
-        for entry in self.entries.iter().filter(taken) {
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| takes(&items, selected.is_empty(), entry))
+        {
             bytes = bytes.saturating_add(entry.size);
             if let Some(why) = entry.problem() {
                 problems.push(format!("{} is {why}.", printable(&entry.name)));
@@ -264,18 +296,126 @@ impl Archive {
                 "{at}: needs {bytes} bytes once extracted, more than the {free} free there."
             ));
         }
-        let claimed = self
-            .entries
-            .iter()
-            .fold(0u64, |sum, entry| sum.saturating_add(entry.size));
-        if claimed > self.len.saturating_mul(MAX_RATIO) {
+        if self.too_large() {
             return Err(format!(
-                "{at}: claims to expand from {} to {claimed} bytes, more than ZIP compression can, \
+                "{at}: claims to expand from {} to {} bytes, more than ZIP compression can, \
                  as zip bombs do. Nothing was extracted.",
-                self.len
+                self.len,
+                self.claimed()
             ));
         }
         Ok(items.into_iter().map(|item| item.join("/")).collect())
+    }
+
+    /// The items extracting all of it makes: its one top-level name, or
+    /// `""` for all of it in a folder named `folder_name` when there are
+    /// several, as Archive Utility does, rather than spilling into the
+    /// destination. Finder's own archives add `__MACOSX` beside the one
+    /// item, for what ZIP can't hold; that doesn't count, and with one item
+    /// it stays behind.
+    fn everything(&self) -> Vec<Vec<&str>> {
+        let mut seen = HashSet::new();
+        let mut items = Vec::new();
+        for entry in &self.entries {
+            if let Ok(parts) = parts(&entry.name)
+                && seen.insert(parts[0])
+            {
+                items.push(vec![parts[0]]);
+            }
+        }
+        let real: Vec<Vec<&str>> = items
+            .iter()
+            .filter(|item| item[0] != "__MACOSX")
+            .cloned()
+            .collect();
+        match real.len() {
+            0 => items,
+            1 => real,
+            _ => vec![Vec::new()],
+        }
+    }
+
+    /// The bytes all its entries hold once extracted, as the archive says.
+    pub fn claimed(&self) -> u64 {
+        self.entries
+            .iter()
+            .fold(0u64, |sum, entry| sum.saturating_add(entry.size))
+    }
+
+    /// It claims to expand by more than deflate can.
+    fn too_large(&self) -> bool {
+        self.claimed() > self.len.saturating_mul(MAX_RATIO)
+    }
+
+    /// Why extracting all of it would be refused, whatever the destination,
+    /// as `plan` would refuse it.
+    pub fn refusal(&self) -> Option<Refusal> {
+        if self.total > self.entries.len() as u64 {
+            return Some(Refusal::TooMany);
+        }
+        let everything = self.everything();
+        let unextractable = self
+            .entries
+            .iter()
+            .filter(|entry| takes(&everything, true, entry) && entry.problem().is_some())
+            .count();
+        if unextractable > 0 {
+            return Some(Refusal::Unextractable(unextractable));
+        }
+        self.too_large().then_some(Refusal::TooLarge)
+    }
+
+    /// The entries and folders directly in `folder`, a folder in the
+    /// archive, as a folder on the disk lists: a folder the archive only
+    /// implies by its entries' names is there too. Each path is the
+    /// archive's joined with the names inside it, so no two are the same,
+    /// though nothing is on the disk there. A name that isn't a path inside
+    /// shows whole at the top, and can't be opened.
+    pub fn level(&self, folder: &str) -> Level {
+        let want = split(folder);
+        let mut level = Level::default();
+        let mut at: HashMap<PathBuf, usize> = HashMap::new();
+        for entry in &self.entries {
+            let modified = entry.modified.map_or(0, |time| {
+                time.duration_since(UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs())
+            });
+            let (name, path, kind, own) = match parts(&entry.name) {
+                Ok(parts) if parts.len() > want.len() && parts.starts_with(&want) => {
+                    let own = parts.len() == want.len() + 1;
+                    let name = parts[want.len()];
+                    let path = self.path.join(parts[..=want.len()].join("/"));
+                    let kind = if own { entry.kind } else { Kind::Dir };
+                    (printable(name).into_owned(), path, kind, own)
+                }
+                Err(_) if want.is_empty() => {
+                    let name = printable(&entry.name).replace('/', ":");
+                    (name.clone(), self.path.join(name), Kind::Other, true)
+                }
+                _ => continue,
+            };
+            if own && let Some(why) = entry.problem() {
+                level.problems.insert(path.clone(), why);
+            }
+            let row = crate::entries::Entry {
+                path: path.clone(),
+                name,
+                kind,
+                size: if kind == Kind::Dir { 0 } else { entry.size },
+                modified,
+                availability: crate::cloud::Availability::Local,
+            };
+            match at.get(&path) {
+                // A folder's own entry has its time; one it implies has none.
+                Some(&ix) if own => level.entries[ix] = row,
+                Some(_) => {}
+                None => {
+                    at.insert(path, level.entries.len());
+                    level.entries.push(row);
+                }
+            }
+        }
+        level
     }
 
     /// The bytes extracting `item` writes, as the archive says.
@@ -1096,6 +1236,79 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .ends_with("isn't a ZIP archive.")
         );
+    }
+
+    #[test]
+    fn a_level_lists_one_folder_with_the_folders_its_names_imply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.zip");
+        zip(
+            &path,
+            &[
+                ("site/", Item::Dir),
+                ("site/index.html", Item::File(b"<p>")),
+                ("site/img/logo.png", Item::File(b"png")),
+                ("site/secret.env", Item::File(b"shh")),
+                ("../up.txt", Item::File(b"up")),
+                ("readme.md", Item::File(b"hi")),
+            ],
+        );
+        patch(&path, "site/secret.env", |fixed, _| fixed[8] |= 1);
+        let archive = Archive::open(&path).unwrap();
+        let rows = |level: &Level| -> Vec<(String, Kind, u64)> {
+            level
+                .entries
+                .iter()
+                .map(|e| {
+                    let inside = e.path.strip_prefix(&path).unwrap();
+                    (inside.display().to_string(), e.kind, e.size)
+                })
+                .collect()
+        };
+        let top = archive.level("");
+        assert_eq!(
+            rows(&top),
+            [
+                ("site".into(), Kind::Dir, 0),
+                ("..:up.txt".into(), Kind::Other, 2),
+                ("readme.md".into(), Kind::File, 2),
+            ]
+        );
+        assert!(top.problems[&path.join("..:up.txt")].contains("climbs out"));
+        // The folder's own entry gives its time.
+        assert!(top.entries[0].modified > 0);
+        let site = archive.level("site/");
+        assert_eq!(
+            rows(&site),
+            [
+                ("site/index.html".into(), Kind::File, 3),
+                ("site/img".into(), Kind::Dir, 0),
+                ("site/secret.env".into(), Kind::File, 3),
+            ]
+        );
+        assert_eq!(site.problems.len(), 1);
+        assert!(site.problems[&path.join("site/secret.env")].starts_with("encrypted"));
+        assert_eq!(rows(&archive.level("site/img"))[0].0, "site/img/logo.png");
+        assert_eq!(archive.refusal(), Some(Refusal::Unextractable(2)));
+        // Finder's `__MACOSX` beside one item doesn't make it several.
+        let mac = dir.path().join("mac.zip");
+        let mut items = vec![
+            ("site/a.txt", Item::File(b"a")),
+            ("__MACOSX/site/._a.txt", Item::File(b"fork")),
+        ];
+        zip(&mac, &items);
+        patch(&mac, "__MACOSX/site/._a.txt", |fixed, _| fixed[8] |= 1);
+        let left = Archive::open(&mac).unwrap();
+        assert_eq!(left.plan(&[], None).unwrap(), ["site"]);
+        // What stays behind can't refuse it.
+        assert_eq!(left.refusal(), None);
+        items.push(("b.txt", Item::File(b"b")));
+        zip(&mac, &items);
+        let plan = Archive::open(&mac).unwrap().plan(&[], None).unwrap();
+        assert_eq!(plan, [""]);
+        let fine = dir.path().join("fine.zip");
+        zip(&fine, &[("a.txt", Item::File(b"a"))]);
+        assert_eq!(Archive::open(&fine).unwrap().refusal(), None);
     }
 
     #[test]

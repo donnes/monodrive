@@ -20,7 +20,7 @@ Update a plan's row when its work lands on `main`.
 | 10 Open With and Get Info | Done; launching apps, the open panel and terminals need a person to check | 5c5f7b1, 5a19615, 74b635c |
 | 11 Search | Done; filter UI skipped for now | 1c1c4f5, ef44c3d |
 | 12 Batch rename | Done | 1574337, 13200b7 |
-| 13 Archives | Core on main; UI picked, not built | |
+| 13 Archives | Done; archives from the wild (encrypted, huge, made on Windows) need a person to check | |
 | 14 Remote locations | Core on main; UI picked, not built | |
 | 17 Storage inspection | Core on main; UI picked, not built | |
 | 18 Cloud storage | Done; downloading and removing downloads from a real iCloud Drive or File Provider folder needs a person to check | |

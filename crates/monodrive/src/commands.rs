@@ -8,14 +8,14 @@
 //! as in AppKit: a text field acts on its text, the file list on its files.
 
 use crate::browser::{
-    AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab,
+    AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab, Compress,
     ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Download, Duplicate, EditFavorites,
-    EditPreview, Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications,
-    GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3,
-    GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10,
-    GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, HideInspector, MoveHere,
-    MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab,
-    OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
+    EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract, FocusSearch, Forward, GetInfo,
+    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2,
+    GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9,
+    GoFavorite10, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, HideInspector,
+    MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab,
+    NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
     OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo, RemoveDownload, RemoveFromSidebar,
     Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder,
     ShowCopiesAndMoves, ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName,
@@ -397,6 +397,21 @@ pub fn all() -> Vec<Command> {
             SELECTION,
             command("Move to Other Pane", File, &["alt-f6"], BROWSER, || {
                 Box::new(MoveToOtherPane)
+            }),
+        ),
+        // Into a ZIP beside the selection, and out of one: what's selected
+        // in it, all of it from its empty space, or archives selected in a
+        // folder, into the other pane's folder or beside the archive.
+        on(
+            SELECTION,
+            separated(command("Compress", File, &[], BROWSER, || {
+                Box::new(Compress)
+            })),
+        ),
+        on(
+            &[Scope::Selection, Scope::Folder],
+            command("Extract", File, &["cmd-shift-e"], BROWSER, || {
+                Box::new(Extract)
             }),
         ),
         on(
@@ -1120,6 +1135,8 @@ mod tests {
                 "Edit in Preview",
                 "| Copy to Other Pane ⌥F5",
                 "Move to Other Pane ⌥F6",
+                "| Compress",
+                "Extract ⇧⌘E",
                 "| Move to Trash ⌘⌫",
                 "Put Back",
                 "| Copy ⌘C",
@@ -1133,6 +1150,7 @@ mod tests {
                 "New File",
                 "| Organize Folder…",
                 "Get Info ⌘I",
+                "| Extract ⇧⌘E",
                 "| Paste ⌘V",
                 "| ✓ as List ⌥⌘1",
                 "as Grid ⌥⌘2",
