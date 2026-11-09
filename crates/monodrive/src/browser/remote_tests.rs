@@ -351,3 +351,103 @@ fn copy_to_other_pane_downloads_from_a_server_and_uploads_to_one(cx: &mut TestAp
         Some("from this Mac")
     );
 }
+
+#[gpui::test]
+fn dragging_between_a_server_and_a_local_pane_copies_and_never_moves(cx: &mut TestAppContext) {
+    use super::drag_tests::{carry, says};
+    use gpui::MouseButton;
+    let (_dir, project) = folder();
+    let project = project.canonicalize().unwrap();
+    let world = world(vec![startup()], cx);
+    let far = far(&world);
+    let start = far.display().to_string();
+    world
+        .store
+        .add_remote("box.example", Some("box"), Some(&start))
+        .unwrap();
+    std::fs::write(far.join("notes.md"), "from the server").unwrap();
+    std::fs::write(project.join("up.txt"), "from this Mac").unwrap();
+    let real = world.dir.path().canonicalize().unwrap();
+    let paths = ops::Paths {
+        state: real.join("state"),
+        settings: real.join("support/settings.json"),
+        trash: real.join("Trash"),
+    };
+    let serve = |cx: &mut VisualTestContext| {
+        let owner = ops::Owner::bind_with(paths.clone(), local_sftp(&[])).unwrap();
+        let serving = std::thread::spawn(move || owner.serve());
+        let client = ops::Client::new(paths.clone(), None);
+        cx.update(|_, cx| cx.set_global(Operations(Arc::new(Mutex::new(client)))));
+        serving
+    };
+    let finish = |serving: std::thread::JoinHandle<std::io::Result<()>>,
+                  cx: &mut VisualTestContext| {
+        cx.update(|_, cx| drop(cx.remove_global::<Operations>()));
+        serving.join().unwrap().unwrap();
+    };
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-alt-s");
+    let row = server_row(&browser, 0, cx);
+    press_on(cx, &row);
+    assert_eq!(listed(&browser, cx).0, ["docs", "a.txt", "notes.md"]);
+    let local = browser.read_with(cx, |b, _| b.tabs[b.active].pane.clone());
+    let into_local = local.read_with(cx, |pane, _| pane.list_bounds.get().center());
+
+    // Down: a server's file onto the local pane. ⌘ asks for a move; it copies.
+    let serving = serve(cx);
+    let notes = center(cx, "remote-row-2");
+    carry(notes, into_local, "cmd", cx);
+    assert_eq!(
+        says(&browser, cx).as_deref(),
+        Some("Copy notes.md to project")
+    );
+    cx.simulate_mouse_up(into_local, MouseButton::Left, with("cmd"));
+    finish(serving, cx);
+    assert_eq!(
+        std::fs::read_to_string(project.join("notes.md"))
+            .ok()
+            .as_deref(),
+        Some("from the server")
+    );
+    assert!(far.join("notes.md").exists(), "nothing moves off a server");
+
+    // Over its own folder it takes nothing.
+    let below = center(cx, "remote-row-2") + gpui::point(gpui::px(0.), gpui::px(120.));
+    carry(center(cx, "remote-row-2"), below, "", cx);
+    assert_eq!(says(&browser, cx).as_deref(), Some("Already in far on box"));
+    press(cx, "escape");
+    cx.simulate_mouse_up(below, MouseButton::Left, with(""));
+
+    // Up: a file here onto a folder on the server.
+    local.update_in(cx, |pane, window, cx| {
+        pane.focus_list(window, cx);
+        pane.reload(cx);
+    });
+    cx.run_until_parked();
+    let names = shown(&browser, cx).0;
+    let up = names.iter().position(|name| name == "up.txt").unwrap();
+    let serving = serve(cx);
+    carry(
+        super::tests::row(&browser, up, cx),
+        center(cx, "remote-row-0"),
+        "cmd",
+        cx,
+    );
+    assert_eq!(
+        says(&browser, cx).as_deref(),
+        Some("Copy up.txt to docs on box")
+    );
+    let docs = center(cx, "remote-row-0");
+    cx.simulate_mouse_up(docs, MouseButton::Left, with("cmd"));
+    finish(serving, cx);
+    assert_eq!(
+        std::fs::read_to_string(far.join("docs/up.txt"))
+            .ok()
+            .as_deref(),
+        Some("from this Mac")
+    );
+    assert!(
+        project.join("up.txt").exists(),
+        "nothing moves onto a server"
+    );
+}

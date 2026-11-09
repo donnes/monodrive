@@ -5,6 +5,7 @@
 //! from, so Back leaves it. The connections are the app's (`Places::remote`),
 //! and `Servers` says how each is doing, for the sidebar and the palette.
 
+use super::drag::{Spot, Target, offers};
 use super::pane::{Pane, PaneEvent, Stop, column, format_date, text_width};
 use super::sidebar::Places;
 use super::{CancelRename, CommitRename};
@@ -742,6 +743,33 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         let paths = self.remote_chosen();
+        self.download_from_server(paths, into, window, cx);
+    }
+
+    /// What a drag from server row `ix` carries, the row joining the
+    /// selection unless it's in it, and the row's kind and name to draw.
+    pub(super) fn remote_drag_from(
+        &mut self,
+        ix: usize,
+    ) -> (Vec<RemotePath>, Option<(Kind, String)>) {
+        let Some(entry) = self.remote.entries.get(ix) else {
+            return (Vec::new(), None);
+        };
+        let picture = Some((entry.kind, entry.name.clone()));
+        if !self.remote.selected.contains(&entry.name) {
+            self.remote.select_only(ix);
+        }
+        (self.remote_chosen(), picture)
+    }
+
+    /// Copies `paths` on a server down into `into`, as a job.
+    pub(super) fn download_from_server(
+        &mut self,
+        paths: Vec<RemotePath>,
+        into: PathBuf,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
@@ -930,8 +958,26 @@ impl Pane {
                 .into_any_element(),
         };
         let _ = window;
+        let drops = self
+            .drag
+            .active()
+            .then(|| self.remote_folder().cloned())
+            .flatten();
+        let pane = cx.entity();
         div()
             .id("remote-list")
+            .when_some(drops, |d, at| {
+                let drag = self.drag.clone();
+                let name = on_server(&at);
+                let spot = Spot::Pane(pane.entity_id());
+                offers(d, move |_| {
+                    drag.offer(Target::Server {
+                        spot: spot.clone(),
+                        at: at.clone(),
+                        name: name.clone(),
+                    })
+                })
+            })
             .key_context("FileList")
             .track_focus(&self.list_focus)
             .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| {
@@ -1050,6 +1096,8 @@ impl Pane {
         let (date, size, kind) = super::pane::columns(self.chrome.width);
         let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
         let active = self.list_focus.contains_focused(window, cx) || self.chrome.menu_here;
+        let drops = self.drag.active();
+        let id = cx.entity_id();
         range
             .filter_map(|ix| {
                 let entry = self.remote.entries.get(ix)?;
@@ -1143,6 +1191,24 @@ impl Pane {
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.remote_click(ix, event, window, cx)
                         }))
+                        .when(self.remote.renaming.is_none(), |d| {
+                            Self::grab_from_server(d, ix, cx)
+                        })
+                        .when(drops && entry.kind == Kind::Dir, |d| {
+                            let drag = self.drag.clone();
+                            let target = Target::Server {
+                                spot: Spot::Row(id, ix),
+                                at: entry.path.clone(),
+                                name: on_server(&entry.path),
+                            };
+                            offers(d, move |_| drag.offer(target.clone()))
+                        })
+                        .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
+                            d.relative().child(
+                                self.drag
+                                    .pulsed(theme::drop_outline().rounded(px(theme::RADIUS_ROW))),
+                            )
+                        })
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -1607,5 +1673,13 @@ impl super::Browser {
         self.sidebar.remotes.retain(|source| source.id != id);
         let id = id.to_owned();
         self.change_places(cx, move |store, _| store.forget_remote(&id).map(drop));
+    }
+}
+
+/// A server folder as a drop names it: "srv on box".
+fn on_server(at: &RemotePath) -> String {
+    match at.name() {
+        Some(name) => format!("{name} on {}", at.source()),
+        None => at.source().to_owned(),
     }
 }

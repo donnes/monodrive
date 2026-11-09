@@ -224,7 +224,7 @@ pub(super) fn press_on(cx: &mut VisualTestContext, selector: &str) {
     click(cx, selector.to_string().leak());
 }
 
-fn center(cx: &mut VisualTestContext, selector: &str) -> Point<Pixels> {
+pub(super) fn center(cx: &mut VisualTestContext, selector: &str) -> Point<Pixels> {
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     cx.debug_bounds(selector.to_string().leak())

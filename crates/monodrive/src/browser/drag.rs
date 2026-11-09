@@ -23,6 +23,7 @@ use gpui::{
     px,
 };
 use monodrive_core::entries::{Entry, Kind};
+use monodrive_core::remote::RemotePath;
 use objc2_app_kit::{NSEvent, NSEventModifierFlags};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -50,6 +51,13 @@ pub(super) struct FileDrag {
     ix: usize,
 }
 
+/// What a person is dragging out of a server folder. Nothing leaves the
+/// window: another app would need a real local file, and none exists yet.
+pub(super) struct ServerDrag {
+    pane: Entity<Pane>,
+    ix: usize,
+}
+
 /// A place on screen that a drop can land on.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Spot {
@@ -72,6 +80,12 @@ pub(super) enum Target {
     },
     /// Into Favorites, before the one at this position.
     Pin(usize),
+    /// Into a folder on a server, named with its server: "srv on box".
+    Server {
+        spot: Spot,
+        at: RemotePath,
+        name: String,
+    },
 }
 
 /// What a drop would do.
@@ -86,6 +100,18 @@ pub(super) enum Decision {
     Pin {
         paths: Vec<PathBuf>,
         at: usize,
+    },
+    /// Copies up to a server; nothing moves to one, which has no Trash.
+    Upload {
+        paths: Vec<PathBuf>,
+        into: RemotePath,
+        name: String,
+    },
+    /// Copies down from a server.
+    Download {
+        paths: Vec<RemotePath>,
+        into: PathBuf,
+        name: String,
     },
     /// Nothing, for this reason.
     Nothing(String),
@@ -109,6 +135,13 @@ pub(super) fn decide(
             };
         }
         Target::Folder { path, name, .. } => (path, name),
+        Target::Server { at, name, .. } => {
+            return Decision::Upload {
+                paths: sources.to_vec(),
+                into: at.clone(),
+                name: name.clone(),
+            };
+        }
     };
     if let Some(source) = sources.iter().find(|source| into.starts_with(source)) {
         let name = shown_name(source);
@@ -147,6 +180,16 @@ impl Decision {
             Self::Pin { paths, .. } => {
                 format!("Pin {} to Favorites", count_of(paths, "folders"))
             }
+            Self::Upload { paths, name, .. } => {
+                format!("Copy {} to {name}", count_of(paths, "items"))
+            }
+            Self::Download { paths, name, .. } => {
+                let what = match paths.as_slice() {
+                    [one] => one.name().unwrap_or(one.source()).to_owned(),
+                    many => format!("{} items", many.len()),
+                };
+                format!("Copy {what} to {name}")
+            }
             Self::Nothing(why) => why.clone(),
         }
     }
@@ -164,6 +207,25 @@ fn shown_name(path: &Path) -> String {
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// What a drop of items from a server would do: a copy down into a folder
+/// here, and nothing anywhere else.
+pub(super) fn decide_from_server(sources: &[RemotePath], target: &Target) -> Decision {
+    match target {
+        Target::Folder { path, name, .. } => Decision::Download {
+            paths: sources.to_vec(),
+            into: path.clone(),
+            name: name.clone(),
+        },
+        Target::Server { at, name, .. }
+            if sources.iter().all(|s| s.parent().as_ref() == Some(at)) =>
+        {
+            Decision::Nothing(format!("Already in {name}"))
+        }
+        Target::Server { .. } => Decision::Nothing("Copy between a server and this Mac.".into()),
+        Target::Pin(_) => Decision::Nothing("Only folders on this Mac go in Favorites.".into()),
+    }
 }
 
 /// `entries` without what's inside another of them, which goes along with it.
@@ -229,6 +291,8 @@ impl Session {
 
 struct Session {
     sources: Vec<PathBuf>,
+    /// What's dragged off a server, in place of `sources`.
+    from_server: Vec<RemotePath>,
     /// All of it is folders, as pinning asks.
     folders: bool,
     /// What the pointer is over now, as this move finds it.
@@ -301,6 +365,8 @@ struct DragState {
     /// whether it's a folder, whatever the keys select meanwhile. It outlasts
     /// the session, for a drag that comes back from outside the window.
     carried: Vec<(PathBuf, bool)>,
+    /// What the drag out of a server folder took, in place of `carried`.
+    carried_from_server: Vec<RemotePath>,
     session: Option<Session>,
 }
 
@@ -318,6 +384,7 @@ impl Drag {
     fn begin(&self, sources: Vec<PathBuf>, folders: bool) {
         self.0.borrow_mut().session = Some(Session {
             sources,
+            from_server: Vec::new(),
             folders,
             target: None,
             source_devices: None,
@@ -336,20 +403,36 @@ impl Drag {
 
     /// A drag out of a pane starts, with `files`.
     fn carry(&self, files: Vec<(PathBuf, bool)>) {
-        self.0.borrow_mut().carried = files;
+        let mut state = self.0.borrow_mut();
+        state.carried = files;
+        state.carried_from_server.clear();
+        drop(state);
+        self.resume();
+    }
+
+    /// A drag out of a server folder starts, with `items`.
+    fn carry_from_server(&self, items: Vec<RemotePath>) {
+        let mut state = self.0.borrow_mut();
+        state.carried.clear();
+        state.carried_from_server = items;
+        drop(state);
         self.resume();
     }
 
     /// The session of what's carried.
     fn resume(&self) {
-        let (sources, folders) = {
+        let (sources, folders, from_server) = {
             let state = self.0.borrow();
             (
                 state.carried.iter().map(|(path, _)| path.clone()).collect(),
-                state.carried.iter().all(|(_, folder)| *folder),
+                !state.carried.is_empty() && state.carried.iter().all(|(_, folder)| *folder),
+                state.carried_from_server.clone(),
             )
         };
         self.begin(sources, folders);
+        if let Some(session) = self.0.borrow_mut().session.as_mut() {
+            session.from_server = from_server;
+        }
     }
 
     /// A move starts: what's under the pointer comes from the offers after it.
@@ -395,11 +478,12 @@ impl Drag {
             .as_ref()
             .is_some_and(|(was, held, _)| *was == target && *held == pressed)
         {
-            let decided = (
-                target.clone(),
-                pressed,
-                decide(&session.sources, &target, keys, same_volume),
-            );
+            let decision = if session.from_server.is_empty() {
+                decide(&session.sources, &target, keys, same_volume)
+            } else {
+                decide_from_server(&session.from_server, &target)
+            };
+            let decided = (target.clone(), pressed, decision);
             let tap = tap(session.decided.as_ref(), &decided);
             session.decided = Some(decided);
             return tap;
@@ -417,8 +501,15 @@ impl Drag {
     /// Whether `spot` is what a drop would go into.
     pub(super) fn outlines(&self, spot: &Spot) -> bool {
         self.decision(|target, decision| {
-            matches!(decision, Decision::Send { .. })
-                && matches!(target, Target::Folder { spot: at, .. } if at == spot)
+            let lands = matches!(
+                decision,
+                Decision::Send { .. } | Decision::Upload { .. } | Decision::Download { .. }
+            );
+            lands
+                && matches!(
+                    target,
+                    Target::Folder { spot: at, .. } | Target::Server { spot: at, .. } if at == spot
+                )
         })
         .unwrap_or(false)
     }
@@ -436,7 +527,7 @@ impl Drag {
     /// favorite or a drive that would take the files.
     fn springable(&self) -> Option<Target> {
         self.decision(|target, decision| {
-            let opens = matches!(decision, Decision::Send { .. })
+            let opens = matches!(decision, Decision::Send { .. } | Decision::Download { .. })
                 && matches!(
                     target,
                     Target::Folder {
@@ -605,9 +696,15 @@ pub(super) fn offers<E: InteractiveElement>(element: E, offer: impl Fn(&mut App)
         .on_mouse_up(MouseButton::Left, move |_, _, cx| at_release(cx))
 }
 
+/// What the drag image draws: an item here, or one on a server by its name.
+enum Picture {
+    Entry(Entry),
+    Named(Kind, String),
+}
+
 /// The icon under the pointer, with a count when there's more than one.
 struct DragImage {
-    entry: Option<Entry>,
+    picture: Option<Picture>,
     count: usize,
     /// Where the press was in the element GPUI draws this over.
     grabbed: Point<Pixels>,
@@ -623,11 +720,12 @@ impl Render for DragImage {
                 div()
                     .relative()
                     .size(px(IMAGE_SIDE))
-                    .children(
-                        self.entry
-                            .as_ref()
-                            .map(|entry| file_icons::icon(entry, IMAGE_SIDE, window, cx)),
-                    )
+                    .children(self.picture.as_ref().map(|picture| match picture {
+                        Picture::Entry(entry) => file_icons::icon(entry, IMAGE_SIDE, window, cx),
+                        Picture::Named(kind, name) => {
+                            file_icons::kind_icon(*kind, Path::new(name), IMAGE_SIDE, window, cx)
+                        }
+                    }))
                     .when(self.count > 1, |d| {
                         d.child(
                             div()
@@ -654,6 +752,45 @@ impl Render for DragImage {
 }
 
 impl Pane {
+    /// Makes server row `ix` start a drag of the selection.
+    pub(super) fn grab_from_server(
+        element: Stateful<Div>,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        element.on_drag(
+            ServerDrag {
+                pane: cx.entity(),
+                ix,
+            },
+            |dragged, grabbed, _, cx| {
+                let ix = dragged.ix;
+                dragged
+                    .pane
+                    .update(cx, |pane, cx| pane.begin_server_drag(ix, grabbed, cx))
+            },
+        )
+    }
+
+    /// The drag has started on server row `ix`, which joins the selection
+    /// unless it's in it.
+    fn begin_server_drag(
+        &mut self,
+        ix: usize,
+        grabbed: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Entity<DragImage> {
+        let (items, picture) = self.remote_drag_from(ix);
+        let count = items.len();
+        self.drag.carry_from_server(items);
+        cx.notify();
+        cx.new(|_| DragImage {
+            picture: picture.map(|(kind, name)| Picture::Named(kind, name)),
+            count,
+            grabbed,
+        })
+    }
+
     /// Makes `element` start a drag of the selection, its press no rectangle.
     pub(super) fn grab(element: Stateful<Div>, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
         element
@@ -706,7 +843,7 @@ impl Pane {
         self.drag.carry(files.collect());
         cx.notify();
         cx.new(|_| DragImage {
-            entry,
+            picture: entry.map(Picture::Entry),
             count,
             grabbed,
         })
@@ -785,7 +922,13 @@ impl Browser {
         .capture_any_mouse_up(cx.listener(|this, _, _, _| {
             this.drag.next_move();
         }))
+        .on_drag_move::<ServerDrag>(cx.listener(|this, _: &DragMoveEvent<ServerDrag>, _, _| {
+            if !this.drag.next_move() {
+                this.drag.resume();
+            }
+        }))
         .on_drop::<FileDrag>(cx.listener(|this, _, window, cx| this.drop_files(window, cx)))
+        .on_drop::<ServerDrag>(cx.listener(|this, _, window, cx| this.drop_files(window, cx)))
         .on_drop::<ExternalPaths>(cx.listener(|this, _, window, cx| this.drop_files(window, cx)))
         .on_modifiers_changed(cx.listener(|this, _, _, cx| {
             if this.drag.active() {
@@ -1035,6 +1178,17 @@ impl Browser {
             Some(Decision::Pin { paths, at }) => {
                 feedback::haptic(Haptic::Generic, cx);
                 self.pin_folders(paths, at, cx);
+            }
+            Some(Decision::Upload { paths, into, .. }) => {
+                feedback::haptic(Haptic::Generic, cx);
+                self.pane()
+                    .update(cx, |pane, cx| pane.upload(paths, into, window, cx));
+            }
+            Some(Decision::Download { paths, into, .. }) => {
+                feedback::haptic(Haptic::Generic, cx);
+                self.pane().update(cx, |pane, cx| {
+                    pane.download_from_server(paths, into, window, cx)
+                });
             }
             Some(Decision::Nothing(_)) | None => {}
         }
