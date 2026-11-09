@@ -40,6 +40,22 @@ out_dir() {
     echo "target/bench/$(date +%Y%m%d-%H%M%S)"
 }
 
+# A run stopped by Ctrl-C or a signal never reaches its suites' cleanup, so
+# this detaches the disk images mounted under that run's own fixtures.
+run_out=""
+detach_run_images() {
+    [ -n "$run_out" ] || return 0
+    local fixtures="$PWD/$run_out/fixtures/" line point
+    mount | while IFS= read -r line; do
+        point=${line#* on }
+        point=${point% (*}
+        case "$point" in
+        "$fixtures"*) hdiutil detach -quiet -force "$point" || true ;;
+        esac
+    done
+}
+trap 'detach_run_images; exit 130' INT TERM
+
 # A build of <commit> in a worktree of its own, with its own target folder.
 # Keeps only the most recent baseline, since a build takes several GB.
 baseline() {
@@ -206,7 +222,9 @@ spotlight)
     read -r against short <<<"$built"
     build "$@"
     busy
-    "$tool" run "$@" --rounds "$rounds" --out "$(out_dir)" --against "$against" --against-commit "$short"
+    out=$(out_dir)
+    run_out=$out
+    "$tool" run "$@" --rounds "$rounds" --out "$out" --against "$against" --against-commit "$short"
     ;;
 -h | --help | help)
     sed -n 2,12p "$0" >&2
@@ -214,6 +232,8 @@ spotlight)
 *)
     build "$@"
     busy
-    "$tool" run "$@" --rounds "$rounds" --out "$(out_dir)"
+    out=$(out_dir)
+    run_out=$out
+    "$tool" run "$@" --rounds "$rounds" --out "$out"
     ;;
 esac

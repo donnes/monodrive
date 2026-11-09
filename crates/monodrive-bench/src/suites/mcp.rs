@@ -380,7 +380,7 @@ fn session(
         .and_then(|id| id.parse().ok())
         .ok_or_else(|| format!("copy replied {queued:?}"))?;
     // What an agent does next: ask until the job ends.
-    let (mut sample_done, status) = measure::served(pid, || -> Result<String, String> {
+    let (polled, status) = measure::served(pid, || -> Result<String, String> {
         loop {
             let status = server.tool("job_status", Job { job })?;
             if !status.contains(": queued,") && !status.contains(": running,") {
@@ -389,7 +389,7 @@ fn session(
         }
     });
     let status = status?;
-    sample_done.wall_ms += sample.wall_ms;
+    let sample_done = sample.then(polled);
     let copied_count = std::fs::read_dir(into.join("copied"))
         .map_err(io(&into))?
         .count();

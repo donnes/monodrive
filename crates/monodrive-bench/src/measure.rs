@@ -19,6 +19,20 @@ pub struct Sample {
     pub cycles: Option<u64>,
 }
 
+impl Sample {
+    /// This and `next`, done one after the other, as one sample. A counter
+    /// either lacks stays unknown.
+    pub fn then(self, next: Sample) -> Sample {
+        let both = |a: Option<u64>, b: Option<u64>| Some(a? + b?);
+        Sample {
+            wall_ms: self.wall_ms + next.wall_ms,
+            cpu_ms: self.cpu_ms.zip(next.cpu_ms).map(|(a, b)| a + b),
+            instructions: both(self.instructions, next.instructions),
+            cycles: both(self.cycles, next.cycles),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Usage {
     cpu_ns: u64,
