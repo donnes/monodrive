@@ -22,7 +22,9 @@
 //! `sidebar-keys.png`, `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png`,
 //! `recents.png` and `recents-grid.png`, then `updates.png`. The Overview's are last: see `shoot_overview`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
-//! `palette-favorites.png`), `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
+//! `palette-favorites.png`), `server.png` and `server-failed.png`, a saved
+//! SFTP server opened from there and one that won't connect,
+//! `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
 //! `settings-<page>.png` for each Settings page, `background.png`, the list
 //! over a picture that runs from bright to dark, `narrow.png`, where the path
 //! collapses, and `no-path-bar.png`.
@@ -97,6 +99,7 @@ use monodrive_core::index::{Found, Hit, Index, LineMatch};
 use monodrive_core::info::{self, Info};
 use monodrive_core::ops::{self, Conflict, Origin, Request};
 use monodrive_core::places::{Favorite, Pinned, RecentSearch, SavedSearch, Store};
+use monodrive_core::remote::{Connections, RemoteError, Source, Transport};
 use monodrive_core::search::{Looks, Scope, Search};
 use monodrive_core::servers::Cancel;
 use monodrive_core::sizes::FolderSize;
@@ -429,6 +432,23 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
         save(&mut cx, window, out, name)?;
     }
 
+    // A server opened from the palette's page, then one that won't connect.
+    let run = named(&mut cx, "palette::Run")?;
+    for (name, server) in [("server", "build-box"), ("server-failed", "studio")] {
+        // Tall enough that the sidebar shows the servers under the drives.
+        let window = open_at(&mut cx, folder, 1100., 960.)?;
+        cx.run_until_parked();
+        dispatch(&mut cx, window, &*palette)?;
+        type_text(&mut cx, window, "Remote locations")?;
+        dispatch(&mut cx, window, &*open_page)?;
+        type_text(&mut cx, window, server)?;
+        dispatch(&mut cx, window, &*run)?;
+        if name == "server" {
+            dispatch(&mut cx, window, &SelectNext)?;
+        }
+        save(&mut cx, window, out, name)?;
+    }
+
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();
     dispatch(&mut cx, window, &SelectNext)?;
@@ -719,6 +739,8 @@ fn worktrees_fixture(home: &Path, empty: bool) -> gpui::Result<Places> {
         trash,
         applications: Vec::new(),
         drives: Arc::new(MadeUp),
+        remote: Arc::new(Connections::new(store.clone(), local_sftp())),
+        previews: support.join("previews"),
     };
     if empty {
         return Ok(places);
@@ -1030,6 +1052,8 @@ fn overview_fixture(
     });
     std::fs::write(home.join("overview.json"), serde_json::to_vec(&saved)?)?;
     Ok(Places {
+        remote: Arc::new(Connections::new(store.clone(), local_sftp())),
+        previews: home.join("previews"),
         store,
         trash,
         applications: Vec::new(),
@@ -1440,6 +1464,7 @@ fn shoot_tabs(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpu
                 history: vec![StopState {
                     place,
                     shows: Shows::Folder,
+                    remote: None,
                 }],
                 at: 0,
                 view: View::List,
@@ -1905,9 +1930,26 @@ fn made_up_places(dir: &Path, trash: &Path) -> gpui::Result<Places> {
     for address in ["smb://nas.local/media", "smb://studio.local/projects"] {
         store.save_server(address).map_err(std::io::Error::other)?;
     }
-    for host in ["build-box", "me@studio.local"] {
+    // build-box is macOS's own sftp-server over pipes, starting in a made-up
+    // folder; studio's host key has changed.
+    let server = dir.join("srv");
+    for folder in ["releases", "www", "logs"] {
+        std::fs::create_dir_all(server.join(folder))?;
+    }
+    for (name, bytes) in [
+        ("deploy.log", 1_400_000),
+        ("backup.sh", 2_000),
+        ("notes.md", 6_000),
+    ] {
+        std::fs::write(server.join(name), vec![b'x'; bytes])?;
+    }
+    let start = server.display().to_string();
+    for (host, start) in [
+        ("build-box", Some(start.as_str())),
+        ("me@studio.local", None),
+    ] {
         store
-            .add_remote(host, None, None)
+            .add_remote(host, None, start)
             .map_err(std::io::Error::other)?;
     }
     for name in ["gone.pdf", "Brief.pdf"] {
@@ -1918,6 +1960,8 @@ fn made_up_places(dir: &Path, trash: &Path) -> gpui::Result<Places> {
         store.opened(&opened).map_err(std::io::Error::other)?;
     }
     Ok(Places {
+        remote: Arc::new(Connections::new(store.clone(), local_sftp())),
+        previews: dir.join("previews"),
         store,
         trash: trash.into(),
         applications: Vec::new(),
@@ -2042,4 +2086,44 @@ fn fill(dir: &Path) -> std::io::Result<PathBuf> {
         std::fs::write(root.join(file), "")?;
     }
     Ok(root)
+}
+
+/// The server's output, which ends the server when the connection lets go.
+struct ServerOut {
+    out: std::process::ChildStdout,
+    child: std::process::Child,
+}
+
+impl std::io::Read for ServerOut {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.out.read(buf)
+    }
+}
+
+impl Drop for ServerOut {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Saved servers reach macOS's own sftp-server over pipes, with no ssh,
+/// network or keys; the one at studio.local has a changed host key.
+fn local_sftp() -> monodrive_core::remote::Connector {
+    Arc::new(|source: &Source| {
+        if source.host.ends_with("studio.local") {
+            return Err(RemoteError::HostKeyChanged(source.host.clone()));
+        }
+        let mut child = std::process::Command::new("/usr/libexec/sftp-server")
+            .current_dir("/")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| RemoteError::Failed(e.to_string()))?;
+        let (Some(stdin), Some(out)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err(RemoteError::Failed("sftp-server has no pipes.".into()));
+        };
+        Ok(Transport::new(ServerOut { out, child }, stdin))
+    })
 }

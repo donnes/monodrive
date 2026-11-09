@@ -7,6 +7,7 @@ use crate::preferences::{Frame, View};
 use gpui::{App, Global, Task};
 use monodrive_core::entries::Sort;
 use monodrive_core::places::Favorite;
+use monodrive_core::remote::RemotePath;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -50,6 +51,27 @@ pub struct StopState {
     pub place: Favorite,
     #[serde(alias = "recents", deserialize_with = "shows_or_older")]
     pub shows: Shows,
+    /// The server folder shown in front of `place`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteAt>,
+}
+
+/// A folder on a saved server: where it starts, until the server has said
+/// where that is, then the folder itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAt {
+    Start(String),
+    At(RemotePath),
+}
+
+impl RemoteAt {
+    pub fn source(&self) -> &str {
+        match self {
+            Self::Start(source) => source,
+            Self::At(path) => path.source(),
+        }
+    }
 }
 
 /// What a place in the history shows: its folder, or a page in front of it.
@@ -64,6 +86,8 @@ pub enum Shows {
     /// A folder inside a ZIP archive, read only. Saved as the folder that
     /// holds the archive, so it's never saved itself.
     Archive,
+    /// A folder on a server, which `StopState::remote` names.
+    Remote,
 }
 
 /// Sessions saved before Overview said `"recents": true`.
@@ -254,6 +278,7 @@ mod tests {
                         volume: None,
                     },
                     shows: Shows::Folder,
+                    remote: None,
                 })
                 .collect(),
             at,

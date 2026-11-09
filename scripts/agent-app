@@ -17,7 +17,8 @@ pid=$dir/pid
 home=$dir/home
 # The owner's Unix socket lives under HOME, and its path has a 104-byte limit
 # that a worktree's path can exceed.
-short_home=/tmp/monodrive-agent-$(basename "$PWD")
+# A hash of the worktree keeps it short however long the worktree's name is.
+short_home=/tmp/mda-$(printf '%s' "$PWD" | shasum | cut -c1-10)
 
 stop() {
   if [[ -f "$pid" ]]; then

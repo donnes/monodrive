@@ -131,6 +131,13 @@ pub fn run(folder: Option<PathBuf>) {
                     store.watch(move || heard_lists.say()).ok(),
                 ));
                 cx.set_global(browser::Places {
+                    previews: monodrive_core::support_dir()
+                        .unwrap_or_default()
+                        .join("previews"),
+                    remote: Arc::new(monodrive_core::remote::Connections::new(
+                        store.clone(),
+                        monodrive_core::remote::ssh::connector(),
+                    )),
                     store,
                     trash: paths.trash,
                     drives: Arc::new(browser::System),

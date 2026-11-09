@@ -9,6 +9,7 @@ use super::columns::{COLUMN_WIDTH, Columns, chevron};
 use super::drag::{Drag, Spot, Target, offers};
 use super::organize::Review;
 use super::overview::OverviewPage;
+use super::remote::RemotePage;
 use super::searches::{CONTENT_SETTLE, Matches};
 use super::worktrees::WorktreesPage;
 use super::{
@@ -34,7 +35,7 @@ use crate::onboarding::IndexGate;
 use crate::pasteboard::Pasteboard;
 use crate::preferences::{self, Preferences, View, WorkspaceStyle};
 use crate::selection::Selection;
-use crate::session::{PaneState, Shows, StopState};
+use crate::session::{PaneState, RemoteAt, Shows, StopState};
 use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, accent, content, danger, icon, on_accent, text_button};
 use crate::thumbnails::{self, Thumb};
@@ -93,6 +94,12 @@ pub(super) enum PaneEvent {
         at: Point<Pixels>,
     },
     Eject(PathBuf),
+    /// Download this file on a server, then open it, or Quick Look it.
+    Fetch {
+        at: monodrive_core::remote::RemotePath,
+        size: u64,
+        look: bool,
+    },
     /// What should be there on the next launch changed.
     Moved,
 }
@@ -313,6 +320,8 @@ pub struct Pane {
     pub(super) worktrees: WorktreesPage,
     /// The archive on screen, as last read; dropped on leaving it.
     pub(super) archived: Option<archive::Archived>,
+    /// The server folder, as last listed.
+    pub(super) remote: RemotePage,
     backdrop: Entity<Backdrop>,
     pub(super) chrome: Chrome,
     /// The window's drag of files.
@@ -426,6 +435,7 @@ impl Pane {
             overview: OverviewPage::default(),
             worktrees: WorktreesPage::default(),
             archived: None,
+            remote: RemotePage::default(),
             backdrop: cx.new(|_| Backdrop::default()),
             chrome: Chrome::default(),
             drag,
@@ -517,6 +527,7 @@ impl Pane {
                         Shows::Archive => Shows::Folder,
                         shows => shows,
                     },
+                    remote: stop.remote.clone(),
                 })
             })
             .collect::<Option<_>>()?;
@@ -573,7 +584,9 @@ impl Pane {
             self.sort = sort;
             preferences::update(cx, |p| p.sort = sort);
             cx.emit(PaneEvent::Moved);
-            if self.query.is_empty() {
+            if self.showing_remote() {
+                self.resort_remote(cx);
+            } else if self.query.is_empty() {
                 self.reload(cx);
             }
         }
@@ -609,6 +622,8 @@ impl Pane {
             "Overview".to_string()
         } else if self.showing_worktrees() {
             "Worktrees".to_string()
+        } else if self.showing_remote() {
+            self.remote_title()
         } else if self.showing_recents() {
             "Recents".to_string()
         } else if self.in_trash(cx) {
@@ -653,8 +668,13 @@ impl Pane {
         self.push_stop(stop, cx);
     }
 
+    /// Makes `stop` what's on screen, after what was, dropping what was
+    /// ahead of it.
     pub(super) fn push_stop(&mut self, stop: Stop, cx: &mut Context<Self>) {
-        self.reselect = Some(self.folder().to_path_buf());
+        // A server's rows aren't this Mac's, so neither side has the other's
+        // folder to select.
+        let local = !self.showing_remote() && stop.shows != Shows::Remote;
+        self.reselect = local.then(|| self.folder().to_path_buf());
         self.collapse_all();
         self.history.truncate(self.at + 1);
         self.history.push(stop);
@@ -758,6 +778,25 @@ impl Pane {
         }
         self.remember = Task::ready(());
         self.asking.clear();
+        if self.showing_remote() {
+            // Nothing local is on screen, so nothing local can be chosen.
+            self.leave_overview();
+            self.loading = Task::ready(());
+            self.listing = false;
+            self.root.clear();
+            self.children.clear();
+            self.entries.clear();
+            self.depths.clear();
+            self.selection.clear();
+            self.matches = Matches::default();
+            self.error = None;
+            self.unavailable = None;
+            self.watch = Watch::default();
+            self.renaming = None;
+            self.archived = None;
+            return self.list_remote(quiet, cx);
+        }
+        self.remote.leave();
         if !self.showing_folder() {
             self.partly_downloaded.clear();
         }
@@ -2748,6 +2787,30 @@ impl Pane {
         {
             return None;
         }
+        if self.showing_remote() {
+            let status = self.remote_status();
+            let most = (self.chrome.width - PATH_BAR_CHROME).max(0.);
+            let taken =
+                text_width(&status, theme::TEXT_SMALL, FontWeight::NORMAL, window) + 2. * 12.;
+            return Some(
+                theme::pane_bar(theme::PATH_BAR_HEIGHT)
+                    .debug_selector(|| "path-bar".into())
+                    .pl(px(theme::PANE_INSET - theme::CRUMB_INSET))
+                    .gap_3()
+                    .border_t_1()
+                    .border_color(content(0.06))
+                    .text_size(px(theme::TEXT_SMALL))
+                    .child(self.remote_crumbs(most - taken, window, cx))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(content(0.65))
+                            .child(status),
+                    ),
+            );
+        }
         // As Finder's status bar: what's selected and the size of its files.
         let count = match (self.selection.len(), self.entries.len()) {
             (0, 1) => "1 item".to_string(),
@@ -2845,7 +2908,9 @@ impl Pane {
                                 .object_fit(gpui::ObjectFit::Contain)
                                 .rounded(px(theme::RADIUS_THUMB))
                                 .into_any_element(),
-                            None if archive => file_icons::kind_icon(entry, side, window, cx),
+                            None if archive => {
+                                file_icons::kind_icon(entry.kind, &entry.path, side, window, cx)
+                            }
                             None => file_icons::icon(entry, side, window, cx),
                         };
                         let rename = self.rename_field(&entry.path, cell - 8., cx);
@@ -3039,7 +3104,13 @@ impl Pane {
                                         .gap_2()
                                         .when(grabs && !selected, |d| Self::grab(d, ix, cx))
                                         .child(if archived.is_some() {
-                                            file_icons::kind_icon(entry, icon_size, window, cx)
+                                            file_icons::kind_icon(
+                                                entry.kind,
+                                                &entry.path,
+                                                icon_size,
+                                                window,
+                                                cx,
+                                            )
                                         } else {
                                             file_icons::icon(entry, icon_size, window, cx)
                                         })
@@ -3298,6 +3369,8 @@ pub(super) struct Stop {
     pub(super) shows: Shows,
     /// The ZIP archive `folder` is in, for `Shows::Archive`.
     pub(super) archive: Option<PathBuf>,
+    /// The server folder a `Shows::Remote` stop shows in front of `folder`.
+    pub(super) remote: Option<RemoteAt>,
     /// How it's saved, from the first save on.
     place: Option<Favorite>,
     /// It came from a saved session and hasn't been checked since: its drive
@@ -3311,6 +3384,7 @@ impl Stop {
             folder,
             shows: Shows::Folder,
             archive: None,
+            remote: None,
             place: None,
             unverified: false,
         }
@@ -3322,6 +3396,7 @@ impl Stop {
             folder,
             shows: Shows::Archive,
             archive: Some(archive),
+            remote: None,
             place: None,
             unverified: false,
         }
@@ -3332,6 +3407,7 @@ impl Stop {
             folder: state.place.path.clone(),
             shows: state.shows,
             archive: None,
+            remote: state.remote,
             place: Some(state.place),
             unverified: true,
         }
@@ -3559,7 +3635,7 @@ pub fn sorted_by(current: Sort, by: SortBy) -> Sort {
 
 /// Which of Date Modified, Size and Kind a list `width` wide shows. Names keep
 /// at least 160 pt: Kind goes first, then the date, then the size.
-fn columns(width: f32) -> (bool, bool, bool) {
+pub(super) fn columns(width: f32) -> (bool, bool, bool) {
     // Each column with its gap, after the list's and the row's padding.
     let (name, date, size, kind) = (32. + 160., 192., 92., 122.);
     (
@@ -3811,6 +3887,9 @@ impl Pane {
         cloud: &[CloudFolder],
         cx: &mut Context<Self>,
     ) -> Div {
+        if self.showing_remote() {
+            return self.remote_commands(root, sheet, cx);
+        }
         // What's in an archive isn't on the disk for macOS or other apps to
         // reach.
         let on_disk = !self.showing_archive();
@@ -4357,7 +4436,9 @@ impl Render for Pane {
         let prefs = cx.global::<Preferences>();
         let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
         // Search results stay in relevance order, so no column shows a sort.
-        let sort_shown = (self.showing_folder() || self.showing_archive()).then_some(self.sort);
+        let remote = self.showing_remote();
+        let sort_shown =
+            (self.showing_folder() || self.showing_archive() || remote).then_some(self.sort);
         let empty = self.root.is_empty() && self.error.is_none();
         let look = prefs.background.clone().map(|path| Look {
             path,
@@ -4370,8 +4451,18 @@ impl Render for Pane {
         });
         self.backdrop
             .update(cx, |backdrop, cx| backdrop.set(look, cx));
-        let list = self.file_list(window, cx);
+        let list = if remote {
+            self.remote_list(window, cx)
+        } else {
+            self.file_list(window, cx).into_any_element()
+        };
         let (date, size, kind) = columns(self.chrome.width);
+        // A server folder is always a list, with titles once it's listed.
+        let titled = if remote {
+            self.remote.listing == super::remote::Listing::Listed
+        } else {
+            self.layout() == View::List
+        };
         let id = cx.entity_id();
         let dropping_here = self.drag.active() && self.takes_files(cx);
         let outlined = self.drag.outlines(&Spot::Pane(id));
@@ -4394,7 +4485,7 @@ impl Render for Pane {
             .children(self.batch_bar(window, cx))
             // The grid sorts from the View menu and Settings.
             .when(
-                self.layout() == View::List
+                titled
                     && self.unavailable.is_none()
                     && self.organizing.is_none()
                     && self.preview.is_none()

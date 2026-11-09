@@ -125,6 +125,10 @@ A page in the pane, like the Overview, from ⌥⌘G, Go and the palette. It gets
 
 Removing asks in the Empty Trash card. A worktree with nothing only it holds gets one line and Move to Trash, primary. Uncommitted changes, or commits no other branch, tag or remote has, list in code boxes, up to 10 each, and the button is Move to Trash Anyway in `Caution`: it's reversible, so never `Destructive`. A worktree whose folder is gone offers Forget, or Forget Anyway in `Caution` when its HEAD holds commits nothing else does. The main worktree, a locked one, a link, one holding another worktree, one with submodules and a replaced folder get the reason and OK. ↩ does what the last button says.
 
+### Servers
+
+Locations lists the startup disk first, then the cloud folders, the other drives and the saved SFTP servers. A server is a 32 pt row, named by its id with the server icon. While it's connected it ends in a row icon button that ejects, named Disconnect; while it connects, a 12 pt ring at 0.55 sits there instead. A server that couldn't connect grows to 40 pt, with a short reason under its name in `danger()`; the pane says the whole reason. A server's folder is the usual list, always a list. Its path crumbs start with the server's name after a 12 pt server icon, and its status ends `· on box`. A file opened from a server comes down first, in a 36 pt card where a toast shows: the name, a 90 pt progress bar, how much has come, and Cancel.
+
 ### Onboarding
 
 A fixed 640 by 520 pt window of its own, not a sheet, because no main window is behind it on first launch. Welcome is centered: the icon, one line of why and the keys to know. The checklist is a card of rows, Full Disk Access first and then the coding agents, each with a button that turns into a green check as it finishes, and the row stays draggable into System Settings' list until the access is on. ↩ does what the button in the accent color does, Esc goes back a step and never closes it, and ⌘W closes it for now, so it comes back next launch. Open Monodrive is always available, since neither the access nor an agent is required.

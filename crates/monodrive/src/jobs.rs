@@ -17,7 +17,7 @@ use gpui::{
     div, prelude::*, px,
 };
 use monodrive_core::cloud;
-use monodrive_core::ops::{self, Conflict, Done, Job, Origin, Request, State};
+use monodrive_core::ops::{self, Conflict, Done, Job, Origin, Request, State, Transfer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -531,7 +531,28 @@ pub fn title(job: &Job) -> String {
         [one] => item_name(one),
         tasks => format!("{} items", tasks.len()),
     };
-    format!("{verb} {what} to {}", folder_name(&job.into))
+    // The server's side prints as `source:/path`.
+    let on_server = |label: &Path| {
+        let label = label.to_string_lossy();
+        let (source, path) = label.split_once(':').unwrap_or((&label, ""));
+        let name = path.rsplit('/').find(|part| !part.is_empty());
+        (source.to_owned(), name.map(str::to_owned))
+    };
+    match job.transfer() {
+        Some(Transfer::Upload) => match on_server(&job.into) {
+            (source, Some(name)) => format!("{verb} {what} to {name} on {source}"),
+            (source, None) => format!("{verb} {what} to {source}"),
+        },
+        Some(Transfer::Download) => {
+            let source = job.tasks.first().map(|task| on_server(&task.source).0);
+            let into = folder_name(&job.into);
+            match source {
+                Some(source) => format!("{verb} {what} from {source} to {into}"),
+                None => format!("{verb} {what} to {into}"),
+            }
+        }
+        None => format!("{verb} {what} to {}", folder_name(&job.into)),
+    }
 }
 
 /// What a job's toast says once it ends: its title, and for a stopped one

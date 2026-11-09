@@ -45,9 +45,22 @@ pub fn arguments(host: &str) -> Vec<OsString> {
     .collect()
 }
 
-/// Connects each source through the system's ssh.
+/// Connects each source through the system's ssh. A dev build given
+/// `MONODRIVE_SSH_CONFIG` passes it as ssh's only config file, so an agent
+/// driving the app reaches a throwaway sshd without the user's `~/.ssh`,
+/// which ssh reads from the account's home whatever `HOME` says. A release
+/// build ignores it.
 pub fn connector() -> Connector {
-    Arc::new(|source: &Source| spawn(SSH.as_ref(), &arguments(&source.host), source.host.clone()))
+    let config = crate::DEV
+        .then(|| std::env::var_os("MONODRIVE_SSH_CONFIG"))
+        .flatten();
+    Arc::new(move |source: &Source| {
+        let mut args = arguments(&source.host);
+        if let Some(config) = &config {
+            args.splice(0..0, [OsString::from("-F"), config.clone()]);
+        }
+        spawn(SSH.as_ref(), &args, source.host.clone())
+    })
 }
 
 /// Runs `program` with its stdio as the transport. Its own process group, so
