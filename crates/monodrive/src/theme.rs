@@ -282,6 +282,8 @@ fn floating_surface() -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
+            // The card's outer edge, past its border.
+            crate::native_view::occlude(bounds.dilate(px(1.)), px(RADIUS_CARD), window);
             let quad = if light {
                 gpui::fill(bounds, Hsla { a: 1., ..pane })
             } else {
@@ -632,8 +634,7 @@ pub fn progress_fill(fraction: f32) -> Div {
 }
 
 /// A button's name in a small card, centered above it or below it. GPUI puts
-/// a tooltip under the pointer, which covers what's under a button, and
-/// nothing GPUI draws can sit over a video's layer.
+/// a tooltip under the pointer, which covers what's under a button.
 struct Tip {
     label: &'static str,
     over: Bounds<Pixels>,

@@ -710,7 +710,8 @@ impl PreviewView {
         let poster = (!framed || self.menu_open()).then(|| self.poster(modified, window, cx));
         let player = self.player.clone();
         let path = self.path.clone();
-        // Nothing GPUI draws can sit over the player, so it steps aside for a menu.
+        // Only floating cards cut through the player, so it steps aside for a
+        // menu's scrim.
         let covered = self.covered || self.menu_open();
         if self.menu_open()
             && let Some(player) = self.player.borrow().as_ref()

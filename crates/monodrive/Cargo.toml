@@ -37,7 +37,9 @@ libc = { version = "0.2", optional = true }
 # The preview's players and its sandboxed HTML page.
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-media", "objc2-quartz-core", "AVAnimation", "AVPlayer", "AVPlayerItem", "AVPlayerLayer"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
-objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "CALayer"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "CALayer", "CAShapeLayer", "CATransaction"] }
+# The holes floating cards cut in a native view.
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKContentRuleList", "WKContentRuleListStore", "WKFrameInfo", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKPreferences", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKWebpagePreferences", "WKWebsiteDataStore"] }
 # The preview's Markdown and colored text. Syntect's pure-Rust regex engine
 # keeps a C library out of the build; its syntaxes load only when a file needs them.
