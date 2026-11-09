@@ -3061,10 +3061,12 @@ version = "0.1.0"
 dependencies = [
  "fsearch",
  "libc",
+ "monodrive-core",
  "rayon",
  "serde",
  "serde_json",
  "tempfile",
+ "toml 1.1.4+spec-1.1.0",
  "unicode-normalization",
 ]
 
@@ -3077,7 +3079,6 @@ dependencies = [
  "block2 0.6.2",
  "caseless",
  "crc32fast",
- "criterion",
  "flate2",
  "fsearch",
  "image",

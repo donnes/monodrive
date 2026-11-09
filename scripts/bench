@@ -1,22 +1,97 @@
 #!/usr/bin/env bash
-# Compares Monodrive's search with Spotlight, find and fd on a generated
-# corpus, on a disk image of its own. See docs/performance.md.
+# Monodrive's benchmarks. See docs/performance.md.
 #
-#   scripts/bench prepare [entries] [seed]   makes the image, the corpus and Spotlight's index of it
-#   scripts/bench wait                       waits again for Spotlight, if prepare gave up
-#   scripts/bench search [rounds]            measures, and writes results.json, report.html, post.html and post.png to target/bench/<time>
-#   scripts/bench report <results.json>      rewrites that run's report.html, post.html and post.png beside it
-#   scripts/bench clean                      detaches the image and deletes it
+#   scripts/bench [suite...]                     runs the suites (platform core search mcp) and writes
+#                                                results.json and report.html to target/bench/<time>
+#   scripts/bench --against <commit> [suite...]  the same, alternating with a build of <commit>
+#   scripts/bench report <results.json> [saved]  rewrites a run's report, beside a saved run's medians
+#   scripts/bench linux [results.json]           the platform suite on donnes-pc, merged into a run
+#   scripts/bench search-real                    name search on a copy of this Mac's real index
+#   scripts/bench spotlight prepare [entries] [seed] | wait | run [rounds] | clean
+#                                                name search against Spotlight, find and fd
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-volume=/Volumes/MonodriveBench
-image=target/bench/corpus.sparseimage
 tool=target/release/monodrive-bench
+rounds=${BENCH_ROUNDS:-20}
+
+# The packages a run needs: the MCP suite runs the app's binary.
+packages() {
+    local needs_app=0
+    if [ $# -eq 0 ]; then needs_app=1; fi
+    for suite in "$@"; do [ "$suite" = mcp ] && needs_app=1; done
+    echo "-p monodrive-bench"
+    [ $needs_app = 1 ] && echo "-p monodrive"
+    return 0
+}
 
 build() {
-    cargo build --release --locked -p monodrive-bench
+    # shellcheck disable=SC2046
+    cargo build --release --locked $(packages "$@")
 }
+
+# What else is running, recorded by the runner too. Builds on this machine
+# make numbers noisy.
+busy() {
+    echo "Load: $(sysctl -n vm.loadavg 2>/dev/null || cat /proc/loadavg). Compilers running: $(pgrep -c rustc 2>/dev/null || pgrep rustc | wc -l | tr -d ' ')."
+}
+
+out_dir() {
+    echo "target/bench/$(date +%Y%m%d-%H%M%S)"
+}
+
+# A build of <commit> in a worktree of its own, with its own target folder.
+# Keeps only the most recent baseline, since a build takes several GB.
+baseline() {
+    local commit short base old
+    commit=$(git rev-parse --verify "$1^{commit}")
+    short=$(git rev-parse --short "$commit")
+    base="target/bench/baseline-$short"
+    shift
+    for old in target/bench/baseline-*; do
+        [ -d "$old" ] && [ "$old" != "$base" ] && git worktree remove --force "$old"
+    done
+    git worktree prune
+    [ -d "$base" ] || git worktree add --quiet --detach "$base" "$commit"
+    if [ ! -f "$base/crates/monodrive-bench/Cargo.toml" ]; then
+        echo "$commit has no crates/monodrive-bench, so it can't be measured against." >&2
+        exit 1
+    fi
+    # shellcheck disable=SC2046
+    (cd "$base" && CARGO_TARGET_DIR="$PWD/target" cargo build --release --locked $(packages "$@")) >&2
+    echo "$base/target/release/monodrive-bench $short"
+}
+
+linux() {
+    local host=${BENCH_LINUX_HOST:-donnes-pc}
+    local remote=.cache/monodrive-bench/checkout
+    local stamp commit out
+    stamp=$(date +%Y%m%d-%H%M%S)
+    commit=$(git rev-parse --short HEAD)
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        echo "Commit first: the PC builds $commit, not uncommitted changes." >&2
+        exit 1
+    fi
+    echo "Building $commit on $host."
+    # A checkout of its own that keeps its build between runs, and a fixture
+    # folder inside it that the run removes.
+    ssh "$host" "mkdir -p $remote && find $remote -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +"
+    git archive HEAD | ssh "$host" "tar -x -C $remote"
+    ssh "$host" "cd $remote && echo \"Load: \$(cat /proc/loadavg)\" && cargo build --release --locked -p monodrive-bench >&2 && \
+        target/release/monodrive-bench run platform --rounds $rounds --out target/bench/linux-$stamp >&2"
+    out=$(out_dir)-linux
+    mkdir -p "$out"
+    scp -q "$host:$remote/target/bench/linux-$stamp/results.json" "$out/results.json"
+    ssh "$host" "rm -rf $remote/target/bench/linux-$stamp"
+    if [ $# -ge 1 ]; then
+        "$tool" merge "$1" "$out/results.json"
+    else
+        "$tool" report "$out/results.json"
+    fi
+}
+
+volume=/Volumes/MonodriveBench
+image=target/bench/corpus.sparseimage
 
 wait_for_spotlight() {
     local entries count last=-1 started=$SECONDS quiet_since=$SECONDS
@@ -44,51 +119,101 @@ post_image() {
     swift scripts/html-to-png.swift "$1/post.html" "$1/post.png" 1200 675
 }
 
-case "${1:-}" in
-prepare)
-    entries=${2:-100000}
-    seed=${3:-1}
-    if [ -e "$volume" ] || [ -e "$image" ]; then
-        echo "$volume or $image exists. Run scripts/bench clean first." >&2
+spotlight() {
+    case "${1:-}" in
+    prepare)
+        local entries=${2:-100000} seed=${3:-1} written
+        if [ -e "$volume" ] || [ -e "$image" ]; then
+            echo "$volume or $image exists. Run scripts/bench spotlight clean first." >&2
+            exit 1
+        fi
+        build spotlight
+        mkdir -p target/bench
+        hdiutil create -quiet -size 64g -fs APFS -type SPARSE -volname MonodriveBench "$image"
+        # Mounted normally: Spotlight leaves a nobrowse volume unindexed.
+        hdiutil attach -quiet "$image"
+        mdutil -i on "$volume" >/dev/null
+        echo "Writing $entries entries, seed $seed."
+        written=$SECONDS
+        time "$tool" corpus "$volume" --entries "$entries" --seed "$seed"
+        wait_for_spotlight
+        echo "$((SECONDS - written))" >"$volume/spotlight-seconds"
+        ;;
+    wait)
+        build spotlight
+        wait_for_spotlight
+        ;;
+    run)
+        local out
+        build spotlight
+        busy
+        # So fsearch's first build doesn't find the volume's files already in memory.
+        hdiutil detach -quiet "$volume"
+        hdiutil attach -quiet "$image"
+        wait_for_spotlight
+        out=$(out_dir)
+        "$tool" spotlight "$volume" --rounds "${2:-30}" --out "$out"
+        post_image "$out"
+        ;;
+    clean)
+        if [ -e "$volume" ]; then hdiutil detach -quiet "$volume"; fi
+        rm -f "$image"
+        ;;
+    *)
+        sed -n 2,12p "$0" >&2
         exit 1
-    fi
-    build
-    mkdir -p target/bench
-    hdiutil create -quiet -size 64g -fs APFS -type SPARSE -volname MonodriveBench "$image"
-    # Mounted normally: Spotlight leaves a nobrowse volume unindexed.
-    hdiutil attach -quiet "$image"
-    mdutil -i on "$volume" >/dev/null
-    echo "Writing $entries entries, seed $seed."
-    written=$SECONDS
-    time "$tool" corpus "$volume" --entries "$entries" --seed "$seed"
-    wait_for_spotlight
-    echo "$((SECONDS - written))" >"$volume/spotlight-seconds"
-    ;;
-wait)
-    build
-    wait_for_spotlight
-    ;;
-search)
-    build
-    # So fsearch's first build doesn't find the volume's files already in memory.
-    hdiutil detach -quiet "$volume"
-    hdiutil attach -quiet "$image"
-    wait_for_spotlight
-    out="target/bench/$(date +%Y%m%d-%H%M%S)"
-    "$tool" search "$volume" --rounds "${2:-30}" --out "$out"
-    post_image "$out"
+        ;;
+    esac
+}
+
+# Only reads the live index: a clone of index.bin, removed afterwards. Never
+# point anything else at that folder.
+search_real() {
+    local live="$HOME/Library/Application Support/FSearch/index.bin" out copy
+    [ -f "$live" ] || { echo "No saved index at $live." >&2; exit 1; }
+    out=$(out_dir)-search-real
+    mkdir -p "$out"
+    copy="$out/index.bin"
+    cp -c "$live" "$copy"
+    "$tool" search-real "$copy" --rounds "$rounds" --out "$out" || { rm -f "$copy"; exit 1; }
+    rm -f "$copy"
+}
+
+case "${1:-}" in
+search-real)
+    build search-real
+    busy
+    search_real
     ;;
 report)
-    build
-    "$tool" report "$2"
-    post_image "$(dirname "$2")"
+    build report
+    page=$("$tool" report "${@:2}")
+    echo "$page"
+    if [ -f "$(dirname "$2")/post.html" ]; then post_image "$(dirname "$2")"; fi
     ;;
-clean)
-    [ -e "$volume" ] && hdiutil detach -quiet "$volume"
-    rm -f "$image"
+linux)
+    build linux
+    linux "${@:2}"
+    ;;
+spotlight)
+    spotlight "${@:2}"
+    ;;
+--against)
+    [ $# -ge 2 ] || { sed -n 2,12p "$0" >&2; exit 1; }
+    commit=$2
+    shift 2
+    built=$(baseline "$commit" "$@")
+    read -r against short <<<"$built"
+    build "$@"
+    busy
+    "$tool" run "$@" --rounds "$rounds" --out "$(out_dir)" --against "$against" --against-commit "$short"
+    ;;
+-h | --help | help)
+    sed -n 2,12p "$0" >&2
     ;;
 *)
-    sed -n 2,9p "$0" >&2
-    exit 1
+    build "$@"
+    busy
+    "$tool" run "$@" --rounds "$rounds" --out "$(out_dir)"
     ;;
 esac

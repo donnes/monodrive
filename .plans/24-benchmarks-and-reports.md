@@ -1,6 +1,6 @@
 # Benchmarks and reports
 
-Status: started. `crates/monodrive-bench` and `scripts/bench` hold the comparison with Spotlight, `find` and `fd` on a corpus of real files, which came first because it decides whether the search claim holds. It uses this plan's rules for raw samples, conditions, turns and verdicts. The rest of the order below hasn't started. Do this first: plans 25 and 26 claim speed, and this plan is how they prove it. The numbers behind those plans came from throwaway C programs in `target/fs-bench`, run on a Mac at load 13 to 28. They are good enough to choose work and not good enough to publish.
+Status: steps 1 to 3 built. `scripts/bench` runs the platform, core, search and MCP suites in rounds, `--against <commit>` alternates with another commit's build, and the report, budgets and `search-real` work as described below; `docs/performance.md` says how to use them. The Spotlight comparison came first and is `scripts/bench spotlight`. Steps 4 and 5 remain: the real-workload suite, competitor comparisons for copies, the counter gate and the quiet Mac. The numbers behind plans 25 and 26 came from throwaway C programs in `target/fs-bench`, run on a Mac at load 13 to 28. They are good enough to choose work and not good enough to publish.
 
 ## Goal
 
