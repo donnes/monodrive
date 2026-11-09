@@ -1,0 +1,24 @@
+[package]
+name = "monodrive-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The platform suite needs only libc, so the tool builds on Linux too; the
+# Monodrive suites are macOS only. A signed-off exception to the no-cfg rule
+# (2026-10-30), for this crate alone.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+libc = "0.2"
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+monodrive-core.workspace = true
+fsearch.workspace = true
+rayon = "1"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

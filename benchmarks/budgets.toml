@@ -1,0 +1,67 @@
+# The most each measured thing may take, judged on the median of this build's
+# samples by `scripts/bench`'s report. Budgets are for an M3 Pro-class Mac with
+# the files in the disk cache. A change that pushes a number past its budget
+# needs a fix, or a new budget here with `why`.
+#
+# `bench` is "suite/bench" as in results.json. A budget with `measured_by`
+# isn't measured by scripts/bench yet; that command measures it.
+
+[[budget]]
+bench = "core/list_dir/10000"
+what = "List a folder of 10,000 entries"
+median_ms = 40
+
+[[budget]]
+bench = "core/list_dir/100000"
+what = "List a folder of 100,000 entries"
+median_ms = 500
+
+[[budget]]
+bench = "core/sort/name"
+what = "Sort 10,000 shuffled entries by name"
+median_ms = 5
+
+[[budget]]
+bench = "core/sort/kind"
+what = "Sort 10,000 shuffled entries by kind"
+median_ms = 5
+
+[[budget]]
+bench = "core/sort/size"
+what = "Sort 10,000 shuffled entries by size"
+median_ms = 5
+
+[[budget]]
+bench = "core/sort/modified"
+what = "Sort 10,000 shuffled entries by date"
+median_ms = 5
+
+[[budget]]
+bench = "core/naming/suggest"
+what = "Suggest names for five text files"
+median_ms = 250
+why = "Suggest Names' gate is 50 ms a file."
+
+[[budget]]
+bench = "existing/scroll-p99"
+what = "Draw a frame while scrolling 10,000 entries, p99"
+median_ms = 4
+measured_by = "cargo bench -p monodrive --bench scrolling"
+
+[[budget]]
+bench = "existing/drag-p99"
+what = "Draw a frame while dragging a file over 10,000 entries, p99"
+median_ms = 4
+measured_by = "cargo bench -p monodrive --bench scrolling"
+
+[[budget]]
+bench = "existing/sidebar-p99"
+what = "Draw a frame while the sidebar slides over 10,000 entries, p99"
+median_ms = 4
+measured_by = "cargo bench -p monodrive --bench scrolling"
+
+[[budget]]
+bench = "existing/launch"
+what = "Launch to drawing the folder's contents, warm, release build"
+median_ms = 150
+measured_by = "cargo run -p monodrive --release --features profile -- <folder>, median of five"

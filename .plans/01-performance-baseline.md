@@ -4,7 +4,7 @@ Status: instrumentation and measured baselines exist. Sorting and launch still h
 
 ## Existing foundation
 
-- `monodrive-core/benches/listing.rs` measures listing and sorting.
+- `scripts/bench core` measures listing and sorting (it replaced `benches/listing.rs`).
 - `monodrive/benches/scrolling.rs` measures the real browser with the headless renderer.
 - The `profile` feature reports launch and frame timing.
 

@@ -31,8 +31,7 @@ objc2-core-media = { version = "0.3", default-features = false, features = ["std
 objc2-pdf-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "PDFDocument", "PDFPage"] }
 # Compares names the way APFS does, which ignores Unicode normalization.
 unicode-normalization = "0.1"
-# No crates.io release yet, so it's pinned to a commit. Bump deliberately.
-fsearch = { git = "https://github.com/noahdunnagan/fsearch", rev = "88e63fdf850cf7749deae8198b187accd21f8ba5" }
+fsearch.workspace = true
 # Writes ZIP archives, deflate only. Monodrive reads them itself, so it can
 # bound what it loads; flate2 and crc32fast are zip's own, for that.
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
@@ -48,12 +47,3 @@ semver = "1"
 [dev-dependencies]
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-
-[[bench]]
-name = "listing"
-harness = false
-
-[[bench]]
-name = "naming"
-harness = false

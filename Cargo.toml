@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/monodrive", "crates/monodrive-core"]
+members = ["crates/monodrive", "crates/monodrive-bench", "crates/monodrive-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,8 @@ publish = false
 monodrive-core = { path = "crates/monodrive-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# No crates.io release yet, so it's pinned to a commit. Bump deliberately.
+fsearch = { git = "https://github.com/noahdunnagan/fsearch", rev = "88e63fdf850cf7749deae8198b187accd21f8ba5" }
 
 # Monocode's patched GPUI: the Apple renderer's alpha and font-matching fixes,
 # and no screen-capture dependency. Sync these from Monocode, don't edit them here.

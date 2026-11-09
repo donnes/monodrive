@@ -1,6 +1,6 @@
 # Benchmarks and reports
 
-Status: planned. Do this first: plans 25 and 26 claim speed, and this plan is how they prove it. The numbers behind those plans came from throwaway C programs in `target/fs-bench`, run on a Mac at load 13 to 28. They are good enough to choose work and not good enough to publish.
+Status: steps 1 to 3 built. `scripts/bench` runs the platform, core, search and MCP suites in rounds, `--against <commit>` alternates with another commit's build, and the report, budgets and `search-real` work as described below; `docs/performance.md` says how to use them. The Spotlight comparison came first and is `scripts/bench spotlight`. Steps 4 and 5 remain: the real-workload suite, competitor comparisons for copies, the counter gate and the quiet Mac. The numbers behind plans 25 and 26 came from throwaway C programs in `target/fs-bench`, run on a Mac at load 13 to 28. They are good enough to choose work and not good enough to publish.
 
 ## Goal
 
@@ -36,6 +36,8 @@ Each suite records wall time, CPU time, and the process's instructions and cycle
 Fixtures are generated from a seed and checked-in size and depth distributions, taken from a real `node_modules` and a real Downloads folder. Every fixture lives in a temp folder. The owner runs on its own `ops::Paths` in that folder, so it never joins the user's owner or journal. Trash suites run only on a disk image the runner attaches and detaches, because trashing on the startup disk would fill the user's Trash. The clippy and no-sleep rules still apply to tests. The runner itself may need `#[expect]` for deleting its own fixtures.
 
 ## Measuring search without a crawl
+
+This section is about Monodrive alone. Comparing with Spotlight needs real files on a volume Spotlight indexes, which `docs/performance.md` describes.
 
 Search needs no crawl and never opens the live index. fsearch's public `walk::Listing` and `Index::build` take listings from memory, as its own `snap` example does, so the suite generates them from the seed. A prototype on 2026-10-30 built 3,001,001 entries in 1.4 s and a 154 MB `index.bin`, searched them in memory, and started an `Engine` on the saved file. The first answer came in 19 ms, and 10 seconds later the entry count hadn't changed and the overlay was empty, so nothing had been crawled.
 
