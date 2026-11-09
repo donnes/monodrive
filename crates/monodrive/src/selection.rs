@@ -66,6 +66,15 @@ impl Selection {
         entries.iter().position(|entry| entry.path == cursor)
     }
 
+    /// The selected paths, in no order: for asking about what's selected
+    /// without walking every row.
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.paths
+            .keys()
+            .chain(self.swept_only().map(|(path, _)| path))
+            .map(PathBuf::as_path)
+    }
+
     /// The selected entries, in the order shown.
     pub fn in_order<'a>(&self, entries: &'a [Entry]) -> Vec<&'a Entry> {
         entries.iter().filter(|e| self.contains(&e.path)).collect()

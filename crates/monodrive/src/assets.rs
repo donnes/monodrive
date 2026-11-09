@@ -48,6 +48,7 @@ icons!(
     "hard-drive",
     "keyboard",
     "link",
+    "lock",
     "palette",
     "pause",
     "pencil",

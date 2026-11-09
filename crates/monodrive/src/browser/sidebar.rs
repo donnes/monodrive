@@ -653,12 +653,12 @@ impl Browser {
     fn open_place_in_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let stop = match self.row_at(self.sidebar_cursor) {
             Some(Row::Overview) => {
-                let mut stop = Stop::folder(self.pane().read(cx).folder().to_path_buf());
+                let mut stop = Stop::folder(self.pane().read(cx).disk_folder().to_path_buf());
                 stop.shows = Shows::Overview;
                 stop
             }
             Some(Row::Recents) => {
-                let mut stop = Stop::folder(self.pane().read(cx).folder().to_path_buf());
+                let mut stop = Stop::folder(self.pane().read(cx).disk_folder().to_path_buf());
                 stop.shows = Shows::Recents;
                 stop
             }

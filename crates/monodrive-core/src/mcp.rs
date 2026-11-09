@@ -2826,9 +2826,10 @@ pub const TOOLS: [Tool; 69] = [
     },
     Tool {
         name: "archive_extract",
-        description: "Extract a ZIP archive into the folder into, as a job: everything, or the entries \
-    named, each coming out under its own name. Refuses paths leading out, encrypted entries and zip \
-    bombs. conflict applies to each item. Returns a job id.",
+        description: "Extract a ZIP archive into the folder into, as a job: the entries named, each \
+    under its own name, or everything, in a folder named for the archive when it holds more than one \
+    item at its top. Refuses paths leading out, encrypted entries and zip bombs. conflict applies to \
+    each item. Returns a job id.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -5056,14 +5057,17 @@ mod tests {
                 ops::Task {
                     source: "/src/a".into(),
                     done: Some(Done::To("/dest/a".into())),
+                    name: None,
                 },
                 ops::Task {
                     source: "/src/b".into(),
                     done: Some(Done::Failed("/dest/b already exists.".into())),
+                    name: None,
                 },
                 ops::Task {
                     source: "/src/c".into(),
                     done: None,
+                    name: None,
                 },
             ],
             bytes: 10,

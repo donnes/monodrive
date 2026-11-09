@@ -75,12 +75,13 @@ use gpui::{
 };
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
-    Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives, EditFavorites,
-    EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder, ExtendNext, ExtendPrevious, FocusNext,
-    FocusSearch, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab,
-    OpenSelected, OpenSettings, OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename,
-    SaveSearch, SearchContents, SelectLast, SelectNext, SelectPrevious, ShowContextMenu,
-    ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
+    Back, Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives,
+    EditFavorites, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder, ExtendNext,
+    ExtendPrevious, FocusNext, FocusSearch, GoOverview, GoRecents, GoToFolder, GoTrash,
+    GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations,
+    OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast, SelectNext,
+    SelectPrevious, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit,
+    Undo, ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
 use monodrive::downloads;
@@ -262,6 +263,30 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     save(&mut cx, window, out, "jobs")?;
     dispatch(&mut cx, window, &ShowCopiesAndMoves)?;
     save(&mut cx, window, out, "ring-waiting")?;
+
+    // An archive that won't read, then one browsed with two entries selected.
+    let downloads = scratch.path().join("Downloads");
+    std::fs::create_dir_all(&downloads)?;
+    std::fs::write(downloads.join("broken.zip"), "not a zip")?;
+    site_assets(&downloads.join("site-assets.zip"))?;
+    let window = open(&mut cx, &downloads)?;
+    cx.run_until_parked();
+    for action in [&SelectNext as &dyn Action, &OpenSelected] {
+        dispatch(&mut cx, window, action)?;
+    }
+    save(&mut cx, window, out, "archive-error")?;
+    for action in [
+        &Back as &dyn Action,
+        &SelectNext,
+        &OpenSelected,
+        &SelectNext,
+        &SelectNext,
+        &SelectNext,
+        &ExtendNext,
+    ] {
+        dispatch(&mut cx, window, action)?;
+    }
+    save(&mut cx, window, out, "archive")?;
 
     let window = open(&mut cx, made_up)?;
     cx.run_until_parked();
@@ -1957,6 +1982,30 @@ fn dispatch(
         window.refresh();
     })?;
     cx.run_until_parked();
+    Ok(())
+}
+
+/// A small website's files as a ZIP, as a download would be.
+fn site_assets(path: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(path)?);
+    let options = zip::write::SimpleFileOptions::default();
+    for name in ["fonts/", "images/"] {
+        zip.add_directory(name, options)
+            .map_err(std::io::Error::other)?;
+    }
+    for (name, size) in [
+        ("fonts/Inter.woff2", 98_000),
+        ("images/hero.jpg", 412_000),
+        ("index.html", 14_000),
+        ("README.md", 3_000),
+        ("styles.css", 22_000),
+    ] {
+        zip.start_file(name, options)
+            .map_err(std::io::Error::other)?;
+        zip.write_all(&vec![b'a'; size])?;
+    }
+    zip.finish().map_err(std::io::Error::other)?;
     Ok(())
 }
 

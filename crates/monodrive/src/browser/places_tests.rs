@@ -2548,3 +2548,41 @@ fn column_view_lists_a_folder_behind_a_privacy_prompt_only_when_asked(cx: &mut T
     cx.run_until_parked();
     assert!(listed(&project.join("Public"), cx));
 }
+
+#[gpui::test]
+fn nothing_is_extracted_into_the_trash_and_pages_from_an_archive_start_on_the_disk(
+    cx: &mut TestAppContext,
+) {
+    use std::io::Write;
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let trash = cx.update(|cx| cx.global::<Places>().trash.clone());
+    for folder in [&trash, &project] {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(folder.join("a.zip")).unwrap());
+        zip.start_file("a.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"a").unwrap();
+        zip.finish().unwrap();
+    }
+    let (browser, cx) = open(&world, &project, cx);
+    let can_extract =
+        |cx: &mut VisualTestContext| in_pane(&browser, cx, |pane, cx| pane.can_extract(cx));
+    // Recents in front of an archive starts at the folder holding it, so
+    // its path never leaves for another app.
+    press(cx, "down down down down");
+    assert_eq!(shown(&browser, cx).1, ["a.zip"]);
+    press(cx, "cmd-down");
+    assert!(in_pane(&browser, cx, |pane, _| pane.showing_archive()));
+    assert!(can_extract(cx));
+    cx.dispatch_action(GoRecents);
+    assert_eq!(here(&browser, cx), project);
+    // In the Trash, an archive neither extracts beside itself nor from
+    // inside.
+    cx.dispatch_action(GoTrash);
+    press(cx, "down");
+    assert_eq!(shown(&browser, cx).1, ["a.zip"]);
+    assert!(!can_extract(cx));
+    press(cx, "cmd-down");
+    assert!(in_pane(&browser, cx, |pane, _| pane.showing_archive()));
+    assert!(!can_extract(cx));
+}

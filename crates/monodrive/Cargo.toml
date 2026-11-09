@@ -53,6 +53,8 @@ profile = ["gpui/profiler", "dep:libc"]
 
 [dev-dependencies]
 tempfile = "3"
+# The snapshot example draws a real archive.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # GPUI's view tests (`#[gpui::test]`) and Criterion benchmarks (`#[gpui::bench]`).
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["bench", "test-support"] }

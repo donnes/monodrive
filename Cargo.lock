@@ -3052,6 +3052,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "unicode-segmentation",
+ "zip",
 ]
 
 [[package]]

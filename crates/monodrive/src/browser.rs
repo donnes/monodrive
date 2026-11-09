@@ -1,6 +1,7 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
+mod archive;
 mod batch_rename;
 mod cloud;
 mod columns;
@@ -143,6 +144,8 @@ actions!(
         NewFolderWithSelection,
         NewFile,
         Duplicate,
+        Compress,
+        Extract,
         MoveToTrash,
         EmptyTrash,
         MoveHere,
@@ -664,6 +667,16 @@ impl Browser {
     /// What the window tells `pane` this frame.
     fn chrome_for(&self, pane: &Entity<Pane>, width: f32, cx: &App) -> Chrome {
         let focused = pane == self.pane();
+        let tab = &self.tabs[self.active];
+        let other = match &tab.second {
+            Some(second) if pane == second => Some(&tab.pane),
+            Some(second) if pane == &tab.pane => Some(second),
+            _ => None,
+        };
+        let extract_to = other
+            .map(|other| other.read(cx))
+            .filter(|other| other.takes_files(cx))
+            .map(|other| other.folder().to_path_buf());
         let pane = pane.read(cx);
         let volume = (pane.showing_folder() && pane.unavailable.is_none())
             .then(|| monodrive_core::volumes::holding(&self.sidebar.volumes, pane.folder()))
@@ -682,6 +695,7 @@ impl Browser {
             ejectable: volume
                 .filter(|volume| !volume.startup)
                 .map(|volume| volume.mount.clone()),
+            extract_to,
         }
     }
 
@@ -1237,7 +1251,7 @@ impl Browser {
         }
         self.remember_focus(window, cx);
         let pane = self.pane().read(cx);
-        let (current, folder) = (pane.current_search(), pane.folder().to_path_buf());
+        let (current, folder) = (pane.current_search(), pane.disk_folder().to_path_buf());
         let anchor = self.search_anchor.clone();
         let view = cx.new(|cx| SearchMenu::new(anchor, current, &folder, cx));
         cx.subscribe_in(
@@ -1442,7 +1456,7 @@ impl Browser {
         let folder = if pane.unavailable.is_some() {
             home()
         } else {
-            pane.folder().to_path_buf()
+            pane.disk_folder().to_path_buf()
         };
         let view = cx.new(|cx| GotoView::new(folder, cx));
         cx.subscribe_in(&view, window, |this, _, event: &GotoEvent, window, cx| {
@@ -1574,7 +1588,7 @@ impl Browser {
     /// here, and a toast offers Undo.
     fn job_finished(&mut self, job: Job, cx: &mut Context<Self>) {
         let undo = job.undoable.then_some(Offer::Undo(job.run));
-        self.toast(jobs::title(&job), false, undo, cx);
+        self.toast(jobs::report(&job), false, undo, cx);
         // A job's bytes may have moved between volumes.
         self.load_volumes(cx);
         let made: Vec<PathBuf> = job
@@ -1923,7 +1937,8 @@ impl Render for Browser {
                         .preview
                         .as_ref()
                         .is_some_and(|view| view.read(cx).typing()),
-                !pane.selection.is_empty(),
+                // An archive's entries aren't on the disk to look at or open.
+                !pane.selection.is_empty() && !pane.showing_archive(),
             )
         });
         let has_query = !self.pane().read(cx).query.is_empty();

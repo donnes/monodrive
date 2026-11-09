@@ -2126,6 +2126,20 @@ fn extracting_follows_each_conflict_choice_and_never_replaces_the_archive() {
         "{refused:?}"
     );
     assert!(crate::archives::Archive::open(&archive).is_ok());
+    // All of it holds two items, so they come out in one folder named for
+    // the archive, which takes a conflict choice as any item does.
+    let all = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
+    assert_eq!(all.tasks.len(), 1);
+    assert_eq!(all.tasks[0].name.as_deref(), Some("a"));
+    assert_eq!(all.tasks[0].done, Some(Done::To(dest.join("a"))));
+    assert_eq!(names(&dest.join("a")), ["a.zip", "proj"]);
+    assert_eq!(read(&dest.join("a/proj/new.txt")), "new");
+    let again = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
+    assert_eq!(again.state, State::Waiting);
+    let both = continued(&shared, again.id, Some(Conflict::KeepBoth));
+    assert_eq!(both.tasks[0].done, Some(Done::To(dest.join("a 2"))));
+    run(&mut shared.lock(), Request::Undo).unwrap();
+    assert!(!dest.join("a 2").exists() && dest.join("a").exists());
 }
 
 #[test]
@@ -2296,7 +2310,7 @@ fn cancelling_an_extraction_keeps_the_items_it_finished() {
     );
     let op = run(
         &mut shared.lock(),
-        extract(&archive, &[], &dest, Conflict::Stop),
+        extract(&archive, &["a.txt", "b.txt"], &dest, Conflict::Stop),
     )
     .unwrap()
     .op;
