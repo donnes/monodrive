@@ -241,9 +241,11 @@ struct Query<'a> {
     query: &'a str,
 }
 
+/// The whole folder, past list_dir's default page.
 #[derive(Serialize)]
-struct PathArg<'a> {
+struct Listing<'a> {
     path: &'a Path,
+    limit: usize,
 }
 
 #[derive(Serialize)]
@@ -330,8 +332,15 @@ fn session(
     ));
 
     let listed = fixture.join("listed");
-    let (sample, listing) =
-        measure::served(pid, || server.tool("list_dir", PathArg { path: &listed }));
+    let (sample, listing) = measure::served(pid, || {
+        server.tool(
+            "list_dir",
+            Listing {
+                path: &listed,
+                limit: 10_000,
+            },
+        )
+    });
     out.push(measured(
         "mcp/list-dir",
         "list_dir of 10,000 entries",
