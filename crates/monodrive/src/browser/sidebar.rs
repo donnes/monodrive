@@ -42,8 +42,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-/// The Overview and Recents come first.
-const FIRST_FAVORITE: usize = 2;
+/// The Overview, Recents and Worktrees come first.
+const FIRST_FAVORITE: usize = 3;
 
 /// The sky behind a nightly's sidebar, as drawn in its SVG.
 const NIGHT_SKY_HEIGHT: f32 = 150.;
@@ -195,6 +195,7 @@ pub(super) struct Sidebar {
 pub(super) enum Row {
     Overview,
     Recents,
+    Worktrees,
     Favorite(usize),
     Cloud(usize),
     Volume(usize),
@@ -205,6 +206,7 @@ pub(super) enum Row {
 pub(super) enum RowTarget {
     Overview,
     Recents,
+    Worktrees,
     Favorite(PathBuf),
     Cloud(PathBuf),
     Volume(PathBuf),
@@ -525,6 +527,7 @@ impl Browser {
         match ix {
             0 => Some(Row::Overview),
             1 => Some(Row::Recents),
+            2 => Some(Row::Worktrees),
             ix if ix < FIRST_FAVORITE + favorites => Some(Row::Favorite(ix - FIRST_FAVORITE)),
             ix if ix < FIRST_FAVORITE + favorites + cloud => {
                 Some(Row::Cloud(ix - favorites - FIRST_FAVORITE))
@@ -541,6 +544,7 @@ impl Browser {
         Some(match self.row_at(self.sidebar_cursor)? {
             Row::Overview => RowTarget::Overview,
             Row::Recents => RowTarget::Recents,
+            Row::Worktrees => RowTarget::Worktrees,
             Row::Favorite(ix) => {
                 RowTarget::Favorite(self.sidebar.places.get(ix)?.favorite.path.clone())
             }
@@ -594,6 +598,9 @@ impl Browser {
             Some(Row::Recents) => self
                 .pane()
                 .update(cx, |pane, cx| pane.open_recents(window, cx)),
+            Some(Row::Worktrees) => self
+                .pane()
+                .update(cx, |pane, cx| pane.open_page(Shows::Worktrees, window, cx)),
             Some(Row::Favorite(ix)) => self.open_favorite(ix, window, cx),
             Some(Row::Cloud(ix)) => {
                 if let Some(path) = self.sidebar.cloud.get(ix).map(|c| c.path.clone()) {
@@ -639,6 +646,11 @@ impl Browser {
             Some(Row::Recents) => {
                 let mut stop = Stop::folder(self.pane().read(cx).folder().to_path_buf());
                 stop.shows = Shows::Recents;
+                stop
+            }
+            Some(Row::Worktrees) => {
+                let mut stop = Stop::folder(self.pane().read(cx).folder().to_path_buf());
+                stop.shows = Shows::Worktrees;
                 stop
             }
             Some(Row::Favorite(ix)) => {
@@ -690,6 +702,9 @@ impl Browser {
         }
         if pane.showing_recents() {
             return Some(1);
+        }
+        if pane.showing_worktrees() {
+            return Some(2);
         }
         let folder = pane.folder();
         let favorite = self
@@ -1254,8 +1269,10 @@ impl Browser {
         };
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
-        let last_row =
-            self.sidebar.places.len() + self.sidebar.cloud.len() + self.sidebar.volumes.len() + 1;
+        let last_row = FIRST_FAVORITE - 1
+            + self.sidebar.places.len()
+            + self.sidebar.cloud.len()
+            + self.sidebar.volumes.len();
         div()
             .relative()
             .w(px(width))
@@ -1400,6 +1417,14 @@ impl Browser {
                         "Recents",
                         "clock",
                         !here.searching && here.shows == Shows::Recents,
+                        cursor,
+                        cx,
+                    ))
+                    .child(Self::page_row(
+                        2,
+                        "Worktrees",
+                        "git-branch",
+                        !here.searching && here.shows == Shows::Worktrees,
                         cursor,
                         cx,
                     ))

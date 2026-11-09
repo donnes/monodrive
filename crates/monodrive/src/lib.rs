@@ -27,6 +27,7 @@ pub mod preview;
 #[cfg(feature = "profile")]
 mod profile;
 mod quick_look;
+mod remove_worktree;
 mod selection;
 pub mod session;
 mod settings;

@@ -60,6 +60,7 @@ pub enum Shows {
     Folder,
     Recents,
     Overview,
+    Worktrees,
 }
 
 /// Sessions saved before Overview said `"recents": true`.

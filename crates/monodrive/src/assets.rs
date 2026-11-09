@@ -43,6 +43,7 @@ icons!(
     "eye",
     "file",
     "folder-01",
+    "git-branch",
     "grip-vertical",
     "hard-drive",
     "keyboard",
