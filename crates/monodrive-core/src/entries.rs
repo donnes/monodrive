@@ -599,6 +599,114 @@ mod tests {
                 "écran 10",
             ]
         );
+
+        // Sorting on keys built once (#21) must order exactly as comparing
+        // whole keys did before it, ties included.
+        // Names that stress the key: shared prefixes past eight bytes, digit
+        // runs with leading zeros and of every length, case, accents, other
+        // scripts, extensions that change the kind, and exact duplicates.
+        const PARTS: [&str; 16] = [
+            "report",
+            "Report",
+            "REPORT-2024",
+            "img_",
+            "IMG_",
+            "0",
+            "00",
+            "007",
+            "10",
+            "9",
+            "écran",
+            "Écran",
+            "日本語",
+            "a.b",
+            ".txt",
+            " ",
+        ];
+        const KINDS: [Kind; 4] = [Kind::File, Kind::Dir, Kind::Link, Kind::Other];
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let generated: Vec<Entry> = (0..5_000)
+            .map(|i| {
+                let parts = 1 + next() % 5;
+                let name: String = (0..parts).map(|_| PARTS[(next() % 16) as usize]).collect();
+                let extension = ["", ".pdf", ".PDF", ".rs", ".tar.gz"][(next() % 5) as usize];
+                let mut made = entry(
+                    &format!("{name}{extension}"),
+                    KINDS[(next() % 4) as usize],
+                    next() % 8,
+                    next() % 8,
+                );
+                // Equal names stay told apart, to check the order of ties.
+                made.path = PathBuf::from(format!("/x/{i}"));
+                made
+            })
+            .collect();
+        for by in [SortBy::Name, SortBy::Kind, SortBy::Size, SortBy::Modified] {
+            for descending in [false, true] {
+                for folders_first in [false, true] {
+                    let order = Sort {
+                        by,
+                        descending,
+                        folders_first,
+                    };
+                    let (mut fast, mut before) = (generated.clone(), generated.clone());
+                    sort(&mut fast, order);
+                    sort_before_keys(&mut before, order);
+                    let paths = |entries: &[Entry]| -> Vec<PathBuf> {
+                        entries.iter().map(|e| e.path.clone()).collect()
+                    };
+                    assert_eq!(paths(&fast), paths(&before), "{order:?}");
+                }
+            }
+        }
+    }
+
+    /// The sort before keys were built once (f1fe6ab^), kept as the reference
+    /// the fast path must match exactly.
+    fn sort_before_keys(entries: &mut [Entry], sort: Sort) {
+        use std::cmp::Reverse;
+        fn natural_key(name: &str) -> Vec<u8> {
+            let name = name.to_lowercase();
+            let mut key = Vec::with_capacity(name.len());
+            let mut rest = name.as_bytes();
+            while let Some((&byte, after)) = rest.split_first() {
+                if !byte.is_ascii_digit() {
+                    key.push(byte);
+                    rest = after;
+                    continue;
+                }
+                let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+                let (run, after) = rest.split_at(digits);
+                let zeros = run.iter().take_while(|&&b| b == b'0').count();
+                let value = &run[zeros..];
+                key.push(b'0');
+                key.extend_from_slice(&value.len().to_be_bytes());
+                key.extend_from_slice(value);
+                rest = after;
+            }
+            key
+        }
+        let column = |entry: &Entry| {
+            let (number, label) = match sort.by {
+                SortBy::Name => (0, String::new()),
+                SortBy::Modified => (entry.modified, String::new()),
+                SortBy::Size => (entry.listed_size(), String::new()),
+                SortBy::Kind => (0, entry.kind_label()),
+            };
+            (number, label, natural_key(&entry.name))
+        };
+        let after_folders = |entry: &Entry| sort.folders_first && entry.kind != Kind::Dir;
+        if sort.descending {
+            entries.sort_by_cached_key(|entry| (after_folders(entry), Reverse(column(entry))));
+        } else {
+            entries.sort_by_cached_key(|entry| (after_folders(entry), column(entry)));
+        }
     }
 
     #[test]
