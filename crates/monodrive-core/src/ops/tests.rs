@@ -2694,3 +2694,171 @@ fn removing_a_worktree_trashes_it_and_its_registration_and_undo_brings_it_back()
     .unwrap_err();
     assert!(main_refused.contains("own checkout"), "{main_refused}");
 }
+
+/// What a copy should keep of an item: everything but its name.
+fn about(path: &Path, with_time: bool) -> String {
+    use std::os::darwin::fs::MetadataExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let mut names = vec![0u8; 1024];
+    // SAFETY: a NUL-terminated path and a buffer of its length.
+    let len = unsafe {
+        libc::listxattr(
+            c.as_ptr(),
+            names.as_mut_ptr().cast(),
+            names.len(),
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    names.truncate(len.max(0) as usize);
+    // The ACL as `ls -le` prints it, after the item's own line.
+    let listed = std::process::Command::new("ls")
+        .arg("-led")
+        .arg(path)
+        .output()
+        .unwrap();
+    let acl: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .skip(1)
+        .map(String::from)
+        .collect();
+    let time = if with_time {
+        format!("modified {}.{}, ", meta.mtime(), meta.mtime_nsec())
+    } else {
+        String::new()
+    };
+    format!(
+        "mode {:o}, size {}, {time}created {}, flags {}, xattrs {:?}, acl {acl:?}, link {:?}",
+        meta.mode(),
+        if meta.is_dir() { 0 } else { meta.len() },
+        meta.st_birthtime(),
+        meta.st_flags(),
+        String::from_utf8_lossy(&names),
+        std::fs::read_link(path).ok(),
+    )
+}
+
+/// What a copy should keep of the folder `root`, without its time, which
+/// copyfile doesn't keep, and of each item inside it, by path.
+fn kept(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = vec![(PathBuf::from("."), about(root, false))];
+    let mut folders = vec![root.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for item in std::fs::read_dir(&folder).unwrap() {
+            let path = item.unwrap().path();
+            if path.is_dir() && !path.is_symlink() {
+                folders.push(path.clone());
+            }
+            out.push((
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                about(&path, true),
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn a_whole_folder_clone_keeps_what_copyfile_keeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = dir.path().canonicalize().unwrap().join("top");
+    let nested = top.join("nested");
+    std::fs::create_dir_all(nested.join("deeper")).unwrap();
+    std::fs::create_dir(top.join("empty")).unwrap();
+    std::fs::write(top.join("plain.txt"), "plain").unwrap();
+    std::fs::write(top.join("noted.txt"), "noted").unwrap();
+    // On a file, and on the folder itself, which gets its metadata last.
+    for noted in [top.join("noted.txt"), top.clone()] {
+        let noted = std::ffi::CString::new(noted.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: NUL-terminated name and path, and a value of its length.
+        let set = unsafe {
+            libc::setxattr(
+                noted.as_ptr(),
+                c"com.example.note".as_ptr(),
+                b"kept".as_ptr().cast(),
+                4,
+                0,
+                0,
+            )
+        };
+        assert_eq!(set, 0);
+    }
+    std::os::unix::fs::symlink("missing", top.join("dangling")).unwrap();
+    std::os::unix::fs::symlink("plain.txt", top.join("to plain")).unwrap();
+    std::fs::write(top.join("tool"), "#!").unwrap();
+    std::fs::set_permissions(
+        top.join("tool"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o4755),
+    )
+    .unwrap();
+    // An ACL inside the folder, which clonefile's CLONE_ACL doesn't reach.
+    std::fs::write(nested.join("guarded.txt"), "guarded").unwrap();
+    // And one on the folder itself, which goes on last. Not a deny write,
+    // which copyfile puts on first and then can't fill the folder.
+    for (guarded, rule) in [
+        (nested.join("guarded.txt"), "everyone deny write"),
+        (top.clone(), "everyone allow read"),
+    ] {
+        let acl = std::process::Command::new("chmod")
+            .args(["+a", rule])
+            .arg(guarded)
+            .status()
+            .unwrap();
+        assert!(acl.success());
+    }
+    // Old times on a file and on folders, set last, since filling a folder
+    // changes its own.
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    for path in [
+        top.join("plain.txt"),
+        nested.join("deeper"),
+        nested.clone(),
+        top.clone(),
+    ] {
+        File::open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(past)
+                    .set_accessed(past),
+            )
+            .unwrap();
+    }
+
+    let (cloned, copied) = (dir.path().join("cloned"), dir.path().join("copied"));
+    disk::clone_whole(&top, &cloned, None).unwrap();
+    let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    disk::copy_each(&c(&top), &c(&copied), None).unwrap();
+    assert_eq!(kept(&cloned), kept(&copied));
+    assert_eq!(kept(&cloned).len(), 10);
+    // Beyond copyfile, which gives the folder itself the time of the copy.
+    assert_eq!(
+        std::fs::metadata(&cloned).unwrap().modified().unwrap(),
+        past
+    );
+
+    // A cancel before or between items stops it.
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let stopped = disk::clone_whole(&top, &dir.path().join("stopped"), Some(&cancel));
+    assert_eq!(stopped.unwrap_err().raw_os_error(), Some(libc::ECANCELED));
+    assert!(!dir.path().join("stopped").exists());
+
+    // A file that can't be read fails as a copy always has.
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("secret"), "s").unwrap();
+    std::fs::set_permissions(
+        locked.join("secret"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o0),
+    )
+    .unwrap();
+    let error = disk::copy(&locked, &dir.path().join("locked copy"), None).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    std::fs::set_permissions(
+        locked.join("secret"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o644),
+    )
+    .unwrap();
+}
