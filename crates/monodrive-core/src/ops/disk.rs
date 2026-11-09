@@ -150,11 +150,198 @@ pub struct Meter<'a> {
     pub cancel: &'a AtomicBool,
 }
 
+/// `clonefile`'s flags, which libc doesn't define: clone a link rather than
+/// what it points to, and copy the top item's ACL.
+const CLONE_NOFOLLOW: u32 = 0x0001;
+const CLONE_ACL: u32 = 0x0004;
+
 /// Copies `from` to the new path `to`, folders whole, keeping metadata.
-/// Each file is an APFS clone where the volume supports it. A `meter` sees
-/// the bytes copied so far and can stop the copy partway, leaving what's
-/// at `to` incomplete.
+///
+/// On APFS it clones: a file in one `clonefile` call, and a folder in one
+/// call per item directly inside it (see `clone_whole`), where `copyfile`
+/// clones file by file and took about ten times as long on a big folder.
+/// Where cloning isn't possible, on another volume or one without clones,
+/// and on any other failure but a cancel, it copies with `copyfile` instead,
+/// cloning each file where it can, so an unreadable file still gets that
+/// copy's error. A `meter` can stop either partway, leaving what's at `to`
+/// incomplete, and sees the bytes `copyfile` has copied so far.
 pub fn copy(from: &Path, to: &Path, meter: Option<&Meter>) -> io::Result<()> {
+    match clone_whole(from, to, meter.map(|meter| meter.cancel)) {
+        Ok(()) => return Ok(()),
+        // `to` may be someone else's, and copyfile would refuse it too. A
+        // cancel keeps what's partway for the caller to deal with, as
+        // copyfile's does.
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EEXIST | libc::ECANCELED)) => {
+            return Err(error);
+        }
+        // What a clone left goes to the Trash first, as a failed copy's
+        // does; `clone_whole` leaves nothing where cloning isn't possible.
+        Err(_) => {
+            if id(to).is_some() {
+                trash(to).map_err(io::Error::other)?;
+            }
+        }
+    }
+    copy_each(&c_path(from)?, &c_path(to)?, meter)
+}
+
+fn clone_one(from: &Path, to: &Path) -> io::Result<()> {
+    let (from, to) = (c_path(from)?, c_path(to)?);
+    // SAFETY: two NUL-terminated paths that outlive the call.
+    if unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), CLONE_NOFOLLOW | CLONE_ACL) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Clones `from` to `to`. A file is one `clonefile` call. A folder is made
+/// here and each item directly inside it is one call, with `cancel` checked
+/// between them: one call for a 100,000-entry `node_modules` took about two
+/// seconds and couldn't be stopped. Then the folder gets its own metadata
+/// and `restore` puts back what the clones left out. Where nothing could be
+/// cloned, as on another volume or one without clones, it leaves nothing.
+/// A pipe or socket directly inside fails it, as copyfile fails on them.
+pub(crate) fn clone_whole(from: &Path, to: &Path, cancel: Option<&AtomicBool>) -> io::Result<()> {
+    let cancelled = || cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed));
+    if cancelled() {
+        return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+    }
+    let meta = std::fs::symlink_metadata(from)?;
+    if !meta.is_dir() {
+        return clone_one(from, to);
+    }
+    let into = to
+        .parent()
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+    if std::fs::symlink_metadata(into)?.dev() != meta.dev() {
+        return Err(io::Error::from_raw_os_error(libc::EXDEV));
+    }
+    std::fs::create_dir(to)?;
+    let mut cloned = 0;
+    let made = std::fs::read_dir(from)
+        .and_then(|items| {
+            for item in items {
+                if cancelled() {
+                    return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+                }
+                let name = item?.file_name();
+                clone_one(&from.join(&name), &to.join(&name))?;
+                cloned += 1;
+            }
+            Ok(())
+        })
+        .and_then(|()| {
+            let (from, to) = (c_path(from)?, c_path(to)?);
+            // SAFETY: two NUL-terminated paths; no state.
+            let copied = unsafe {
+                libc::copyfile(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    std::ptr::null_mut(),
+                    libc::COPYFILE_METADATA,
+                )
+            };
+            if copied == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })
+        .and_then(|()| restore(from, to));
+    if made.is_err() && cloned == 0 {
+        // The folder this just made, still empty, so a volume without
+        // clones doesn't send one to the Trash for each copy.
+        // SAFETY: a NUL-terminated path.
+        let _ = c_path(to).map(|to| unsafe { libc::rmdir(to.as_ptr()) });
+    }
+    made
+}
+
+/// Puts back what `clonefile` leaves out when it clones a folder, which
+/// `copyfile` keeps: each folder's times, which filling it changed, and the
+/// ACLs of the items inside, since `CLONE_ACL` copies only the top item's.
+fn restore(from: &Path, to: &Path) -> io::Result<()> {
+    if !std::fs::symlink_metadata(from)?.is_dir() {
+        return Ok(());
+    }
+    let mut folders = vec![std::path::PathBuf::new()];
+    let mut times = Vec::new();
+    while let Some(folder) = folders.pop() {
+        let meta = std::fs::symlink_metadata(from.join(&folder))?;
+        times.push((folder.clone(), meta));
+        for item in std::fs::read_dir(from.join(&folder))? {
+            let item = item?;
+            let inside = folder.join(item.file_name());
+            copy_acl(&from.join(&inside), &to.join(&inside))?;
+            if item.file_type()?.is_dir() {
+                folders.push(inside);
+            }
+        }
+    }
+    for (folder, meta) in times {
+        let stamps = [
+            libc::timespec {
+                tv_sec: meta.atime(),
+                tv_nsec: meta.atime_nsec(),
+            },
+            libc::timespec {
+                tv_sec: meta.mtime(),
+                tv_nsec: meta.mtime_nsec(),
+            },
+        ];
+        let path = c_path(&to.join(&folder))?;
+        // SAFETY: a NUL-terminated path and two timespecs.
+        let set = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                path.as_ptr(),
+                stamps.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if set != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+unsafe extern "C" {
+    fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
+    fn acl_set_link_np(
+        path: *const libc::c_char,
+        kind: libc::c_int,
+        acl: *mut libc::c_void,
+    ) -> libc::c_int;
+    fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+}
+
+/// Gives `to` the ACL `from` has, if it has one.
+fn copy_acl(from: &Path, to: &Path) -> io::Result<()> {
+    let (from, to) = (c_path(from)?, c_path(to)?);
+    // SAFETY: NUL-terminated paths; the ACL is freed below.
+    unsafe {
+        let acl = acl_get_link_np(from.as_ptr(), ACL_TYPE_EXTENDED);
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            // No ACL at all.
+            return match error.raw_os_error() {
+                Some(libc::ENOENT) => Ok(()),
+                _ => Err(error),
+            };
+        }
+        let set = acl_set_link_np(to.as_ptr(), ACL_TYPE_EXTENDED, acl);
+        let error = io::Error::last_os_error();
+        acl_free(acl);
+        if set == 0 { Ok(()) } else { Err(error) }
+    }
+}
+
+/// `copyfile`, cloning each file where the volume can.
+pub(crate) fn copy_each(from: &CString, to: &CString, meter: Option<&Meter>) -> io::Result<()> {
     struct Progress<'a> {
         meter: &'a Meter<'a>,
         /// Bytes in the files already finished.
@@ -195,7 +382,6 @@ pub fn copy(from: &Path, to: &Path, meter: Option<&Meter>) -> io::Result<()> {
             .store(progress.done + progress.current, Ordering::Relaxed);
         libc::COPYFILE_CONTINUE
     }
-    let (from, to) = (c_path(from)?, c_path(to)?);
     // COPYFILE_CLONE copies data, stat and extended attributes, never
     // replaces `to`, and copies links rather than what they point to. ACLs
     // need their own flag.
