@@ -527,7 +527,8 @@ fn shoot_downloads(
 /// 20% free, with suggestions, a scanned drive, an unscanned share and a drive
 /// that's gone; `overview-roomy.png` over it; `overview-locations.png` with the
 /// drives on screen, `overview-one-drive.png` with nothing else to say, and
-/// the low one again in a 900×600 window and the smallest, 720×440.
+/// the low one again in a 900×600 window, the smallest, 720×440, and a wide
+/// 1600×900.
 fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
     const GB: u64 = 1_000_000_000;
     cx.update(|cx| cx.set_global(base.clone()));
@@ -575,6 +576,12 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
             true,
             true,
         ),
+        (
+            "overview-wide",
+            vec![startup(44), backup.clone(), media.clone()],
+            true,
+            true,
+        ),
     ];
     // Paths under the made-up home read as they would on a Mac, from `~`.
     let real_home = std::env::var_os("HOME");
@@ -585,6 +592,7 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
         let window = match name {
             "overview-smallest" => open_at(cx, folder, 720., 440.)?,
             "overview-medium" => open_at(cx, folder, 900., 600.)?,
+            "overview-wide" => open_at(cx, folder, 1600., 900.)?,
             _ => open(cx, folder)?,
         };
         // SAFETY: the headless app is parked between shots, and nothing else
