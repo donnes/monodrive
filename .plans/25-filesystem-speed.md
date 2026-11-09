@@ -1,6 +1,6 @@
 # Filesystem speed
 
-Status: ready to start once [plan 24](24-benchmarks-and-reports.md) reaches its step 3. Each section below is its own PR, judged with `scripts/bench --against <the commit before it>`.
+Status: done. Whole-folder clones made a 20,000-entry copy job 2.4 times faster and a duplicate 3.7 times, and copies now beat `cp -c -R`. The copy's checks walk in bulk, sort keys have their old-against-new test, and the rules and decisions are in `docs/performance.md`. Three measurements wait: cold listing for the quiet Mac's `purge`, and `fseventsd`'s load and the Developer Tools permission for a person. `method`, `require_clone` and `wait_seconds` belong to [plan 26](26-mcp-contract.md). Each section was its own PR, judged with `scripts/bench --against <the commit before it>`.
 
 ## The constraint
 

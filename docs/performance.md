@@ -10,6 +10,25 @@ The last baselines before `scripts/bench`, on an M3 Pro: listing 10,000 entries 
 
 A listing asks `getattrlistbulk` for each batch of entries' names, types, sizes, dates, flags and inodes, where `read_dir` needed an `lstat` per entry. A copy's checks walk with the same call: `tally` and `stamp`, which together walked a copied folder about four times, item by item. `stamp` still takes each folder's size from `lstat`, since the journal keeps stamps made with it and the bulk call reports none for folders. The kernel reading each entry's inode is still most of the time: about 4.5 ms of the 10 ms for 10,000 entries. Sorting writes every entry's key into one buffer and its first eight bytes into a number, so most comparisons are one integer compare.
 
+## File work
+
+Monodrive can't change what the kernel and APFS charge per call, so it goes faster by making fewer calls: a listing, a copy's checks and a whole copy each take one call per batch or per folder rather than one per item. These rules keep later features on that path.
+
+- **At most 4 threads for file work.** Past 4 to 5 threads, metadata throughput falls on APFS and on btrfs alike. Where one job walks or changes many files at once, share a limit of 4 rather than one per core. Today nothing in `monodrive-core` runs file work on more threads: finding duplicates reads with 2.
+- **No hard links.** They're the slowest metadata call on this Mac: 1.5 ms each on one thread on 2026-11-09, under load, against 14 µs on donnes-pc. Clone or symlink instead.
+- **No durable sync per item.** `F_FULLFSYNC` took 1.8 to 3.3 ms a call here. The journal syncs once per line, which is fine for one record per change and worth watching on big batches.
+- **No newly written executables on a hot path.** Launching a binary at a path never run before took 45 to 77 ms, against about 1 ms for launching one again, since macOS checks a new executable on its first launch.
+
+Measured and decided:
+
+- **Trash at scale.** Move to Trash goes through `NSFileManager` one item at a time: 1,000 selected files took 0.66 s on 2026-11-09, at load 5, on the core suite's disk image. That's fine as one request for now; past a few thousand items it's worth becoming a job with progress. A whole folder is one rename, and a 20,000-entry `node_modules` went to the Trash in 0.45 to 0.5 s against 1.8 s for `rm -rf`, which the `trash` tool's description now tells agents. Only a person empties the Trash, so agents that clean up often grow it, and the description says so rather than changing that rule.
+
+Not decided yet, because they need a measurement this Mac can't make:
+
+- **Cold listing** needs `purge` and so sudo, which the quiet Mac will have. Only if it's slow is drawing a remembered listing first worth building.
+- **`fseventsd`'s load** needs a person to quit Monodrive and compare, to find out whether the index's subscription adds to it.
+- **Slow fresh launches** need a person to switch Terminal's Developer Tools permission off and on and rerun `scripts/bench platform`. If the permission matters, Settings or onboarding can say so.
+
 ## Launch
 
 The listing of a home folder is ready within a millisecond of being asked for, so launch holds the window back for it, up to 40 ms, without blocking the main thread. Opened first, the window draws empty, and the finished listing then waits behind AppKit activating the app: drawing took 240 ms that way. Closing onboarding opens its windows at once instead, since the app quits when it has no window.
