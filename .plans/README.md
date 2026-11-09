@@ -26,7 +26,7 @@ Update a plan's row when its work lands on `main`.
 | 18 Cloud storage | Done; downloading and removing downloads from a real iCloud Drive or File Provider folder needs a person to check | |
 | 19 Column view | UI picked, not built | |
 | 21 User commands | Core on main; UI picked, not built; parked | |
-| 22 Worktree management | Inventory on main; goal changed to one place to scan and manage all worktrees; deletion needs a design review | |
+| 22 Worktree management | Done: the disk-wide scan, the Worktrees page (option A) and removal through the Trash with undo, in core, MCP and the window. Creation through MCP is its own later milestone. Keeping a detached HEAD's commits alive with a ref while they're in the Trash needs a decision | |
 | 23 Agent features | Later | |
 | 24 Benchmarks and reports | Planned; do first | |
 | 25 Filesystem speed | Planned; needs plan 24's runner | |

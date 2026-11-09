@@ -1,6 +1,6 @@
 # Monodrive worktree management plan
 
-Status: proposed implementation sequence. Planning only; no feature implementation authorized by this plan itself.
+Status: inventory and management done (scan, Worktrees page, removal through the Trash; see docs/worktrees.md). The creation milestones below wait on their own design review.
 Terminology: "Work3" is interpreted as "worktree".
 
 ## Goal and order
