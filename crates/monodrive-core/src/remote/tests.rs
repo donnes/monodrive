@@ -921,3 +921,44 @@ fn a_preview_never_downloads_more_than_it_reserved_whatever_the_server_says_next
     assert_eq!(previews.inner.used.load(Ordering::Relaxed), 0);
     assert_eq!(std::fs::read_dir(&previews.inner.dir).unwrap().count(), 0);
 }
+
+#[test]
+fn adding_a_server_keeps_it_only_once_it_connected_and_wasnt_cancelled() {
+    let (_dir, dir) = folder();
+    let store = store(&dir);
+    let connections = Connections::new(
+        store.clone(),
+        Arc::new(|source: &Source| match source.host.as_str() {
+            "changed.example" => Err(RemoteError::HostKeyChanged(source.host.clone())),
+            _ => Ok(fixture::transport()),
+        }),
+    );
+    let refused = connections.add("changed.example", None, || false);
+    assert_eq!(
+        refused,
+        Err(RemoteError::HostKeyChanged("changed.example".into()))
+    );
+    assert_eq!(store.remotes(), Ok(Vec::new()));
+    assert_eq!(
+        connections.add("box.example", None, || true),
+        Err(RemoteError::Cancelled)
+    );
+    assert_eq!(store.remotes(), Ok(Vec::new()));
+    assert!(!connections.is_connected("box.example"));
+
+    let added = connections
+        .add("box.example", Some("/srv"), || false)
+        .unwrap();
+    assert_eq!(
+        (added.id.as_str(), added.start.as_deref()),
+        ("box.example", Some("/srv"))
+    );
+    assert!(connections.is_connected(&added.id));
+    // One saved before stays, even when connecting to it again fails.
+    connections.disconnect(&added.id);
+    assert_eq!(
+        connections.add("box.example", Some("/srv"), || true),
+        Err(RemoteError::Cancelled)
+    );
+    assert_eq!(store.remotes(), Ok(vec![added]));
+}

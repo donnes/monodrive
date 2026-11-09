@@ -178,15 +178,44 @@ impl Browser {
         cx: &mut Context<Self>,
     ) {
         let tab = &self.tabs[self.active];
-        let Some(into) = tab
-            .other()
-            .map(|other| other.read(cx).folder().to_path_buf())
-        else {
+        let (focused, Some(other)) = (tab.focused().clone(), tab.other().cloned()) else {
             return;
         };
-        tab.focused().clone().update(cx, |pane, cx| {
+        let from_server = focused.read(cx).showing_remote();
+        let to_server = other.read(cx).remote_folder().cloned();
+        if moving && (from_server || to_server.is_some()) {
+            return self.toast(
+                "Servers have no Trash, so nothing moves to or from one. Copy to Other Pane copies instead."
+                    .into(),
+                true,
+                None,
+                cx,
+            );
+        }
+        if from_server {
+            if to_server.is_some() {
+                return self.toast(
+                    "Copy between a server and this Mac: one pane needs a folder here.".into(),
+                    true,
+                    None,
+                    cx,
+                );
+            }
+            let into = other.read(cx).folder().to_path_buf();
+            return focused.update(cx, |pane, cx| pane.remote_download(into, window, cx));
+        }
+        focused.update(cx, |pane, cx| {
             let paths = pane.chosen();
-            pane.send(paths, into, moving, window, cx);
+            match to_server {
+                Some(into) => pane.upload(paths, into, window, cx),
+                None => pane.send(
+                    paths,
+                    other.read(cx).folder().to_path_buf(),
+                    moving,
+                    window,
+                    cx,
+                ),
+            }
         });
     }
 

@@ -21,7 +21,7 @@ Update a plan's row when its work lands on `main`.
 | 11 Search | Done; filter UI skipped for now | 1c1c4f5, ef44c3d |
 | 12 Batch rename | Done | 1574337, 13200b7 |
 | 13 Archives | Done; archives from the wild (encrypted, huge, made on Windows) need a person to check | |
-| 14 Remote locations | Core on main; UI picked, not built | |
+| 14 Remote locations | Servers under Locations, browsing, opening, folder changes and copies in the window; dragging between a server and a local pane is next | |
 | 17 Storage inspection | Core on main; UI picked, not built | |
 | 18 Cloud storage | Done; downloading and removing downloads from a real iCloud Drive or File Provider folder needs a person to check | |
 | 19 Column view | Done; layout A with preview P1. Frame times need a quiet machine to record against the budget, and the privacy-prompt Open needs a person to check | |

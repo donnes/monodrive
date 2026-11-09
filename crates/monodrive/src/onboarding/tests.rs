@@ -320,6 +320,7 @@ fn state(stop: &str) -> WindowState {
                         volume: None,
                     },
                     shows: Default::default(),
+                    remote: None,
                 }],
                 at: 0,
                 view: View::List,

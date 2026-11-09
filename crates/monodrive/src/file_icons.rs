@@ -245,26 +245,30 @@ fn raster(art: Art, side: f32, window: &mut Window, cx: &mut App) -> AnyElement 
 pub fn icon(entry: &Entry, side: f32, window: &mut Window, cx: &mut App) -> AnyElement {
     let art = match entry.kind {
         Kind::Dir | Kind::Link => Art::Path(entry.path.clone()),
-        Kind::File | Kind::Other => by_extension(entry),
+        Kind::File | Kind::Other => by_extension(&entry.path),
     };
     raster(art, side, window, cx)
 }
 
-/// The icon for what an entry is, without looking on the disk: for an
-/// archive's entries, which aren't there.
-pub fn kind_icon(entry: &Entry, side: f32, window: &mut Window, cx: &mut App) -> AnyElement {
-    let art = match entry.kind {
+/// The icon for what an item is, without looking on the disk: for an
+/// archive's entries or a server's, which aren't there.
+pub fn kind_icon(
+    kind: Kind,
+    path: &Path,
+    side: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let art = match kind {
         Kind::Dir => Art::Folder,
-        Kind::File | Kind::Link | Kind::Other => by_extension(entry),
+        Kind::File | Kind::Link | Kind::Other => by_extension(path),
     };
     raster(art, side, window, cx)
 }
 
-fn by_extension(entry: &Entry) -> Art {
+fn by_extension(path: &Path) -> Art {
     Art::Type(
-        entry
-            .path
-            .extension()
+        path.extension()
             .and_then(|extension| extension.to_str())
             .unwrap_or_default()
             .to_lowercase(),

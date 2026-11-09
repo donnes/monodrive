@@ -6,6 +6,7 @@
 
 use super::drag::{Spot, Target, offers};
 use super::pane::Stop;
+use super::remote;
 use super::searches;
 use super::{
     Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, GoFavorite1, GoFavorite2,
@@ -18,6 +19,7 @@ use crate::commands::{self, Scope};
 use crate::feedback::{self, Haptic};
 use crate::motion::Slide;
 use crate::preferences::{Preferences, SIDEBAR_WIDTHS};
+use crate::session::RemoteAt;
 use crate::session::Shows;
 use crate::theme::{
     self, ButtonLook, accent, content, icon, icon_button, row_icon_button, section_label,
@@ -33,6 +35,7 @@ use monodrive_core::entries::Entry;
 use monodrive_core::index::{Caps, Found, Index};
 use monodrive_core::ops::{self, Origin};
 use monodrive_core::places::{Availability, Place, Store};
+use monodrive_core::remote::{Connections, Source};
 use monodrive_core::search::{Looks, Search};
 use monodrive_core::servers::{self, Cancel, Prompt};
 use monodrive_core::updates::Channel;
@@ -144,6 +147,10 @@ pub struct Places {
     pub drives: Arc<dyn Drives>,
     /// The folders of apps, whose dotfiles are macOS's and not the person's.
     pub applications: Vec<PathBuf>,
+    /// This app's connections to saved SFTP servers.
+    pub remote: Arc<Connections>,
+    /// Where files from servers come down to open, removed as the app quits.
+    pub previews: PathBuf,
 }
 
 impl Global for Places {}
@@ -175,6 +182,8 @@ pub(super) struct Sidebar {
     pub(super) cloud: Vec<CloudFolder>,
     pub(super) volumes: Vec<Volume>,
     pub(super) servers: Vec<String>,
+    /// The saved SFTP servers, listed after the drives.
+    pub(super) remotes: Vec<Source>,
     /// Why the saved lists didn't read. They stay as last read, and nothing
     /// changes the file.
     error: Option<String>,
@@ -208,6 +217,7 @@ pub(super) enum Row {
     Favorite(usize),
     Cloud(usize),
     Volume(usize),
+    Server(usize),
 }
 
 /// What a sidebar row stands for, wherever the rows above it have gone.
@@ -219,12 +229,15 @@ pub(super) enum RowTarget {
     Favorite(PathBuf),
     Cloud(PathBuf),
     Volume(PathBuf),
+    Server(String),
 }
 
 /// Where the pane that commands act on is, for marking its row.
 struct Here {
     folder: PathBuf,
     shows: Shows,
+    /// The server the pane shows, by source id.
+    server: Option<String>,
     searching: bool,
     in_trash: bool,
 }
@@ -427,18 +440,26 @@ impl Browser {
         let volumes = self.sidebar.volumes.clone();
         let read = cx.background_executor().spawn(async move {
             let favorites = places.store.places(&volumes);
-            (favorites, places.store.servers())
+            (favorites, places.store.servers(), places.store.remotes())
         });
         self.sidebar.load_lists = Some(cx.spawn(async move |this, cx| {
-            let (favorites, saved) = read.await;
+            let (favorites, saved, remotes) = read.await;
             let _ = this.update(cx, |this, cx| {
                 let sidebar = &mut this.sidebar;
-                sidebar.error = favorites.as_ref().err().or(saved.as_ref().err()).cloned();
+                sidebar.error = favorites
+                    .as_ref()
+                    .err()
+                    .or(saved.as_ref().err())
+                    .or(remotes.as_ref().err())
+                    .cloned();
                 if let Ok(favorites) = favorites {
                     sidebar.places = favorites;
                 }
                 if let Ok(saved) = saved {
                     sidebar.servers = saved;
+                }
+                if let Ok(remotes) = remotes {
+                    sidebar.remotes = remotes;
                 }
                 cx.notify();
             });
@@ -447,7 +468,7 @@ impl Browser {
 
     /// Changes a saved list off the UI thread, says why if it can't, and
     /// reads the lists again.
-    fn change_places(
+    pub(super) fn change_places(
         &mut self,
         cx: &mut Context<Self>,
         change: impl FnOnce(&Store, &[Volume]) -> Result<(), String> + Send + 'static,
@@ -548,7 +569,12 @@ impl Browser {
             ix if ix < first + favorites + cloud => Some(Row::Cloud(ix - favorites - first)),
             ix => {
                 let volume = ix - favorites - cloud - first;
-                (volume < self.sidebar.volumes.len()).then_some(Row::Volume(volume))
+                let volumes = self.sidebar.volumes.len();
+                if volume < volumes {
+                    return Some(Row::Volume(volume));
+                }
+                let server = volume - volumes;
+                (server < self.sidebar.remotes.len()).then_some(Row::Server(server))
             }
         }
     }
@@ -564,7 +590,18 @@ impl Browser {
             }
             Row::Cloud(ix) => RowTarget::Cloud(self.sidebar.cloud.get(ix)?.path.clone()),
             Row::Volume(ix) => RowTarget::Volume(self.sidebar.volumes.get(ix)?.mount.clone()),
+            Row::Server(ix) => RowTarget::Server(self.sidebar.remotes.get(ix)?.id.clone()),
         })
+    }
+
+    /// The server the sidebar's keys are on, and whether it's connected.
+    fn server_at_cursor(&self, cx: &App) -> Option<(String, bool)> {
+        let Some(Row::Server(ix)) = self.row_at(self.sidebar_cursor) else {
+            return None;
+        };
+        let id = self.sidebar.remotes.get(ix)?.id.clone();
+        let connected = remote::link(&id, cx) == Some(&remote::Link::Connected);
+        Some((id, connected))
     }
 
     /// The volume to eject for the row the sidebar's keys are on, if any.
@@ -625,6 +662,12 @@ impl Browser {
                 if let Some(mount) = self.sidebar.volumes.get(ix).map(|v| v.mount.clone()) {
                     self.pane()
                         .update(cx, |pane, cx| pane.go(mount, window, cx));
+                }
+            }
+            Some(Row::Server(ix)) => {
+                if let Some(id) = self.sidebar.remotes.get(ix).map(|s| s.id.clone()) {
+                    self.pane()
+                        .update(cx, |pane, cx| pane.open_server(&id, window, cx));
                 }
             }
             None => {}
@@ -688,6 +731,13 @@ impl Browser {
                 };
                 Stop::folder(volume.mount.clone())
             }
+            Some(Row::Server(ix)) => {
+                let Some(source) = self.sidebar.remotes.get(ix) else {
+                    return;
+                };
+                let folder = self.pane().read(cx).folder().to_path_buf();
+                Stop::remote(folder, RemoteAt::Start(source.id.clone()))
+            }
             None => return,
         };
         self.new_tab(stop, window, cx);
@@ -719,6 +769,16 @@ impl Browser {
         }
         if pane.showing_worktrees() {
             return self.sidebar.worktrees.then_some(2);
+        }
+        if let Some(id) = pane.remote_source() {
+            let ix = self.sidebar.remotes.iter().position(|s| s.id == id)?;
+            return Some(
+                self.first_favorite()
+                    + self.sidebar.places.len()
+                    + self.sidebar.cloud.len()
+                    + self.sidebar.volumes.len()
+                    + ix,
+            );
         }
         let folder = pane.folder();
         let favorite = self
@@ -1084,6 +1144,84 @@ impl Browser {
             .map(|d| self.drop_row(d, ix, folder))
     }
 
+    /// A saved SFTP server: Eject while it's connected, and why when it
+    /// couldn't connect, on a second line.
+    fn server_row(
+        &self,
+        at: usize,
+        here: &Here,
+        cursor: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let source = &self.sidebar.remotes[at];
+        let ix = at
+            + self.first_favorite()
+            + self.sidebar.places.len()
+            + self.sidebar.cloud.len()
+            + self.sidebar.volumes.len();
+        let selected = here.server.as_deref() == Some(source.id.as_str());
+        let link = remote::link(&source.id, cx).cloned();
+        let failed = match &link {
+            Some(remote::Link::Failed(error)) => Some(remote::short_reason(error)),
+            _ => None,
+        };
+        let id = source.id.clone();
+        let row = Self::row(ix, selected, true, cursor)
+            .h(px(if failed.is_some() {
+                DRIVE_HEIGHT
+            } else {
+                ROW_HEIGHT
+            }))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon("server", 16.).text_color(content(if selected { 1. } else { 0.55 })))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(source.id.clone()))
+                    .children(failed.map(|why| {
+                        div()
+                            .debug_selector(move || format!("server-failed-{at}"))
+                            .truncate()
+                            .text_size(px(theme::TEXT_CAPTION))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(theme::danger())
+                            .child(why)
+                    })),
+            )
+            .when(link == Some(remote::Link::Connecting), |d| {
+                d.child(
+                    div()
+                        .debug_selector(move || format!("server-connecting-{at}"))
+                        .size(px(12.))
+                        .mr_1()
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(content(0.55)),
+                )
+            })
+            .when(link == Some(remote::Link::Connected), |d| {
+                d.child(
+                    row_button(
+                        ("server-disconnect", at),
+                        format!("server-disconnect-{at}"),
+                        "Disconnect",
+                        "eject",
+                    )
+                    .occlude()
+                    .on_click(cx.listener(move |this, _, _, cx| this.disconnect_server(&id, cx))),
+                )
+            });
+        Self::slot(ix, selected, true, cx)
+            .aria_label(source.id.clone())
+            .child(row)
+    }
+
     fn favorites_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let editing = self.sidebar.editing;
         let label = if editing { "Done" } else { "Edit" };
@@ -1278,6 +1416,7 @@ impl Browser {
         let here = Here {
             folder: pane.folder().to_path_buf(),
             shows: pane.stop().shows,
+            server: pane.remote_source().map(str::to_owned),
             searching: !pane.query.is_empty(),
             in_trash: pane.in_trash(cx),
         };
@@ -1286,7 +1425,8 @@ impl Browser {
         let last_row = self.first_favorite() - 1
             + self.sidebar.places.len()
             + self.sidebar.cloud.len()
-            + self.sidebar.volumes.len();
+            + self.sidebar.volumes.len()
+            + self.sidebar.remotes.len();
         div()
             .relative()
             .w(px(width))
@@ -1408,6 +1548,21 @@ impl Browser {
                             this.eject(mount.clone(), cx)
                         }))
                     })
+                    // A server's Eject disconnects it, and Remove from Sidebar
+                    // forgets it, as Finder does for servers.
+                    .when_some(self.server_at_cursor(cx), |d, (id, connected)| {
+                        let forgotten = id.clone();
+                        d.when(connected, |d| {
+                            d.on_action(cx.listener(move |this, _: &super::Eject, _, cx| {
+                                this.disconnect_server(&id, cx)
+                            }))
+                        })
+                        .on_action(cx.listener(
+                            move |this, _: &super::RemoveFromSidebar, _, cx| {
+                                this.forget_server(&forgotten, cx)
+                            },
+                        ))
+                    })
                     .when(at_cursor == Some(Row::Recents), |d| {
                         d.on_action(cx.listener(|this, _: &super::ClearRecents, _, cx| {
                             this.pane().update(cx, |pane, cx| pane.clear_recents(cx))
@@ -1467,6 +1622,11 @@ impl Browser {
                         (0..self.sidebar.volumes.len())
                             .map(|vol| self.volume_row(vol, &here, cursor, cx))
                             .collect::<Vec<_>>(),
+                    )
+                    .children(
+                        (0..self.sidebar.remotes.len())
+                            .map(|at| self.server_row(at, &here, cursor, cx))
+                            .collect::<Vec<_>>(),
                     ),
             )
             .child(self.foot(&here, cx))
@@ -1521,20 +1681,27 @@ impl Browser {
         };
         self.remember_focus(window, cx);
         let saved = self.sidebar.servers.clone();
-        let view = cx.new(|cx| crate::connect::ConnectView::new(places, saved, cx));
+        let remotes = self.sidebar.remotes.clone();
+        let view = cx.new(|cx| crate::connect::ConnectView::new(places, saved, &remotes, cx));
         cx.subscribe_in(
             &view,
             window,
             |this, _, event: &crate::connect::ConnectEvent, window, cx| {
                 this.close_sheet(window, cx);
-                if let crate::connect::ConnectEvent::Connected { address, mount } = event {
-                    this.toast(
-                        format!("Connected {address} at {}", mount.display()),
-                        false,
-                        None,
-                        cx,
-                    );
-                    this.load_volumes(cx);
+                match event {
+                    crate::connect::ConnectEvent::Connected { address, mount } => {
+                        this.toast(
+                            format!("Connected {address} at {}", mount.display()),
+                            false,
+                            None,
+                            cx,
+                        );
+                        this.load_volumes(cx);
+                    }
+                    crate::connect::ConnectEvent::ConnectedServer(id) => this
+                        .pane()
+                        .update(cx, |pane, cx| pane.open_server(id, window, cx)),
+                    crate::connect::ConnectEvent::Dismissed => {}
                 }
                 this.load_lists(cx);
             },

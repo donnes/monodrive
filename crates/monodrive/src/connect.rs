@@ -1,8 +1,9 @@
 //! Connect to Server (⇧⌘K), in the palette's card: an address, the saved
 //! servers (a click fills the address, ✕ forgets one), Cancel and Connect.
-//! macOS asks for any credentials and keeps them in the Keychain, so none
-//! pass through here. Connecting only mounts; the share then shows in the
-//! sidebar, and opening it is a separate step.
+//! An smb:// share mounts, and macOS asks for any credentials and keeps them
+//! in the Keychain, so none pass through here; the share then shows in the
+//! sidebar. An sftp:// or ssh:// server connects with the user's ssh keys and
+//! opens in the pane, and is saved only once it has connected.
 
 use crate::browser::Places;
 use crate::palette;
@@ -14,7 +15,8 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Role,
     Task, Window, actions, div, prelude::*, px,
 };
-use monodrive_core::servers::{self, Cancel};
+use monodrive_core::remote::Source;
+use monodrive_core::servers::{self, Cancel, Server};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,13 +34,21 @@ pub fn bind(cx: &mut App) {
 
 pub enum ConnectEvent {
     Dismissed,
-    Connected { address: String, mount: PathBuf },
+    Connected {
+        address: String,
+        mount: PathBuf,
+    },
+    /// An SFTP server connected, and is saved as this source.
+    ConnectedServer(String),
 }
 
 pub struct ConnectView {
     pub(crate) field: Entity<TextField>,
     places: Places,
+    /// Saved addresses: smb:// shares, then SFTP servers as sftp:// ones.
     saved: Vec<String>,
+    /// The saved SFTP servers, by address, for forgetting them.
+    remotes: Vec<(String, String)>,
     /// The saved server the arrows are on.
     selected: Option<usize>,
     pub(crate) error: Option<String>,
@@ -56,8 +66,19 @@ impl Focusable for ConnectView {
 }
 
 impl ConnectView {
-    pub fn new(places: Places, saved: Vec<String>, cx: &mut Context<Self>) -> Self {
-        let field = cx.new(|cx| TextField::new("Server address", "smb://nas.local/media", cx));
+    pub fn new(
+        places: Places,
+        mut saved: Vec<String>,
+        remotes: &[Source],
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let field = cx
+            .new(|cx| TextField::new("Server address", "smb://nas.local/media or sftp://host", cx));
+        let remotes: Vec<(String, String)> = remotes
+            .iter()
+            .map(|source| (sftp_address(source), source.id.clone()))
+            .collect();
+        saved.extend(remotes.iter().map(|(address, _)| address.clone()));
         cx.subscribe(&field, |this, _, _: &text_field::Changed, cx| {
             this.error = None;
             cx.notify();
@@ -67,6 +88,7 @@ impl ConnectView {
             field,
             places,
             saved,
+            remotes,
             selected: None,
             error: None,
             connecting: None,
@@ -108,9 +130,20 @@ impl ConnectView {
         self.selected = None;
         cx.notify();
         let store = self.places.store.clone();
-        let forgotten = cx
-            .background_executor()
-            .spawn(async move { store.forget_server(&address) });
+        let remote = self
+            .remotes
+            .iter()
+            .find(|(saved, _)| *saved == address)
+            .map(|(_, id)| id.clone());
+        if let Some(id) = &remote {
+            crate::browser::remote::disconnect(id, cx);
+        }
+        let forgotten = cx.background_executor().spawn(async move {
+            match remote {
+                Some(id) => store.forget_remote(&id).map(drop),
+                None => store.forget_server(&address),
+            }
+        });
         cx.spawn(async move |this, cx| {
             if let Err(why) = forgotten.await {
                 let _ = this.update(cx, |this, cx| {
@@ -129,27 +162,38 @@ impl ConnectView {
             return;
         }
         let typed = self.field.read(cx).text().to_owned();
-        if let Err(why) = servers::address(&typed) {
-            self.error = Some(why);
-            cx.notify();
-            return;
-        }
+        let server = match servers::server(&typed) {
+            Ok(server) => server,
+            Err(why) => {
+                self.error = Some(why);
+                cx.notify();
+                return;
+            }
+        };
         let cancel = Arc::new(Cancel::default());
         self.connecting = Some(cancel.clone());
         self.error = None;
         cx.notify();
         let places = self.places.clone();
         let done = cx.background_executor().spawn(async move {
-            servers::connect(&places.store, &typed, &cancel, |address| {
-                places.drives.mount(address, &cancel)
-            })
+            match server {
+                Server::Smb(_) => servers::connect(&places.store, &typed, &cancel, |address| {
+                    places.drives.mount(address, &cancel)
+                })
+                .map(|(address, mount)| ConnectEvent::Connected { address, mount }),
+                Server::Sftp { host, start } => places
+                    .remote
+                    .add(&host, start.as_deref(), || cancel.is_cancelled())
+                    .map(|source| ConnectEvent::ConnectedServer(source.id))
+                    .map_err(String::from),
+            }
         });
         self.work = cx.spawn(async move |this, cx| {
             let done = done.await;
             let _ = this.update(cx, |this, cx| {
                 this.connecting = None;
                 match done {
-                    Ok((address, mount)) => cx.emit(ConnectEvent::Connected { address, mount }),
+                    Ok(event) => cx.emit(event),
                     Err(why) => this.error = Some(why),
                 }
                 cx.notify();
@@ -213,7 +257,7 @@ impl Render for ConnectView {
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(content(0.65))
                     .child(if self.saved.is_empty() {
-                        "A server you connect to is saved here. macOS asks for any password and keeps it in the Keychain."
+                        "A server you connect to is saved here. macOS asks for an SMB password and keeps it in the Keychain; SFTP uses your ssh keys."
                     } else {
                         "Saved servers"
                     }),
@@ -274,4 +318,13 @@ impl Render for ConnectView {
                 body,
             ))
     }
+}
+
+/// How a saved SFTP server is written as an address.
+fn sftp_address(source: &Source) -> String {
+    format!(
+        "sftp://{}{}",
+        source.host,
+        source.start.as_deref().unwrap_or_default()
+    )
 }

@@ -857,17 +857,26 @@ impl Server {
                 };
                 volumes::eject(&expand_home(&path), &origin, &mut self.ops).map(|done| done + "\n")
             }
-            ToolCall::Connect { address } => servers::address(&address).and_then(|address| {
+            ToolCall::Connect { address } => servers::server(&address).and_then(|server| {
                 if !self.ops.agents_change_files() {
-                    return Err(format!(
-                        "Agents can't connect to {address}: Let agents change files is off in Monodrive's Agents settings."
-                    ));
+                    return Err(
+                        "Agents can't connect to servers: Let agents change files is off in Monodrive's Agents settings.".into()
+                    );
                 }
-                let cancel = Arc::default();
-                servers::connect(&self.places, &address, &cancel, |address| {
-                    servers::mount(address, Prompt::Never, &cancel)
-                })
-                .map(|(address, at)| format!("{address} is at {}\n", at.display()))
+                match server {
+                    servers::Server::Smb(address) => {
+                        let cancel = Arc::default();
+                        servers::connect(&self.places, &address, &cancel, |address| {
+                            servers::mount(address, Prompt::Never, &cancel)
+                        })
+                        .map(|(address, at)| format!("{address} is at {}\n", at.display()))
+                    }
+                    servers::Server::Sftp { host, start } => self
+                        .remote
+                        .add(&host, start.as_deref(), || false)
+                        .map(|source| format!("{}\n", self.source_line(&source)))
+                        .map_err(String::from),
+                }
             }),
             ToolCall::Disconnect { address } => {
                 let origin = Origin::Agent {
@@ -2992,7 +3001,8 @@ pub const TOOLS: [Tool; 69] = [
         name: "connect",
         description: "Mount an smb:// share, or say where it's already mounted, and save its address. \
     Uses credentials macOS already has; one that needs a prompt reports that, since only the user can answer \
-    one, from Monodrive's window. Takes no password. Lists nothing.",
+    one, from Monodrive's window. sftp://host/folder saves an SSH server as a remote source once it connects, \
+    as remote_sources lists it. Takes no password. Lists nothing.",
         input_schema: address_schema,
     },
     Tool {
@@ -3966,6 +3976,17 @@ mod tests {
         );
         let reply = call(&mut server, json!({"name": "remote_sources"}));
         assert!(text(&reply).contains(", connected"), "{reply}");
+        // connect takes an sftp:// address as Connect to Server does, and
+        // saves it as a source once it's connected.
+        let reply = call(
+            &mut server,
+            json!({"name": "connect", "arguments": {"address": format!("sftp://me@spare{}", near.display())}}),
+        );
+        assert_eq!(
+            text(&reply),
+            format!("spare: me@spare, starts at {}, connected\n", near.display())
+        );
+        assert!(server.places.remote("spare").is_ok());
 
         let reply = call(
             &mut server,

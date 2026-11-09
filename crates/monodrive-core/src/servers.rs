@@ -68,6 +68,50 @@ pub fn address(typed: &str) -> Result<String, String> {
     })
 }
 
+/// What Connect to Server was given: a share to mount, or an SSH server to
+/// browse over SFTP.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Server {
+    Smb(String),
+    Sftp { host: String, start: Option<String> },
+}
+
+/// The server for what was typed. `sftp://` or `ssh://` names an SSH host,
+/// `user@host` or alias, with an optional folder to start in; anything else
+/// is an smb:// address. Refusals never repeat what was typed.
+pub fn server(typed: &str) -> Result<Server, String> {
+    let typed = typed.trim();
+    let ssh = typed.split_once("://").and_then(|(scheme, rest)| {
+        (scheme.eq_ignore_ascii_case("sftp") || scheme.eq_ignore_ascii_case("ssh")).then_some(rest)
+    });
+    let Some(rest) = ssh else {
+        return address(typed).map(Server::Smb);
+    };
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let (user, host) = authority
+        .rsplit_once('@')
+        .map_or((None, authority), |(user, host)| (Some(user), host));
+    if user.is_some_and(|user| user.contains(':')) {
+        return Err(
+            "Leave the password out of the address. Monodrive uses your ssh keys and ssh-agent."
+                .into(),
+        );
+    }
+    if host.is_empty() {
+        return Err("That address doesn't name a server.".into());
+    }
+    if host.contains(':') {
+        return Err(
+            "ssh takes no port in an address. Give the host a Port in ~/.ssh/config.".into(),
+        );
+    }
+    let path = path.trim_end_matches('/').replace("%20", " ");
+    Ok(Server::Sftp {
+        host: authority.into(),
+        start: (!path.is_empty()).then_some(path),
+    })
+}
+
 /// `url` without any password, as macOS's remount address could hold one
 /// for a share someone else mounted.
 pub fn without_password(url: &str) -> String {
@@ -373,6 +417,28 @@ mod tests {
             let why = refused(hidden);
             assert!(!why.contains("secret"), "{hidden}: {why}");
         }
+    }
+
+    #[test]
+    fn an_sftp_or_ssh_address_names_a_host_and_a_start() {
+        let sftp = |host: &str, start: Option<&str>| Server::Sftp {
+            host: host.into(),
+            start: start.map(Into::into),
+        };
+        assert_eq!(server("sftp://box"), Ok(sftp("box", None)));
+        assert_eq!(
+            server(" SSH://me@box.lan/srv/My%20Site/ "),
+            Ok(sftp("me@box.lan", Some("/srv/My Site")))
+        );
+        assert_eq!(
+            server("nas.local/media"),
+            Ok(Server::Smb("smb://nas.local/media".into()))
+        );
+        let refused = |typed: &str| server(typed).unwrap_err();
+        assert!(refused("sftp://me:secret@box").starts_with("Leave the password out"));
+        assert!(!refused("sftp://me:secret@box").contains("secret"));
+        assert!(refused("sftp://box:2222/srv").contains("Port"));
+        assert!(refused("sftp:///srv").contains("doesn't name a server"));
     }
 
     #[test]

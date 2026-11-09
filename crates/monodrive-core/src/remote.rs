@@ -410,6 +410,21 @@ impl RemoteEntry {
     }
 }
 
+impl crate::entries::Sorted for RemoteEntry {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn kind(&self) -> Kind {
+        self.kind
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn modified(&self) -> u64 {
+        self.modified
+    }
+}
+
 fn kind_of(attrs: Attrs) -> Kind {
     match attrs.permissions.map(|mode| mode & u32::from(libc::S_IFMT)) {
         Some(mode) if mode == u32::from(libc::S_IFDIR) => Kind::Dir,
@@ -511,6 +526,43 @@ impl Connections {
         let open = Arc::new(Connection::open(source, transport, self.limits)?);
         *slot = Some(open.clone());
         Ok(open)
+    }
+
+    /// Saves a source for `host` and connects to it, as Connect to Server
+    /// does. A new source stays saved only if it connected and `cancelled`
+    /// still says no; one saved before stays whatever happens.
+    pub fn add(
+        &self,
+        host: &str,
+        start: Option<&str>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Source, RemoteError> {
+        let checked = Source::new("new", host, start).map_err(RemoteError::BadPath)?;
+        let known = self
+            .store
+            .remotes()
+            .map_err(RemoteError::Failed)?
+            .into_iter()
+            .any(|source| source.host == checked.host && source.start == checked.start);
+        let source = self
+            .store
+            .add_remote(host, None, start)
+            .map_err(RemoteError::Failed)?;
+        let connected = self.connect(&source.id).and_then(|_| {
+            if cancelled() {
+                Err(RemoteError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(e) = connected {
+            if !known {
+                self.disconnect(&source.id);
+                let _ = self.store.forget_remote(&source.id);
+            }
+            return Err(e);
+        }
+        Ok(source)
     }
 
     /// Ends the connection to source `id`, if it has one, and its subprocess.

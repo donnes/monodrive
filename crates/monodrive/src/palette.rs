@@ -5,6 +5,7 @@
 //! the browser last read, so it opens at once, and reads the rest in the
 //! background.
 
+use crate::browser::remote::{Link, Servers};
 use crate::browser::{self, Eject, OpenWith, Places, format_bytes};
 use crate::commands::{self, Command, Scope};
 use crate::menu;
@@ -26,7 +27,7 @@ use monodrive_core::places::{Availability, Place};
 use monodrive_core::remote::Source;
 use monodrive_core::servers;
 use monodrive_core::volumes::Volume;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -66,7 +67,10 @@ pub enum PaletteEvent {
     Eject(PathBuf),
     /// Connect to this saved server through the Connect card.
     Connect(String),
-    Say(String),
+    /// Open this saved SFTP server, by source id.
+    OpenServer(String),
+    /// Disconnect this SFTP server, by source id.
+    Disconnect(String),
     /// Open these files in this app.
     OpenWith {
         files: Vec<PathBuf>,
@@ -136,7 +140,7 @@ pub(crate) enum Target {
     Page(Page),
     Folder(PathBuf),
     File(PathBuf),
-    /// A saved SFTP source, by its host.
+    /// A saved SFTP source, by its id.
     Remote(String),
     AddRemote,
     /// A saved SMB address that isn't mounted.
@@ -178,6 +182,8 @@ pub(crate) struct Row {
     checked: bool,
     /// Where ⌘E or the row's button ejects.
     eject: Option<PathBuf>,
+    /// The connected server ⌘E or the row's button disconnects, by id.
+    disconnect: Option<String>,
     /// What ⌘⌫ or the row's button forgets.
     forget: Option<Saved>,
     /// What else it's found by, besides its title: a command's menu. Not a
@@ -203,6 +209,7 @@ impl Row {
             destructive: false,
             checked: false,
             eject: None,
+            disconnect: None,
             forget: None,
             found_by: String::new(),
         }
@@ -252,6 +259,8 @@ pub struct PaletteView {
     scroll: ScrollHandle,
     recents: Vec<Entry>,
     remotes: Vec<Source>,
+    /// How each server's connection is doing, as the app last said.
+    links: HashMap<String, Link>,
     cloud: Vec<CloudFolder>,
     /// What Open With offers, once it's loaded.
     apps: Option<Offered>,
@@ -281,6 +290,11 @@ impl PaletteView {
         })
         .detach();
         let reads = Self::read_lists(cx);
+        cx.observe_global::<Servers>(|this, cx| {
+            this.links = cx.global::<Servers>().0.clone();
+            this.refresh(cx);
+        })
+        .detach();
         let mut view = Self {
             query,
             now,
@@ -292,6 +306,10 @@ impl PaletteView {
             scroll: ScrollHandle::new(),
             recents: Vec::new(),
             remotes: Vec::new(),
+            links: cx
+                .try_global::<Servers>()
+                .map(|servers| servers.0.clone())
+                .unwrap_or_default(),
             cloud: Vec::new(),
             apps: None,
             apps_load: Task::ready(()),
@@ -548,7 +566,11 @@ impl PaletteView {
         match page {
             Page::Root => Vec::new(),
             Page::Remote => {
-                let mut rows: Vec<Row> = self.remotes.iter().map(remote_row).collect();
+                let mut rows: Vec<Row> = self
+                    .remotes
+                    .iter()
+                    .map(|source| remote_row(source, self.links.get(&source.id)))
+                    .collect();
                 rows.extend(self.now.servers.iter().map(|a| self.server_row(a)));
                 rows
             }
@@ -646,9 +668,7 @@ impl PaletteView {
             Target::Folder(path) => PaletteEvent::Go(path.clone()),
             Target::File(path) => PaletteEvent::Open(path.clone()),
             Target::Server(address) => PaletteEvent::Connect(address.clone()),
-            Target::Remote(host) => {
-                PaletteEvent::Say(format!("Browsing {host} isn't available yet."))
-            }
+            Target::Remote(id) => PaletteEvent::OpenServer(id.clone()),
             Target::Page(page) => {
                 let page = *page;
                 return self.open_page(page, cx);
@@ -709,7 +729,7 @@ impl PaletteView {
             let added = added.await;
             let _ = this.update(cx, |this, cx| match added {
                 Ok(source) => {
-                    this.land_on = Some(source.host.clone().into());
+                    this.land_on = Some(source.id.clone().into());
                     if !this.remotes.contains(&source) {
                         this.remotes.push(source);
                     }
@@ -756,8 +776,13 @@ impl PaletteView {
     }
 
     fn eject(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(mount) = self.rows.get(ix).and_then(|row| row.eject.clone()) {
+        let Some(row) = self.rows.get(ix) else {
+            return;
+        };
+        if let Some(mount) = row.eject.clone() {
             cx.emit(PaletteEvent::Eject(mount));
+        } else if let Some(id) = row.disconnect.clone() {
+            cx.emit(PaletteEvent::Disconnect(id));
         }
     }
 
@@ -782,10 +807,15 @@ impl PaletteView {
             theme::row(active)
         };
         let button_ink = if active { muted } else { content(0.55) };
-        let eject_button = row.eject.is_some().then(|| {
+        let eject_label = if row.disconnect.is_some() {
+            "Disconnect"
+        } else {
+            "Eject"
+        };
+        let eject_button = (row.eject.is_some() || row.disconnect.is_some()).then(|| {
             theme::tip(
-                row_icon_button(("palette-eject", ix), "Eject", "eject", button_ink),
-                "Eject",
+                row_icon_button(("palette-eject", ix), eject_label, "eject", button_ink),
+                eject_label,
             )
             .occlude()
             .on_click(cx.listener(move |this, _, _, cx| this.eject(ix, cx)))
@@ -828,7 +858,10 @@ impl PaletteView {
                     frame
                         .debug_selector(move || format!("palette-row-{ix}"))
                         .when(row.subtitle.is_some(), |d| d.h(px(TALL_ROW)))
-                        .when(row.eject.is_some() || row.forget.is_some(), |d| d.pr_1())
+                        .when(
+                            row.eject.is_some() || row.disconnect.is_some() || row.forget.is_some(),
+                            |d| d.pr_1(),
+                        )
                         .child(icon(row.glyph, 16.).flex_shrink_0().text_color(if enabled {
                             if active { muted } else { content(0.55) }
                         } else {
@@ -890,10 +923,14 @@ impl PaletteView {
     }
 
     fn footer(&self, cx: &App) -> impl IntoElement + use<> {
-        let page_key = match self.page {
-            Page::Remote => Some((commands::label("cmd-backspace"), "Forget")),
-            Page::Drives => commands::shortcut_label(Eject.name(), cx).map(|keys| (keys, "Eject")),
-            _ => None,
+        let eject = |what| commands::shortcut_label(Eject.name(), cx).map(|keys| (keys, what));
+        let page_keys: Vec<(String, &str)> = match self.page {
+            Page::Remote => eject("Disconnect")
+                .into_iter()
+                .chain([(commands::label("cmd-backspace"), "Forget")])
+                .collect(),
+            Page::Drives => eject("Eject").into_iter().collect(),
+            _ => Vec::new(),
         };
         div()
             .h(px(FOOTER_HEIGHT))
@@ -914,7 +951,11 @@ impl PaletteView {
                     "Back"
                 },
             ))
-            .children(page_key.map(|(keys, what)| key_hint(&[keys.as_str()], what)))
+            .children(
+                page_keys
+                    .into_iter()
+                    .map(|(keys, what)| key_hint(&[keys.as_str()], what)),
+            )
     }
 
     /// The one line where there are no rows.
@@ -1208,16 +1249,23 @@ fn add_remote_row(query: &str) -> Row {
     }
 }
 
-fn remote_row(source: &Source) -> Row {
+/// A saved SFTP server, with how its connection is doing.
+fn remote_row(source: &Source, link: Option<&Link>) -> Row {
+    let about = match link {
+        Some(Link::Connected) => format!("Connected · {}", source.host),
+        Some(link) => link.short().to_string(),
+        None => format!("Not connected · {}", source.host),
+    };
     Row {
         forget: Some(Saved::Remote(source.id.clone())),
+        disconnect: (link == Some(&Link::Connected)).then(|| source.id.clone()),
         ..Row::new(
             SFTP,
             "server",
-            source.host.clone(),
-            Target::Remote(source.host.clone()),
+            source.id.clone(),
+            Target::Remote(source.id.clone()),
         )
-        .about("Not connected")
+        .about(about)
     }
 }
 
@@ -1371,7 +1419,7 @@ mod tests {
             view.now.servers.pop();
             view.refresh(cx);
         });
-        assert_eq!(view.read_with(cx, under_keys).as_deref(), Some("a.local"));
+        assert_eq!(view.read_with(cx, under_keys).as_deref(), Some("a"));
     }
 
     #[test]

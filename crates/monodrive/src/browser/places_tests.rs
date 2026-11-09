@@ -122,7 +122,7 @@ fn volume(name: &str, mount: &Path, id: &str, total: u64, free: u64) -> Volume {
     }
 }
 
-fn startup() -> Volume {
+pub(super) fn startup() -> Volume {
     Volume {
         ejectable: false,
         removable: false,
@@ -158,6 +158,11 @@ pub(super) fn world(volumes: Vec<Volume>, cx: &mut TestAppContext) -> World {
         ..Fake::default()
     });
     let places = Places {
+        previews: real.join("previews"),
+        remote: Arc::new(monodrive_core::remote::Connections::new(
+            store.clone(),
+            local_sftp(&["changed.example"]),
+        )),
         store: store.clone(),
         trash: trash.clone(),
         drives: fake.clone(),
@@ -178,7 +183,7 @@ pub(super) fn world(volumes: Vec<Volume>, cx: &mut TestAppContext) -> World {
 }
 
 /// A browser on `folder` that hears `world`'s watches.
-fn open<'a>(
+pub(super) fn open<'a>(
     world: &World,
     folder: &Path,
     cx: &'a mut TestAppContext,
@@ -215,7 +220,7 @@ fn on_screen(cx: &mut VisualTestContext, selector: &str) -> bool {
     cx.debug_bounds(selector.to_string().leak()).is_some()
 }
 
-fn press_on(cx: &mut VisualTestContext, selector: &str) {
+pub(super) fn press_on(cx: &mut VisualTestContext, selector: &str) {
     click(cx, selector.to_string().leak());
 }
 
@@ -894,7 +899,10 @@ fn command_backspace_in_the_sidebar_never_reaches_the_lists_selection(cx: &mut T
 }
 
 /// The palette that's open.
-fn palette(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Entity<PaletteView> {
+pub(super) fn palette(
+    browser: &Entity<Browser>,
+    cx: &mut VisualTestContext,
+) -> Entity<PaletteView> {
     browser.read_with(cx, |b, _| match &b.sheet {
         Some(Sheet::Palette(view)) => view.clone(),
         _ => panic!("the palette is open"),
@@ -902,7 +910,10 @@ fn palette(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Entity<Pale
 }
 
 /// Each row's title, in its section.
-fn sections(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Vec<(String, Vec<String>)> {
+pub(super) fn sections(
+    view: &Entity<PaletteView>,
+    cx: &mut VisualTestContext,
+) -> Vec<(String, Vec<String>)> {
     view.read_with(cx, |view, _| {
         let mut out: Vec<(String, Vec<String>)> = Vec::new();
         for row in &view.rows {
@@ -915,20 +926,20 @@ fn sections(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Vec<(Stri
     })
 }
 
-fn titles(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Vec<String> {
+pub(super) fn titles(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Vec<String> {
     view.read_with(cx, |view, _| {
         view.rows.iter().map(|row| row.title.to_string()).collect()
     })
 }
 
-fn under_keys(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Option<String> {
+pub(super) fn under_keys(view: &Entity<PaletteView>, cx: &mut VisualTestContext) -> Option<String> {
     view.read_with(cx, |view, _| {
         let row = view.rows.get(view.active?)?;
         Some(row.title.to_string())
     })
 }
 
-fn type_in(cx: &mut VisualTestContext, text: &str) {
+pub(super) fn type_in(cx: &mut VisualTestContext, text: &str) {
     cx.simulate_input(text);
     cx.run_until_parked();
 }
@@ -1321,13 +1332,13 @@ fn remote_locations_add_explain_connect_and_forget(cx: &mut TestAppContext) {
     let saved = world.store.remotes().unwrap();
     assert_eq!(saved[0].host, "build-box");
     assert_eq!(under_keys(&view, cx).as_deref(), Some("build-box"));
-    // Browsing isn't built, so choosing one says so instead of doing nothing.
+    // Choosing one opens it in the pane.
     press(cx, "enter");
     assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));
-    assert_eq!(
-        toast(&browser, cx).unwrap().0,
-        "Browsing build-box isn't available yet."
-    );
+    let source = in_pane(&browser, cx, |pane, _| {
+        pane.remote_source().map(str::to_owned)
+    });
+    assert_eq!(source.as_deref(), Some("build-box"));
     // ⌘⌫ forgets it.
     press(cx, "cmd-k");
     let view = palette(&browser, cx);
@@ -1500,6 +1511,7 @@ fn saved_pane(places: Vec<Favorite>) -> PaneState {
             .map(|place| StopState {
                 place,
                 shows: Shows::Folder,
+                remote: None,
             })
             .collect(),
         view: View::List,
@@ -2585,4 +2597,45 @@ fn nothing_is_extracted_into_the_trash_and_pages_from_an_archive_start_on_the_di
     press(cx, "cmd-down");
     assert!(in_pane(&browser, cx, |pane, _| pane.showing_archive()));
     assert!(!can_extract(cx));
+}
+
+/// The server's output, which ends the server it came from when the
+/// connection lets go of it.
+struct ServerOut {
+    out: std::process::ChildStdout,
+    child: std::process::Child,
+}
+
+impl std::io::Read for ServerOut {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.out.read(buf)
+    }
+}
+
+impl Drop for ServerOut {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Connects every source to macOS's own `sftp-server` over pipes, with no
+/// ssh, network or keys, except a host named in `refused`, whose host key
+/// has changed.
+pub(super) fn local_sftp(refused: &'static [&'static str]) -> monodrive_core::remote::Connector {
+    use monodrive_core::remote::{RemoteError, Source, Transport};
+    Arc::new(move |source: &Source| {
+        if refused.contains(&source.host.as_str()) {
+            return Err(RemoteError::HostKeyChanged(source.host.clone()));
+        }
+        let mut child = std::process::Command::new("/usr/libexec/sftp-server")
+            .current_dir("/")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| RemoteError::Failed(e.to_string()))?;
+        let (stdin, out) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        Ok(Transport::new(ServerOut { out, child }, stdin))
+    })
 }

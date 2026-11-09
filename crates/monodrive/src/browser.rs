@@ -11,6 +11,7 @@ mod open_with;
 mod organize;
 mod overview;
 mod pane;
+pub(crate) mod remote;
 mod searches;
 mod sidebar;
 mod tabs;
@@ -27,6 +28,8 @@ mod drag_tests;
 mod inspector_tests;
 #[cfg(test)]
 mod places_tests;
+#[cfg(test)]
+mod remote_tests;
 #[cfg(test)]
 mod search_tests;
 #[cfg(test)]
@@ -361,6 +364,11 @@ pub struct Browser {
     in_panel: bool,
     /// `preview` is in this pane.
     previewing: Option<(gpui::WeakEntity<Pane>, Entity<PreviewView>)>,
+    /// A file from a server, downloaded for Quick Look, until the next frame
+    /// shows it.
+    look_at: Option<PathBuf>,
+    /// A file from a server coming down to open.
+    fetching: Option<remote::Fetching>,
     /// What the sidebar lists.
     sidebar: sidebar::Sidebar,
     /// The window's frame, as last settled.
@@ -519,6 +527,10 @@ impl Browser {
         .detach();
         // Repaints the ring as the jobs change.
         cx.observe(&jobs, |_, _, cx| cx.notify()).detach();
+        // The sidebar's servers say how their connections are doing.
+        cx.default_global::<remote::Servers>();
+        cx.observe_global::<remote::Servers>(|_, cx| cx.notify())
+            .detach();
         // Whatever moves the selection repaints, so Quick Look follows it here.
         cx.observe_self(|this, cx| this.follow_selection(cx))
             .detach();
@@ -583,6 +595,8 @@ impl Browser {
             quick_look: None,
             in_panel: false,
             previewing: None,
+            look_at: None,
+            fetching: None,
             sidebar: sidebar::Sidebar::new(
                 cx.try_global::<Preferences>()
                     .is_some_and(|p| p.show_worktrees),
@@ -715,6 +729,7 @@ impl Browser {
                 self.request_menu(scopes.clone(), *at, origin, cx);
             }
             PaneEvent::Eject(mount) => self.eject(mount.clone(), cx),
+            PaneEvent::Fetch { at, size, look } => self.fetch(at.clone(), *size, *look, cx),
             PaneEvent::Moved => self.save_session(cx),
         }
     }
@@ -1576,7 +1591,10 @@ impl Browser {
             PaletteEvent::Open(file) => self.pane().update(cx, |pane, cx| pane.open_file(file, cx)),
             PaletteEvent::Eject(mount) => self.eject(mount.clone(), cx),
             PaletteEvent::Connect(address) => self.connect_to(address, window, cx),
-            PaletteEvent::Say(text) => self.toast(text.clone(), false, None, cx),
+            PaletteEvent::OpenServer(id) => self
+                .pane()
+                .update(cx, |pane, cx| pane.open_server(id, window, cx)),
+            PaletteEvent::Disconnect(id) => self.disconnect_server(id, cx),
             PaletteEvent::OpenWith { files, app } => {
                 self.open_files_with(files.clone(), app.clone(), cx)
             }
@@ -1601,6 +1619,10 @@ impl Browser {
             .collect();
         for pane in self.shown_panes() {
             pane.update(cx, |pane, cx| {
+                // A copy to a server may have landed in the folder shown.
+                if pane.showing_remote() {
+                    return pane.list(true, cx);
+                }
                 if !pane.showing_folder() {
                     return;
                 }
@@ -1734,7 +1756,7 @@ impl Browser {
 
     /// The toast at the bottom of the files, with its Undo.
     fn toast_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let toast = self.toast.as_ref()?;
+        let toast = self.toast.as_ref().filter(|_| self.fetching.is_none())?;
         // Above the path bar, if it's showing.
         let bar = if cx.global::<Preferences>().show_path_bar {
             theme::PATH_BAR_HEIGHT
@@ -1860,6 +1882,9 @@ impl Focusable for Browser {
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_drag(window, cx);
+        if let Some(path) = self.look_at.take() {
+            self.quick_look_file(path, window, cx);
+        }
         self.sidebar.command_held = sidebar::command_held(window);
         let prefs = cx.global::<Preferences>().clone();
         self.step_sidebar(prefs.show_sidebar, window, cx);
@@ -1936,16 +1961,18 @@ impl Render for Browser {
                     || pane
                         .preview
                         .as_ref()
-                        .is_some_and(|view| view.read(cx).typing()),
+                        .is_some_and(|view| view.read(cx).typing())
+                    || pane.remote_renaming(),
                 // An archive's entries aren't on the disk to look at or open.
-                !pane.selection.is_empty() && !pane.showing_archive(),
+                (!pane.selection.is_empty() && !pane.showing_archive())
+                    || pane.remote_has_selection(),
             )
         });
         let has_query = !self.pane().read(cx).query.is_empty();
-        let other_takes = self.tabs[self.active]
-            .other()
-            .is_some_and(|other| other.read(cx).takes_files(cx))
-            && selected
+        let other_takes = self.tabs[self.active].other().is_some_and(|other| {
+            let other = other.read(cx);
+            other.takes_files(cx) || other.remote_folder().is_some()
+        }) && selected
             && !renaming;
         let root = div()
             // A sheet or the context menu takes the keys while it's open:
@@ -2076,10 +2103,22 @@ impl Render for Browser {
                         if this.drag.active() {
                             return this.spring_now(window, cx);
                         }
+                        if this.pane().read(cx).showing_remote() {
+                            return this
+                                .pane()
+                                .update(cx, |pane, cx| pane.remote_open(true, cx));
+                        }
                         this.toggle_preview(cx)
                     }))
                     .on_action(cx.listener(
-                        |this, _: &OpenInQuickLook, window, cx| this.open_in_quick_look(window, cx),
+                        |this, _: &OpenInQuickLook, window, cx| {
+                            if this.pane().read(cx).showing_remote() {
+                                return this
+                                    .pane()
+                                    .update(cx, |pane, cx| pane.remote_open(true, cx));
+                            }
+                            this.open_in_quick_look(window, cx)
+                        },
                     ))
                 })
                 .on_action(cx.listener(|this, _: &ShowCopiesAndMoves, window, cx| {
@@ -2155,6 +2194,7 @@ impl Render for Browser {
                                     .h_full()
                                     .flex()
                                     .child(self.split_view(boxy, window, cx))
+                                    .children(self.fetching_toast(cx))
                                     .children(self.toast_view(cx)),
                             )
                             .children(self.inspector_view(boxy, split, window, cx)),

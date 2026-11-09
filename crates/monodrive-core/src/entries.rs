@@ -41,24 +41,58 @@ pub struct Entry {
 impl Entry {
     /// What the entry is, as people say it: "Folder", "PDF file".
     pub fn kind_label(&self) -> String {
-        match self.kind {
-            Kind::Dir => "Folder".into(),
-            Kind::Link => "Alias".into(),
-            Kind::Other => "--".into(),
-            Kind::File => self.path.extension().map_or_else(
-                || "Document".into(),
-                |ext| format!("{} file", ext.to_string_lossy().to_uppercase()),
-            ),
-        }
+        kind_label(self.kind, &self.path)
     }
 
     /// Its size as listed: only files have one.
     pub fn listed_size(&self) -> u64 {
-        if self.kind == Kind::File {
-            self.size
-        } else {
-            0
-        }
+        listed_size(self.kind, self.size)
+    }
+}
+
+/// What an item of `kind` named `name` is, as people say it.
+pub fn kind_label(kind: Kind, name: &Path) -> String {
+    match kind {
+        Kind::Dir => "Folder".into(),
+        Kind::Link => "Alias".into(),
+        Kind::Other => "--".into(),
+        Kind::File => name.extension().map_or_else(
+            || "Document".into(),
+            |ext| format!("{} file", ext.to_string_lossy().to_uppercase()),
+        ),
+    }
+}
+
+fn listed_size(kind: Kind, size: u64) -> u64 {
+    if kind == Kind::File { size } else { 0 }
+}
+
+/// What a listing sorts on, so this Mac's entries and a server's sort alike.
+pub trait Sorted {
+    fn name(&self) -> &str;
+    fn kind(&self) -> Kind;
+    fn size(&self) -> u64;
+    fn modified(&self) -> u64;
+    fn kind_label(&self) -> String {
+        kind_label(self.kind(), Path::new(self.name()))
+    }
+}
+
+impl Sorted for Entry {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn kind(&self) -> Kind {
+        self.kind
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn modified(&self) -> u64 {
+        self.modified
+    }
+    fn kind_label(&self) -> String {
+        Entry::kind_label(self)
     }
 }
 
@@ -99,7 +133,7 @@ impl Default for Sort {
 /// Each entry's key goes into one shared buffer, and its first eight bytes
 /// into a number, so most comparisons are one integer compare and a sort by
 /// name of ASCII names allocates nothing per entry.
-pub fn sort(entries: &mut [Entry], sort: Sort) {
+pub fn sort<T: Sorted>(entries: &mut [T], sort: Sort) {
     let mut bytes = Vec::with_capacity(entries.len() * 24);
     let keys: Vec<Key> = entries
         .iter()
@@ -107,8 +141,8 @@ pub fn sort(entries: &mut [Entry], sort: Sort) {
             let start = bytes.len();
             let number = match sort.by {
                 SortBy::Name | SortBy::Kind => 0,
-                SortBy::Modified => entry.modified,
-                SortBy::Size => entry.listed_size(),
+                SortBy::Modified => entry.modified(),
+                SortBy::Size => listed_size(entry.kind(), entry.size()),
             };
             if sort.by == SortBy::Kind {
                 // NUL sorts before any byte a label has, so a shorter label
@@ -116,12 +150,12 @@ pub fn sort(entries: &mut [Entry], sort: Sort) {
                 bytes.extend_from_slice(entry.kind_label().as_bytes());
                 bytes.push(0);
             }
-            push_natural_key(&entry.name, &mut bytes);
+            push_natural_key(entry.name(), &mut bytes);
             let mut head = [0; 8];
             let len = (bytes.len() - start).min(8);
             head[..len].copy_from_slice(&bytes[start..start + len]);
             Key {
-                after_folders: sort.folders_first && entry.kind != Kind::Dir,
+                after_folders: sort.folders_first && entry.kind() != Kind::Dir,
                 number,
                 head: u64::from_be_bytes(head),
                 start: start as u32,
