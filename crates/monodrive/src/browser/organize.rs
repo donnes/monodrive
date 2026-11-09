@@ -43,7 +43,7 @@ impl Review {
 impl Pane {
     /// Organize: the review, with nothing changed.
     pub(super) fn start_organize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.changing_names() || self.showing_overview() {
+        if self.changing_names() || self.showing_page() {
             return;
         }
         let keys = cx.focus_handle();

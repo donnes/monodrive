@@ -8,12 +8,13 @@ use super::drag::{Drag, Spot, Target, offers};
 use super::organize::Review;
 use super::overview::OverviewPage;
 use super::searches::{CONTENT_SETTLE, Matches};
+use super::worktrees::WorktreesPage;
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Download, Duplicate,
     EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious,
     ExtendRight, FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments,
-    GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash,
-    NewFile, NewFolder, NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected,
+    GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveHere,
+    MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected,
     OrganizeFolder, PageDown, PageUp, Places, PutBack, Redo, RemoveDownload, Rename,
     RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder,
     SelectFirst, SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowPackageContents,
@@ -296,6 +297,8 @@ pub struct Pane {
     pub(super) open_after_download: HashSet<PathBuf>,
     /// The Overview, as last read.
     pub(super) overview: OverviewPage,
+    /// The worktrees, as last scanned.
+    pub(super) worktrees: WorktreesPage,
     backdrop: Entity<Backdrop>,
     pub(super) chrome: Chrome,
     /// The window's drag of files.
@@ -405,6 +408,7 @@ impl Pane {
             downloads,
             open_after_download: HashSet::new(),
             overview: OverviewPage::default(),
+            worktrees: WorktreesPage::default(),
             backdrop: cx.new(|_| Backdrop::default()),
             chrome: Chrome::default(),
             drag,
@@ -581,6 +585,8 @@ impl Pane {
             }
         } else if self.showing_overview() {
             "Overview".to_string()
+        } else if self.showing_worktrees() {
+            "Worktrees".to_string()
         } else if self.showing_recents() {
             "Recents".to_string()
         } else if self.in_trash(cx) {
@@ -715,6 +721,9 @@ impl Pane {
         } else {
             self.leave_overview();
         }
+        if self.showing_worktrees() {
+            self.scan_worktrees(cx);
+        }
         let mut folder = self.folder().to_path_buf();
         let query = self.query.clone();
         let search = self.current_search();
@@ -723,7 +732,7 @@ impl Pane {
             .then(|| cx.background_executor().timer(CONTENT_SETTLE));
         let index = self.index.clone();
         let gate = cx.try_global::<IndexGate>().cloned();
-        let overview = self.showing_overview();
+        let overview = self.showing_page();
         let recents = self
             .showing_recents()
             .then(|| cx.try_global::<Places>().map(|places| places.store.clone()));
@@ -1670,6 +1679,9 @@ impl Pane {
     /// `OPEN_WITHOUT_ASKING` files it asks first, as Finder does, so ⌘A then
     /// ↩ can't launch a whole folder.
     pub(super) fn open_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.showing_worktrees() {
+            return self.open_worktree(window, cx);
+        }
         if self.batch.is_some() {
             return;
         }
@@ -1811,6 +1823,9 @@ impl Pane {
 
     /// ↑ and ↓: a row of the list, or of the grid.
     pub(super) fn select_vertically(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+        if self.showing_worktrees() {
+            return self.step_worktree(down, cx);
+        }
         let step = match (self.layout(), down) {
             (View::List, true) => Move::Next,
             (View::List, false) => Move::Previous,
@@ -2423,6 +2438,14 @@ impl Pane {
     /// Copies the selected paths, one per line in the order shown, or the
     /// folder's, ready to paste into an agent's prompt or a terminal.
     pub(super) fn copy_path(&self, cx: &mut Context<Self>) {
+        if let Some(worktree) = self
+            .worktrees
+            .selected()
+            .filter(|_| self.showing_worktrees())
+        {
+            let text = worktree.display().to_string();
+            return cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
         let chosen = self.selection.in_order(&self.entries);
         let text = if chosen.is_empty() {
             self.folder().display().to_string()
@@ -2571,7 +2594,7 @@ impl Pane {
     ) -> Option<impl IntoElement + use<>> {
         if !cx.global::<Preferences>().show_path_bar
             || self.unavailable.is_some()
-            || self.showing_overview()
+            || self.showing_page()
         {
             return None;
         }
@@ -3026,6 +3049,11 @@ pub(super) fn said(request: &Request, outcome: &Outcome) -> Option<String> {
         }
         Request::EmptyTrash { .. } => format!("Erased {what} for good"),
         Request::PutBack { .. } => format!("Put back {what}"),
+        // Its folder first, unless only Git's registration of it was left.
+        Request::RemoveWorktree { path, .. } if asked.first() == Some(&path.as_path()) => {
+            format!("Moved {} to the Trash", jobs::quoted(path))
+        }
+        Request::RemoveWorktree { path, .. } => format!("Forgot {}", jobs::quoted(path)),
         _ => return None,
     })
 }
@@ -3588,6 +3616,9 @@ impl Pane {
                 .on_action(cx.listener(|this, _: &GoOverview, window, cx| {
                     this.open_page(Shows::Overview, window, cx)
                 }))
+                .on_action(cx.listener(|this, _: &GoWorktrees, window, cx| {
+                    this.open_page(Shows::Worktrees, window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &GoTrash, window, cx| this.open_trash(window, cx)))
                 .on_action(cx.listener(|this, _: &GoDesktop, window, cx| {
                     this.go(home().join("Desktop"), window, cx)
@@ -3907,6 +3938,14 @@ impl Pane {
             // Only here, so the menu bar's items are off and can't change the
             // selection's files while the keys are somewhere else, such as the
             // sidebar.
+            .when(
+                self.showing_worktrees() && self.worktrees.selected().is_some(),
+                |d| {
+                    d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
+                        this.ask_remove_worktree(window, cx)
+                    }))
+                },
+            )
             .when(!self.changing_names() && !self.selection.is_empty(), |d| {
                 d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
                     let paths = this.chosen();
@@ -3951,7 +3990,7 @@ impl Pane {
                 )
             })
             .on_action(cx.listener(|this, _: &ShowContextMenu, _, cx| {
-                if !this.changing_names() && !this.showing_overview() {
+                if !this.changing_names() && !this.showing_page() {
                     let at = this.menu_point(cx);
                     let scopes = this.scopes();
                     cx.emit(PaneEvent::Menu { scopes, at });
@@ -4001,6 +4040,7 @@ impl Pane {
             .child(
                 self.organize_page(cx)
                     .or_else(|| self.overview_page(cx))
+                    .or_else(|| self.worktrees_page(cx))
                     .or_else(|| {
                         // Until it has something to show, so it never
                         // appears in pieces.
@@ -4081,7 +4121,7 @@ impl Render for Pane {
                     && self.unavailable.is_none()
                     && self.organizing.is_none()
                     && self.preview.is_none()
-                    && !self.showing_overview(),
+                    && !self.showing_page(),
                 |d| {
                     d.child(
                         theme::pane_bar(theme::ROW_HEIGHT)

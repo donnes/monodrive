@@ -19,6 +19,7 @@ pub use owner::{Client, Owner, Watch, run_owner};
 
 use crate::places;
 use crate::remote::RemotePath;
+use crate::worktrees;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -194,6 +195,18 @@ pub enum Request {
         #[serde(default)]
         skip_problems: bool,
     },
+    /// Moves a linked worktree's folder to the Trash, then the folder Git
+    /// keeps for it, as one operation, so one undo brings the worktree back.
+    /// The branch stays. Refused unless `worktrees::removal` still allows it
+    /// and finds exactly the risk the person confirmed, and the folder going
+    /// too or not, as they were told.
+    RemoveWorktree {
+        repo: PathBuf,
+        path: PathBuf,
+        confirmed: worktrees::Risk,
+        /// The checkout goes, not only Git's registration of it.
+        with_folder: bool,
+    },
 }
 
 /// A file as a scan verified it.
@@ -243,6 +256,7 @@ impl Request {
             Request::EmptyTrash { .. } => "Empty Trash",
             Request::RenameMany { .. } => "Batch Rename",
             Request::TrashDuplicates { .. } => "Trash Duplicates",
+            Request::RemoveWorktree { .. } => "Remove Worktree",
         }
     }
 }
@@ -909,8 +923,14 @@ impl Engine {
         // A folder made with items is all or nothing.
         let whole = matches!(
             submission.request,
-            Request::NewFolderWith { .. } | Request::Organize { .. } | Request::SaveEdit { .. }
+            Request::NewFolderWith { .. }
+                | Request::Organize { .. }
+                | Request::SaveEdit { .. }
+                | Request::RemoveWorktree { .. }
         );
+        // A worktree's registration goes only once its folder has.
+        let in_order = matches!(submission.request, Request::RemoveWorktree { .. });
+        let mut stopped = false;
         if plans.iter().all(|(_, plan)| plan.is_err())
             || (whole && plans.iter().any(|(_, plan)| plan.is_err()))
         {
@@ -930,6 +950,14 @@ impl Engine {
         let mut items = Vec::new();
         let mut steps = Vec::new();
         for (path, plan) in plans {
+            let plan = if stopped {
+                Err(format!(
+                    "{}: left in place, since what came before it didn't move.",
+                    path.display()
+                ))
+            } else {
+                plan
+            };
             let result = plan.and_then(|plan| match plan {
                 Plan::Move(mut step) => {
                     let to = step.shift(true)?;
@@ -966,6 +994,7 @@ impl Engine {
                     .and_then(|_| erase(&path))
                     .map(|()| path.clone()),
             });
+            stopped |= in_order && result.is_err();
             items.push(Item { path, result });
         }
         let placed: Vec<PathBuf> = steps
@@ -1016,6 +1045,12 @@ impl Engine {
                 .iter()
                 .map(|item| (item.path.clone(), self.plan_erase(item)))
                 .collect(),
+            Request::RemoveWorktree {
+                repo,
+                path,
+                confirmed,
+                with_folder,
+            } => plan_worktree(repo, path, confirmed, *with_folder),
             _ => Vec::new(),
         }
     }
@@ -1255,6 +1290,37 @@ fn plan_trash(path: &Path) -> Result<Plan, String> {
         stamp,
         keep: None,
     }))
+}
+
+/// A worktree's folder, then Git's registration of it, each to the Trash, if
+/// Git still allows it and nothing more is at risk than was confirmed.
+fn plan_worktree(
+    repo: &Path,
+    path: &Path,
+    confirmed: &worktrees::Risk,
+    with_folder: bool,
+) -> Vec<(PathBuf, Result<Plan, String>)> {
+    let removal = worktrees::Git::find()
+        .and_then(|git| worktrees::removal(&git, repo, path))
+        .and_then(|removal| {
+            if removal.risk == *confirmed && removal.folder.is_some() == with_folder {
+                Ok(removal)
+            } else {
+                Err(format!(
+                    "{} changed since its removal was confirmed, so nothing moved. Look again before removing it.",
+                    path.display()
+                ))
+            }
+        });
+    match removal {
+        Err(e) => vec![(path.to_path_buf(), Err(e))],
+        Ok(removal) => removal
+            .folder
+            .iter()
+            .chain([&removal.registration])
+            .map(|item| (item.clone(), plan_trash(item)))
+            .collect(),
+    }
 }
 
 /// Trashes a group's copies only while one it keeps can still be read as

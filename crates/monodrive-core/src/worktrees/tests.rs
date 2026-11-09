@@ -328,8 +328,10 @@ fn status_counts_changes_and_known_ahead_behind_without_writing_the_index() {
     let before = std::fs::read(&index).unwrap();
 
     let git = found();
+    let read = status(&git, &feature);
+    let changed = read.as_ref().map_or(0, |read| read.changed);
     assert_eq!(
-        status(&git, &feature),
+        read,
         Ok(Status {
             head: Some(fixture(&feature, &["rev-parse", "HEAD"]).trim().into()),
             branch: Some("feature".into()),
@@ -339,6 +341,11 @@ fn status_counts_changes_and_known_ahead_behind_without_writing_the_index() {
             unstaged: 2,
             conflicted: 0,
             untracked: 2,
+            files: ["M a", "R b moved", "M c", "? folder/", "? new file"]
+                .map(String::from)
+                .into(),
+            paths: 5,
+            changed,
         })
     );
     assert_eq!(
@@ -547,4 +554,267 @@ fn registering_keeps_one_bookmark_per_repository_and_forgetting_only_removes_it(
         store.forget_repository(&main),
         Err(format!("{} isn't a registered repository.", main.display()))
     );
+}
+
+#[test]
+fn risk_holds_uncommitted_changes_and_commits_no_other_ref_reaches() {
+    let (_dir, root) = real_tempdir();
+    let main = root.join("repo");
+    repo(&main);
+    let add = |args: &[&str]| fixture(&main, &[&["worktree", "add", "-q"][..], args].concat());
+    add(&["-b", "merged", "../merged"]);
+    add(&["-b", "ahead", "../ahead"]);
+    add(&["--detach", "../detached"]);
+    let git = found();
+
+    // Its commits are all on main too, so nothing is at risk.
+    let merged = risk(&git, &root.join("merged")).unwrap();
+    assert!(merged.is_empty() && !merged.detached, "{merged:?}");
+
+    let ahead = root.join("ahead");
+    commit(&ahead, "b", "b\n");
+    commit(&ahead, "c", "c\n");
+    std::fs::write(ahead.join("a"), "changed\n").unwrap();
+    std::fs::write(ahead.join("new"), "").unwrap();
+    let only = risk(&git, &ahead).unwrap();
+    let full = |rev: &str| fixture(&ahead, &["rev-parse", rev]).trim().to_owned();
+    assert_eq!(
+        only,
+        Risk {
+            files: vec!["M a".into(), "? new".into()],
+            paths: 2,
+            changed: only.changed,
+            commits: vec![
+                Commit {
+                    hash: full("HEAD"),
+                    subject: "c".into()
+                },
+                Commit {
+                    hash: full("HEAD~"),
+                    subject: "b".into()
+                },
+            ],
+            unpushed: 2,
+            detached: false,
+        }
+    );
+    // A change past the paths a confirmation lists still changes the risk.
+    for name in ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"] {
+        std::fs::write(ahead.join(name), "").unwrap();
+    }
+    let listed = risk(&git, &ahead).unwrap();
+    std::fs::rename(ahead.join("n9"), ahead.join("n9 renamed")).unwrap();
+    let after = risk(&git, &ahead).unwrap();
+    assert_eq!(
+        (after.files.clone(), after.paths),
+        (listed.files.clone(), listed.paths)
+    );
+    assert_ne!(after, listed);
+    // Another branch, or a remote's, holding them takes them out of risk.
+    fixture(&main, &["branch", "-q", "copy", "ahead"]);
+    assert_eq!(risk(&git, &ahead).unwrap().unpushed, 0);
+    fixture(&main, &["branch", "-q", "-D", "copy"]);
+    fixture(&main, &["update-ref", "refs/remotes/origin/ahead", "ahead"]);
+    assert_eq!(risk(&git, &ahead).unwrap().unpushed, 0);
+
+    let detached = root.join("detached");
+    commit(&detached, "d", "d\n");
+    let lost = risk(&git, &detached).unwrap();
+    assert_eq!((lost.unpushed, lost.detached, lost.paths), (1, true, 0));
+}
+
+#[test]
+fn removal_takes_a_linked_worktree_and_its_registration_and_refuses_the_rest() {
+    let (_dir, root) = real_tempdir();
+    let main = root.join("repo");
+    repo(&main);
+    let add = |args: &[&str]| fixture(&main, &[&["worktree", "add", "-q"][..], args].concat());
+    add(&["-b", "feature", "../feature"]);
+    add(&["-b", "locked", "../locked"]);
+    add(&["-b", "gone", "../gone"]);
+    fixture(
+        &main,
+        &["worktree", "lock", "--reason", "agent", "../locked"],
+    );
+    std::fs::rename(root.join("gone"), root.join("elsewhere")).unwrap();
+    let git = found();
+    let common = main.join(".git");
+
+    let feature = removal(&git, &root.join("feature"), &root.join("feature")).unwrap();
+    assert_eq!(
+        (feature.folder, feature.registration, feature.risk),
+        (
+            Some(root.join("feature")),
+            common.join("worktrees/feature"),
+            Risk::default()
+        )
+    );
+    // A missing folder leaves only Git's registration, reached through the repository.
+    let gone = removal(&git, &main, &root.join("gone")).unwrap();
+    assert_eq!(
+        (gone.folder, gone.registration),
+        (None, common.join("worktrees/gone"))
+    );
+    let refused = |path: &Path| removal(&git, &main, path).unwrap_err();
+    assert!(refused(&main).contains("repository's own checkout"));
+    let locked = refused(&root.join("locked"));
+    assert!(locked.contains("locked by Git: agent"), "{locked}");
+    assert!(refused(&root).contains("isn't a worktree of"));
+}
+
+#[test]
+fn a_scan_lists_each_repository_once_from_its_worktrees_git_files_and_registrations() {
+    let (_dir, root) = real_tempdir();
+    let (one, two, lone) = (root.join("one"), root.join("two"), root.join("lone"));
+    for dir in [&one, &two, &lone] {
+        repo(dir);
+    }
+    for name in ["a", "b"] {
+        fixture(
+            &one,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                name,
+                &format!("../one-{name}"),
+            ],
+        );
+    }
+    fixture(
+        &two,
+        &["worktree", "add", "-q", "-b", "x", "../.hidden/two-x"],
+    );
+    let trashed = root.join(".Trash/old");
+    std::fs::create_dir_all(&trashed).unwrap();
+    std::fs::write(
+        trashed.join(".git"),
+        format!("gitdir: {}\n", two.join(".git/worktrees/two-x").display()),
+    )
+    .unwrap();
+    let entry = |path: PathBuf| crate::entries::Entry {
+        name: path.file_name().unwrap().to_string_lossy().into(),
+        path,
+        kind: crate::entries::Kind::File,
+        size: 0,
+        modified: 0,
+        availability: crate::cloud::Availability::Unknown,
+    };
+    let answers: Vec<_> = [
+        root.join("one-a/.git"),
+        root.join("one-b/.git"),
+        root.join(".hidden/two-x/.git"),
+        trashed.join(".git"),
+        root.join("one-a/.gitignore"),
+    ]
+    .into_iter()
+    .map(entry)
+    .collect();
+    let store = places::Store {
+        places: root.join("places.json"),
+        recents: root.join("recents.json"),
+    };
+    register(&found(), &store, &lone).unwrap();
+    let asked = std::cell::RefCell::new(Vec::new());
+    let listed = scan(&found(), &store, |query, _| {
+        asked.borrow_mut().push(query.to_owned());
+        Ok(answers.clone())
+    });
+    let mains: Vec<_> = listed
+        .repositories
+        .iter()
+        .map(|repo| (repo.worktrees[0].path.clone(), repo.worktrees.len()))
+        .collect();
+    assert_eq!(mains, [(lone, 1), (one, 3), (two, 2)]);
+    assert_eq!(listed.problems, Vec::<String>::new());
+    assert_eq!(asked.into_inner(), [GIT_FILES]);
+
+    // Without the index, the registered repositories still list, and the index says why.
+    let without = scan(&found(), &store, |_, _| Err("indexing".into()));
+    assert_eq!(
+        (without.repositories.len(), without.problems),
+        (1, vec!["indexing".to_owned()])
+    );
+}
+
+#[test]
+fn removal_refuses_what_it_cant_take_whole_and_counts_a_missing_worktrees_commits() {
+    let (_dir, root) = real_tempdir();
+    let main = root.join("repo");
+    repo(&main);
+    let add = |args: &[&str]| fixture(&main, &[&["worktree", "add", "-q"][..], args].concat());
+    let git = found();
+    let refused = |path: &Path| removal(&git, &main, path).unwrap_err();
+
+    // A worktree another one sits inside.
+    add(&["-b", "outer", "../outer"]);
+    add(&["-b", "inner", "../outer/inner"]);
+    let nested = refused(&root.join("outer"));
+    assert!(nested.contains("holds another worktree"), "{nested}");
+
+    // A link where the worktree was: trashing it would leave the checkout.
+    add(&["-b", "linked", "../linked"]);
+    std::fs::rename(root.join("linked"), root.join("real")).unwrap();
+    std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+    assert!(refused(&root.join("linked")).contains("is a link"));
+
+    // A submodule checked out in it, whose repository Git keeps in the
+    // registration.
+    let sub = root.join("sub");
+    repo(&sub);
+    add(&["-b", "with-sub", "../with-sub"]);
+    let with_sub = root.join("with-sub");
+    fixture(
+        &with_sub,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../sub",
+            "sub",
+        ],
+    );
+    assert!(refused(&with_sub).contains("submodules"));
+
+    // Gone, but its registration still holds a detached HEAD's commits.
+    add(&["--detach", "../away"]);
+    let away = root.join("away");
+    commit(&away, "lone", "lone\n");
+    std::fs::rename(&away, root.join("moved")).unwrap();
+    let forget = removal(&git, &main, &away).unwrap();
+    assert_eq!(forget.folder, None);
+    assert_eq!((forget.risk.unpushed, forget.risk.detached), (1, true));
+
+    // Written relative to each other, as worktree.useRelativePaths does.
+    add(&["--relative-paths", "-b", "relative", "../relative"]);
+    let relative = removal(&git, &main, &root.join("relative")).unwrap();
+    assert_eq!(relative.registration, main.join(".git/worktrees/relative"));
+    std::fs::rename(root.join("relative"), root.join("relative moved")).unwrap();
+    let gone = removal(&git, &main, &root.join("relative")).unwrap();
+    assert_eq!(gone.registration, main.join(".git/worktrees/relative"));
+}
+
+#[test]
+fn a_submodules_git_file_isnt_taken_for_a_worktree() {
+    let (_dir, root) = real_tempdir();
+    let (main, sub) = (root.join("repo"), root.join("sub"));
+    repo(&main);
+    repo(&sub);
+    fixture(
+        &main,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../sub",
+            "sub",
+        ],
+    );
+    assert!(main.join("sub/.git").is_file());
+    assert_eq!(common_of_link(&main.join("sub/.git")), None);
 }

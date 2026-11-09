@@ -1002,6 +1002,7 @@ fn with_nothing_typed_the_palette_shows_its_sections_and_what_would_run(cx: &mut
             "Favorites",
             "Overview",
             "Recents",
+            "Worktrees",
             "Trash"
         ]
     );
@@ -2407,4 +2408,110 @@ fn a_drive_shows_nothing_until_someone_asks_for_a_scan(cx: &mut TestAppContext) 
     // A row opens its folder on the drive.
     press_on(cx, "overview-row-Photos");
     assert_eq!(here(&browser, cx), mount.join("Photos"));
+}
+
+/// Runs git in `dir` with no configuration but the repository's.
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new(monodrive_core::worktrees::Git::find().unwrap().program)
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Monodrive")
+        .env("GIT_AUTHOR_EMAIL", "test@monodrive.invalid")
+        .env("GIT_COMMITTER_NAME", "Monodrive")
+        .env("GIT_COMMITTER_EMAIL", "test@monodrive.invalid")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+#[gpui::test]
+fn the_worktrees_page_opens_a_worktree_and_moves_one_to_the_trash_once_asked(
+    cx: &mut TestAppContext,
+) {
+    let world = world(vec![disk(900_000)], cx);
+    let owned = own(cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    let (app, feature) = (home.join("app"), home.join("app-feature"));
+    std::fs::create_dir(&app).unwrap();
+    git(&app, &["init", "-q", "-b", "main"]);
+    std::fs::write(app.join("a"), "a\n").unwrap();
+    git(&app, &["add", "a"]);
+    git(&app, &["commit", "-q", "-m", "a"]);
+    git(
+        &app,
+        &["worktree", "add", "-q", "-b", "feature", "../app-feature"],
+    );
+    world
+        .store
+        .register_repository(monodrive_core::worktrees::Registration {
+            common_dir: app.join(".git"),
+            path: app.clone(),
+        })
+        .unwrap();
+    let (browser, cx) = open(&world, &home, cx);
+    let asking = |cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::RemoveWorktree(_))))
+    };
+
+    press(cx, "cmd-alt-g");
+    assert!(on_screen(cx, "worktrees-page"));
+    assert_eq!(
+        in_pane(&browser, cx, |pane, cx| pane.title(cx)),
+        "Worktrees"
+    );
+    assert!(on_screen(cx, "worktree-app") && on_screen(cx, "worktree-app-feature"));
+
+    // ⌘↓ opens the selected worktree's folder, and Back returns to the page.
+    press(cx, "down cmd-down");
+    assert_eq!(here(&browser, cx), app);
+    press(cx, "cmd-[");
+    assert!(on_screen(cx, "worktrees-page"));
+
+    // The repository's own checkout stays, and the card says why.
+    press(cx, "cmd-backspace");
+    assert!(asking(cx));
+    press(cx, "enter");
+    assert!(!asking(cx) && app.join(".git").is_dir());
+
+    // A clean linked worktree goes once confirmed: Esc keeps it, ↩ moves it.
+    press(cx, "down cmd-backspace");
+    assert!(asking(cx));
+    press(cx, "escape");
+    assert!(!asking(cx) && feature.exists());
+    press(cx, "cmd-backspace enter");
+    assert!(!feature.exists() && !app.join(".git/worktrees/app-feature").exists());
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Moved \"app-feature\" to the Trash".into(), false, true))
+    );
+    assert!(!on_screen(cx, "worktree-app-feature"));
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn worktrees_has_a_sidebar_row_only_once_settings_shows_it(cx: &mut TestAppContext) {
+    let world = world(vec![disk(900_000)], cx);
+    let (_dir, project) = folder();
+    let (browser, cx) = open(&world, &project, cx);
+    let row = |browser: &Entity<Browser>, cx: &mut VisualTestContext| {
+        browser.read_with(cx, |browser, _| browser.row_at(2))
+    };
+    assert!(matches!(row(&browser, cx), Some(Row::Favorite(0))));
+    // ⌥⌘G opens the page either way.
+    press(cx, "cmd-alt-g");
+    assert!(on_screen(cx, "worktrees-page"));
+    let cursor = browser.read_with(cx, |browser, cx| browser.cursor_on_folder(cx));
+    assert_eq!(cursor, None);
+
+    cx.update(|_, cx| preferences::update(cx, |p| p.show_worktrees = true));
+    cx.run_until_parked();
+    assert_eq!(row(&browser, cx), Some(Row::Worktrees));
+    let cursor = browser.read_with(cx, |browser, cx| browser.cursor_on_folder(cx));
+    assert_eq!(cursor, Some(2));
+    assert!(matches!(
+        browser.read_with(cx, |browser, _| browser.row_at(3)),
+        Some(Row::Favorite(0))
+    ));
 }

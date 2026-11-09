@@ -123,6 +123,8 @@ pub struct Preferences {
     pub show_hidden: bool,
     /// The thin bar under the files, with the path and the status.
     pub show_path_bar: bool,
+    /// The Worktrees page has a row in the sidebar. ⌥⌘G opens it either way.
+    pub show_worktrees: bool,
     pub theme: Theme,
     /// A preset from `palettes::PALETTES`.
     pub palette: String,
@@ -188,6 +190,7 @@ impl Default for Preferences {
         Self {
             show_hidden: false,
             show_path_bar: true,
+            show_worktrees: false,
             theme: Theme::Dark,
             palette: "default".into(),
             accent: None,
@@ -234,6 +237,7 @@ impl Preferences {
         self.window_frame = defaults.window_frame;
         self.row_size = defaults.row_size;
         self.show_path_bar = defaults.show_path_bar;
+        self.show_worktrees = defaults.show_worktrees;
         self.view = defaults.view;
         self.grid_icon = defaults.grid_icon;
         self.grid_label = defaults.grid_label;
@@ -265,6 +269,7 @@ impl Preferences {
             window_frame: self.window_frame,
             row_size: self.row_size,
             show_path_bar: self.show_path_bar,
+            show_worktrees: self.show_worktrees,
             view: self.view,
             grid_icon: self.grid_icon,
             grid_label: self.grid_label,

@@ -72,6 +72,17 @@ impl Pane {
         self.query.is_empty() && self.history[self.at].shows == Shows::Overview
     }
 
+    /// Whether the Worktrees page is on screen: a search in front of it isn't.
+    pub(super) fn showing_worktrees(&self) -> bool {
+        self.query.is_empty() && self.history[self.at].shows == Shows::Worktrees
+    }
+
+    /// Whether a page that isn't a listing, the Overview or Worktrees, is on
+    /// screen.
+    pub(super) fn showing_page(&self) -> bool {
+        self.showing_overview() || self.showing_worktrees()
+    }
+
     /// Whether the rows are a folder's, rather than search results or Recents.
     pub(super) fn showing_folder(&self) -> bool {
         self.query.is_empty() && self.history[self.at].shows == Shows::Folder

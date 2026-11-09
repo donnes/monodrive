@@ -13,6 +13,7 @@ mod searches;
 mod sidebar;
 mod tabs;
 mod trash;
+mod worktrees;
 
 #[cfg(test)]
 mod batch_rename_tests;
@@ -46,6 +47,7 @@ use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
 use crate::preview::{PreviewView, Saved};
 use crate::quick_look::{self, Preview};
+use crate::remove_worktree::{self, RemoveWorktreeView};
 use crate::session::{self, TabState, WindowState};
 use crate::settings::{self, SettingsView};
 use crate::text_field;
@@ -156,6 +158,7 @@ actions!(
         PutBack,
         GoOverview,
         GoRecents,
+        GoWorktrees,
         GoTrash,
         GoFavorite1,
         GoFavorite2,
@@ -518,6 +521,7 @@ impl Browser {
         // it's shown. Settings' own changes to the view and the sort go to
         // the pane the commands act on, and nothing else changes those.
         cx.observe_global::<Preferences>(|this, cx| {
+            this.sidebar.worktrees = cx.global::<Preferences>().show_worktrees;
             let adopt = matches!(this.sheet, Some(Sheet::Settings(_)));
             let focused = this.pane().clone();
             for pane in this.shown_panes() {
@@ -574,7 +578,10 @@ impl Browser {
             quick_look: None,
             in_panel: false,
             previewing: None,
-            sidebar: sidebar::Sidebar::default(),
+            sidebar: sidebar::Sidebar::new(
+                cx.try_global::<Preferences>()
+                    .is_some_and(|p| p.show_worktrees),
+            ),
             frame: None,
             session_key: None,
             session_save: Task::ready(()),
@@ -1637,6 +1644,37 @@ impl Browser {
         self.set_sheet(Some(Sheet::EmptyTrash(view)), cx);
     }
 
+    /// Asks before a worktree goes, with what the active pane worked out:
+    /// what goes, what's at risk, or why it stays.
+    fn ask_remove_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ask) = self
+            .pane()
+            .update(cx, |pane, _| pane.worktrees.asking.take())
+        else {
+            return;
+        };
+        self.remember_focus(window, cx);
+        let view = cx.new(|cx| RemoveWorktreeView::new(ask, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, answer: &remove_worktree::Answer, window, cx| {
+                let request = match answer {
+                    remove_worktree::Answer::Remove(request) => Some(request.clone()),
+                    remove_worktree::Answer::Cancel => None,
+                };
+                this.close_sheet(window, cx);
+                if let Some(request) = request {
+                    this.pane()
+                        .update(cx, |pane, cx| pane.submit(request, window, cx));
+                }
+            },
+        )
+        .detach();
+        window.focus(&view.focus_handle(cx), cx);
+        self.set_sheet(Some(Sheet::RemoveWorktree(view)), cx);
+    }
+
     /// Follows a drag of the sidebar's edge. Element mouse handlers only fire
     /// while hovered, so this listens to the whole window, which keeps the
     /// resize cursor and tracking even when the pointer outruns the edge or
@@ -1960,6 +1998,11 @@ impl Render for Browser {
                             this.empty_trash(window, cx)
                         }),
                     )
+                    .on_action(
+                        cx.listener(|this, _: &worktrees::AskRemoveWorktree, window, cx| {
+                            this.ask_remove_worktree(window, cx)
+                        }),
+                    )
                     .on_action(cx.listener(|this, _: &ToggleSplit, window, cx| {
                         this.toggle_split(window, cx)
                     }))
@@ -2112,6 +2155,7 @@ impl Render for Browser {
                         .map_or_else(|| div().into_any_element(), |p| p.into_any_element()),
                     Sheet::Searches(view) => view.clone().into_any_element(),
                     Sheet::EmptyTrash(view) => view.clone().into_any_element(),
+                    Sheet::RemoveWorktree(view) => view.clone().into_any_element(),
                     Sheet::Connect(view) => view.clone().into_any_element(),
                 }
             }))
@@ -2249,6 +2293,7 @@ enum Sheet {
     /// The search field's menu.
     Searches(Entity<SearchMenu>),
     EmptyTrash(Entity<EmptyTrashView>),
+    RemoveWorktree(Entity<RemoveWorktreeView>),
     Connect(Entity<ConnectView>),
 }
 

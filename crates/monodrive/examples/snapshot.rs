@@ -74,10 +74,10 @@ use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives, EditFavorites,
     EditPreview, EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch,
-    GoOverview, GoRecents, GoToFolder, GoTrash, NewTab, OpenSelected, OpenSettings, OpenWith,
-    Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast,
-    SelectNext, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo,
-    ViewAsGrid, ViewAsList,
+    GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected,
+    OpenSettings, OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch,
+    SearchContents, SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowCopiesAndMoves,
+    ShowSearches, SuggestNames, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
 use monodrive::downloads;
@@ -486,6 +486,7 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     shoot_drags(&mut cx, out, folder, &base)?;
     shoot_batch_rename(&mut cx, out, folder, &base)?;
     shoot_inspector(&mut cx, out, folder, &base)?;
+    shoot_worktrees(&mut cx, out, folder, &base)?;
     shoot_overview(&mut cx, out, folder, &base)?;
     shoot_downloads(&mut cx, out, made_up, &base)
 }
@@ -521,6 +522,212 @@ fn shoot_downloads(
         save(cx, window, out, name)?;
     }
     Ok(())
+}
+
+/// The Worktrees page over made-up repositories: `worktrees.png` with a row
+/// selected and its changes read, `worktrees-empty.png` with none, and the
+/// card that asks before one goes: `worktrees-remove-clean.png`,
+/// `-dirty`, `-unpushed`, `-detached`, `-forget` for a missing folder, and
+/// `-locked` and `-main`, which it refuses. Nothing is removed.
+fn shoot_worktrees(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
+    // With its sidebar row, which Settings turns on.
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            show_worktrees: true,
+            ..base.clone()
+        })
+    });
+    let real_home = std::env::var_os("HOME");
+    for empty in [false, true] {
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().canonicalize()?;
+        let places = worktrees_fixture(&home, empty)?;
+        cx.update(|cx| cx.set_global(places));
+        // SAFETY: the headless app is parked between shots, and nothing else
+        // in this process reads the environment while it changes.
+        unsafe { std::env::set_var("HOME", &home) };
+        let window = open(cx, folder)?;
+        dispatch(cx, window, &GoWorktrees)?;
+        settle_git(cx);
+        if empty {
+            save(cx, window, out, "worktrees-empty")?;
+        } else {
+            // The rows in order: monocode, mc-popover-port, monodrive, then
+            // monodrive's worktrees as Git lists them, by name.
+            let shots = [
+                (3, "worktrees", false),
+                (3, "worktrees-remove-dirty", true),
+                (4, "worktrees-remove-unpushed", true),
+                (5, "worktrees-remove-locked", true),
+                (6, "worktrees-remove-forget", true),
+                (7, "worktrees-remove-detached", true),
+                (2, "worktrees-remove-main", true),
+                (1, "worktrees-remove-clean", true),
+            ];
+            let mut at: Option<usize> = None;
+            for (row, name, ask) in shots {
+                while at != Some(row) {
+                    let down = at.is_none_or(|at| at < row);
+                    let step: &dyn Action = if down { &SelectNext } else { &SelectPrevious };
+                    dispatch(cx, window, step)?;
+                    at = match at {
+                        None => Some(0),
+                        Some(at) if down => Some(at + 1),
+                        Some(at) => Some(at - 1),
+                    };
+                }
+                settle_git(cx);
+                if ask {
+                    dispatch(cx, window, &MoveToTrash)?;
+                    settle_git(cx);
+                }
+                save(cx, window, out, name)?;
+                if ask {
+                    let cancel = named(cx, "remove_worktree::Cancel")?;
+                    dispatch(cx, window, &*cancel)?;
+                }
+            }
+        }
+        cx.update_window(window.into(), |_, window, _| window.remove_window())?;
+        cx.run_until_parked();
+        if let Some(home) = &real_home {
+            // SAFETY: as above.
+            unsafe { std::env::set_var("HOME", home) };
+        }
+    }
+    Ok(())
+}
+
+/// Lets the git the page runs on the background threads answer, and a card
+/// fade in. Headless, those threads run for real, so parking alone doesn't
+/// wait for them.
+fn settle_git(cx: &mut Cx) {
+    settle();
+    cx.run_until_parked();
+    settle();
+    cx.run_until_parked();
+}
+
+/// Runs git with no configuration but the repository's, on a fixed date.
+fn git(dir: &Path, args: &[&str]) -> gpui::Result<()> {
+    let date = "2026-11-01T12:00:00Z";
+    let out = std::process::Command::new("/usr/bin/git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Monodrive")
+        .env("GIT_AUTHOR_EMAIL", "snapshot@monodrive.invalid")
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_NAME", "Monodrive")
+        .env("GIT_COMMITTER_EMAIL", "snapshot@monodrive.invalid")
+        .env("GIT_COMMITTER_DATE", date)
+        .output()?;
+    if !out.status.success() {
+        let why = format!("git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        return Err(std::io::Error::other(why).into());
+    }
+    Ok(())
+}
+
+fn commit(dir: &Path, file: &str, message: &str) -> gpui::Result<()> {
+    std::fs::write(dir.join(file), message)?;
+    git(dir, &["add", file])?;
+    git(dir, &["commit", "-q", "-m", message])
+}
+
+/// Two registered repositories with worktrees in every state the page shows.
+fn worktrees_fixture(home: &Path, empty: bool) -> gpui::Result<Places> {
+    let support = home.join("Library/Application Support/Monodrive");
+    std::fs::create_dir_all(&support)?;
+    let store = Store {
+        places: support.join("places.json"),
+        recents: support.join("recents.json"),
+    };
+    let trash = home.join(".Trash");
+    std::fs::create_dir_all(&trash)?;
+    let places = Places {
+        store: store.clone(),
+        trash,
+        applications: Vec::new(),
+        drives: Arc::new(MadeUp),
+    };
+    if empty {
+        return Ok(places);
+    }
+    let projects = home.join("Projects");
+    let linked = home.join(".t3/worktrees/monodrive");
+    std::fs::create_dir_all(&linked)?;
+    for name in ["monodrive", "monocode"] {
+        let repo = projects.join(name);
+        std::fs::create_dir_all(&repo)?;
+        git(&repo, &["init", "-q", "-b", "main"])?;
+        commit(&repo, "README.md", "first commit")?;
+        let registration = monodrive_core::worktrees::Registration {
+            common_dir: repo.join(".git"),
+            path: repo.clone(),
+        };
+        store
+            .register_repository(registration)
+            .map_err(std::io::Error::other)?;
+    }
+    let monodrive = projects.join("monodrive");
+    let add = |args: &[&str]| git(&monodrive, &[&["worktree", "add", "-q"][..], args].concat());
+    let at = |name: &str| linked.join(name).display().to_string();
+    add(&["-b", "feat/archives-ui", &at("feat-archives-ui")])?;
+    add(&["-b", "feat/column-view", &at("feat-column-view")])?;
+    add(&["--detach", &at("t3-1c1e18ad")])?;
+    add(&["-b", "fix/preview-trim", &at("t3-0f7b3c85")])?;
+    add(&[
+        "-b",
+        "feat/worktree-management",
+        &at("feat-worktree-management"),
+    ])?;
+    git(
+        &monodrive,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "t3 session",
+            &at("feat-worktree-management"),
+        ],
+    )?;
+    let archives = linked.join("feat-archives-ui");
+    for (file, message) in [
+        ("archives.rs", "feat(archives): browse a ZIP like a folder"),
+        ("browser.rs", "feat(archives): add the Extract buttons"),
+    ] {
+        commit(&archives, file, message)?;
+        std::fs::write(archives.join(file), "changed")?;
+    }
+    std::fs::write(archives.join("notes.md"), "")?;
+    let columns = linked.join("feat-column-view");
+    commit(&columns, "columns.rs", "feat(columns): first column view")?;
+    commit(
+        &columns,
+        "preview.rs",
+        "feat(columns): preview in the last column",
+    )?;
+    commit(
+        &linked.join("t3-1c1e18ad"),
+        "tips.rs",
+        "wip: tip names for icon buttons",
+    )?;
+    std::fs::rename(linked.join("t3-0f7b3c85"), home.join("moved-away"))?;
+    let monocode = projects.join("monocode");
+    git(
+        &monocode,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "mc/popover-port",
+            "../mc-popover-port",
+        ],
+    )?;
+    Ok(places)
 }
 
 /// The Overview, from saved totals on a made-up Mac: `overview-low.png` under

@@ -465,7 +465,10 @@ impl PaletteView {
             page(Page::Drives),
             page(Page::Favorites),
         ]);
-        rows.extend(named("Go to", &["Overview", "Recents", "Trash"]));
+        rows.extend(named(
+            "Go to",
+            &["Overview", "Recents", "Worktrees", "Trash"],
+        ));
         rows.extend(named(
             "View",
             &[
@@ -1151,6 +1154,7 @@ fn glyph_for(command: &Command) -> &'static str {
         "Move to Trash" | "Empty Trash…" | "Trash" | "Put Back" => "trash",
         "Recents" => "clock",
         "Overview" => "hard-drive",
+        "Worktrees" => "git-branch",
         "Connect to Server…" => "server",
         "Search" | "Search This Folder" | "Searches…" | "Save Search…" | "Reveal in Finder" => {
             "search"

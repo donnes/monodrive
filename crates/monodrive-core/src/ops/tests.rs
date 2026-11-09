@@ -2599,3 +2599,84 @@ fn agent_changes_say_who_changed_what_lately_and_need_no_owner() {
         "looking leaves the journal alone, torn line included"
     );
 }
+
+#[test]
+fn removing_a_worktree_trashes_it_and_its_registration_and_undo_brings_it_back() {
+    use crate::worktrees::{
+        self, Git, Risk,
+        tests::{fixture, real_tempdir, repo},
+    };
+    let (_state, _files, mut engine) = engine();
+    let (_dir, root) = real_tempdir();
+    let main = root.join("repo");
+    repo(&main);
+    fixture(
+        &main,
+        &["worktree", "add", "-q", "-b", "feature", "../feature"],
+    );
+    let feature = root.join("feature");
+    let registration = main.join(".git/worktrees/feature");
+    let remove = |confirmed: Risk| Request::RemoveWorktree {
+        repo: main.clone(),
+        path: feature.clone(),
+        confirmed,
+        with_folder: true,
+    };
+    let listed = || {
+        worktrees::list(&Git::find().unwrap(), &main)
+            .unwrap()
+            .worktrees
+            .len()
+    };
+
+    // Changed since the person looked: nothing moves.
+    std::fs::write(feature.join("new"), "").unwrap();
+    let refused = run(&mut engine, remove(Risk::default())).unwrap_err();
+    assert!(refused.contains("changed since"), "{refused}");
+    assert!(feature.exists() && registration.exists());
+
+    let seen = worktrees::risk(&Git::find().unwrap(), &feature).unwrap();
+    // Asked to forget it while its folder was away: back now, nothing moves.
+    let forget = Request::RemoveWorktree {
+        repo: main.clone(),
+        path: feature.clone(),
+        confirmed: seen.clone(),
+        with_folder: false,
+    };
+    let refused = run(&mut engine, forget).unwrap_err();
+    assert!(refused.contains("changed since"), "{refused}");
+    assert!(feature.exists() && registration.exists());
+
+    let trashed = moved(run(&mut engine, remove(seen)));
+    assert_eq!(trashed.len(), 2, "{trashed:?}");
+    assert!(!feature.exists() && !registration.exists());
+    assert_eq!(listed(), 1);
+    assert_eq!(
+        fixture(&main, &["branch", "--list", "feature"]).trim(),
+        "feature",
+        "the branch stays"
+    );
+
+    assert_eq!(
+        moved(run(&mut engine, Request::Undo)),
+        vec![registration.clone(), feature.clone()]
+    );
+    assert_eq!(listed(), 2);
+    assert!(feature.join("new").exists());
+    assert_eq!(
+        fixture(&feature, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "feature"
+    );
+
+    let main_refused = run(
+        &mut engine,
+        Request::RemoveWorktree {
+            repo: main.clone(),
+            path: main.clone(),
+            confirmed: Risk::default(),
+            with_folder: true,
+        },
+    )
+    .unwrap_err();
+    assert!(main_refused.contains("own checkout"), "{main_refused}");
+}

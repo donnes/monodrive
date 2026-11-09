@@ -13,19 +13,19 @@ use crate::browser::{
     EditPreview, Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications,
     GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3,
     GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10,
-    GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane,
-    MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab,
-    OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith, OrganizeFolder,
-    PreviousTab, PutBack, QuickLook, Redo, RemoveDownload, RemoveFromSidebar, Rename, ResetZoom,
-    RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
-    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
-    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid,
-    ViewAsList, ZoomIn, ZoomOut,
+    GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, HideInspector, MoveHere,
+    MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab,
+    OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
+    OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo, RemoveDownload, RemoveFromSidebar,
+    Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder,
+    ShowCopiesAndMoves, ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName,
+    SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo,
+    ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
-    browser, connect, empty_trash, goto, jobs, menu, onboarding, palette, settings, text_field,
-    updates,
+    browser, connect, empty_trash, goto, jobs, menu, onboarding, palette, remove_worktree,
+    settings, text_field, updates,
 };
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
@@ -470,6 +470,9 @@ pub fn all() -> Vec<Command> {
         command("Recents", Go, &["cmd-shift-f"], BROWSER, || {
             Box::new(GoRecents)
         }),
+        command("Worktrees", Go, &["cmd-alt-g"], BROWSER, || {
+            Box::new(GoWorktrees)
+        }),
         command("Home", Go, &["cmd-shift-h"], BROWSER, || Box::new(GoHome)),
         command("Desktop", Go, &["cmd-shift-d"], BROWSER, || {
             Box::new(GoDesktop)
@@ -841,6 +844,7 @@ pub fn apply(cx: &mut App) {
     jobs::bind(cx);
     updates::bind(cx);
     empty_trash::bind(cx);
+    remove_worktree::bind(cx);
     menu::bind(cx);
     onboarding::bind(cx);
     let mut bindings = Vec::new();
