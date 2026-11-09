@@ -530,7 +530,13 @@ fn shoot_downloads(
 /// `-dirty`, `-unpushed`, `-detached`, `-forget` for a missing folder, and
 /// `-locked` and `-main`, which it refuses. Nothing is removed.
 fn shoot_worktrees(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
-    cx.update(|cx| cx.set_global(base.clone()));
+    // With its sidebar row, which Settings turns on.
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            show_worktrees: true,
+            ..base.clone()
+        })
+    });
     let real_home = std::env::var_os("HOME");
     for empty in [false, true] {
         let dir = tempfile::tempdir()?;

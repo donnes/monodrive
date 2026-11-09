@@ -42,9 +42,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-/// The Overview, Recents and Worktrees come first.
-const FIRST_FAVORITE: usize = 3;
-
 /// The sky behind a nightly's sidebar, as drawn in its SVG.
 const NIGHT_SKY_HEIGHT: f32 = 150.;
 
@@ -185,9 +182,21 @@ pub(super) struct Sidebar {
     pub(super) editing: bool,
     /// ⌘ alone was held at the last draw, so the favorites show their keys.
     pub(super) command_held: bool,
+    /// Worktrees has a row, after Recents, as Settings says.
+    pub(super) worktrees: bool,
     load_volumes: Option<Task<()>>,
     load_lists: Option<Task<()>>,
     _heard: Vec<Task<()>>,
+}
+
+impl Sidebar {
+    /// Nothing read yet, with the Worktrees row as Settings says.
+    pub(super) fn new(worktrees: bool) -> Self {
+        Self {
+            worktrees,
+            ..Self::default()
+        }
+    }
 }
 
 /// A row the sidebar's keys can land on, in order on screen.
@@ -520,20 +529,25 @@ impl Browser {
         cx.notify();
     }
 
+    /// The first favorite's row: after the Overview, Recents and, when
+    /// Settings shows it, Worktrees.
+    fn first_favorite(&self) -> usize {
+        if self.sidebar.worktrees { 3 } else { 2 }
+    }
+
     /// What the sidebar's keys are on.
     pub(super) fn row_at(&self, ix: usize) -> Option<Row> {
+        let first = self.first_favorite();
         let favorites = self.sidebar.places.len();
         let cloud = self.sidebar.cloud.len();
         match ix {
             0 => Some(Row::Overview),
             1 => Some(Row::Recents),
-            2 => Some(Row::Worktrees),
-            ix if ix < FIRST_FAVORITE + favorites => Some(Row::Favorite(ix - FIRST_FAVORITE)),
-            ix if ix < FIRST_FAVORITE + favorites + cloud => {
-                Some(Row::Cloud(ix - favorites - FIRST_FAVORITE))
-            }
+            2 if self.sidebar.worktrees => Some(Row::Worktrees),
+            ix if ix < first + favorites => Some(Row::Favorite(ix - first)),
+            ix if ix < first + favorites + cloud => Some(Row::Cloud(ix - favorites - first)),
             ix => {
-                let volume = ix - favorites - cloud - FIRST_FAVORITE;
+                let volume = ix - favorites - cloud - first;
                 (volume < self.sidebar.volumes.len()).then_some(Row::Volume(volume))
             }
         }
@@ -704,7 +718,7 @@ impl Browser {
             return Some(1);
         }
         if pane.showing_worktrees() {
-            return Some(2);
+            return self.sidebar.worktrees.then_some(2);
         }
         let folder = pane.folder();
         let favorite = self
@@ -712,8 +726,8 @@ impl Browser {
             .places
             .iter()
             .position(|place| place.at() == Some(folder))
-            .map(|ix| ix + FIRST_FAVORITE);
-        let after_favorites = self.sidebar.places.len() + FIRST_FAVORITE;
+            .map(|ix| ix + self.first_favorite());
+        let after_favorites = self.sidebar.places.len() + self.first_favorite();
         let cloud = || {
             let ix = self.sidebar.cloud.iter().position(|c| c.path == folder)?;
             Some(ix + after_favorites)
@@ -865,7 +879,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let place = &self.sidebar.places[fav];
-        let ix = fav + FIRST_FAVORITE;
+        let ix = fav + self.first_favorite();
         let label = label_of(&place.favorite.path);
         let glyph = glyph_of(&place.favorite.path);
         let selected = here.showing_folder() && place.at() == Some(here.folder.as_path());
@@ -972,7 +986,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let folder = &self.sidebar.cloud[at];
-        let ix = at + FIRST_FAVORITE + self.sidebar.places.len();
+        let ix = at + self.first_favorite() + self.sidebar.places.len();
         let selected = here.showing_folder() && here.folder == folder.path;
         let row = Self::row(ix, selected, true, cursor)
             .h(px(ROW_HEIGHT))
@@ -996,7 +1010,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let volume = &self.sidebar.volumes[vol];
-        let ix = vol + FIRST_FAVORITE + self.sidebar.places.len() + self.sidebar.cloud.len();
+        let ix = vol + self.first_favorite() + self.sidebar.places.len() + self.sidebar.cloud.len();
         let selected = here.showing_folder() && here.folder == volume.mount;
         let mount = volume.mount.clone();
         let glyph = if volume.network {
@@ -1269,7 +1283,7 @@ impl Browser {
         };
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
-        let last_row = FIRST_FAVORITE - 1
+        let last_row = self.first_favorite() - 1
             + self.sidebar.places.len()
             + self.sidebar.cloud.len()
             + self.sidebar.volumes.len();
@@ -1420,14 +1434,16 @@ impl Browser {
                         cursor,
                         cx,
                     ))
-                    .child(Self::page_row(
-                        2,
-                        "Worktrees",
-                        "git-branch",
-                        !here.searching && here.shows == Shows::Worktrees,
-                        cursor,
-                        cx,
-                    ))
+                    .when(self.sidebar.worktrees, |d| {
+                        d.child(Self::page_row(
+                            2,
+                            "Worktrees",
+                            "git-branch",
+                            !here.searching && here.shows == Shows::Worktrees,
+                            cursor,
+                            cx,
+                        ))
+                    })
                     .child(self.favorites_header(cx))
                     .children(self.sidebar.error.clone().map(|why| {
                         div()

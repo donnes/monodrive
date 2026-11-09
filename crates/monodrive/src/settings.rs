@@ -1011,6 +1011,25 @@ impl SettingsView {
                 ],
             ),
             group(
+                "Sidebar",
+                None,
+                vec![row(
+                    "Show Worktrees",
+                    Some("Every Git worktree on the disk, in one place. ⌥⌘G opens it either way."),
+                    self.focusable(
+                        "show-worktrees",
+                        true,
+                        toggle(
+                            "show-worktrees",
+                            "Show Worktrees",
+                            p.show_worktrees,
+                            |p, on| p.show_worktrees = on,
+                        ),
+                        cx,
+                    ),
+                )],
+            ),
+            group(
                 "Grid",
                 None,
                 vec![

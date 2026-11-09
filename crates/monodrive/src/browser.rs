@@ -521,6 +521,7 @@ impl Browser {
         // it's shown. Settings' own changes to the view and the sort go to
         // the pane the commands act on, and nothing else changes those.
         cx.observe_global::<Preferences>(|this, cx| {
+            this.sidebar.worktrees = cx.global::<Preferences>().show_worktrees;
             let adopt = matches!(this.sheet, Some(Sheet::Settings(_)));
             let focused = this.pane().clone();
             for pane in this.shown_panes() {
@@ -577,7 +578,10 @@ impl Browser {
             quick_look: None,
             in_panel: false,
             previewing: None,
-            sidebar: sidebar::Sidebar::default(),
+            sidebar: sidebar::Sidebar::new(
+                cx.try_global::<Preferences>()
+                    .is_some_and(|p| p.show_worktrees),
+            ),
             frame: None,
             session_key: None,
             session_save: Task::ready(()),
