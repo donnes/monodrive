@@ -474,6 +474,7 @@ impl PaletteView {
             &[
                 "as List",
                 "as Grid",
+                "as Columns",
                 "Show Hidden Files",
                 "Show Path Bar",
                 "Sort by Name",

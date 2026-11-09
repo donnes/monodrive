@@ -1,4 +1,5 @@
-//! Scrolling a 10,000-entry folder in the list and the grid, through GPUI's
+//! Scrolling a 10,000-entry folder in the list, the grid and the column with
+//! the keys in column view, beside the first file's preview, through GPUI's
 //! headless Metal renderer. Each run opens a fresh window, scrolls a fixed
 //! distance one wheel event per frame, and reports frame and draw times.
 //! Another scrolls the list beside the open inspector. A last run carries a
@@ -14,7 +15,7 @@ use gpui::{
     BenchAppContext, Focusable, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px,
 };
-use monodrive::browser::{Browser, ToggleSidebar};
+use monodrive::browser::{Browser, SelectNext, ToggleSidebar};
 use monodrive::preferences::{Preferences, View};
 use std::path::Path;
 use std::sync::Arc;
@@ -66,16 +67,26 @@ fn scroll(view: View, show_inspector: bool, cx: &mut BenchAppContext) {
             });
             // The listing lands and the first frame draws untimed.
             window.run_until_idle();
+            if view == View::Columns {
+                // The last column previews the first file.
+                window.update(|window, cx| window.dispatch_action(Box::new(SelectNext), cx));
+                window.run_until_idle();
+            }
             let handle = window.window_handle();
             let stop = Arc::new(AtomicBool::new(false));
             (stop.clone(), handle, stop)
         },
         |stop, frame, window, cx| {
             let size = window.viewport_size();
+            // Over the listing, clear of the sidebar: in column view, the
+            // middle of the first column, after the 240 pt sidebar.
+            let x = match view {
+                View::Columns => px(240. + 110.),
+                _ => size.width * 0.6,
+            };
             window.dispatch_event(
                 PlatformInput::ScrollWheel(ScrollWheelEvent {
-                    // Over the listing, clear of the sidebar.
-                    position: point(size.width * 0.6, size.height * 0.5),
+                    position: point(x, size.height * 0.5),
                     delta: ScrollDelta::Pixels(point(px(0.), px(-STEP))),
                     modifiers: Modifiers::default(),
                     touch_phase: TouchPhase::Moved,
@@ -223,6 +234,11 @@ fn scroll_grid(cx: &mut BenchAppContext) {
 }
 
 #[gpui::bench]
+fn scroll_columns(cx: &mut BenchAppContext) {
+    scroll(View::Columns, false, cx);
+}
+
+#[gpui::bench]
 fn drag_over_list(cx: &mut BenchAppContext) {
     drag(cx);
 }
@@ -242,6 +258,7 @@ gpui::bench_group!(
     scroll_list,
     scroll_list_with_inspector,
     scroll_grid,
+    scroll_columns,
     drag_over_list,
     slide_sidebar_list,
     slide_sidebar_grid

@@ -962,7 +962,7 @@ impl SettingsView {
                 vec![
                     row(
                         "View as",
-                        Some("⌥⌘1 and ⌥⌘2 switch it too."),
+                        Some("⌥⌘1 to ⌥⌘3 switch it too."),
                         self.focusable(
                             "view",
                             true,
@@ -970,7 +970,11 @@ impl SettingsView {
                                 "view",
                                 "View as",
                                 p.view,
-                                &[(View::List, "List"), (View::Grid, "Grid")],
+                                &[
+                                    (View::List, "List"),
+                                    (View::Grid, "Grid"),
+                                    (View::Columns, "Columns"),
+                                ],
                                 |p, view| p.view = view,
                             ),
                             cx,

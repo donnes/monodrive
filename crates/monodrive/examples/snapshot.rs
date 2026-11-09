@@ -46,6 +46,9 @@
 //! Open With submenu on made-up choices of the system's own apps, and
 //! `settings-general.png` the Terminal row.
 //!
+//! `columns.png`, `columns-preview.png`, `columns-several.png`,
+//! `columns-empty.png` and `columns-split.png` show column view.
+//!
 //! `search-contents.png` is a content search with its matching lines,
 //! `search-menu.png` the search field's menu over it, with made-up saved and
 //! recent searches, and `search-save.png` that menu naming a new one.
@@ -73,11 +76,11 @@ use gpui::{
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives, EditFavorites,
-    EditPreview, EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch,
-    GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected,
-    OpenSettings, OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch,
-    SearchContents, SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowCopiesAndMoves,
-    ShowSearches, SuggestNames, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
+    EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder, ExtendNext, ExtendPrevious, FocusNext,
+    FocusSearch, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab,
+    OpenSelected, OpenSettings, OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename,
+    SaveSearch, SearchContents, SelectLast, SelectNext, SelectPrevious, ShowContextMenu,
+    ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
 use monodrive::downloads;
@@ -487,6 +490,7 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     shoot_batch_rename(&mut cx, out, folder, &base)?;
     shoot_inspector(&mut cx, out, folder, &base)?;
     shoot_worktrees(&mut cx, out, folder, &base)?;
+    shoot_columns(&mut cx, out, made_up, &base)?;
     shoot_overview(&mut cx, out, folder, &base)?;
     shoot_downloads(&mut cx, out, made_up, &base)
 }
@@ -521,6 +525,45 @@ fn shoot_downloads(
         cx.run_until_parked();
         save(cx, window, out, name)?;
     }
+    Ok(())
+}
+
+/// Column view in the made-up folder: `columns.png` with monodrive selected
+/// and its files in the last column, `columns-preview.png` a column further
+/// in with DESIGN.md previewed, `columns-several.png` two selected there,
+/// `columns-empty.png` an empty folder selected, and `columns-split.png` the
+/// narrow panes of Split View.
+fn shoot_columns(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            view: View::Columns,
+            ..base.clone()
+        })
+    });
+    let select = |cx: &mut Cx, window, rows: usize| -> gpui::Result<()> {
+        for action in std::iter::repeat_n(&SelectNext as &dyn Action, rows) {
+            dispatch(cx, window, action)?;
+        }
+        rest(cx);
+        Ok(())
+    };
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    select(cx, window, 3)?;
+    save(cx, window, out, "columns")?;
+    dispatch(cx, window, &ExpandFolder)?;
+    select(cx, window, 3)?;
+    save(cx, window, out, "columns-preview")?;
+    dispatch(cx, window, &ExtendNext)?;
+    save(cx, window, out, "columns-several")?;
+    let window = open(cx, folder)?;
+    cx.run_until_parked();
+    select(cx, window, 1)?;
+    save(cx, window, out, "columns-empty")?;
+    dispatch(cx, window, &ToggleSplit)?;
+    select(cx, window, 3)?;
+    save(cx, window, out, "columns-split")?;
+    cx.update(|cx| cx.set_global(base.clone()));
     Ok(())
 }
 
@@ -1929,6 +1972,13 @@ fn fill(dir: &Path) -> std::io::Result<PathBuf> {
     let app = root.join("Calculator.app");
     if app.symlink_metadata().is_err() {
         std::os::unix::fs::symlink("/System/Applications/Calculator.app", app)?;
+    }
+    let project = root.join("monodrive");
+    for folder in ["crates/monodrive", "crates/monodrive-core", "docs"] {
+        std::fs::create_dir_all(project.join(folder))?;
+    }
+    for file in ["Cargo.toml", "DESIGN.md", "README.md", "AGENTS.md"] {
+        std::fs::write(project.join(file), "")?;
     }
     for file in [
         "Brief.pdf",

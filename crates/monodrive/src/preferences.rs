@@ -62,6 +62,7 @@ impl RowSize {
 pub enum View {
     List,
     Grid,
+    Columns,
 }
 
 /// Grid icon sizes, in points.

@@ -27,7 +27,7 @@ Drawing is not the same as showing. GPUI draws the first frame as the window ope
 ## Measuring
 
 - `cargo bench -p monodrive-core --bench listing` lists and sorts synthetic folders under `target/tmp`.
-- `cargo bench -p monodrive --bench scrolling` scrolls the real browser, list and grid, carries a file over the list, and slides the sidebar closed and open over the list and the grid, through GPUI's headless Metal renderer. Its report also counts allocations per run, a number to watch: about 5 MB a frame today.
+- `cargo bench -p monodrive --bench scrolling` scrolls the real browser in the list, the grid and column view, carries a file over the list, and slides the sidebar closed and open over the list and the grid, through GPUI's headless Metal renderer. Its report also counts allocations per run, a number to watch: about 5 MB a frame today.
 - `cargo run -p monodrive --release --features profile -- <folder>` prints the launch times and, when the app quits, frame draw times. "On the display by" is stamped at the frame signal after the present, so it's an upper bound; GPUI's `Present` events skip the first frames, so they can't time launch. Launch it a few times and take the median; the first launch after a build is slower. Without a folder it restores and saves your real session.
 
 Criterion keeps the last run in `target/criterion` and compares the next one against it.
