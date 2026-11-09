@@ -60,7 +60,7 @@ const TEXTS: [(&str, &str, usize); 5] = [
     ("data.csv", "name,email,total\nAda,a@b.c,3\n", 2000),
 ];
 
-fn hdiutil(args: &[&str]) -> Result<(), String> {
+pub(super) fn hdiutil(args: &[&str]) -> Result<(), String> {
     let out = Command::new("hdiutil")
         .args(args)
         .output()
@@ -143,14 +143,21 @@ pub fn prepare(fixture: &Path, seed: u64, tree_entries: usize) -> Result<(), Str
 }
 
 pub fn finish(fixture: &Path) -> Result<(), String> {
-    let volume = fixture.join(VOLUME);
-    if volume.join("masters").exists() {
-        let volume = volume.to_string_lossy();
-        // Spotlight or Finder may still hold the volume for a moment.
-        hdiutil(&["detach", "-quiet", &volume])
-            .or_else(|_| hdiutil(&["detach", "-quiet", "-force", &volume]))?;
+    detach(&fixture.join(VOLUME))
+}
+
+/// Detaches the disk image a suite attached at `volume`, if one is there:
+/// a mount point is on another device than the folder holding it.
+pub(super) fn detach(volume: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let device = |path: &Path| std::fs::metadata(path).map(|meta| meta.dev()).ok();
+    if device(volume).is_none() || device(volume) == volume.parent().and_then(device) {
+        return Ok(());
     }
-    Ok(())
+    let volume = volume.to_string_lossy();
+    // Spotlight or Finder may still hold the volume for a moment.
+    hdiutil(&["detach", "-quiet", &volume])
+        .or_else(|_| hdiutil(&["detach", "-quiet", "-force", &volume]))
 }
 
 fn measured(
@@ -311,7 +318,7 @@ fn private_bytes(tree: &Path) -> Result<u64, String> {
 }
 
 /// An owner of the fixture's own, served on a thread of this process.
-struct Jobs {
+pub(super) struct Jobs {
     client: Client,
     changed: mpsc::Receiver<()>,
     _watch: monodrive_core::ops::Watch,
@@ -319,7 +326,7 @@ struct Jobs {
 }
 
 impl Jobs {
-    fn start(fixture: &Path) -> Result<Self, String> {
+    pub(super) fn start(fixture: &Path) -> Result<Self, String> {
         let root = fixture.join(format!("owner-{}", std::process::id()));
         std::fs::create_dir_all(root.join("Trash")).map_err(io(&root))?;
         let short = crate::suites::ShortPath::to(&root, "owner")?;
@@ -346,7 +353,7 @@ impl Jobs {
 
     /// Runs `request` and, for a job, waits for it to end. Returns where the
     /// items went.
-    fn run(&mut self, request: Request, job: bool) -> Result<Vec<PathBuf>, String> {
+    pub(super) fn run(&mut self, request: Request, job: bool) -> Result<Vec<PathBuf>, String> {
         let outcome = self.client.submit(Origin::Window, request)?;
         if !job {
             return outcome.items.into_iter().map(|item| item.result).collect();
@@ -457,7 +464,7 @@ fn jobs(fixture: &Path, out: &mut Vec<Measured>) -> Result<(), String> {
     trash(fixture, &mut jobs, out)
 }
 
-fn clone_into(from: &Path, to: &Path) -> Result<(), String> {
+pub(super) fn clone_into(from: &Path, to: &Path) -> Result<(), String> {
     let (a, b) = (
         CString::new(from.as_os_str().as_bytes()).map_err(|e| e.to_string())?,
         CString::new(to.as_os_str().as_bytes()).map_err(|e| e.to_string())?,

@@ -32,6 +32,7 @@ const USAGE: &str = "usage:
   monodrive-bench merge <results.json> <more results.json>
   monodrive-bench shape <folder> <source>
   monodrive-bench search-real <copy of index.bin> --out <folder> [--rounds N]
+  monodrive-bench gate <results.json>
   monodrive-bench counters
   monodrive-bench corpus <volume> --entries N --seed N
   monodrive-bench spotlight-count <volume>
@@ -56,6 +57,9 @@ enum Task {
         source: String,
     },
     Counters,
+    Gate {
+        results: PathBuf,
+    },
     #[cfg(target_os = "macos")]
     SearchReal {
         index: PathBuf,
@@ -191,6 +195,9 @@ fn decode(args: impl Iterator<Item = String>) -> Result<Task, String> {
             source: args.words.get(1).cloned().ok_or("shape needs a source")?,
         }),
         "counters" => Ok(Task::Counters),
+        "gate" => Ok(Task::Gate {
+            results: path(&args.words, 0)?,
+        }),
         #[cfg(target_os = "macos")]
         "search-real" => Ok(Task::SearchReal {
             index: path(&args.words, 0)?,
@@ -273,6 +280,25 @@ fn run(task: Task) -> Result<(), String> {
                 serde_json::to_string_pretty(&shape).map_err(|e| e.to_string())?
             );
             Ok(())
+        }
+        Task::Gate { results } => {
+            let bytes =
+                std::fs::read(&results).map_err(|e| format!("{}: {e}", results.display()))?;
+            let results: format::Results = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("{}: {e}", results.display()))?;
+            let slower = report::slower_instructions(&results);
+            for line in &slower {
+                println!("{line}");
+            }
+            if slower.is_empty() {
+                println!("No result takes more instructions than the baseline's.");
+                Ok(())
+            } else {
+                Err(format!(
+                    "{} results take more instructions than the baseline's",
+                    slower.len()
+                ))
+            }
         }
         Task::Counters => {
             // Whether this machine's counters work: CI's virtual Macs may read 0.

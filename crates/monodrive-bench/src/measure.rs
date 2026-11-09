@@ -6,6 +6,8 @@
 //! regressions beside wall time and don't replace it.
 
 use serde::{Deserialize, Serialize};
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -146,6 +148,81 @@ pub fn served<T>(pid: u32, work: impl FnOnce() -> T) -> (Sample, T) {
     (sample, out)
 }
 
+/// What a child printed and how it ended.
+pub struct Ran {
+    pub stdout: Vec<u8>,
+    pub success: bool,
+}
+
+/// Runs `command` to its end, timed from spawn to exit. Its stdout is read
+/// whole; stderr is dropped. On macOS the counters are read from the exited
+/// child before it's reaped, so they're its own and nobody else's; on Linux
+/// only wall time is known.
+pub fn child(command: &mut Command) -> Result<(Sample, Ran), String> {
+    let started = Instant::now();
+    let mut process = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("{command:?}: {error}"))?;
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = process.stdout.take() {
+        pipe.read_to_end(&mut stdout)
+            .map_err(|error| format!("{command:?}: {error}"))?;
+    }
+    let pid = process.id() as libc::pid_t;
+    wait_unreaped(pid)?;
+    let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+    let zero = Usage {
+        cpu_ns: 0,
+        instructions: 0,
+        cycles: 0,
+    };
+    let sample = match usage(pid) {
+        Some(usage) => usage.since(zero, wall_ms),
+        None => Sample {
+            wall_ms,
+            cpu_ms: None,
+            instructions: None,
+            cycles: None,
+        },
+    };
+    let status = process
+        .wait()
+        .map_err(|error| format!("{command:?}: {error}"))?;
+    Ok((
+        sample,
+        Ran {
+            stdout,
+            success: status.success(),
+        },
+    ))
+}
+
+/// Waits for `pid` to exit without reaping it, so its usage can still be read.
+fn wait_unreaped(pid: libc::pid_t) -> Result<(), String> {
+    loop {
+        // SAFETY: an all-zero siginfo is valid, and waitid writes only into it.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if waited == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("waiting for {pid}: {error}"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +231,11 @@ mod tests {
     fn work_here_takes_time() {
         let (sample, sum) = here(|| (0..2_000_000u64).fold(0u64, |a, b| a ^ b.wrapping_mul(31)));
         assert!(sum > 0 && sample.wall_ms > 0.);
+    }
+
+    #[test]
+    fn a_child_is_timed_and_its_output_kept() {
+        let (sample, ran) = child(Command::new("echo").arg("hi")).unwrap();
+        assert!(ran.success && ran.stdout == b"hi\n" && sample.wall_ms > 0.);
     }
 }

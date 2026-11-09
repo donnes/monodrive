@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Monodrive's benchmarks. See docs/performance.md.
 #
-#   scripts/bench [suite...]                     runs the suites (platform core search mcp) and writes
+#   scripts/bench [suite...]                     runs the suites (platform core search mcp workload compare) and writes
 #                                                results.json and report.html to target/bench/<time>
 #   scripts/bench --against <commit> [suite...]  the same, alternating with a build of <commit>
 #   scripts/bench report <results.json> [saved]  rewrites a run's report, beside a saved run's medians
-#   scripts/bench linux [results.json]           the platform suite on donnes-pc, merged into a run
+#   scripts/bench linux [results.json]           the platform and workload suites on donnes-pc, merged into a run
 #   scripts/bench search-real                    name search on a copy of this Mac's real index
 #   scripts/bench spotlight prepare [entries] [seed] | wait | run [rounds] | clean
 #                                                name search against Spotlight, find and fd
@@ -94,7 +94,7 @@ linux() {
     ssh "$host" "mkdir -p $remote && find $remote -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +"
     git archive HEAD | ssh "$host" "tar -x -C $remote"
     ssh "$host" "cd $remote && echo \"Load: \$(cat /proc/loadavg)\" && cargo build --release --locked -p monodrive-bench >&2 && \
-        target/release/monodrive-bench run platform --rounds $rounds --out target/bench/linux-$stamp >&2"
+        target/release/monodrive-bench run platform workload --rounds $rounds --out target/bench/linux-$stamp >&2"
     out=$(out_dir)-linux
     mkdir -p "$out"
     scp -q "$host:$remote/target/bench/linux-$stamp/results.json" "$out/results.json"

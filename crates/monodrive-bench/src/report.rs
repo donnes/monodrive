@@ -327,6 +327,33 @@ fn verdicts(bench: &Bench) -> Vec<(String, Verdict, Option<Verdict>)> {
     out
 }
 
+/// Each result whose instructions came out slower than the baseline's, as a
+/// line: what `monodrive-bench gate` fails on.
+pub fn slower_instructions(results: &Results) -> Vec<String> {
+    results
+        .suites
+        .iter()
+        .flat_map(|run| run.benches.iter().map(move |bench| (run, bench)))
+        .flat_map(|(run, bench)| {
+            verdicts(bench)
+                .into_iter()
+                .filter_map(move |(who, _, counted)| match counted {
+                    Some(slower @ Verdict::Slower { .. })
+                        if who.ends_with("this against baseline") =>
+                    {
+                        Some(format!(
+                            "{}/{}: {}",
+                            run.suite,
+                            bench.bench,
+                            verdict(slower).0
+                        ))
+                    }
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
 fn group(
     page: &mut String,
     title: &str,
@@ -694,5 +721,50 @@ mod tests {
             high: 2.25,
         });
         assert_eq!((text.as_str(), class), ("slower, 1.50× to 2.25×", "slower"));
+    }
+
+    #[test]
+    fn the_gate_names_what_takes_more_instructions_and_nothing_else() {
+        use crate::format::{Bench, Series, SuiteRun};
+        use crate::measure::Sample;
+        let series = |build: &str, instructions: u64| Series {
+            build: build.into(),
+            variant: String::new(),
+            warmup: None,
+            samples: (0..12)
+                .map(|i| Sample {
+                    wall_ms: 1.,
+                    cpu_ms: None,
+                    instructions: Some(instructions + i),
+                    cycles: None,
+                })
+                .collect(),
+            checks: vec![],
+        };
+        let results = |this: u64| Results {
+            version: crate::format::RESULTS,
+            started: String::new(),
+            builds: vec![],
+            suites: vec![SuiteRun {
+                suite: "core".into(),
+                conditions: crate::conditions::tests::quiet(),
+                rounds: 12,
+                notes: vec![],
+                benches: vec![Bench {
+                    bench: "list_dir/10000".into(),
+                    title: String::new(),
+                    group: String::new(),
+                    items: None,
+                    cache: Cache::Warm,
+                    series: vec![series("this", this), series("baseline", 1_000_000)],
+                }],
+            }],
+        };
+        assert_eq!(
+            slower_instructions(&results(2_000_000)),
+            ["core/list_dir/10000: slower, 2.00× to 2.00×"]
+        );
+        assert!(slower_instructions(&results(1_010_000)).is_empty());
+        assert!(slower_instructions(&results(500_000)).is_empty());
     }
 }

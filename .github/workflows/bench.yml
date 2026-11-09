@@ -1,0 +1,59 @@
+name: Bench
+
+# scripts/bench on the quiet Mac: a self-hosted runner labeled `bench` that
+# runs nothing else. A self-hosted runner must never run code from an
+# untrusted pull request, so this runs only for pushes to main and a
+# maintainer's dispatch, and it holds no release signing credentials. It
+# stays off until the repository variable BENCH_RUNNER is "true", once that
+# Mac is set up as docs/performance.md describes.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      against:
+        description: "Commit to compare against (empty: the one before this)"
+        required: false
+      suites:
+        description: "Suites, space separated (empty: all)"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: Benchmarks
+    if: vars.BENCH_RUNNER == 'true'
+    runs-on: [self-hosted, macOS, bench]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run
+        env:
+          AGAINST: ${{ inputs.against || github.event.before }}
+          SUITES: ${{ inputs.suites }}
+        run: |
+          # shellcheck disable=SC2086
+          if git cat-file -e "$AGAINST^{commit}" 2>/dev/null && git cat-file -e "$AGAINST:crates/monodrive-bench/Cargo.toml" 2>/dev/null; then
+            scripts/bench --against "$AGAINST" $SUITES
+            # Instructions that grew past the floor fail the run. GitHub's
+            # macOS VMs count none, so this gate lives here.
+            target/release/monodrive-bench gate "$(ls -d target/bench/2*/ | tail -1)results.json"
+          else
+            scripts/bench $SUITES
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ github.sha }}
+          path: |
+            target/bench/*/results.json
+            target/bench/*/report.html
+          if-no-files-found: ignore
