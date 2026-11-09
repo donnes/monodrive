@@ -6,6 +6,7 @@ use super::pane::{Pane, Stop};
 use super::sidebar::Places;
 use super::{EmptyTrash, Operations, lock};
 use crate::empty_trash::is_hidden;
+use crate::session::Shows;
 use crate::theme::{self, ButtonLook, content, text_button};
 use gpui::{Context, FontWeight, Task, Window, div, prelude::*, px};
 use monodrive_core::cloud::Availability;
@@ -63,12 +64,17 @@ pub(super) fn read_recents(store: Option<&Store>) -> Result<Vec<PathBuf>, String
 
 impl Pane {
     pub(super) fn showing_recents(&self) -> bool {
-        self.history[self.at].recents
+        self.history[self.at].shows == Shows::Recents
+    }
+
+    /// Whether the Overview is on screen: a search in front of it isn't.
+    pub(super) fn showing_overview(&self) -> bool {
+        self.query.is_empty() && self.history[self.at].shows == Shows::Overview
     }
 
     /// Whether the rows are a folder's, rather than search results or Recents.
     pub(super) fn showing_folder(&self) -> bool {
-        self.query.is_empty() && !self.showing_recents()
+        self.query.is_empty() && self.history[self.at].shows == Shows::Folder
     }
 
     pub(super) fn in_trash(&self, cx: &gpui::App) -> bool {
@@ -88,11 +94,16 @@ impl Pane {
     /// Opens the list of recently opened files, so Back returns from it. The
     /// folder behind it stays what Go to Folder and Open in Terminal start at.
     pub(super) fn open_recents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.showing_recents() {
+        self.open_page(Shows::Recents, window, cx);
+    }
+
+    /// A page in front of the folder, as a place in the history.
+    pub(super) fn open_page(&mut self, shows: Shows, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stop().shows != shows {
             self.collapse_all();
             self.history.truncate(self.at + 1);
             let mut stop = Stop::folder(self.folder().to_path_buf());
-            stop.recents = true;
+            stop.shows = shows;
             self.history.push(stop);
             self.at = self.history.len() - 1;
         }

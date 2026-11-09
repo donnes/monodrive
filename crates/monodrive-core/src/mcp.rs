@@ -13,6 +13,7 @@ use crate::index::{self, Caps, GrepMode, Index, Status};
 use crate::info::{self, Info};
 use crate::naming;
 use crate::ops::{self, Conflict, Done, Job, Origin, Request, organize, rename};
+use crate::overview::{self, LocationKind, Overview};
 use crate::places::{self, Availability, Place, SavedSearch};
 use crate::remote::{self, Connection, Connections, RemoteEntry, RemoteError, RemotePath, Source};
 use crate::search::{Query, Scope};
@@ -46,6 +47,7 @@ trash, put_back, rename, rename_many, create_folder, create_folder_with, create_
 undo and redo change files through the same undo history as the Monodrive window; rename_preview \
 shows what rename_many would do. copy, move, archive_create and archive_extract run as jobs that \
 job_status follows; archive_list shows what a ZIP holds without extracting it. \
+overview says what could free space, where the user's things are and which locations are connected; \
 storage_scan shows what takes up space in a folder, duplicates \
 finds identical files there, and cleanup_duplicates trashes the copies you choose. \
 list_places shows the sidebar's favorites, the mounted volumes, the cloud folders and the saved servers; pin, unpin and eject \
@@ -249,6 +251,10 @@ enum ToolCall {
         #[serde(default)]
         conflict: Conflict,
     },
+    Overview {
+        #[serde(default = "overview_timeout")]
+        timeout_seconds: u64,
+    },
     StorageScan {
         path: String,
         #[serde(default = "largest")]
@@ -442,6 +448,10 @@ fn folder_limit() -> usize {
 
 fn min_size() -> u64 {
     1
+}
+
+fn overview_timeout() -> u64 {
+    5
 }
 
 fn scan_timeout() -> u64 {
@@ -727,8 +737,43 @@ impl Server {
                 timeout_seconds,
             } => {
                 let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
-                storage::scan(&expand_home(&path), &storage::Progress::default(), deadline)
-                    .map(|report| storage_report(&report, largest, depth, limit, timeout_seconds))
+                storage::scan(&expand_home(&path), &storage::Progress::default(), deadline).map(
+                    |report| {
+                        // A whole drive's scan is what the Overview shows for it.
+                        let volumes = volumes::list();
+                        if let Some(volume) = overview::volume_at(&volumes, &report.root().path) {
+                            let now = overview::now();
+                            let _ = overview::record_scan(&self.overview_env(), volume, &report, now);
+                        }
+                        storage_report(&report, largest, depth, limit, timeout_seconds)
+                    },
+                )
+            }
+            ToolCall::Overview { timeout_seconds } => {
+                let env = self.overview_env();
+                let deadline = Instant::now().checked_add(Duration::from_secs(timeout_seconds));
+                let progress = storage::Progress::default();
+                let volumes = volumes::list();
+                let read = |now| {
+                    let connected = |id: &str| self.remote.is_connected(id);
+                    overview::read(&env, &volumes, &cloud::folders(&env.home), &connected, now)
+                };
+                // Only an index this session already started: looking at the
+                // Overview must never start one.
+                if let Some(Ok(index)) = &self.index {
+                    let git = Git::find().ok();
+                    let _ = overview::discover(&env, git.as_ref(), |name, limit| {
+                        index.find(name, limit)
+                    });
+                }
+                let now = overview::now();
+                for folder in read(now).due {
+                    if deadline.is_some_and(|end| Instant::now() >= end) {
+                        break;
+                    }
+                    overview::measure(&env, &folder, &progress, deadline, now);
+                }
+                Ok(overview_text(&read(now), now))
             }
             ToolCall::Duplicates {
                 path,
@@ -1351,6 +1396,10 @@ impl Server {
     }
 
     /// Where the index is, without starting it.
+    fn overview_env(&self) -> overview::Env {
+        overview::Env::new(self.ops.trash().to_path_buf(), self.places.clone())
+    }
+
     fn status(&self) -> Result<Status, String> {
         match &self.index {
             None => Ok(Status::not_started(index::saved())),
@@ -1686,6 +1735,113 @@ fn bytes(n: u64) -> String {
         ..1e12 => format!("{:.1} GB", n / 1e9),
         _ => format!("{:.2} TB", n / 1e12),
     }
+}
+
+/// The Overview in lines: the startup disk, then each section that has anything.
+fn overview_text(about: &Overview, now: u64) -> String {
+    let mut out = String::new();
+    let aged = |size: &overview::Measured| {
+        let short = if size.complete { "" } else { " at least" };
+        match size.age(now) {
+            Some(age) => format!("{short} {} on disk, {age}", bytes(size.on_disk)),
+            None => format!("{short} {} on disk", bytes(size.on_disk)),
+        }
+    };
+    if let Some(disk) = &about.headline {
+        let _ = write!(
+            out,
+            "{}: {} free of {}",
+            disk.name,
+            bytes(disk.free),
+            bytes(disk.total)
+        );
+        if disk.low {
+            out.push_str(", low");
+        }
+        if let Some(trash) = disk.trash.filter(|trash| trash.unshared >= 1_000_000) {
+            let short = if trash.complete { "" } else { "at least " };
+            let _ = write!(
+                out,
+                ", {short}{} more after emptying the Trash",
+                bytes(trash.unshared)
+            );
+            if let Some(age) = trash.age(now) {
+                let _ = write!(out, " ({age})");
+            }
+        }
+        out.push('\n');
+    }
+    if !about.suggestions.is_empty() {
+        out.push_str("suggestions:\n");
+    }
+    for suggestion in &about.suggestions {
+        let short = if suggestion.size.complete {
+            ""
+        } else {
+            "at least "
+        };
+        let age = suggestion
+            .size
+            .age(now)
+            .map_or(String::new(), |age| format!(", {age}"));
+        let _ = writeln!(
+            out,
+            "frees {short}{}{age} {}: {}. {}",
+            bytes(suggestion.size.unshared),
+            suggestion.path.display(),
+            suggestion.evidence.title(),
+            suggestion.evidence.why()
+        );
+    }
+    if !about.stuff.is_empty() {
+        out.push_str("stuff:\n");
+    }
+    for group in &about.stuff {
+        for spot in &group.spots {
+            let size = spot.size.as_ref().map_or(" not measured".to_string(), aged);
+            let _ = writeln!(
+                out,
+                "{}/ ({}, on {}):{size}",
+                spot.path.display(),
+                group.name,
+                spot.location
+            );
+        }
+    }
+    if let Some(rest) = about.everything_else {
+        let _ = writeln!(out, "everything else: {}", bytes(rest));
+    }
+    if !about.locations.is_empty() {
+        out.push_str("locations:\n");
+    }
+    for location in &about.locations {
+        let kind = match &location.kind {
+            LocationKind::Drive => "drive",
+            LocationKind::Share { .. } => "share",
+            LocationKind::Sftp { .. } => "sftp",
+            LocationKind::Disconnected => "drive",
+        };
+        let state = if location.connected {
+            "connected"
+        } else {
+            "not connected"
+        };
+        let _ = write!(out, "{} ({kind}): {state}", location.name);
+        if let Some((total, free)) = location.capacity {
+            let _ = write!(out, ", {} free of {}", bytes(free), bytes(total));
+        }
+        match &location.scan {
+            Some(scan) => {
+                let _ = writeln!(out, ", last scan{}", aged(&scan.total));
+                for row in &scan.rows {
+                    let _ = writeln!(out, "{}/:{}", row.path.display(), aged(&row.size));
+                }
+            }
+            None if location.mount.is_some() => out.push_str(", not scanned\n"),
+            None => out.push('\n'),
+        }
+    }
+    out
 }
 
 fn by(origin: &Origin) -> String {
@@ -2216,7 +2372,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 67] = [
+pub const TOOLS: [Tool; 68] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2547,6 +2703,22 @@ pub const TOOLS: [Tool; 67] = [
                     "conflict": conflict_schema()
                 },
                 "required": ["path", "into"]
+            })
+        },
+    },
+    Tool {
+        name: "overview",
+        description: "What could free space, where the user's things are, and which locations are \
+    connected, as the window's Overview page shows them. Connects to nothing and never walks the whole \
+    disk: it measures known folders until timeout_seconds and says which are not measured. Sizes that \
+    aren't current say how old they are, and a drive nobody scanned says not scanned. Scan one with \
+    storage_scan on its mount; clean up with trash.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "timeout_seconds": {"type": "integer", "minimum": 0, "default": 5}
+                }
             })
         },
     },
@@ -3165,6 +3337,47 @@ mod tests {
             ops::Client::new(paths, None),
             places("/nonexistent/monodrive-test".as_ref()),
         )
+    }
+
+    #[test]
+    fn overview_says_what_is_measured_and_what_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let paths = ops::Paths {
+            state: home.join("state"),
+            settings: home.join("settings.json"),
+            trash: home.join(".Trash"),
+        };
+        std::fs::create_dir(home.join("Documents")).unwrap();
+        std::fs::write(home.join("Documents/a"), vec![1; 4096]).unwrap();
+        std::fs::create_dir(home.join("Pictures")).unwrap();
+        let mut server = Server::new(ops::Client::new(paths, None), places(&home));
+
+        let out = |reply: Value| {
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let timed_out = out(call(
+            &mut server,
+            json!({"name": "overview", "arguments": {"timeout_seconds": 0}}),
+        ));
+        assert!(
+            timed_out.contains(&format!("{}/Documents/", home.display()))
+                && timed_out.contains("not measured"),
+            "{timed_out}"
+        );
+
+        let measured = out(call(
+            &mut server,
+            json!({"name": "overview", "arguments": {}}),
+        ));
+        assert!(
+            !measured.contains("Documents, on This Mac): not measured"),
+            "{measured}"
+        );
+        assert!(measured.contains("on disk"), "{measured}");
     }
 
     #[test]

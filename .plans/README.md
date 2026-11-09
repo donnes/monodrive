@@ -31,7 +31,7 @@ Update a plan's row when its work lands on `main`.
 | 24 Benchmarks and reports | Planned; do first | |
 | 25 Filesystem speed | Planned; needs plan 24's runner | |
 | 26 MCP contract v1 | Planned; tool map and profiles need review | |
-| 27 Overview | UI picked, not built | |
+| 27 Overview | Done except worktree suggestions, which wait for plan 22's delete review | |
 | 28 Built-in previews and editing | Done; the full app, with a real shared owner and session, needs a person to check | |
 | 29 Video thumbnails | Done; a real share and a folder behind a privacy prompt need a person to check | |
 | 30 Name and organize files | Suggest Names and rules-only Organize done, for text-based files with no model; a model is held behind a speed gate; the review page is option A, picked without drawn options | |

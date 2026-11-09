@@ -1,10 +1,21 @@
 # Overview
 
-Status: direction picked (Desk, D1), not built. This plan authorizes planning only.
+Status: steps 1 to 4 done. Step 5 waits for plan 22's delete review.
+
+Decisions made while building it:
+
+- The page started from the picked Desk mockup. On 2026-11-06 the maintainer rejected that layout and picked direction A, the storage map, from three mockups. The disk is drawn by what fills it: Documents (Desktop, Documents and Downloads), Projects, Pictures, Movies and music, and Cloud, each in a fixed tint that its rows' icons and bars share, then what the suggestions and the Trash could give back, in green, then Other. On 2026-11-06 the maintainer also dropped the dithered bar for plain solid parts. A key under the bar names each part. Nothing is counted twice: a folder inside another counts in the outer one, and what a suggestion frees leaves the kind that holds it. The tints are fixed rather than the accent, so no accent makes two kinds look alike. It has no motion, glow or hover repaint.
+- Under the bar come "Free up", a row per suggestion and one for the Trash with Empty Trash…, so the section adds up to the bar's green part. Each suggestion's button says Move to Trash, which is what it does. A row whose folder holds a suggestion ends its bar in that green, which is why the key gives its kind less than the row shows. Then "Largest on" the startup disk and on each scanned drive, each list with bars against its own largest, since drives share no space. A project with copies elsewhere ranks by what it takes on the startup disk. "Other locations" are tiles, as many across as fit 330 pt each. "Changed by agents" appears only when an agent changed something in the last day. Copies and moves stay in the title bar's ring.
+- The lists rank largest first, not the mockup's recently active first, because nothing records activity.
+- Every text starts on the pane's 16 pt inset, and every list row keeps its bar, size and button slots, so they line up at any width down to the smallest window.
+- A project on several locations lists each copy under its row on a press, in place of a page of its own.
+- Suggestions only move to the Trash. No tool's own cleanup command runs, so tools that own their cleanup, npm among them, aren't suggested.
+- A share gets no Trash button, because nothing says cheaply whether it has a Trash.
+- `storage_scan` on a volume's mount saves that scan, so an agent can do what the Scan button does.
 
 ## Goal
 
-A page that answers three things on opening: what should I do, where is my stuff, and what is happening now. It is about the user's things across every location, not a list of drives. The sidebar already lists drives.
+A page that answers three things on opening: what fills the disk and what should I do, where is my stuff, and what the other locations hold. It is about the user's things across every location, not a list of drives. The sidebar already lists drives.
 
 Today's measurements on the maintainer's Mac are why it leads with actions: 44 GB free of 460 GB, 92.4 GB in build outputs and package stores, 12.4 GB in worktrees. Worktrees alone would miss most of what can be recovered.
 
@@ -12,9 +23,9 @@ Today's measurements on the maintainer's Mac are why it leads with actions: 44 G
 
 From the top, in one pane, as a place in Back history:
 
-1. **Headline and suggestions.** Free space on the startup disk, then up to 3 suggestions, each with what it frees, why it's safe, and one button.
-2. **Your stuff, everywhere.** Projects and kinds of things, each row saying where it lives. A row opens its folder, or a page when it spans locations.
-3. **Right now.** Jobs, what agents just changed, and which locations are connected.
+1. **Headline, disk bar and suggestions.** Free space on the startup disk and what fills it, then up to 3 suggestions, each with what it frees, why it's safe, and one button.
+2. **Largest.** Projects and kinds of things on the startup disk, then each scanned drive's largest folders. A row opens its folder, or lists its copies when it spans locations.
+3. **Other locations, and what agents changed.** Each location's connection, space and scan, and what agents changed in the last day.
 
 Rules that apply everywhere:
 
@@ -65,7 +76,7 @@ Add `crates/monodrive-core/src/overview.rs`. The view and the MCP tool call it, 
 - Add `Stop`'s third kind beside `recents`, so Back, tabs and sessions keep working. Make it an enum rather than a second bool.
 - `GoOverview` in `commands.rs` with ⌥⌘O, which is free. That gives it the menu, palette and Keyboard settings. Add a sidebar row at the top.
 - Put the new code in `browser/overview.rs`, on `theme.rs`'s controls. It has no list columns, selection or marquee, and commands that act on files don't apply there.
-- Stay on `DESIGN.md`'s type scale. The headline is `TEXT_TITLE` semibold, as a current folder's name is, with no display size.
+- The headline follows the Desk mockup: `TEXT_DISPLAY`, added to `DESIGN.md`'s type scale for this one figure.
 - Add the page and its states to the snapshot example: under and over 20% free, one drive, unscanned share, disconnected drive.
 
 ## MCP

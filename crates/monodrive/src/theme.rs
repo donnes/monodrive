@@ -24,6 +24,8 @@ pub const TEXT_CAPTION: f32 = 11.;
 pub const TEXT_SMALL: f32 = 12.;
 pub const TEXT_BODY: f32 = 13.;
 pub const TEXT_TITLE: f32 = 14.;
+/// The Overview's one figure, the only text larger than a title.
+pub const TEXT_DISPLAY: f32 = 22.;
 
 pub const TITLE_BAR_HEIGHT: f32 = 40.;
 pub const ROW_HEIGHT: f32 = 28.;
@@ -143,6 +145,32 @@ pub fn on_danger() -> Hsla {
 /// Green ink for what's done.
 pub fn success() -> Hsla {
     rgb(if is_light() { 0x059669 } else { 0x10b981 }).into()
+}
+
+/// What tints a kind of thing on the Overview, at 3:1 on the theme's panes:
+/// its icon, its part of the disk's bar and its row's bar.
+pub fn tint_blue() -> Hsla {
+    rgb(if is_light() { 0x2563eb } else { 0x60a5fa }).into()
+}
+
+pub fn tint_cyan() -> Hsla {
+    rgb(if is_light() { 0x0e7490 } else { 0x22d3ee }).into()
+}
+
+pub fn tint_green() -> Hsla {
+    rgb(if is_light() { 0x15803d } else { 0x4ade80 }).into()
+}
+
+pub fn tint_orange() -> Hsla {
+    rgb(if is_light() { 0xc2620e } else { 0xf0954f }).into()
+}
+
+pub fn tint_purple() -> Hsla {
+    rgb(if is_light() { 0x8250df } else { 0xb18cf2 }).into()
+}
+
+pub fn tint_pink() -> Hsla {
+    rgb(if is_light() { 0xc4307e } else { 0xf07ab0 }).into()
 }
 
 /// Black or white, whichever reads on the accent.
@@ -290,7 +318,7 @@ pub fn key_cap(key: impl Into<SharedString>) -> Div {
         .child(key.into())
 }
 
-pub fn section_label(label: &'static str) -> Div {
+pub fn section_label(label: impl Into<SharedString>) -> Div {
     div()
         .h(px(28.))
         .px_2()
@@ -300,7 +328,7 @@ pub fn section_label(label: &'static str) -> Div {
         .text_size(px(TEXT_SMALL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(content(0.65))
-        .child(label)
+        .child(label.into())
 }
 
 pub fn icon(path: &'static str, side: f32) -> Svg {
