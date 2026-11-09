@@ -102,7 +102,7 @@ On 2026-11-09 the maintainer picked option B of four, with option A's report lin
 - While measuring, it says "Measured 5 of 9." and "at least" the sum so far. If Git's answer changed when the review opens, plan 22's view shows what it sees now.
 - "Storage report", a bare text button at the end of Free up's label, opens plan 17's report.
 - Until those commands exist, the page shows neither: no row with nowhere to go and no disabled button. The `overview` MCP tool gains the suggestion in the same change as the view, so agents and the window never disagree.
-- Over 20% free there is no Free up, as now, and worktrees stay in their project's row under Largest.
+- Like every suggestion, it shows only under 20% free. The Trash row keeps showing as it does now.
 
 ## Left out
 
