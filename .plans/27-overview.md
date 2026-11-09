@@ -1,6 +1,6 @@
 # Overview
 
-Status: steps 1 to 4 done. Step 5 waits for plan 22's delete review.
+Status: steps 1 to 4 done. Step 5's design is picked; building it waits for plan 22's worktree view, and its report link waits for plan 17's report.
 
 Decisions made while building it:
 
@@ -43,7 +43,7 @@ A suggestion is a typed value with evidence, never a name match or a percentage.
 |---|---|---|
 | Build output | `CACHEDIR.TAG` inside and a build manifest beside it (`target` on this Mac has both) | Move to Trash |
 | Tool cache | A known path for that tool | Move to Trash, or the tool's own command where it owns the cleanup |
-| Worktree | Git says clean, nothing unpushed, not locked, not the main worktree | Opens plan 22's review, never one press |
+| Worktrees | Git says clean, nothing unpushed, not locked, not the main worktree | Review…, which opens plan 22's view with these selected; never one press |
 
 Rank by bytes freed, using `Usage::unshared` so clones and hard links don't inflate the number. The headline counts what you will have after Empty Trash, because moving to the Trash frees nothing yet. Each result gets the usual toast with Undo, and Empty Trash stays its own step.
 
@@ -91,7 +91,18 @@ Each step ships alone and is useful alone.
 2. The page: headline, suggestions as links that open the folder, your stuff, jobs, Back and the command.
 3. Suggestions that act, through the ops owner, with Undo.
 4. Scan on request for drives and shares, the saved summary, and rows that span locations.
-5. Worktree suggestions, once plan 22's delete review exists.
+5. Worktree suggestions, once plan 22's view exists, and the link to plan 17's report, once that exists.
+
+## Step 5
+
+On 2026-11-09 the maintainer picked option B of four, with option A's report link:
+
+- Every clean worktree, across every repository, is one suggestion: "Remove 9 clean worktrees", what they free, and which repositories hold them. It ranks by their total, so 12.4 GB of worktrees on this Mac makes the top 3, where no single worktree (the largest is 3.1 GB) would beat a 6 GB tool cache.
+- Its button says Review…. It runs plan 22's command for its worktree view, with the clean ones selected, and the deleting happens there, under plan 22's review. Nothing on this page removes a worktree.
+- While measuring, it says "Measured 5 of 9." and "at least" the sum so far. If Git's answer changed when the review opens, plan 22's view shows what it sees now.
+- "Storage report", a bare text button at the end of Free up's label, opens plan 17's report.
+- Until those commands exist, the page shows neither: no row with nowhere to go and no disabled button. The `overview` MCP tool gains the suggestion in the same change as the view, so agents and the window never disagree.
+- Like every suggestion, it shows only under 20% free. The Trash row keeps showing as it does now.
 
 ## Left out
 
