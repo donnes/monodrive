@@ -32,8 +32,6 @@ const MEASURING: usize = 2;
 /// How far back the page says what agents changed, and how many.
 const CHANGES_SINCE: u64 = 24 * 60 * 60;
 const CHANGES_SHOWN: usize = 5;
-/// Wider than this, the page stops growing, so sizes stay near their names.
-const MAX_WIDTH: f32 = 880.;
 /// A row holds a title over a detail, 16 pt each.
 const ROW_HEIGHT: f32 = 34.;
 const TITLE_LINE: f32 = 16.;
@@ -396,7 +394,7 @@ impl Pane {
         });
         let largest = self.largest(&about, measuring, now, cx);
         // As many tiles across as fit whole, each as wide as the others.
-        let inside = (self.chrome.width - 2. * theme::PANE_INSET).min(MAX_WIDTH - 2. * ROW_INSET);
+        let inside = self.chrome.width - 2. * theme::PANE_INSET;
         let across = ((inside / CHIP_MIN_WIDTH).floor() as u16).max(1);
         let locations = (!about.locations.is_empty()).then(|| {
             div()
@@ -459,8 +457,6 @@ impl Pane {
                         .py_4()
                         .child(
                             div()
-                                .w_full()
-                                .max_w(px(MAX_WIDTH))
                                 .flex()
                                 .flex_col()
                                 .gap_2()
