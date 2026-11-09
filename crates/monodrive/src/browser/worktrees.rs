@@ -385,7 +385,10 @@ impl Pane {
                         .to_string(),
                 )
             } else {
-                ("No worktrees found", found.problems.join("\n"))
+                (
+                    "No worktrees found",
+                    problem_lines(&found.problems).join("\n"),
+                )
             };
             div()
                 .flex_1()
@@ -412,21 +415,7 @@ impl Pane {
                 .into_any_element()
         } else {
             let items = page.items().len();
-            // A few, so a disk of unreadable repositories can't push the list
-            // off the page.
-            let mut said: Vec<String> = found
-                .problems
-                .iter()
-                .take(PROBLEMS_SHOWN)
-                .map(|why| format!("Couldn't read {why}"))
-                .collect();
-            if found.problems.len() > PROBLEMS_SHOWN {
-                said.push(format!(
-                    "and {} more",
-                    found.problems.len() - PROBLEMS_SHOWN
-                ));
-            }
-            let problems = said.into_iter().map(|line| {
+            let problems = problem_lines(&found.problems).into_iter().map(|line| {
                 div()
                     .px(px(theme::PANE_INSET))
                     .pb_2()
@@ -721,6 +710,20 @@ impl Pane {
                     ),
             )
     }
+}
+
+/// What a scan couldn't read, a few lines of it, so a disk of unreadable
+/// repositories can't push the list off the page.
+fn problem_lines(problems: &[String]) -> Vec<String> {
+    let mut lines: Vec<String> = problems
+        .iter()
+        .take(PROBLEMS_SHOWN)
+        .map(|why| format!("Couldn't read {why}"))
+        .collect();
+    if problems.len() > PROBLEMS_SHOWN {
+        lines.push(format!("and {} more", problems.len() - PROBLEMS_SHOWN));
+    }
+    lines
 }
 
 /// A badge at a row's end: what's special about it, in `danger` when Git's
