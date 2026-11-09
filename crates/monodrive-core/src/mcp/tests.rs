@@ -919,7 +919,16 @@ fn overview_says_what_is_measured_and_what_is_not() {
     );
     assert_eq!(data(&timed_out)["partial"], true);
     let measured = call(&mut server, "overview", json!({}));
-    assert!(text(&measured).contains("on disk"), "{measured}");
+    let documents = format!("{}/Documents/ (Documents, on ", home.display());
+    let line = text(&measured)
+        .lines()
+        .find(|line| line.starts_with(&documents))
+        .unwrap_or_else(|| panic!("{measured}"))
+        .to_owned();
+    assert!(
+        line.contains("on disk") && !line.ends_with("not measured"),
+        "{line}"
+    );
 }
 
 #[test]

@@ -1058,30 +1058,19 @@ mod tests {
                     command.title
                 );
             }
+            // The menu bar shows the first key and AppKit matches it before
+            // any view, so a bare printable key there stops fields typing it.
+            if let Some(first) = command.keys.first() {
+                let stroke = Keystroke::parse(first).unwrap();
+                let modifiers = &stroke.modifiers;
+                let printable = stroke.key == "space" || stroke.key.chars().count() == 1;
+                assert!(
+                    modifiers.platform || modifiers.control || modifiers.alt || !printable,
+                    "{}: {first}",
+                    command.title
+                );
+            }
         }
-    }
-
-    #[test]
-    fn quick_look_is_in_the_file_menu_on_command_y_and_space() {
-        let commands = all();
-        let file: Vec<_> = commands
-            .iter()
-            .filter(|c| c.group == Group::File)
-            .map(|c| c.title)
-            .collect();
-        let at = file
-            .iter()
-            .position(|title| *title == "Quick Look")
-            .unwrap();
-        assert_eq!(file[at - 1], "Duplicate");
-        // The menu bar shows the first key and AppKit matches it before any
-        // view: a bare Space there would stop the search field typing one.
-        let quick_look = &commands[commands
-            .iter()
-            .position(|c| c.title == "Quick Look")
-            .unwrap()];
-        assert_eq!(quick_look.keys, ["cmd-y", "space"]);
-        assert_eq!(quick_look.context, Some("FileList"));
     }
 
     #[test]

@@ -1618,4 +1618,15 @@ mod tests {
         let plain = highlighted("hello", Path::new("a.unknownext"), false);
         assert!(plain[0].spans.is_empty());
     }
+
+    #[test]
+    fn a_picture_that_cant_be_decoded_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("broken.png");
+        std::fs::write(&broken, b"not a picture").unwrap();
+        assert!(matches!(
+            read(&broken, false, 256),
+            Body::Notice(why) if why == "This picture can't be shown."
+        ));
+    }
 }

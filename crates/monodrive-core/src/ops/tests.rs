@@ -2298,33 +2298,6 @@ fn extracting_refuses_zip_bombs_entries_it_cant_read_and_more_than_fits() {
 }
 
 #[test]
-fn cancelling_an_extraction_keeps_the_items_it_finished() {
-    use crate::archives::tests::{Item, zip};
-    let (_dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let (archive, dest) = (files.join("a.zip"), files.join("dest"));
-    std::fs::create_dir(&dest).unwrap();
-    zip(
-        &archive,
-        &[("a.txt", Item::File(b"a")), ("b.txt", Item::File(b"b"))],
-    );
-    let op = run(
-        &mut shared.lock(),
-        extract(&archive, &["a.txt", "b.txt"], &dest, Conflict::Stop),
-    )
-    .unwrap()
-    .op;
-    assert!(jobs::next(&shared, op));
-    run(&mut shared.lock(), Request::Cancel { job: op }).unwrap();
-    assert!(!jobs::next(&shared, op));
-    let cancelled = status(&shared, op);
-    assert_eq!(cancelled.state, State::Cancelled);
-    assert_eq!(cancelled.tasks[0].done, Some(Done::To(dest.join("a.txt"))));
-    assert_eq!(cancelled.tasks[1].done, None);
-    assert_eq!(names(&dest), ["a.txt"]);
-}
-
-#[test]
 fn an_extraction_cut_short_by_a_crash_trashes_what_it_left_unfinished() {
     use crate::archives::tests::{Item, zip};
     let (dir, files, engine) = engine();

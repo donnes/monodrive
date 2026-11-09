@@ -233,18 +233,6 @@ fn the_preview_takes_the_panes_list_and_gives_it_back(cx: &mut TestAppContext) {
     assert!(!drawn(cx, "preview"));
 }
 
-#[gpui::test]
-fn a_picture_that_cant_be_decoded_says_so(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("broken.png"), b"not a picture").unwrap();
-    let (_browser, cx) = browse(dir.path(), cx);
-    press(cx, "down space");
-    cx.run_until_parked();
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-    assert!(drawn(cx, "preview-notice"));
-}
-
 /// A preview's real path: the keys and mouse through the real `Browser`, a real
 /// recipe flattened and saved through a real owner, and one Undo.
 #[gpui::test]
@@ -1924,7 +1912,8 @@ fn empty_trash_says_how_many_and_erases_only_once_confirmed(cx: &mut TestAppCont
     let owned = own(cx);
     let trash = owned.state.path().join("Trash");
     std::fs::create_dir(&trash).unwrap();
-    for name in ["old.txt", "older.txt"] {
+    // .DS_Store is the Finder's own and isn't counted; other hidden items are.
+    for name in ["old.txt", "older.txt", ".hidden", ".DS_Store"] {
         std::fs::write(trash.join(name), "").unwrap();
     }
     let (browser, cx) = browse(&project, cx);
@@ -1938,13 +1927,16 @@ fn empty_trash_says_how_many_and_erases_only_once_confirmed(cx: &mut TestAppCont
         Some(Sheet::EmptyTrash(card)) => card.read(cx).message(),
         _ => String::new(),
     });
-    assert_eq!(said, "2 items will be erased for good.");
+    assert_eq!(
+        said,
+        "3 items, including 1 hidden, will be erased for good."
+    );
     press(cx, "escape");
     assert!(!asking(cx));
     press(cx, "cmd-shift-backspace");
     click(cx, "empty-trash-cancel");
     assert!(!asking(cx));
-    assert_eq!(ops::trash_items(&trash).unwrap().len(), 2);
+    assert_eq!(ops::trash_items(&trash).unwrap().len(), 3);
     // ↩ empties, as Finder's default button does.
     press(cx, "cmd-shift-backspace enter");
     assert!(!asking(cx));
@@ -1955,29 +1947,6 @@ fn empty_trash_says_how_many_and_erases_only_once_confirmed(cx: &mut TestAppCont
         toast(&browser, cx),
         Some(("The Trash is empty.".into(), false, false))
     );
-    release(owned, cx);
-}
-
-#[gpui::test]
-fn the_empty_trash_card_counts_hidden_items_and_says_so(cx: &mut TestAppContext) {
-    let (_dir, project) = folder();
-    let owned = own(cx);
-    let trash = owned.state.path().join("Trash");
-    std::fs::create_dir(&trash).unwrap();
-    for name in ["old.txt", ".hidden", ".DS_Store"] {
-        std::fs::write(trash.join(name), "").unwrap();
-    }
-    let (browser, cx) = browse(&project, cx);
-    press(cx, "cmd-shift-backspace");
-    let said = browser.read_with(cx, |b, cx| match &b.sheet {
-        Some(Sheet::EmptyTrash(card)) => card.read(cx).message(),
-        _ => String::new(),
-    });
-    assert_eq!(
-        said,
-        "2 items, including 1 hidden, will be erased for good."
-    );
-    press(cx, "escape");
     release(owned, cx);
 }
 

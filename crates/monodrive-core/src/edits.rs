@@ -859,6 +859,21 @@ mod tests {
         .unwrap();
         assert_eq!(steps[0], Step::Rotate { quarter_turns: 1 });
         assert!(matches!(&steps[1], Step::Arrow { width, .. } if *width == 6.));
+        // Recipes saved before marks could turn or wrap still read.
+        let steps: Vec<Step> = serde_json::from_str(
+            r#"[{"type":"text","at":[1,2],"text":"Hi"},
+                {"type":"redact","rect":{"x":0,"y":0,"width":1,"height":1}}]"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            steps[0],
+            Step::Text {
+                wrap: None,
+                rotation: 0.,
+                ..
+            }
+        ));
+        assert!(matches!(steps[1], Step::Redact { rotation: 0., .. }));
     }
 
     #[test]

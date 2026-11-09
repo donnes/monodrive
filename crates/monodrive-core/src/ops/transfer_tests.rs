@@ -682,6 +682,10 @@ fn what_a_folder_holds_that_cant_be_copied_is_reported_not_dropped() {
     let job = b.run(b.download(&["pipe"], Conflict::Stop));
     assert_eq!(job.state, State::Failed, "{job:?}");
     assert!(
+        first_failure(&job).contains("isn't a file, folder or link"),
+        "{job:?}"
+    );
+    assert!(
         b.here().iter().all(|name| !name.starts_with("pipe")),
         "{job:?}"
     );

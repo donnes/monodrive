@@ -582,25 +582,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_recipe_without_rotation_or_wrap_still_reads() {
-        let step: Step =
-            serde_json::from_str(r#"{"type": "text", "at": [1, 2], "text": "Hi"}"#).unwrap();
-        assert!(matches!(
-            step,
-            Step::Text {
-                wrap: None,
-                rotation: 0.,
-                ..
-            }
-        ));
-        let boxed: Step = serde_json::from_str(
-            r#"{"type": "redact", "rect": {"x": 0, "y": 0, "width": 1, "height": 1}}"#,
-        )
-        .unwrap();
-        assert!(matches!(boxed, Step::Redact { rotation: 0., .. }));
-    }
-
     /// The layer shown during a drag must sit where saving will draw the mark.
     /// See-through ink keeps its own color on the layer, for the window to blend.
     #[test]
