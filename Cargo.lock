@@ -3093,6 +3093,7 @@ dependencies = [
  "objc2-image-io",
  "objc2-pdf-kit",
  "objc2-quick-look-thumbnailing",
+ "schemars",
  "semver",
  "serde",
  "serde_json",

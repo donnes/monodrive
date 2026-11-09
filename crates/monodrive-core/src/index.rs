@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum GrepMode {
     #[default]

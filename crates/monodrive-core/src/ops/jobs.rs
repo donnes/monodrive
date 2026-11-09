@@ -23,9 +23,12 @@ const RUNNING: usize = 2;
 /// How many finished jobs clients are shown.
 const SHOWN: usize = 50;
 
-/// What to do when an item of the same name is already where one is going.
-/// Monodrive never asks; the request says.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// When a name is taken where an item goes: keep_both numbers the new one,
+/// replace trashes the one there first, skip, or stop and wait for
+/// continue_job. Monodrive never asks; the request says.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Conflict {
     /// Names the new one "name 2", "name 3" and on.

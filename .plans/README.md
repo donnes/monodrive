@@ -30,7 +30,7 @@ Update a plan's row when its work lands on `main`.
 | 23 Agent features | Later | |
 | 24 Benchmarks and reports | Done; the quiet Mac needs buying and registering as the `bench` runner, and scrolling and launch still report outside `scripts/bench` | |
 | 25 Filesystem speed | Done; cold listing waits for the quiet Mac, and `fseventsd`'s load and the Developer Tools permission need a person to check | |
-| 26 MCP contract v1 | Planned; tool map and profiles need review | |
+| 26 MCP contract v1 | Done; tried with Claude Code and Codex, not Cursor, whose CLI wasn't signed in | |
 | 27 Overview | Done except step 5: worktree suggestions (one row for all clean worktrees, picked) wait for plan 22's view, and Free up's link waits for plan 17's report | 82cb1cf |
 | 28 Built-in previews and editing | Done; the full app, with a real shared owner and session, needs a person to check | |
 | 29 Video thumbnails | Done; a real share and a folder behind a privacy prompt need a person to check | |

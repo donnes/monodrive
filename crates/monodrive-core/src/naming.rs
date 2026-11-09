@@ -25,7 +25,9 @@ const PHRASE_WORDS: usize = 8;
 const NOISE: [&str; 5] = ["final", "copy", "draft", "new", "untitled"];
 
 /// How a suggestion is written.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Style {
     /// `residential-lease-agreement.pdf`

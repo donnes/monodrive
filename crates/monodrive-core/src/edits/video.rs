@@ -28,7 +28,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 /// One edit. Crop and rotate apply in order, in the video's picture as it plays.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Clip {
     /// Seconds from the start.

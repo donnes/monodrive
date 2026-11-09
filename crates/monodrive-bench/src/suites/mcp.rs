@@ -241,9 +241,11 @@ struct Query<'a> {
     query: &'a str,
 }
 
+/// The whole folder, past list_dir's default page.
 #[derive(Serialize)]
-struct PathArg<'a> {
+struct Listing<'a> {
     path: &'a Path,
+    limit: usize,
 }
 
 #[derive(Serialize)]
@@ -259,8 +261,9 @@ struct Copy<'a> {
 }
 
 #[derive(Serialize)]
-struct Job {
-    job: u64,
+struct Job<'a> {
+    job: &'a str,
+    wait_seconds: u64,
 }
 
 fn measured(bench: &str, title: &str, sample: Sample, check: String) -> Measured {
@@ -329,8 +332,15 @@ fn session(
     ));
 
     let listed = fixture.join("listed");
-    let (sample, listing) =
-        measure::served(pid, || server.tool("list_dir", PathArg { path: &listed }));
+    let (sample, listing) = measure::served(pid, || {
+        server.tool(
+            "list_dir",
+            Listing {
+                path: &listed,
+                limit: 10_000,
+            },
+        )
+    });
     out.push(measured(
         "mcp/list-dir",
         "list_dir of 10,000 entries",
@@ -374,15 +384,21 @@ fn session(
         sample,
         "queued".into(),
     ));
-    let job: u64 = queued
+    let job = queued
         .split_whitespace()
         .nth(1)
-        .and_then(|id| id.parse().ok())
         .ok_or_else(|| format!("copy replied {queued:?}"))?;
-    // What an agent does next: ask until the job ends.
+    // What an agent does next: wait for the job to end, asking again if a
+    // wait runs out first.
     let (polled, status) = measure::served(pid, || -> Result<String, String> {
         loop {
-            let status = server.tool("job_status", Job { job })?;
+            let status = server.tool(
+                "job_status",
+                Job {
+                    job,
+                    wait_seconds: 60,
+                },
+            )?;
             if !status.contains(": queued,") && !status.contains(": running,") {
                 return Ok(status);
             }
@@ -395,7 +411,7 @@ fn session(
         .count();
     out.push(measured(
         "mcp/copy-done",
-        "copy of 1,000 files, then job_status until it ends",
+        "copy of 1,000 files, then job_status waiting until it ends",
         sample_done,
         format!(
             "{}, {copied_count} files",

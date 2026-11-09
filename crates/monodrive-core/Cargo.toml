@@ -43,6 +43,8 @@ caseless = "0.2"
 blake3 = "1.8"
 # Orders releases, whose nightly numbers compare as numbers.
 semver = "1"
+# Generates the MCP tools' schemas from the types that decode their arguments.
+schemars = "1"
 
 [dev-dependencies]
 tempfile = "3"
