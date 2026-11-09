@@ -58,6 +58,9 @@
 //! review of the folder. `preview.png` is the preview of the last entry, and
 //! `preview-edit.png` its tools.
 //!
+//! `downloads.png` and `downloads-grid.png` show a file downloading and a
+//! folder whose download failed.
+//!
 //! All of it twice, once dark in `target/snapshots` and once light in
 //! `target/snapshots/light`.
 
@@ -77,13 +80,14 @@ use monodrive::browser::{
     ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
+use monodrive::downloads;
 use monodrive::native::{self, Native, SizeDone};
 use monodrive::onboarding::{Onboarding, Setup, Step};
 use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
 use monodrive::session::{PaneState, Shows, StopState, TabState, WindowState};
 use monodrive::updates::{self, Updates};
 use monodrive_core::apps::App as MacApp;
-use monodrive_core::cloud::{Availability, CloudFolder};
+use monodrive_core::cloud::{Asked, Availability, CloudFolder, Progress};
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::index::{Found, Hit, Index, LineMatch};
 use monodrive_core::info::{self, Info};
@@ -482,7 +486,41 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     shoot_drags(&mut cx, out, folder, &base)?;
     shoot_batch_rename(&mut cx, out, folder, &base)?;
     shoot_inspector(&mut cx, out, folder, &base)?;
-    shoot_overview(&mut cx, out, folder, &base)
+    shoot_overview(&mut cx, out, folder, &base)?;
+    shoot_downloads(&mut cx, out, made_up, &base)
+}
+
+/// `downloads.png` and `downloads-grid.png`: Brief.pdf downloading and the
+/// Invoices folder's download failed, from the made-up macOS. Last, since
+/// those stay on their way for every window after.
+fn shoot_downloads(
+    cx: &mut Cx,
+    out: &Path,
+    made_up: &Path,
+    base: &Preferences,
+) -> gpui::Result<()> {
+    let paths = vec![made_up.join("Brief.pdf"), made_up.join("Invoices")];
+    cx.update(|cx| {
+        downloads::get(cx).update(cx, |downloads, cx| {
+            downloads.download(paths, std::rc::Rc::new(|_, _, _| {}), cx)
+        })
+    });
+    for (name, view) in [("downloads", View::List), ("downloads-grid", View::Grid)] {
+        cx.update(|cx| {
+            cx.set_global(Preferences {
+                view,
+                ..base.clone()
+            })
+        });
+        let window = open(cx, made_up)?;
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, _| window.refresh())?;
+        }
+        cx.run_until_parked();
+        save(cx, window, out, name)?;
+    }
+    Ok(())
 }
 
 /// The Overview, from saved totals on a made-up Mac: `overview-low.png` under
@@ -1290,6 +1328,23 @@ impl Native for MadeUp {
 
     fn installed(&self, _: &str) -> bool {
         true
+    }
+
+    /// Every download runs, except a folder's, which fails as a lost
+    /// connection would.
+    fn download(&self, path: &Path) -> Result<Asked, String> {
+        match path.is_dir() {
+            true => Err("The Internet connection appears to be offline.".into()),
+            false => Ok(Asked::Requested),
+        }
+    }
+
+    fn remove_download(&self, _: &Path) -> Result<Asked, String> {
+        Ok(Asked::Requested)
+    }
+
+    fn download_progress(&self, _: &Path) -> Progress {
+        Progress::Running
     }
 }
 

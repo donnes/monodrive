@@ -11,11 +11,12 @@ mod zoom;
 pub use tools::Saved;
 
 use crate::browser::{OpenSelected, QuickLook};
+use crate::downloads::{self, Changed, State};
 use crate::native_view::Host;
-use crate::theme::{self, ButtonLook, content, text_button};
+use crate::theme::{self, ButtonLook, content, danger, text_button};
 use gpui::{
     App, Asset, Bounds, Context, FontWeight, HighlightStyle, InteractiveText, ListAlignment,
-    ListState, MouseButton, Pixels, RenderImage, SharedString, StyledText, Task,
+    ListState, MouseButton, Pixels, RenderImage, SharedString, StyledText, Subscription, Task,
     UniformListScrollHandle, Window, canvas, div, list, prelude::*, px, uniform_list,
 };
 use html::Page;
@@ -87,6 +88,9 @@ enum Body {
     Loading,
     /// Something to say in place of the file.
     Notice(String),
+    /// A cloud placeholder, which only downloads when asked: arrowing through
+    /// a cloud folder mustn't fetch every file it passes.
+    NotDownloaded,
     Text {
         lines: Arc<Vec<Line>>,
         cut: bool,
@@ -156,6 +160,8 @@ pub struct PreviewView {
     /// has one, and mustn't repaint forever.
     loading_ticks: u32,
     _reading: Option<Task<()>>,
+    /// Hears downloads, once a placeholder has been shown.
+    _downloads: Option<[Subscription; 2]>,
 }
 
 impl Default for PreviewView {
@@ -193,6 +199,7 @@ impl PreviewView {
             _ticking: None,
             loading_ticks: 0,
             _reading: None,
+            _downloads: None,
         }
     }
 
@@ -293,6 +300,9 @@ impl PreviewView {
             _ => None,
         };
         self.body = body;
+        if matches!(self.body, Body::NotDownloaded) && self._downloads.is_none() {
+            self.follow_downloads(cx);
+        }
         // A save that replaced this file waited for it, and the selection may
         // have moved meanwhile.
         if let Some((path, folder, position)) = self.wanted.take() {
@@ -322,6 +332,82 @@ impl PreviewView {
 
     /// Gives back what's held: the picture in memory and on the GPU, and the
     /// native view.
+    /// Repaints as downloads start and end, and shows the file once it's here.
+    fn follow_downloads(&mut self, cx: &mut Context<Self>) {
+        let downloads = downloads::get(cx);
+        self._downloads = Some([
+            cx.observe(&downloads, |_, _, cx| cx.notify()),
+            cx.subscribe(&downloads, |this, _, Changed(path), cx| {
+                if *path == this.path && matches!(this.body, Body::NotDownloaded) {
+                    this.load(path.clone(), this.folder, this.position, cx);
+                }
+            }),
+        ]);
+    }
+
+    /// Says the file isn't here, with Download, then what the download is
+    /// doing: "Downloading…", or why it failed, with Try Again.
+    fn not_downloaded(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let downloads = downloads::get(cx);
+        let state = downloads.read(cx).state(&self.path).cloned();
+        let name = self
+            .path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        let (said, ink, label, look) = match &state {
+            Some(State::Running) => (
+                "Downloading…".to_string(),
+                content(0.65),
+                "Downloading…",
+                ButtonLook::Disabled,
+            ),
+            Some(State::Failed(why)) => (why.clone(), danger(), "Try Again", ButtonLook::Caution),
+            None => (
+                "Download it to preview it.".to_string(),
+                content(0.65),
+                "Download",
+                ButtonLook::Primary,
+            ),
+        };
+        let path = self.path.clone();
+        div()
+            .debug_selector(|| "preview-notice".into())
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_6()
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_TITLE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(format!("\"{name}\" isn't downloaded.")),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_BODY))
+                    .text_color(ink)
+                    .text_center()
+                    .child(said),
+            )
+            .child(
+                text_button("preview-download", label, look)
+                    .debug_selector(|| "preview-download".into())
+                    .mt_2()
+                    .when(look != ButtonLook::Disabled, |d| {
+                        d.on_click(move |_, _, cx| {
+                            let path = path.clone();
+                            downloads.update(cx, |downloads, cx| {
+                                downloads.download(vec![path], Rc::new(|_, _, _| {}), cx)
+                            });
+                        })
+                    }),
+            )
+            .into_any_element()
+    }
+
     pub fn release(&mut self, cx: &mut App) {
         if let Body::Picture { image, .. } = std::mem::replace(&mut self.body, Body::Loading) {
             give_back_image(image, cx);
@@ -1053,7 +1139,7 @@ fn set_item(view: &Retained<QLPreviewView>, path: &Path, folder: bool) {
 fn read(path: &Path, light: bool, side: u32) -> Body {
     let notice = |why: &str| Body::Notice(why.to_string());
     match preview::classify(path) {
-        Kind::NotDownloaded => notice("This file isn't downloaded. Download it to preview it."),
+        Kind::NotDownloaded => Body::NotDownloaded,
         Kind::NeedsAccess => notice("Needs Full Disk Access to preview."),
         Kind::Unplayable => notice("macOS can't play this format. Use Open With."),
         Kind::System => Body::System,
@@ -1382,6 +1468,7 @@ impl Render for PreviewView {
         let content_view: gpui::AnyElement = match &self.body {
             Body::Loading => div().size_full().into_any_element(),
             Body::Notice(why) => notice(why.clone()),
+            Body::NotDownloaded => self.not_downloaded(cx),
             Body::Text { lines, cut } => {
                 let cut = *cut;
                 let rows = text_rows(lines.clone(), &self.scroll);

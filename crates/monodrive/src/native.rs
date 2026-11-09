@@ -5,6 +5,7 @@
 use crate::workspace;
 use gpui::{App, Global};
 use monodrive_core::apps::{self, App as MacApp};
+use monodrive_core::cloud::{self, Asked, Progress};
 use monodrive_core::info::{self, Info};
 use monodrive_core::sizes::{self, FolderSize, Sizes};
 use std::collections::HashSet;
@@ -41,6 +42,14 @@ pub trait Native: Send + Sync {
     /// Whether an app with this bundle identifier is installed. Call it off
     /// the UI thread.
     fn installed(&self, bundle_id: &str) -> bool;
+    /// Asks iCloud Drive or a File Provider app to download `path`. Call it
+    /// off the UI thread.
+    fn download(&self, path: &Path) -> Result<Asked, String>;
+    /// Asks the provider to keep only a placeholder of `path`. Call it off the
+    /// UI thread.
+    fn remove_download(&self, path: &Path) -> Result<Asked, String>;
+    /// Where a download of `path` stands. Call it off the UI thread.
+    fn download_progress(&self, path: &Path) -> Progress;
 }
 
 /// The real thing.
@@ -105,6 +114,18 @@ impl Native for System {
 
     fn installed(&self, bundle_id: &str) -> bool {
         apps::with_bundle_id(bundle_id).is_some()
+    }
+
+    fn download(&self, path: &Path) -> Result<Asked, String> {
+        cloud::download(path)
+    }
+
+    fn remove_download(&self, path: &Path) -> Result<Asked, String> {
+        cloud::remove_download(path)
+    }
+
+    fn download_progress(&self, path: &Path) -> Progress {
+        cloud::progress(path)
     }
 }
 
@@ -230,6 +251,15 @@ mod tests {
         fn choose_app(&self, _: Box<dyn FnOnce(Option<PathBuf>)>) {}
         fn installed(&self, _: &str) -> bool {
             true
+        }
+        fn download(&self, _: &Path) -> Result<Asked, String> {
+            Err("unused".into())
+        }
+        fn remove_download(&self, _: &Path) -> Result<Asked, String> {
+            Err("unused".into())
+        }
+        fn download_progress(&self, _: &Path) -> Progress {
+            Progress::Failed("unused".into())
         }
     }
 

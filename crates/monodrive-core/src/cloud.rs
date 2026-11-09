@@ -6,14 +6,13 @@
 //! macOS through NSFileManager. docs/cloud.md records what reads what.
 
 use crate::entries::{Entry, Kind};
-use crate::ops::{self, Origin};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{msg_send, sel};
 use objc2_foundation::{
     NSArray, NSError, NSFileManager, NSNumber, NSString, NSURL, NSURLIsUbiquitousItemKey,
-    NSURLResourceKey, NSURLUbiquitousItemHasUnresolvedConflictsKey,
-    NSURLUbiquitousItemIsUploadedKey,
+    NSURLResourceKey, NSURLUbiquitousItemDownloadingErrorKey,
+    NSURLUbiquitousItemHasUnresolvedConflictsKey, NSURLUbiquitousItemIsUploadedKey,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -194,9 +193,17 @@ pub fn partly_downloaded(listed: &[Entry]) -> HashSet<PathBuf> {
         .collect()
 }
 
+const NOT_DOWNLOADED: &str = " isn't downloaded. Download it first.";
+
 /// Why `path` isn't read: reading it would download it unseen.
 pub fn not_downloaded(path: &Path) -> String {
-    format!("{} isn't downloaded. Download it first.", path.display())
+    format!("{}{NOT_DOWNLOADED}", path.display())
+}
+
+/// The path a refusal from `not_downloaded` names, so whoever shows it can
+/// offer to download it.
+pub fn refused(why: &str) -> Option<PathBuf> {
+    why.strip_suffix(NOT_DOWNLOADED).map(PathBuf::from)
 }
 
 /// Refuses to open `path` for reading when what it leads to is a
@@ -299,8 +306,7 @@ pub enum Asked {
 
 /// Asks iCloud Drive or the File Provider app holding `path` to download
 /// it. A folder's request covers what the provider puts under it.
-pub fn download(path: &Path, origin: &Origin, ops: &ops::Client) -> Result<Asked, String> {
-    allowed(origin, ops)?;
+pub fn download(path: &Path) -> Result<Asked, String> {
     let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let local = Availability::of(&meta).is_local();
     if local && !meta.is_dir() {
@@ -329,8 +335,7 @@ pub fn download(path: &Path, origin: &Origin, ops: &ops::Client) -> Result<Asked
 /// Asks the provider holding `path` to remove its downloaded copy and keep
 /// a placeholder, as Finder's Remove Download does. Refuses an item that
 /// isn't uploaded yet or has conflicts, whose only copy may be here.
-pub fn remove_download(path: &Path, origin: &Origin, ops: &ops::Client) -> Result<Asked, String> {
-    allowed(origin, ops)?;
+pub fn remove_download(path: &Path) -> Result<Asked, String> {
     let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !Availability::of(&meta).is_local() && !meta.is_dir() {
         return Ok(Asked::Unneeded);
@@ -366,14 +371,51 @@ pub fn remove_download(path: &Path, origin: &Origin, ops: &ops::Client) -> Resul
     })
 }
 
-fn allowed(origin: &Origin, ops: &ops::Client) -> Result<(), String> {
-    if matches!(origin, Origin::Agent { .. }) && !ops.agents_change_files() {
-        return Err(
-            "Agents can't download or remove downloads: Let agents change files is off in Monodrive's Agents settings."
-                .into(),
-        );
+/// Whether opening `path`, or where it leads, would read something that
+/// isn't downloaded: it's a placeholder, or a folder, such as a document
+/// package, that holds one. Reads the disk.
+pub fn needs_download(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| {
+        !Availability::of(&meta).is_local()
+            || (meta.is_dir() && fully_downloaded(path) == Some(false))
+    })
+}
+
+/// Where a download asked for with `download` stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// On its way, or not started yet.
+    Running,
+    Done,
+    /// The provider's reason, or why `path` can't be read any more.
+    Failed(String),
+}
+
+/// Where the download of `path` stands. A folder is done once fileproviderd
+/// says nothing under it is a placeholder, or, where it doesn't say, once the
+/// folder itself is here. Until then the provider's last error, if any, is a
+/// failure: macOS doesn't retry a download on its own.
+pub fn progress(path: &Path) -> Progress {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => return Progress::Failed(format!("{}: {e}", path.display())),
+    };
+    if Availability::of(&meta).is_local()
+        && (!meta.is_dir() || fully_downloaded(path) != Some(false))
+    {
+        return Progress::Done;
     }
-    Ok(())
+    with_url(path, |url| {
+        // SAFETY: Foundation's constant key.
+        let key = unsafe { NSURLUbiquitousItemDownloadingErrorKey };
+        url.resourceValuesForKeys_error(&NSArray::from_slice(&[key]))
+            .ok()
+            .and_then(|values| values.objectForKey(key))
+            .and_then(|e| e.downcast::<NSError>().ok())
+            .map_or(Progress::Running, |e| {
+                Progress::Failed(e.localizedDescription().to_string())
+            })
+    })
 }
 
 fn not_in_cloud(path: &Path) -> String {
@@ -472,6 +514,19 @@ mod tests {
         assert_eq!(fully_downloaded(dir.path()), None);
         let listed = crate::entries::list_dir(dir.path(), false, Default::default()).unwrap();
         assert_eq!(partly_downloaded(&listed), HashSet::new());
+        assert!(!needs_download(&dir.path().join("a.txt")));
+        assert!(!needs_download(&dir.path().join("sub")));
+        // What's here is done; what's gone fails, rather than waiting forever.
+        assert_eq!(progress(&dir.path().join("a.txt")), Progress::Done);
+        assert_eq!(progress(&dir.path().join("sub")), Progress::Done);
+        let gone = dir.path().join("gone.txt");
+        assert_eq!(
+            progress(&gone),
+            Progress::Failed(format!(
+                "{}: No such file or directory (os error 2)",
+                gone.display()
+            ))
+        );
     }
 
     #[test]
@@ -482,6 +537,11 @@ mod tests {
         assert_eq!(readable(path, Availability::Downloading), refused);
         assert_eq!(readable(path, Availability::Unknown), refused);
         assert_eq!(readable(path, Availability::Local), Ok(()));
+        assert_eq!(
+            super::refused(&not_downloaded(path)),
+            Some(path.to_path_buf())
+        );
+        assert_eq!(super::refused("/x/photo.jpg: Permission denied"), None);
         let stopped = std::io::Error::from_raw_os_error(libc::EDEADLK);
         assert_eq!(Err(read_error(path, &stopped)), refused);
         let gone = std::io::Error::from_raw_os_error(libc::ENOENT);

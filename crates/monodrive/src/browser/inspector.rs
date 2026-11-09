@@ -7,21 +7,21 @@
 
 use super::pane::{Pane, format_date, format_size, level_name, real};
 use super::tabs::{CARD_GAP, NARROWEST_PANE};
-use super::{Browser, GetInfo, HideInspector, OpenWith, format_bytes, with_owner};
+use super::{Browser, GetInfo, HideInspector, OpenWith, format_bytes};
+use crate::downloads::{self, Changed, State};
 use crate::file_icons;
 use crate::native::native;
 use crate::preferences::{self, Preferences};
-use crate::theme::{self, ButtonLook, content, danger, icon, icon_button, text_button};
+use crate::theme::{self, ButtonLook, content, danger, icon, icon_button};
 use crate::thumbnails::{self, Thumb};
 use chrono::Local;
 use gpui::{
     AnyElement, App, Context, CursorStyle, Div, Entity, EntityId, FontWeight, MouseButton,
     RenderImage, Role, ScrollHandle, Task, Window, div, prelude::*, px,
 };
-use monodrive_core::cloud::{self, Availability};
+use monodrive_core::cloud::Availability;
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::info::Info;
-use monodrive_core::ops::Origin;
 use monodrive_core::paths;
 use monodrive_core::sizes::FolderSize;
 use std::collections::BTreeMap;
@@ -734,6 +734,7 @@ impl Browser {
                             .child(format!("{count} items"))
                             .into_any_element(),
                         kinds.clone(),
+                        None,
                     ),
                     section("file", "Details"),
                     fact("Size", size),
@@ -852,8 +853,11 @@ impl Browser {
         let kind = known
             .as_ref()
             .map_or_else(|| entry.kind_label(), |info| info.kind_name.clone());
+        let chip = known
+            .as_ref()
+            .and_then(|info| self.cloud_chip(info, pane, cx));
         let mut rows = vec![
-            header(art, name, kind.clone()),
+            header(art, name, kind.clone(), chip),
             section("file", "Details"),
             fact("Size", self.size_text(entry)),
             fact("Kind", kind),
@@ -892,7 +896,7 @@ impl Browser {
             rows.push(self.where_row(parent.to_path_buf(), Some(entry.path.clone()), pane, cx));
         }
         if let Some(info) = &known {
-            self.storage_rows(info, &mut rows, cx);
+            self.storage_rows(info, &mut rows);
         }
         match &self.inspector.read {
             Read::Gated => rows.push(note("Needs Full Disk Access to read more.", content(0.65))),
@@ -1000,7 +1004,96 @@ impl Browser {
             .into_any_element()
     }
 
-    fn storage_rows(&self, info: &Info, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
+    /// Where the item's contents are, by its kind, as a button that
+    /// downloads what isn't here and removes the download of what is. Only
+    /// for what iCloud Drive or a File Provider app keeps, and not one of
+    /// their own folders.
+    fn cloud_chip(
+        &self,
+        info: &Info,
+        pane: &Entity<Pane>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !info.in_cloud && info.availability.is_local() {
+            return None;
+        }
+        let path = info.path.clone();
+        let state = pane.read(cx).downloads.read(cx).state(&path).cloned();
+        let (glyph, said, look, does): (_, _, _, Option<(&'static str, bool)>) =
+            match (&state, info.availability) {
+                (Some(State::Running), _) | (None, Availability::Downloading) => (
+                    "cloud-downloading",
+                    "Downloading…",
+                    ButtonLook::Disabled,
+                    None,
+                ),
+                (Some(State::Failed(_)), _) => (
+                    "cloud-alert",
+                    "Couldn't download",
+                    ButtonLook::Caution,
+                    Some(("Try Again", true)),
+                ),
+                (None, Availability::Placeholder) => (
+                    "cloud-download",
+                    "In the cloud",
+                    ButtonLook::Secondary,
+                    Some(("Download", true)),
+                ),
+                _ if info.partly_downloaded => (
+                    "cloud-download",
+                    "Partly in the cloud",
+                    ButtonLook::Secondary,
+                    Some(("Download", true)),
+                ),
+                _ if self.sidebar.cloud.iter().any(|c| c.path == path) => return None,
+                _ => (
+                    "cloud",
+                    "Downloaded",
+                    ButtonLook::Secondary,
+                    Some(("Remove Download", false)),
+                ),
+            };
+        let ink = match look {
+            ButtonLook::Caution => danger(),
+            ButtonLook::Disabled => content(0.3),
+            _ => content(0.55),
+        };
+        let chip = theme::button("inspector-cloud", look)
+            .debug_selector(|| "inspector-cloud".into())
+            .aria_label(does.map_or(said, |(label, _)| label))
+            .child(icon(glyph, 12.).text_color(ink))
+            .child(said);
+        let Some((label, download)) = does else {
+            return Some(chip.into_any_element());
+        };
+        let pane = pane.clone();
+        Some(
+            theme::tip(chip, label)
+                .on_click(move |_, _, cx| {
+                    let paths = vec![path.clone()];
+                    pane.update(cx, |pane, cx| match download {
+                        true => pane.download(paths, cx),
+                        false => pane.remove_downloads_of(paths, cx),
+                    });
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Reads again what the inspector shows when a download changes it, and
+    /// repaints its chip as downloads start and end.
+    pub(super) fn follow_downloads(cx: &mut Context<Self>) {
+        let downloads = downloads::get(cx);
+        cx.observe(&downloads, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&downloads, |this, _, Changed(path), cx| {
+            if this.shows(path) {
+                this.schedule_read(Duration::ZERO, cx);
+            }
+        })
+        .detach();
+    }
+
+    fn storage_rows(&self, info: &Info, rows: &mut Vec<AnyElement>) {
         if let Some(volume) = &info.volume {
             rows.push(fact("Volume", volume.name.clone()));
         }
@@ -1021,56 +1114,15 @@ impl Browser {
         if info.package {
             rows.push(fact("Package", "Yes".to_string()));
         }
-        if info.in_cloud || !info.availability.is_local() {
-            let state = match info.availability {
-                Availability::Placeholder => "In the cloud",
-                Availability::Downloading => "Downloading…",
-                _ if info.partly_downloaded => "Partly in the cloud",
-                _ => "On this Mac",
-            };
-            rows.push(fact("Availability", state.to_string()));
-        }
-        if info.availability == Availability::Placeholder {
-            let path = info.path.clone();
-            let asked = path.clone();
-            rows.push(
-                div()
-                    .flex()
-                    .justify_end()
-                    .py(px(4.))
-                    .child(
-                        text_button("inspector-download", "Download", ButtonLook::Secondary)
-                            .debug_selector(|| "inspector-download".into())
-                            .on_click(cx.listener(move |_, _, window, cx| {
-                                let path = path.clone();
-                                with_owner(
-                                    window,
-                                    cx,
-                                    move |owner| cloud::download(&path, &Origin::Window, owner),
-                                    {
-                                        let asked = asked.clone();
-                                        move |this: &mut Self, done, _, cx| match done {
-                                            Ok(_) if this.shows(&asked) => {
-                                                this.schedule_read(Duration::ZERO, cx)
-                                            }
-                                            Ok(_) => {}
-                                            Err(why) => this.toast(why, true, None, cx),
-                                        }
-                                    },
-                                );
-                            })),
-                    )
-                    .into_any_element(),
-            );
-        }
         if let Some(why) = &info.download_error {
             rows.push(note(why.clone(), danger()));
         }
     }
 }
 
-/// The picture, the name and the kind, centered at the top.
-fn header(art: AnyElement, name: AnyElement, kind: String) -> AnyElement {
+/// The picture, the name and the kind, centered at the top, and the cloud
+/// chip after the kind.
+fn header(art: AnyElement, name: AnyElement, kind: String, chip: Option<AnyElement>) -> AnyElement {
     div()
         .w_full()
         .pt(px(24.))
@@ -1091,10 +1143,19 @@ fn header(art: AnyElement, name: AnyElement, kind: String) -> AnyElement {
         .child(
             div()
                 .max_w_full()
-                .text_center()
-                .text_size(px(theme::TEXT_SMALL))
-                .text_color(content(0.65))
-                .child(kind),
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_center()
+                        .text_size(px(theme::TEXT_SMALL))
+                        .text_color(content(0.65))
+                        .child(kind),
+                )
+                .children(chip),
         )
         .into_any_element()
 }

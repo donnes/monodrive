@@ -6,18 +6,21 @@
 //! going or the popover is open.
 
 use crate::browser::{Operations, format_bytes, lock, short_reason};
+use crate::downloads::{self, State as DownloadState};
 use crate::menu;
 use crate::theme::{
     self, ButtonLook, accent, circle_button, content, danger, progress_fill, progress_track,
     row_icon_button, text_button,
 };
 use gpui::{
-    App, Context, ElementId, EventEmitter, Hsla, KeyBinding, Role, Task, actions, div, prelude::*,
-    px,
+    App, Context, ElementId, EventEmitter, Hsla, KeyBinding, Role, Subscription, Task, actions,
+    div, prelude::*, px,
 };
+use monodrive_core::cloud;
 use monodrive_core::ops::{Conflict, Done, Job, Origin, Request, State};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 actions!(jobs, [Dismiss]);
@@ -62,6 +65,8 @@ pub struct Jobs {
     /// The owner is asked again each `CHECK`.
     watching: bool,
     watch: Option<Task<()>>,
+    /// Repaints a Download button as its download starts and ends.
+    _downloads: Option<Subscription>,
 }
 
 impl EventEmitter<JobsEvent> for Jobs {}
@@ -261,10 +266,50 @@ impl Jobs {
         .detach();
     }
 
-    fn row(&self, job: &Job, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Downloads `path`, then runs job `id` again, or says why it couldn't.
+    fn download_then_retry(&mut self, path: PathBuf, id: u64, ours: bool, cx: &mut Context<Self>) {
+        let jobs = cx.weak_entity();
+        let then = Rc::new(move |_: &Path, how: Result<(), String>, cx: &mut App| {
+            let _ = jobs.update(cx, |this, cx| match how {
+                Ok(()) => this.ask(
+                    Request::Retry {
+                        job: id,
+                        conflict: None,
+                    },
+                    ours,
+                    cx,
+                ),
+                Err(why) => {
+                    this.error = Some(why);
+                    cx.notify();
+                }
+            });
+        });
+        downloads::get(cx).update(cx, |downloads, cx| downloads.download(vec![path], then, cx));
+    }
+
+    fn row(&mut self, job: &Job, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (id, run) = (job.id, job.run);
         let ours = job.origin == Origin::Window;
         let answer = |conflict| Request::Retry { job: id, conflict };
+        // A copy refused because a source isn't downloaded offers to
+        // download it, and runs again once it's here.
+        let refused = match job.state {
+            State::Failed | State::Interrupted => {
+                job.tasks.iter().find_map(|task| match &task.done {
+                    Some(Done::Failed(why)) => cloud::refused(why),
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        let downloads = downloads::get(cx);
+        if self._downloads.is_none() {
+            self._downloads = Some(cx.observe(&downloads, |_, _, cx| cx.notify()));
+        }
+        let downloading = refused
+            .as_ref()
+            .is_some_and(|path| downloads.read(cx).state(path) == Some(&DownloadState::Running));
         let buttons: Vec<(&'static str, Request)> = match job.state {
             State::Waiting => vec![
                 ("Skip", answer(Some(Conflict::Skip))),
@@ -376,19 +421,44 @@ impl Jobs {
                     .child(text)
             }))
             .when(!buttons.is_empty(), |d| {
-                d.child(div().flex().gap_1().children(buttons.into_iter().map(
-                    |(label, request)| {
-                        text_button(
-                            ElementId::NamedInteger(label.into(), id),
-                            label,
-                            ButtonLook::Secondary,
-                        )
-                        .debug_selector(move || format!("job-{label}"))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.ask(request.clone(), ours, cx)),
-                        )
-                    },
-                )))
+                let download = refused.map(|path| {
+                    let look = match downloading {
+                        true => ButtonLook::Disabled,
+                        false => ButtonLook::Secondary,
+                    };
+                    let label = match downloading {
+                        true => "Downloading…",
+                        false => "Download",
+                    };
+                    text_button(
+                        ElementId::NamedInteger("job-download".into(), id),
+                        label,
+                        look,
+                    )
+                    .debug_selector(|| "job-download".into())
+                    .when(!downloading, |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| {
+                            this.download_then_retry(path.clone(), id, ours, cx)
+                        }))
+                    })
+                });
+                d.child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .children(download)
+                        .children(buttons.into_iter().map(|(label, request)| {
+                            text_button(
+                                ElementId::NamedInteger(label.into(), id),
+                                label,
+                                ButtonLook::Secondary,
+                            )
+                            .debug_selector(move || format!("job-{label}"))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.ask(request.clone(), ours, cx),
+                            ))
+                        })),
+                )
             })
     }
 }

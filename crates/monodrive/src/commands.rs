@@ -9,15 +9,15 @@
 
 use crate::browser::{
     AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab,
-    ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Duplicate, EditFavorites, EditPreview,
-    Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications, GoComputer,
-    GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
-    GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome,
-    GoOverview, GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane,
+    ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Download, Duplicate, EditFavorites,
+    EditPreview, Eject, EmptyTrash, EnclosingFolder, FocusSearch, Forward, GetInfo, GoApplications,
+    GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3,
+    GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10,
+    GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, HideInspector, MoveHere, MoveToOtherPane,
     MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab,
     OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith, OrganizeFolder,
-    PreviousTab, PutBack, QuickLook, Redo, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder,
-    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
+    PreviousTab, PutBack, QuickLook, Redo, RemoveDownload, RemoveFromSidebar, Rename, ResetZoom,
+    RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
     ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
     SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsGrid,
     ViewAsList, ZoomIn, ZoomOut,
@@ -258,6 +258,18 @@ pub fn all() -> Vec<Command> {
         on(
             SELECTION,
             command("Open With", File, &[], BROWSER, || Box::new(OpenWith)),
+        ),
+        // Each is offered only where it would run, as Finder does; neither has
+        // a key there.
+        on(
+            SELECTION,
+            command("Download", File, &[], BROWSER, || Box::new(Download)),
+        ),
+        on(
+            SELECTION,
+            command("Remove Download", File, &[], BROWSER, || {
+                Box::new(RemoveDownload)
+            }),
         ),
         // ⌃⌘O, as Finder's.
         on(
@@ -1081,6 +1093,8 @@ mod tests {
             [
                 "Open ⌘↓",
                 "Open With",
+                "Download",
+                "Remove Download",
                 "Open in New Tab ⌃⌘O",
                 "Show Package Contents",
                 "Reveal in Finder",
@@ -1131,7 +1145,7 @@ mod tests {
         // New Folder with Selection is for several, after the ways to open.
         let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
         assert_eq!(
-            several[7..10],
+            several[9..12],
             [
                 "| New Folder with Selection ⌃⌘N",
                 "Rename ↩",

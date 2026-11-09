@@ -9,18 +9,20 @@ use super::organize::Review;
 use super::overview::OverviewPage;
 use super::searches::{CONTENT_SETTLE, Matches};
 use super::{
-    Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Duplicate, EditPreview,
-    Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
-    FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome,
-    GoOverview, GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash, NewFile, NewFolder,
-    NewFolderWithSelection, OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places,
-    PutBack, Redo, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
-    SearchContents, SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-    ShowContextMenu, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
-    SuggestNames, Undo, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
+    Back, CancelRename, ClearRecents, CommitRename, CopyPath, DeselectAll, Download, Duplicate,
+    EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious,
+    ExtendRight, FocusSearch, Forward, GoApplications, GoComputer, GoDesktop, GoDocuments,
+    GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, MoveHere, MoveToTrash,
+    NewFile, NewFolder, NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected,
+    OrganizeFolder, PageDown, PageUp, Places, PutBack, Redo, RemoveDownload, Rename,
+    RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder,
+    SelectFirst, SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowPackageContents,
+    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, Undo, ViewAsGrid, ViewAsList,
+    home, short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
+use crate::downloads::Downloads;
 use crate::feedback::{self, Sound};
 use crate::file_icons;
 use crate::jobs;
@@ -41,7 +43,7 @@ use gpui::{
     ScrollWheelEvent, Subscription, Task, TextOverflow, UniformListScrollHandle, Window, canvas,
     div, point, prelude::*, px, uniform_list,
 };
-use monodrive_core::cloud;
+use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::Index;
 use monodrive_core::info;
@@ -74,7 +76,7 @@ pub(super) enum PaneEvent {
     Toast {
         text: String,
         failed: bool,
-        undo: Option<u64>,
+        offer: Option<Offer>,
     },
     ClearToast,
     /// Follow this job of the pane's until it ends.
@@ -288,6 +290,10 @@ pub struct Pane {
     partly_downloaded: HashSet<PathBuf>,
     /// Asking macOS which folders those are. A new listing drops these.
     asking: Vec<Task<()>>,
+    /// What's downloading, for every pane.
+    pub(super) downloads: Entity<Downloads>,
+    /// Placeholders that open in their app once they're downloaded.
+    pub(super) open_after_download: HashSet<PathBuf>,
     /// The Overview, as last read.
     pub(super) overview: OverviewPage,
     backdrop: Entity<Backdrop>,
@@ -328,6 +334,7 @@ impl Pane {
         // Whatever moves the selection repaints, so the Trash's bar follows it.
         cx.observe_self(|this, cx| this.follow_trash_selection(cx))
             .detach();
+        let downloads = super::cloud::follow(cx);
         let prefs = cx.global::<Preferences>();
         let (grid_icon, show_hidden) = (prefs.grid_icon, prefs.show_hidden);
         let Opening {
@@ -395,6 +402,8 @@ impl Pane {
             missing: HashSet::new(),
             partly_downloaded: HashSet::new(),
             asking: Vec::new(),
+            downloads,
+            open_after_download: HashSet::new(),
             overview: OverviewPage::default(),
             backdrop: cx.new(|_| Backdrop::default()),
             chrome: Chrome::default(),
@@ -586,10 +595,14 @@ impl Pane {
         &mut self,
         text: String,
         failed: bool,
-        undo: Option<u64>,
+        offer: Option<Offer>,
         cx: &mut Context<Self>,
     ) {
-        cx.emit(PaneEvent::Toast { text, failed, undo });
+        cx.emit(PaneEvent::Toast {
+            text,
+            failed,
+            offer,
+        });
     }
 
     pub(super) fn folder(&self) -> &Path {
@@ -932,7 +945,7 @@ impl Pane {
 
     /// Whether `entry` gets the cloud badge: it, or something in it, isn't
     /// downloaded.
-    fn in_cloud(&self, entry: &Entry) -> bool {
+    pub(super) fn in_cloud(&self, entry: &Entry) -> bool {
         entry.availability == cloud::Availability::Placeholder
             || self.partly_downloaded.contains(&entry.path)
     }
@@ -1674,8 +1687,8 @@ impl Pane {
             .map(|entry| entry.path.clone())
             .collect();
         if files.len() <= OPEN_WITHOUT_ASKING {
-            for file in &files {
-                self.open_file(file, cx);
+            for file in files {
+                self.open_or_download(file, cx);
             }
             return;
         }
@@ -1689,13 +1702,45 @@ impl Pane {
         cx.spawn(async move |this, cx| {
             if answer.await == Ok(0) {
                 let _ = this.update(cx, |this, cx| {
-                    for file in &files {
-                        this.open_file(file, cx);
+                    for file in files {
+                        this.open_or_download(file, cx);
                     }
                 });
             }
         })
         .detach();
+    }
+
+    /// Opens the file or package `path` in its app, once it's downloaded if
+    /// it's a placeholder or holds one. What the listing can't say, such as a
+    /// search result's or where a link leads, the disk says off the UI
+    /// thread, and a link's target is what downloads.
+    fn open_or_download(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let listed = self.entries.iter().find(|entry| entry.path == path);
+        let needs = match listed.map(|entry| (entry.kind, entry.availability)) {
+            Some((Kind::Link, _)) | Some((_, cloud::Availability::Unknown)) | None => {
+                let asked = path.clone();
+                let target = cx.background_executor().spawn(async move {
+                    let target = std::fs::canonicalize(&asked).unwrap_or(asked);
+                    cloud::needs_download(&target).then_some(target)
+                });
+                return cx
+                    .spawn(async move |this, cx| {
+                        let target = target.await;
+                        let _ = this.update(cx, |this, cx| match target {
+                            Some(target) => this.download_and_open(target, cx),
+                            None => this.open_file(&path, cx),
+                        });
+                    })
+                    .detach();
+            }
+            Some((_, cloud::Availability::Placeholder)) => true,
+            _ => self.partly_downloaded.contains(&path),
+        };
+        match needs {
+            true => self.download_and_open(path, cx),
+            false => self.open_file(&path, cx),
+        }
     }
 
     pub(super) fn open(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1705,7 +1750,7 @@ impl Pane {
         let path = entry.path.clone();
         let kind = entry.kind;
         if !matches!(kind, Kind::Dir | Kind::Link) {
-            return self.open_file(&path, cx);
+            return self.open_or_download(path, cx);
         }
         // Whether it's a package, or where a link leads, is on the disk, maybe
         // a slow volume. A package launches its handler, as in Finder.
@@ -1728,7 +1773,7 @@ impl Pane {
                 if goes_in {
                     this.navigate(path, cx);
                 } else {
-                    this.open_file(&path, cx);
+                    this.open_or_download(path, cx);
                 }
             });
         });
@@ -1938,21 +1983,23 @@ impl Pane {
             Err(e) => return self.toast(e, true, None, cx),
         };
         if let Some(why) = outcome.failures().next() {
+            // A copy of what isn't downloaded is refused: offer to download it.
+            let download = cloud::refused(why).map(|path| Offer::Download("Download", vec![path]));
             let why = short_reason(why, [self.folder()]);
             let renamed = outcome.items.iter().filter(|i| i.result.is_ok()).count();
             if matches!(request, Request::RenameMany { .. }) && renamed > 0 {
                 // A batch isn't atomic: what it did rename can still go back.
                 let of = outcome.items.len();
                 let said = format!("Renamed {renamed} of {of} items. {why}");
-                self.toast(said, true, Some(outcome.op), cx);
+                self.toast(said, true, Some(Offer::Undo(outcome.op)), cx);
             } else {
-                self.toast(why, true, None, cx);
+                self.toast(why, true, download, cx);
             }
         } else if let Some(said) = said(&request, &outcome) {
             // Undo from the toast undoes this change or nothing.
             let changed = !outcome.items.is_empty();
-            let undo =
-                (changed && !matches!(request, Request::EmptyTrash { .. })).then_some(outcome.op);
+            let undo = (changed && !matches!(request, Request::EmptyTrash { .. }))
+                .then_some(Offer::Undo(outcome.op));
             self.toast(said, false, undo, cx);
             match &request {
                 Request::Trash { .. } if changed => feedback::sound(Sound::MoveToTrash, cx),
@@ -2632,16 +2679,17 @@ impl Pane {
                         };
                         let rename = self.rename_field(&entry.path, cell - 8., cx);
                         let grabs = !missing && rename.is_none();
-                        let badge = self.in_cloud(entry).then(|| {
-                            cloud_badge(
-                                GRID_BADGE,
-                                match (selected, active) {
-                                    (true, true) => on_accent(),
-                                    (true, false) => content(1.),
-                                    (false, _) => content(0.55),
-                                },
-                            )
-                        });
+                        let badge = self.cloud_badge(
+                            entry,
+                            ix,
+                            GRID_BADGE,
+                            match (selected, active) {
+                                (true, true) => on_accent(),
+                                (true, false) => content(1.),
+                                (false, _) => content(0.55),
+                            },
+                            cx,
+                        );
                         div()
                             .id(ix)
                             .role(gpui::Role::ListItem)
@@ -2857,16 +2905,17 @@ impl Pane {
                                                             .into_any_element()
                                                     }
                                                 })
-                                                .when(self.in_cloud(entry), |d| {
-                                                    d.child(cloud_badge(
-                                                        LIST_BADGE,
-                                                        if selected {
-                                                            selected_ink
-                                                        } else {
-                                                            content(0.55)
-                                                        },
-                                                    ))
-                                                }),
+                                                .children(self.cloud_badge(
+                                                    entry,
+                                                    ix,
+                                                    LIST_BADGE,
+                                                    if selected {
+                                                        selected_ink
+                                                    } else {
+                                                        content(0.55)
+                                                    },
+                                                    cx,
+                                                )),
                                         ),
                                 )
                                 .children(new.and_then(|new| {
@@ -3045,7 +3094,7 @@ pub(super) fn grid_name(
     name: &str,
     width: gpui::Pixels,
     size: gpui::Pixels,
-    badge: Option<gpui::Svg>,
+    badge: Option<gpui::AnyElement>,
     window: &Window,
 ) -> Vec<gpui::Div> {
     let line = |text: &str| {
@@ -3111,12 +3160,6 @@ pub(super) fn grid_name(
 /// name.
 const GRID_BADGE: f32 = 12.;
 const LIST_BADGE: f32 = 14.;
-
-/// The cloud after the name of an item that isn't all downloaded, as Finder
-/// shows it.
-fn cloud_badge(side: f32, ink: gpui::Hsla) -> gpui::Svg {
-    icon("cloud-download", side).text_color(ink)
-}
 
 /// The extension a cut name still shows. Past this many characters, or with
 /// a space, what follows the last dot is just more name, as in
@@ -3502,8 +3545,16 @@ impl Pane {
 
     /// The commands that act on this pane wherever the keys are in the window,
     /// so the window puts them on its root for the pane they're meant for.
-    pub(super) fn commands(&mut self, root: Div, sheet: bool, cx: &mut Context<Self>) -> Div {
+    pub(super) fn commands(
+        &mut self,
+        root: Div,
+        sheet: bool,
+        cloud: &[CloudFolder],
+        cx: &mut Context<Self>,
+    ) -> Div {
         let package = self.package().is_some();
+        let download = self.can_download(cx);
+        let remove_download = !self.removable(cloud).is_empty();
         // Nothing new goes in search results, Recents or the Trash.
         let can_make_here = self.takes_files(cx);
         let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
@@ -3581,6 +3632,16 @@ impl Pane {
                 .when(package, |d| {
                     d.on_action(cx.listener(|this, _: &ShowPackageContents, _, cx| {
                         this.show_package_contents(cx)
+                    }))
+                })
+                .when(download, |d| {
+                    d.on_action(cx.listener(|this, _: &Download, _, cx| this.download_selected(cx)))
+                })
+                .when(remove_download, |d| {
+                    let cloud = cloud.to_vec();
+                    d.on_action(cx.listener(move |this, _: &RemoveDownload, _, cx| {
+                        let paths = this.removable(&cloud);
+                        this.remove_downloads_of(paths, cx)
                     }))
                 })
         })

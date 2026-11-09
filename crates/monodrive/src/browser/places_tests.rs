@@ -34,7 +34,7 @@ pub(super) struct Fake {
     /// What the next mount answers.
     mounted: Mutex<Option<Result<PathBuf, String>>>,
     pub(super) opened: Mutex<Vec<PathBuf>>,
-    cloud: Mutex<Vec<CloudFolder>>,
+    pub(super) cloud: Mutex<Vec<CloudFolder>>,
     /// What the index finds, whatever's asked.
     files: Mutex<Vec<Entry>>,
     /// The paths whose device was asked for, in order.
@@ -2322,7 +2322,7 @@ fn suggestions_show_when_the_disk_is_low_and_their_button_can_be_undone(cx: &mut
         Some(("Moved \"pip\" to the Trash".into(), false, true))
     );
     assert!(!on_screen(cx, "overview-clean"), "its proof is gone");
-    click(cx, "toast-undo");
+    click(cx, "toast-offer");
     assert!(cache.join("wheel").exists());
     release(owned, cx);
 }

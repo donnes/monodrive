@@ -1408,7 +1408,7 @@ pub(super) fn toast(
 ) -> Option<(String, bool, bool)> {
     browser.read_with(cx, |browser, _| {
         let toast = browser.toast.as_ref()?;
-        Some((toast.text.clone(), toast.failed, toast.undo.is_some()))
+        Some((toast.text.clone(), toast.failed, toast.offer.is_some()))
     })
 }
 
@@ -1676,7 +1676,7 @@ fn duplicate_selects_the_copy_and_trash_undoes(cx: &mut TestAppContext) {
         Some(("Moved \"a copy.txt\" to the Trash".into(), false, true))
     );
     // The toast's Undo is the shared one.
-    click(cx, "toast-undo");
+    click(cx, "toast-offer");
     assert!(project.join("a copy.txt").exists());
     assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
     assert_eq!(toast(&browser, cx), None);

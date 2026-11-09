@@ -7,6 +7,7 @@ mod background;
 pub mod browser;
 mod commands;
 pub mod connect;
+pub mod downloads;
 mod empty_trash;
 mod feedback;
 pub mod file_icons;

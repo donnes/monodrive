@@ -6,7 +6,7 @@
 
 use super::pane::Pane;
 use super::sidebar::Places;
-use super::{ConnectToServer, EmptyTrash, Operations, lock, with_owner};
+use super::{ConnectToServer, EmptyTrash, Offer, Operations, lock, with_owner};
 use crate::theme::{self, ButtonLook, content, icon, row_icon_button, section_label, text_button};
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, MouseButton, Role, Task, Window, div, prelude::*, px,
@@ -228,7 +228,7 @@ impl Pane {
                         None => this.toast(
                             format!("Moved {name} to the Trash"),
                             false,
-                            Some(outcome.op),
+                            Some(Offer::Undo(outcome.op)),
                             cx,
                         ),
                     },
@@ -267,7 +267,7 @@ impl Pane {
                         None => this.toast(
                             format!("Moved {name} to the Trash"),
                             false,
-                            Some(outcome.op),
+                            Some(Offer::Undo(outcome.op)),
                             cx,
                         ),
                     },
@@ -284,15 +284,14 @@ impl Pane {
             return;
         };
         let name = quoted(&path);
-        with_owner(
-            window,
-            cx,
-            move |client| {
-                let asked = cloud::remove_download(&path, &Origin::Window, client)?;
-                overview::forget(&env, &path);
-                Ok(asked)
-            },
-            move |this, removed, _, cx| {
+        let removed = cx.background_executor().spawn(async move {
+            let asked = cloud::remove_download(&path)?;
+            overview::forget(&env, &path);
+            Ok::<_, String>(asked)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let removed = removed.await;
+            let _ = this.update(cx, |this, cx| {
                 match removed {
                     Ok(_) => {
                         this.toast(format!("Removing the download of {name}"), false, None, cx)
@@ -300,8 +299,9 @@ impl Pane {
                     Err(why) => this.toast(why, true, None, cx),
                 }
                 this.reread_overview(cx);
-            },
-        );
+            });
+        })
+        .detach();
     }
 
     /// Scans a mounted drive or share, which only ever happens on request, and
