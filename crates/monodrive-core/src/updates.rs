@@ -17,7 +17,7 @@ const RELEASES: &str = "https://api.github.com/repos/donnes/monodrive/releases?p
 const SIGNED_BY_US: &str =
     "=anchor apple generic and certificate leaf[subject.OU] = \"YNNZS92R87\"";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
     Stable,

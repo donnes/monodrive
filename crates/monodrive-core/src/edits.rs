@@ -49,7 +49,7 @@ fn line() -> f64 {
 }
 
 /// In pixels of the picture as earlier steps left it, from its top left.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -58,7 +58,7 @@ pub struct Rect {
 }
 
 /// One edit, applied to what the ones before it left.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Step {
     Crop {

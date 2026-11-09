@@ -1906,6 +1906,27 @@ fn copy_name(path: &Path) -> Option<PathBuf> {
 /// The Agents setting, read from the app's settings for each request so a
 /// change applies at once. A missing or unreadable file means the default,
 /// on, as the app reads it.
+/// Whether a copy of `from` into the folder `into` clones: both on one APFS
+/// volume, where `copyfile` shares blocks instead of writing them.
+pub fn clones(from: &Path, into: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let device = |path: &Path| std::fs::metadata(path).map(|meta| meta.dev()).ok();
+    fn stats(path: &Path) -> Option<libc::statfs> {
+        let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+        // SAFETY: an all-zero statfs is valid, and the call only fills it.
+        let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::statfs(path.as_ptr(), &mut stats) } == 0;
+        ok.then_some(stats)
+    }
+    let Some(stats) = stats(from) else {
+        return false;
+    };
+    // SAFETY: statfs fills f_fstypename with a NUL-terminated name.
+    let apfs =
+        unsafe { std::ffi::CStr::from_ptr(stats.f_fstypename.as_ptr()) }.to_bytes() == b"apfs";
+    apfs && device(from).is_some() && device(from) == device(into)
+}
+
 fn agents_change_files(paths: &Paths) -> bool {
     /// `Preferences::agents_change_files` in the app.
     #[derive(Deserialize)]

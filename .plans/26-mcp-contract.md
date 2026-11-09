@@ -1,6 +1,6 @@
 # MCP contract v1
 
-Status: planned; tool map and profiles need a maintainer's review. Nobody uses the MCP server yet, so this is the one cheap moment to break it. It should land before the MCP server is promoted in a stable release.
+Status: done. `docs/mcp.md` states the contract and `crates/monodrive-core/contract/v1.json` holds it. Reviewed on 2026-11-09: the maintainer picked two profiles (core and all), verb_noun names for management tools, `id:/path` for servers with ZIPs listed as folders, and scans that reply when done or at their timeout with `partial: true`.
 
 ## The problem
 
@@ -42,37 +42,43 @@ Tools state outcomes, never mechanisms. An agent asks for a copy. Whether that's
 
 **Speed fields.** `copy` and `duplicate` report `method: "clone" | "copy"` per item, and take `require_clone: true` to fail rather than write a full copy. These report outcomes and promise no speed.
 
-## Proposed tool map
+## Tool map
 
-Keep the behavior; change the names and shapes. Reviewed against `TOOLS` on 2026-10-30.
+69 tools became 54. Core has 29; `all` adds 25.
 
-| v1 tool | Replaces |
-|---|---|
-| `find_files` | itself |
-| `grep` | itself |
-| `list_dir` | itself, `remote_list`, `archive_list` |
-| `stat` | itself, `remote_stat` |
-| `read_file` | `remote_read` |
-| `folder_size`, `index_status` | themselves |
-| `trash`, `put_back`, `undo`, `redo`, `duplicate` | themselves |
-| `rename` | itself, `rename_preview`, `rename_many`, `remote_rename` |
-| `create_folder` | itself, `create_folder_with`, `remote_mkdir` |
-| `create_file` | itself |
-| `copy` | itself, `remote_copy` |
-| `move` | itself |
-| `archive_create`, `archive_extract` | themselves |
-| `storage_scan`, `duplicates`, `cleanup_duplicates` | themselves |
-| `job_status`, `cancel_job`, `continue_job` | themselves, `command_status`, `command_cancel` |
+| v1 tool | Replaces | Profile |
+|---|---|---|
+| `find_files`, `grep`, `thumbnail`, `index_status` | themselves | core |
+| `list_dir` | itself, `remote_list`, `archive_list` | core |
+| `stat` | itself, `remote_stat` | core |
+| `read_file` | `remote_read`, and local files | core |
+| `folder_size`, `overview`, `storage_scan`, `duplicates`, `cleanup_duplicates` | themselves | core |
+| `trash`, `put_back`, `undo`, `redo`, `duplicate`, `create_file`, `move` | themselves | core |
+| `rename` | itself, `rename_preview`, `rename_many`, `remote_rename` | core |
+| `create_folder` | itself, `create_folder_with`, `remote_mkdir` | core |
+| `copy` | itself, `remote_copy` | core |
+| `archive_create`, `archive_extract`, `download`, `remove_download` | themselves | core |
+| `job_status`, `cancel_job` | themselves, `command_status`, `command_cancel` | core |
+| `continue_job` | itself | core |
+| `edit_image`, `edit_video`, `organize`, `suggest_names` | themselves | all |
+| `list_places` | itself, `remote_sources` | all |
+| `pin`, `unpin`, `eject`, `connect` | themselves | all |
+| `disconnect`, `forget_server` | themselves, `remote_disconnect`, `remote_forget` | all |
+| `add_server` | `remote_add` | all |
+| `list_searches`, `save_search`, `rename_search`, `remove_search` | themselves | all |
+| `list_worktrees`, `list_repos`, `register_repo`, `forget_repo` | `worktrees`, `repos`, `repo_register`, `repo_forget` | all |
+| `remove_worktree` | `worktree_remove` | all |
+| `worktree_status` | itself | all |
+| `list_commands`, `run_command` | `commands_list`, `command_run`, `command_preview` | all |
+| `check_updates` | `update_check` | all |
 
-That's 25 tools in the core profile.
-
-**Management tools** stay available in an `all` profile, chosen with `monodrive mcp --profile all` and on Settings' Agents page: places (`list_places`, `pin`, `unpin`, `eject`), servers (`connect`, `disconnect`, `forget_server`, `remote_sources`, `remote_add`, `remote_forget`, `remote_disconnect`), downloads, saved searches, repos and worktrees, and user commands. An agent that needs these can be configured for them, so principle 2 in AGENTS.md still holds. **This is the decision to review:** the alternative is listing everything always and paying about 8,000 tokens, or folding each group into one tool with an `action` field, which gives weaker schemas. A test keeps the core profile's `tools/list` under 16 KB.
+`monodrive mcp --profile all`, or Management tools on Settings' Agents page, offers the second profile. A test keeps what core gives a model under 16 KB.
 
 ## How it's built
 
 Split `mcp.rs` into `mcp/contract.rs` (argument and result types, error codes), `mcp/server.rs` (protocol) and `mcp/tools/*.rs` (each tool decodes, calls one service, formats). This matches AGENTS.md's "decode into a typed enum, call one service, terse text reply".
 
-Generate schemas from the types with `schemars`, so a schema can't disagree with what's decoded. It's a new dependency, so check its license against `deny.toml`. Types stay independent of service types, with a conversion between them, so renaming a core field can't change the contract by accident.
+Generate schemas from the types with `schemars`, so a schema can't disagree with what's decoded. GPUI already pulled it in, under MIT. Output types are the contract's own, converted from service types. Inputs reuse the services' argument types where they already were the tools' (`rename::Rule`, `edits::Step`, `Conflict`), since the snapshot test catches a field renamed underneath.
 
 ## Keeping it stable
 
@@ -89,6 +95,14 @@ Generate schemas from the types with `schemars`, so a schema can't disagree with
 5. Freeze: contract version 1, snapshot, and `docs/mcp.md`. Update `agents.rs` and `INSTRUCTIONS`.
 
 Each step is its own PR. Before step 5, breaks are free.
+
+## Trial
+
+Step 4 ran on 2026-11-09 with a dev build over fixtures in `.scratch/`, one prompt with four tasks: what a ZIP holds, trash a duplicate and undo, rename photos after a dry run, copy a file and say whether it cloned.
+
+- **Claude Code** (2.1.319) finished all four with Monodrive's tools alone and used no shell. It saw `structuredContent`, not the text, so `list_dir`'s structured reply dropped per-item paths and dates. The rename dry run caught a double space in its first rule before anything changed. The whole session took about 33,000 tokens to cache and $0.39.
+- **Codex** (0.167.0) finished all four once Monodrive's tools were pre-approved; without that, `codex exec` refused every tool not marked read-only, the `rename` dry run included. It ran `rg --files` once where `list_dir` would do. It repeats the server instructions after every description, so they were cut to four lines. 282,000 input tokens, 237,000 of them cached.
+- **Cursor**'s CLI wasn't signed in, so it wasn't tried.
 
 ## Not in this plan
 

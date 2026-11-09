@@ -26,7 +26,7 @@ use gpui::{
     div, point, prelude::*, px, relative,
 };
 use monodrive_core::entries::SortBy;
-use monodrive_core::mcp::TOOLS;
+use monodrive_core::mcp::{Profile, TOOLS};
 use monodrive_core::updates::Channel;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -125,7 +125,10 @@ impl Page {
             Page::Window => Some(Preferences::restore_window),
             Page::Appearance => Some(Preferences::restore_appearance),
             Page::Keyboard => Some(|p| p.shortcuts.clear()),
-            Page::Agents => Some(|p| p.agents_change_files = true),
+            Page::Agents => Some(|p| {
+                p.agents_change_files = true;
+                p.agents_all_tools = false;
+            }),
         }
     }
 }
@@ -1323,8 +1326,14 @@ impl SettingsView {
             Some(_) => mcp.push(setup.into_any_element()),
             None => {}
         }
+        let profile = if p.agents_all_tools {
+            Profile::All
+        } else {
+            Profile::Core
+        };
         let tools = TOOLS
             .iter()
+            .filter(|tool| profile.offers(tool.profile))
             .map(|tool| {
                 div()
                     .py(px(8.))
@@ -1358,27 +1367,48 @@ impl SettingsView {
             group(
                 "Files",
                 None,
-                vec![row(
-                    "Let agents change files",
-                    Some(
-                        "Trash, put back, rename, create, duplicate, undo and redo. Off, agents can only read.",
-                    ),
-                    self.focusable(
-                        "agents-change-files",
-                        true,
-                        toggle(
-                            "agents-change-files",
-                            "Let agents change files",
-                            p.agents_change_files,
-                            |p, on| p.agents_change_files = on,
+                vec![
+                    row(
+                        "Let agents change files",
+                        Some(
+                            "Trash, put back, rename, create, copy, move, undo and redo. Off, agents can only read.",
                         ),
-                        cx,
+                        self.focusable(
+                            "agents-change-files",
+                            true,
+                            toggle(
+                                "agents-change-files",
+                                "Let agents change files",
+                                p.agents_change_files,
+                                |p, on| p.agents_change_files = on,
+                            ),
+                            cx,
+                        ),
                     ),
-                )],
+                    row(
+                        "Management tools",
+                        Some(
+                            "Also offer places, servers, saved searches, Git, saved commands, edits and organize. Each costs an agent's context; new sessions pick this up.",
+                        ),
+                        self.focusable(
+                            "agents-all-tools",
+                            true,
+                            toggle(
+                                "agents-all-tools",
+                                "Management tools",
+                                p.agents_all_tools,
+                                |p, on| p.agents_all_tools = on,
+                            ),
+                            cx,
+                        ),
+                    ),
+                ],
             ),
             group(
                 "Tools",
-                Some("What agents can call. The ones that change files need the setting above."),
+                Some(
+                    "What agents can call. The ones that change files need Let agents change files.",
+                ),
                 tools,
             ),
         ]

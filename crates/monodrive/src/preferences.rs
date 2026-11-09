@@ -176,6 +176,10 @@ pub struct Preferences {
     /// Agents may change files over MCP. The operation owner reads it from
     /// the saved file, by this name.
     pub agents_change_files: bool,
+    /// Agents' MCP servers also offer places, servers, saved searches, Git,
+    /// saved commands, edits and organize. `monodrive mcp` reads it from the
+    /// saved file, by this name, when an agent session starts.
+    pub agents_all_tools: bool,
     /// Which releases the updater offers.
     pub update_channel: monodrive_core::updates::Channel,
     /// The onboarding last finished; a later version can show itself again.
@@ -223,6 +227,7 @@ impl Default for Preferences {
             sentence_case_names: false,
             open_folders_while_dragging: true,
             agents_change_files: true,
+            agents_all_tools: false,
             update_channel: Default::default(),
             onboarding_version: 0,
         }
@@ -278,6 +283,7 @@ impl Preferences {
             sentence_case_names: self.sentence_case_names,
             open_folders_while_dragging: self.open_folders_while_dragging,
             agents_change_files: self.agents_change_files,
+            agents_all_tools: self.agents_all_tools,
             update_channel: self.update_channel,
             onboarding_version: self.onboarding_version,
             ..Self::default()

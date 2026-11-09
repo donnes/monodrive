@@ -342,9 +342,25 @@ impl Client {
     /// Runs `request` through the owner, starting one if needed. An error
     /// means nothing changed, or that the owner couldn't be reached.
     pub fn submit(&mut self, origin: Origin, request: Request) -> Result<Outcome, String> {
+        self.submit_as(None, origin, request)
+    }
+
+    /// As `submit`, under the caller's own request id when it gives one: an
+    /// agent that lost a reply sends the same id again, from any session,
+    /// and gets the first outcome instead of a second change.
+    pub fn submit_as(
+        &mut self,
+        id: Option<&str>,
+        origin: Origin,
+        request: Request,
+    ) -> Result<Outcome, String> {
         self.sent += 1;
+        let id = match id {
+            Some(id) => format!("agent-{id}"),
+            None => format!("{}-{}", self.prefix, self.sent),
+        };
         let submission = Submission {
-            id: format!("{}-{}", self.prefix, self.sent),
+            id,
             origin,
             request,
         };
