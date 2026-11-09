@@ -20,6 +20,12 @@ actions!(worktrees, [AskRemoveWorktree]);
 
 /// A row holds a title over a detail, 16 pt each.
 const ROW_HEIGHT: f32 = 34.;
+/// Every line of the list, a row and its gap, so it stays a `uniform_list`.
+const ITEM_HEIGHT: f32 = ROW_HEIGHT + theme::ROW_GAP;
+/// Between one repository's card and the next.
+const CARD_SPACING: f32 = 8.;
+/// The tinted circle a repository's title starts with.
+const MARK: f32 = 20.;
 const LINE: f32 = 16.;
 const CHIP_HEIGHT: f32 = 18.;
 /// How many repositories that couldn't be read show under the list.
@@ -431,7 +437,9 @@ impl Pane {
                     uniform_list("worktrees-list", items, cx.processor(Self::worktree_items))
                         .track_scroll(&self.worktrees.scroll)
                         .flex_1()
-                        .px(px(theme::PANE_INSET - 8.))
+                        // Rows' icons land on the pane's inset, inside the
+                        // card's gap and their own 8 pt padding.
+                        .px(px(theme::PANE_INSET - theme::ROW_GAP - 8.))
                         .pb_2(),
                 )
                 .children(problems)
@@ -479,11 +487,14 @@ impl Pane {
                 let shown = match *item {
                     Item::Repository(repo) => {
                         let (inventory, _) = self.worktrees.worktree_at(repo, 0)?;
-                        self.repository_header(inventory, cx).into_any_element()
+                        self.repository_header(inventory, tint(repo), cx)
+                            .into_any_element()
                     }
                     Item::Worktree(repo, w) => {
-                        let (_, worktree) = self.worktrees.worktree_at(repo, w)?;
-                        self.worktree_row(worktree, keys_here, cx)
+                        let (inventory, worktree) = self.worktrees.worktree_at(repo, w)?;
+                        let last = w + 1 == inventory.worktrees.len();
+                        card_segment(last)
+                            .child(self.worktree_row(worktree, tint(repo), keys_here, last, cx))
                             .into_any_element()
                     }
                 };
@@ -492,10 +503,12 @@ impl Pane {
             .collect()
     }
 
-    /// A repository's name, where it is, and Forget when it's registered.
+    /// The top of a repository's card: its name, where it is, Forget when
+    /// it's registered, and how many worktrees it has.
     fn repository_header(
         &self,
         repo: &Inventory,
+        tint: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let main = repo.worktrees.first().map(|w| w.path.clone());
@@ -507,52 +520,89 @@ impl Pane {
         let shown = main.map_or_else(String::new, |path| tilde(&path));
         let registered = self.worktrees.registered.contains(&repo.common_dir);
         let common_dir = repo.common_dir.clone();
-        // A row's height and gap, its text at the bottom, so it sits by the
-        // rows under it.
+        let count = counted(repo.worktrees.len(), "worktree");
+        // A row's height and gap like every line of the list: the space
+        // between cards, then the card's top.
         div()
-            .h(px(ROW_HEIGHT + theme::ROW_GAP))
-            .pb(px(theme::ROW_GAP))
-            .px_2()
-            .flex()
-            .items_end()
-            .gap_2()
+            .h(px(ITEM_HEIGHT))
             .flex_shrink_0()
+            .pt(px(CARD_SPACING))
             .child(
                 div()
-                    .flex_shrink_0()
-                    .text_size(px(theme::TEXT_BODY))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(name),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(theme::TEXT_SMALL))
-                    .text_color(content(0.65))
-                    .child(shown),
-            )
-            .when(registered, |d| {
-                d.child(
-                    text_button(
-                        gpui::ElementId::Name(
-                            format!("forget-{}", repo.common_dir.display()).into(),
-                        ),
-                        "Forget",
-                        ButtonLook::Ghost,
+                    .size_full()
+                    // The mark's center lines up with the row icons' below.
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .bg(theme::card_fill())
+                    .border_t_1()
+                    .border_x_1()
+                    .border_color(content(0.06))
+                    // design: a card drawn in slices across uniform_list lines.
+                    .rounded_t(px(theme::RADIUS_CARD))
+                    .child(
+                        div()
+                            .size(px(MARK))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(tint.opacity(0.18))
+                            .child(icon("folder-01", 12.).text_color(tint)),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.forget_repository(common_dir.clone(), cx)
-                    })),
-                )
-            })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(theme::TEXT_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(theme::TEXT_SMALL))
+                            .text_color(content(0.65))
+                            .child(shown),
+                    )
+                    .when(registered, |d| {
+                        d.child(
+                            text_button(
+                                gpui::ElementId::Name(
+                                    format!("forget-{}", repo.common_dir.display()).into(),
+                                ),
+                                "Forget",
+                                ButtonLook::Ghost,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.forget_repository(common_dir.clone(), cx)
+                                },
+                            )),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .pr_2()
+                            .text_size(px(theme::TEXT_SMALL))
+                            .text_color(content(0.65))
+                            .child(count),
+                    ),
+            )
     }
 
+    /// A worktree, led by its branch, then its folder and where it is, or
+    /// its changes once it's selected.
     fn worktree_row(
         &self,
         worktree: &Worktree,
+        tint: Hsla,
         keys_here: bool,
+        last: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let page = &self.worktrees;
@@ -567,18 +617,18 @@ impl Pane {
             || worktree.path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let mut detail = match (&worktree.branch, &worktree.head, worktree.bare) {
-            (Some(branch), _, _) => branch.clone(),
-            (None, _, true) => "bare".to_string(),
-            (None, Some(head), false) => format!("detached at {}", short(head)),
-            (None, None, false) => "no commits".to_string(),
+        let (title, mark) = match (&worktree.branch, &worktree.head, worktree.bare) {
+            (Some(branch), _, _) => (branch.clone(), "git-branch"),
+            (None, _, true) => ("bare".to_string(), "git-commit"),
+            (None, Some(head), false) => (format!("detached at {}", short(head)), "git-commit"),
+            (None, None, false) => ("no commits".to_string(), "git-commit"),
         };
         let status = page
             .status
             .as_ref()
             .filter(|(path, _)| selected && *path == worktree.path)
             .map(|(_, status)| status);
-        detail.push_str(" · ");
+        let mut detail = format!("{name} · ");
         detail.push_str(&match status {
             Some(Ok(status)) => changes(status),
             Some(Err(why)) => why.clone(),
@@ -622,6 +672,12 @@ impl Pane {
                     .h(px(ROW_HEIGHT))
                     .px_2()
                     .rounded(px(theme::RADIUS_ROW))
+                    // The card's last row follows its corners, so a highlight
+                    // never pokes past them.
+                    .when(last, |d| {
+                        // design: the card's radius less the gap it sits in.
+                        d.rounded_b(px(theme::RADIUS_CARD - theme::ROW_GAP))
+                    })
                     .flex()
                     .items_center()
                     .gap_2()
@@ -634,11 +690,7 @@ impl Pane {
                             d.group_hover(theme::ROW_GROUP, |s| s.bg(content(0.08)))
                         }
                     })
-                    .child(icon("folder-01", 16.).text_color(if accented {
-                        on_accent()
-                    } else {
-                        content(0.55)
-                    }))
+                    .child(icon(mark, 16.).text_color(if accented { on_accent() } else { tint }))
                     .child(
                         div()
                             .flex_1()
@@ -652,7 +704,7 @@ impl Pane {
                                     .line_height(px(LINE))
                                     .text_size(px(theme::TEXT_BODY))
                                     .text_color(ink)
-                                    .child(name),
+                                    .child(title),
                             )
                             .child(
                                 div()
@@ -702,6 +754,34 @@ impl Pane {
                     ),
             )
     }
+}
+
+/// One worktree's slice of its repository's card, the bottom one closing it.
+/// Its height is fixed, so the bottom border sits in the last row's gap.
+fn card_segment(last: bool) -> gpui::Div {
+    div()
+        .h(px(ITEM_HEIGHT))
+        .flex_shrink_0()
+        .px(px(theme::ROW_GAP))
+        .bg(theme::card_fill())
+        .border_x_1()
+        .border_color(content(0.06))
+        .when(last, |d| {
+            // design: a card drawn in slices across uniform_list lines.
+            d.border_b_1().rounded_b(px(theme::RADIUS_CARD))
+        })
+}
+
+/// A repository's color, from the Overview's tints, so neighbors differ.
+fn tint(repo: usize) -> Hsla {
+    let tints = [
+        theme::tint_blue,
+        theme::tint_pink,
+        theme::tint_orange,
+        theme::tint_purple,
+        theme::tint_cyan,
+    ];
+    tints[repo % tints.len()]()
 }
 
 /// What a scan couldn't read, a few lines of it, so a disk of unreadable

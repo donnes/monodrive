@@ -196,6 +196,21 @@ pub fn shell_fill() -> Hsla {
     tokens().shell
 }
 
+/// A card of content inside the pane, such as a repository on the Worktrees
+/// page: opaque, so its text reads the same over any background image.
+pub fn card_fill() -> Hsla {
+    let Tokens { light, shell, .. } = tokens();
+    if light {
+        gpui::white()
+    } else {
+        Hsla {
+            l: shell.l + 0.03,
+            a: 1.,
+            ..shell
+        }
+    }
+}
+
 /// The content pane: clear over the window's glass, or solid.
 pub fn pane_fill() -> Hsla {
     tokens().pane

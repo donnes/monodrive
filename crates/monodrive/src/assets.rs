@@ -44,6 +44,7 @@ icons!(
     "file",
     "folder-01",
     "git-branch",
+    "git-commit",
     "grip-vertical",
     "hard-drive",
     "keyboard",
