@@ -9,8 +9,9 @@ use super::sidebar::Places;
 use crate::remove_worktree::Ask;
 use crate::theme::{self, ButtonLook, content, icon, on_accent, row_icon_button, text_button, tip};
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, Hsla, MouseButton, PathPromptOptions, Role, Task,
-    Window, actions, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, FontWeight, Hsla, MouseButton, PathPromptOptions, Role,
+    ScrollStrategy, Task, UniformListScrollHandle, Window, actions, div, prelude::*, px,
+    uniform_list,
 };
 use monodrive_core::worktrees::{self, Found, Git, Inventory, State, Status, Worktree};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,15 @@ pub(in crate::browser) struct WorktreesPage {
     reading: Option<Task<()>>,
     /// What the window's card asks next.
     pub(in crate::browser) asking: Option<Ask>,
+    scroll: UniformListScrollHandle,
+}
+
+/// One line of the list: a repository's title, or one of its worktrees.
+/// Both are a row's height, so the list stays a `uniform_list`.
+#[derive(Clone, Copy, PartialEq)]
+enum Item {
+    Repository(usize),
+    Worktree(usize, usize),
 }
 
 impl WorktreesPage {
@@ -58,6 +68,22 @@ impl WorktreesPage {
 
     fn row_of(&self, path: &Path) -> Option<(&Inventory, &Worktree)> {
         self.rows().find(|(_, w)| w.path == path)
+    }
+
+    fn items(&self) -> Vec<Item> {
+        let repositories = self.found.iter().flat_map(|found| &found.repositories);
+        repositories
+            .enumerate()
+            .flat_map(|(repo, inventory)| {
+                std::iter::once(Item::Repository(repo))
+                    .chain((0..inventory.worktrees.len()).map(move |w| Item::Worktree(repo, w)))
+            })
+            .collect()
+    }
+
+    fn worktree_at(&self, repo: usize, w: usize) -> Option<(&Inventory, &Worktree)> {
+        let inventory = self.found.as_ref()?.repositories.get(repo)?;
+        Some((inventory, inventory.worktrees.get(w)?))
     }
 }
 
@@ -158,6 +184,22 @@ impl Pane {
             (Some(at), false) => paths.get(at.saturating_sub(1)),
         };
         self.select_worktree(next.cloned(), cx);
+        // In view, and its repository's title with it when going up to it.
+        let items = self.worktrees.items();
+        let page = &self.worktrees;
+        let at = items.iter().position(|item| match item {
+            Item::Worktree(repo, w) => page
+                .worktree_at(*repo, *w)
+                .is_some_and(|(_, worktree)| Some(&worktree.path) == page.selected.as_ref()),
+            Item::Repository(_) => false,
+        });
+        if let Some(at) = at {
+            let title_above = at > 0 && matches!(items[at - 1], Item::Repository(_));
+            let target = if !down && title_above { at - 1 } else { at };
+            self.worktrees
+                .scroll
+                .scroll_to_item(target, ScrollStrategy::Nearest);
+        }
     }
 
     /// ↩: the selected worktree's folder, in the pane, so Back returns here.
@@ -207,7 +249,10 @@ impl Pane {
         };
         let asked = cx.background_executor().spawn(async move {
             match Git::find().and_then(|git| worktrees::removal(&git, &repo, &path)) {
-                Ok(removal) => Ask::Remove { repo, removal },
+                Ok(removal) => Ask::Remove {
+                    repo,
+                    removal: Box::new(removal),
+                },
                 Err(why) => Ask::Refused { path, why },
             }
         });
@@ -276,17 +321,12 @@ impl Pane {
     }
 
     /// The page, when it's what's on screen.
-    pub(super) fn worktrees_page(
-        &mut self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    pub(super) fn worktrees_page(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.showing_worktrees() {
             return None;
         }
         let page = &self.worktrees;
         let scanning = page.scanning.is_some();
-        let keys_here = self.list_focus.contains_focused(window, cx);
         let summary = match &page.found {
             None => "Looking for worktrees…".to_string(),
             Some(_) if scanning => "Looking again…".to_string(),
@@ -369,29 +409,28 @@ impl Pane {
                 )
                 .into_any_element()
         } else {
-            let mut list = div().w_full().max_w(px(MAX_WIDTH)).flex().flex_col();
-            for repo in &found.repositories {
-                list = list.child(self.repository_header(repo, cx));
-                for worktree in &repo.worktrees {
-                    list = list.child(self.worktree_row(worktree, keys_here, cx));
-                }
-            }
+            let items = page.items().len();
             let problems = found.problems.iter().map(|why| {
                 div()
-                    .px_2()
-                    .pt_2()
+                    .px(px(theme::PANE_INSET))
+                    .pb_2()
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(theme::danger())
                     .child(format!("Couldn't read {why}"))
             });
             div()
-                .id("worktrees-list")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .px(px(theme::PANE_INSET - 8.))
-                .pb_4()
-                .child(list.children(problems))
+                .flex()
+                .flex_col()
+                .child(
+                    uniform_list("worktrees-list", items, cx.processor(Self::worktree_items))
+                        .track_scroll(&self.worktrees.scroll)
+                        .flex_1()
+                        .px(px(theme::PANE_INSET - 8.))
+                        .pb_2(),
+                )
+                .children(problems)
                 .into_any_element()
         };
         Some(
@@ -419,6 +458,42 @@ impl Pane {
         )
     }
 
+    /// The list's lines in `range`.
+    fn worktree_items(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let keys_here = self.list_focus.contains_focused(window, cx);
+        let items = self.worktrees.items();
+        items
+            .get(range)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|item| {
+                let shown = match *item {
+                    Item::Repository(repo) => {
+                        let (inventory, _) = self.worktrees.worktree_at(repo, 0)?;
+                        self.repository_header(inventory, cx).into_any_element()
+                    }
+                    Item::Worktree(repo, w) => {
+                        let (_, worktree) = self.worktrees.worktree_at(repo, w)?;
+                        self.worktree_row(worktree, keys_here, cx)
+                            .into_any_element()
+                    }
+                };
+                Some(
+                    div()
+                        .w_full()
+                        .max_w(px(MAX_WIDTH))
+                        .child(shown)
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
     /// A repository's name, where it is, and Forget when it's registered.
     fn repository_header(
         &self,
@@ -434,12 +509,14 @@ impl Pane {
         let shown = main.map_or_else(String::new, |path| tilde(&path));
         let registered = self.worktrees.registered.contains(&repo.common_dir);
         let common_dir = repo.common_dir.clone();
+        // A row's height and gap, its text at the bottom, so it sits by the
+        // rows under it.
         div()
-            .h(px(theme::PATH_BAR_HEIGHT))
-            .mt_3()
+            .h(px(ROW_HEIGHT + theme::ROW_GAP))
+            .pb(px(theme::ROW_GAP))
             .px_2()
             .flex()
-            .items_center()
+            .items_end()
             .gap_2()
             .flex_shrink_0()
             .child(

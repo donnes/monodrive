@@ -4040,7 +4040,7 @@ impl Pane {
             .child(
                 self.organize_page(cx)
                     .or_else(|| self.overview_page(cx))
-                    .or_else(|| self.worktrees_page(window, cx))
+                    .or_else(|| self.worktrees_page(cx))
                     .or_else(|| {
                         // Until it has something to show, so it never
                         // appears in pieces.

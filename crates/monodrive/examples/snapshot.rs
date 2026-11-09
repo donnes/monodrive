@@ -74,10 +74,10 @@ use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives, EditFavorites,
     EditPreview, EmptyTrash, EnclosingFolder, ExtendNext, ExtendPrevious, FocusNext, FocusSearch,
-    GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, NewTab, OpenSelected, OpenSettings,
-    OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents,
-    SelectLast, SelectNext, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames,
-    ToggleSplit, Undo, ViewAsGrid, ViewAsList,
+    GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected,
+    OpenSettings, OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch,
+    SearchContents, SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowCopiesAndMoves,
+    ShowSearches, SuggestNames, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
 use monodrive::downloads;
@@ -542,6 +542,7 @@ fn shoot_worktrees(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -
         unsafe { std::env::set_var("HOME", &home) };
         let window = open(cx, folder)?;
         dispatch(cx, window, &GoWorktrees)?;
+        settle_git(cx);
         if empty {
             save(cx, window, out, "worktrees-empty")?;
         } else {
@@ -561,19 +562,23 @@ fn shoot_worktrees(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -
             for (row, name, ask) in shots {
                 while at != Some(row) {
                     let down = at.is_none_or(|at| at < row);
-                    press(cx, window, if down { "down" } else { "up" })?;
+                    let step: &dyn Action = if down { &SelectNext } else { &SelectPrevious };
+                    dispatch(cx, window, step)?;
                     at = match at {
                         None => Some(0),
                         Some(at) if down => Some(at + 1),
                         Some(at) => Some(at - 1),
                     };
                 }
+                settle_git(cx);
                 if ask {
-                    press(cx, window, "cmd-backspace")?;
+                    dispatch(cx, window, &MoveToTrash)?;
+                    settle_git(cx);
                 }
                 save(cx, window, out, name)?;
                 if ask {
-                    press(cx, window, "escape")?;
+                    let cancel = named(cx, "remove_worktree::Cancel")?;
+                    dispatch(cx, window, &*cancel)?;
                 }
             }
         }
@@ -585,6 +590,16 @@ fn shoot_worktrees(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -
         }
     }
     Ok(())
+}
+
+/// Lets the git the page runs on the background threads answer, and a card
+/// fade in. Headless, those threads run for real, so parking alone doesn't
+/// wait for them.
+fn settle_git(cx: &mut Cx) {
+    settle();
+    cx.run_until_parked();
+    settle();
+    cx.run_until_parked();
 }
 
 /// Runs git with no configuration but the repository's, on a fixed date.
@@ -673,9 +688,12 @@ fn worktrees_fixture(home: &Path, empty: bool) -> gpui::Result<Places> {
         ],
     )?;
     let archives = linked.join("feat-archives-ui");
-    for (file, text) in [("archives.rs", "changed"), ("browser.rs", "changed")] {
-        commit(&archives, file, "start")?;
-        std::fs::write(archives.join(file), text)?;
+    for (file, message) in [
+        ("archives.rs", "feat(archives): browse a ZIP like a folder"),
+        ("browser.rs", "feat(archives): add the Extract buttons"),
+    ] {
+        commit(&archives, file, message)?;
+        std::fs::write(archives.join(file), "changed")?;
     }
     std::fs::write(archives.join("notes.md"), "")?;
     let columns = linked.join("feat-column-view");

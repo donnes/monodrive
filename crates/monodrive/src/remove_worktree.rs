@@ -26,7 +26,7 @@ pub fn bind(cx: &mut App) {
 #[derive(Clone, Debug)]
 pub enum Ask {
     /// Git allows it. `repo` is the repository's common Git folder.
-    Remove { repo: PathBuf, removal: Removal },
+    Remove { repo: PathBuf, removal: Box<Removal> },
     /// Why it stays, in Monodrive's or Git's words.
     Refused { path: PathBuf, why: String },
 }
@@ -86,9 +86,11 @@ impl RemoveWorktreeView {
     fn said(&self) -> Said {
         let removal = match &self.ask {
             Ask::Refused { path, why } => {
+                // The title names it, so the reason does by name too.
+                let why = why.replace(&path.display().to_string(), &quoted(path));
                 return Said {
                     title: format!("{} stays", quoted(path)),
-                    lines: vec![Part::Text(why.clone())],
+                    lines: vec![Part::Text(why)],
                     button: ("OK", ButtonLook::Primary),
                 };
             }
@@ -100,17 +102,16 @@ impl RemoveWorktreeView {
             .branch
             .as_ref()
             .map(|branch| format!("The branch {branch} stays."));
-        if removal.folder.is_none() {
+        let risk = &removal.risk;
+        let missing = removal.folder.is_none();
+        let gone = "Its folder isn't where Git expects it, maybe on a drive that isn't connected, so only Git's registration of it goes to the Trash.";
+        if missing && risk.is_empty() {
             return Said {
                 title: format!("Forget {name}?"),
-                lines: vec![Part::Text(
-                    "Its folder is gone, so only Git's registration of it goes to the Trash. ⌘Z puts it back."
-                        .into(),
-                )],
+                lines: vec![Part::Text(format!("{gone} ⌘Z puts it back."))],
                 button: ("Forget", ButtonLook::Primary),
             };
         }
-        let risk = &removal.risk;
         if risk.is_empty() {
             let mut text = "The folder goes to the Trash and Git forgets the worktree.".to_string();
             if let Some(stays) = &branch_stays {
@@ -125,6 +126,9 @@ impl RemoveWorktreeView {
             };
         }
         let mut lines = Vec::new();
+        if missing {
+            lines.push(Part::Text(gone.into()));
+        }
         if risk.paths > 0 {
             lines.push(Part::Text(format!(
                 "{} go to the Trash with it:",
@@ -133,16 +137,20 @@ impl RemoveWorktreeView {
             lines.push(Part::Listed(more(&risk.files, risk.paths)));
         }
         if risk.unpushed > 0 {
-            let commits = counted(risk.unpushed as usize, "commit");
+            let commits = counted(risk.unpushed, "commit");
             lines.push(Part::Text(match &worktree.branch {
                 Some(branch) => {
                     format!("{commits} on {branch} that no other branch, tag or remote has:")
                 }
-                None => format!(
-                    "{commits} on no branch, tag or remote. Once the Trash is emptied, Git can drop them:"
-                ),
+                None => {
+                    let them = if risk.unpushed == 1 { "it" } else { "them" };
+                    format!(
+                        "{commits} on no branch, tag or remote. Git may drop {them} at its next cleanup, and ⌘Z can't bring {them} back after that:"
+                    )
+                }
             }));
-            lines.push(Part::Listed(more(&risk.commits, risk.unpushed as usize)));
+            let commits: Vec<String> = risk.commits.iter().map(ToString::to_string).collect();
+            lines.push(Part::Listed(more(&commits, risk.unpushed)));
         }
         let mut last = branch_stays.unwrap_or_default();
         if !last.is_empty() {
@@ -153,7 +161,11 @@ impl RemoveWorktreeView {
         Said {
             title: format!("{name} holds work nothing else does"),
             lines,
-            button: ("Move to Trash Anyway", ButtonLook::Caution),
+            button: if missing {
+                ("Forget Anyway", ButtonLook::Caution)
+            } else {
+                ("Move to Trash Anyway", ButtonLook::Caution)
+            },
         }
     }
 }

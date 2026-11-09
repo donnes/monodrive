@@ -88,6 +88,9 @@ pub struct Status {
     pub files: Vec<String>,
     /// Every changed path, of which `files` is the start.
     pub paths: usize,
+    /// Every changed path and its letter, hashed, so a list that differs past
+    /// what `files` shows still differs.
+    pub changed: u64,
 }
 
 /// How many changed files or commits a confirmation lists.
@@ -102,12 +105,28 @@ pub struct Risk {
     /// The first `SHOWN` changed paths, as `Status::files`.
     pub files: Vec<String>,
     pub paths: usize,
-    /// The first `SHOWN` of those commits, newest first: short hash, then
-    /// subject.
-    pub commits: Vec<String>,
-    pub unpushed: u64,
-    /// HEAD is on no branch, so its commits go once Git stops keeping them.
+    /// As `Status::changed`.
+    pub changed: u64,
+    /// The first `SHOWN` of those commits, newest first.
+    pub commits: Vec<Commit>,
+    pub unpushed: usize,
+    /// HEAD is on no branch, so nothing keeps its commits once the
+    /// registration goes: Git may drop them at its next cleanup.
     pub detached: bool,
+}
+
+/// A commit, by its full hash, which shows short.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Commit {
+    pub hash: String,
+    pub subject: String,
+}
+
+impl std::fmt::Display for Commit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let short: String = self.hash.chars().take(7).collect();
+        write!(f, "{short} {}", self.subject)
+    }
 }
 
 /// A worktree Monodrive may remove, and what removing it means.
@@ -441,36 +460,56 @@ fn own_filters(config: &[u8]) -> Vec<String> {
 /// refuses what status refuses, then reads the commits only HEAD reaches.
 pub fn risk(git: &Git, dir: &Path) -> Result<Risk, String> {
     let status = status(git, dir)?;
-    let mut risk = Risk {
+    let (unpushed, commits) = match &status.head {
+        Some(head) => lone_commits(git, dir, head, status.branch.as_deref())?,
+        None => (0, Vec::new()),
+    };
+    Ok(Risk {
         files: status.files,
         paths: status.paths,
+        changed: status.changed,
+        commits,
+        unpushed,
         detached: status.branch.is_none(),
-        ..Risk::default()
-    };
-    if status.head.is_none() {
-        return Ok(risk);
-    }
-    // Every ref but this worktree's own branch: what they reach stays.
+    })
+}
+
+/// How many commits `head` reaches that no branch but `branch`, no tag and
+/// no remote does, and the newest `SHOWN` of them. `dir` is any folder of
+/// the repository, so a missing worktree's commits count too.
+fn lone_commits(
+    git: &Git,
+    dir: &Path,
+    head: &str,
+    branch: Option<&str>,
+) -> Result<(usize, Vec<Commit>), String> {
     // `--exclude` takes the branch's name as `--branches` sees it.
-    let own = status.branch.map(|branch| format!("--exclude={branch}"));
-    let mut only = vec!["HEAD", "--not"];
+    let own = branch.map(|branch| format!("--exclude={branch}"));
+    let mut only = vec![head, "--not"];
     only.extend(own.as_deref());
     only.extend(["--branches", "--tags", "--remotes"]);
     let count = git.run(dir, &[&["rev-list", "--count"][..], &only].concat())?;
-    risk.unpushed = String::from_utf8_lossy(&count)
+    let count: usize = String::from_utf8_lossy(&count)
         .trim()
         .parse()
         .map_err(|_| "git rev-list didn't print a count.".to_owned())?;
-    if risk.unpushed > 0 {
-        let shown = SHOWN.to_string();
-        let log = [&["log", "--format=%h %s", "-n", shown.as_str()][..], &only].concat();
-        let out = git.run(dir, &log)?;
-        risk.commits = String::from_utf8_lossy(&out)
-            .lines()
-            .map(String::from)
-            .collect();
+    if count == 0 {
+        return Ok((0, Vec::new()));
     }
-    Ok(risk)
+    let shown = SHOWN.to_string();
+    let log = [&["log", "--format=%H %s", "-n", shown.as_str()][..], &only].concat();
+    let out = git.run(dir, &log)?;
+    let commits = String::from_utf8_lossy(&out)
+        .lines()
+        .map(|line| {
+            let (hash, subject) = line.split_once(' ').unwrap_or((line, ""));
+            Commit {
+                hash: hash.into(),
+                subject: subject.into(),
+            }
+        })
+        .collect();
+    Ok((count, commits))
 }
 
 /// What removing the worktree at `path`, of the repository `repo` is in,
@@ -482,8 +521,9 @@ pub fn removal(git: &Git, repo: &Path, path: &Path) -> Result<Removal, String> {
     let real = std::fs::canonicalize(path).ok();
     let worktree = inventory
         .worktrees
-        .into_iter()
+        .iter()
         .find(|w| w.path == path || real.is_some() && std::fs::canonicalize(&w.path).ok() == real)
+        .cloned()
         .ok_or_else(|| format!("{} isn't a worktree of {}.", path.display(), repo.display()))?;
     let shown = worktree.path.display();
     if worktree.main || worktree.bare {
@@ -501,10 +541,48 @@ pub fn removal(git: &Git, repo: &Path, path: &Path) -> Result<Removal, String> {
             "{shown} is locked by Git{why}. Unlock it with git worktree unlock once nothing uses it."
         ));
     }
+    // The Trash would take the link and leave the checkout it leads to.
+    if std::fs::symlink_metadata(&worktree.path).is_ok_and(|meta| meta.is_symlink()) {
+        return Err(format!(
+            "{shown} is a link to another folder, so Monodrive leaves it alone."
+        ));
+    }
+    if let Some(inside) = inventory
+        .worktrees
+        .iter()
+        .find(|other| other.path != worktree.path && other.path.starts_with(&worktree.path))
+    {
+        return Err(format!(
+            "{shown} holds another worktree, {}, so it stays.",
+            inside.path.display()
+        ));
+    }
     let registration = registration(&inventory.common_dir, &worktree.path)?;
+    // A linked worktree's submodules keep their repositories in its
+    // registration, and status doesn't look inside them.
+    if registration.join("modules").exists() {
+        return Err(format!(
+            "{shown} has submodules checked out, which Monodrive can't look into, so it stays. Git's worktree remove refuses it too."
+        ));
+    }
     let (folder, risk) = match &worktree.state {
         State::Ok => (Some(worktree.path.clone()), risk(git, &worktree.path)?),
-        State::Missing | State::Stale => (None, Risk::default()),
+        // The folder's changes can't be read, but its commits can.
+        State::Missing | State::Stale => {
+            let (unpushed, commits) = match &worktree.head {
+                Some(head) => {
+                    lone_commits(git, &inventory.common_dir, head, worktree.branch.as_deref())?
+                }
+                None => (0, Vec::new()),
+            };
+            let risk = Risk {
+                commits,
+                unpushed,
+                detached: worktree.branch.is_none(),
+                ..Risk::default()
+            };
+            (None, risk)
+        }
         State::Replaced => {
             return Err(format!(
                 "{shown} holds another checkout now, so Monodrive leaves it alone."
@@ -520,10 +598,15 @@ pub fn removal(git: &Git, repo: &Path, path: &Path) -> Result<Removal, String> {
     })
 }
 
-/// The folder in `common_dir/worktrees` whose `gitdir` leads to `path`'s
-/// `.git`, read without following it, since the worktree may be gone.
+/// The folder in `common_dir/worktrees` that registers the worktree at
+/// `path`: the one its `.git` names, or, when that's gone, the one whose
+/// `gitdir` names `path`'s `.git`, which Git may have written relative to it.
 fn registration(common_dir: &Path, path: &Path) -> Result<PathBuf, String> {
     let admin = common_dir.join("worktrees");
+    let named = link(&path.join(".git"), b"gitdir: ").ok().flatten();
+    if let Some(dir) = named.filter(|dir| dir.parent() == Some(admin.as_path())) {
+        return Ok(dir);
+    }
     let dirs = std::fs::read_dir(&admin).map_err(|e| format!("{}: {e}", admin.display()))?;
     dirs.flatten()
         .map(|dir| dir.path())
@@ -531,9 +614,26 @@ fn registration(common_dir: &Path, path: &Path) -> Result<PathBuf, String> {
             linked(&dir.join("gitdir"), b"")
                 .ok()
                 .flatten()
-                .is_some_and(|dot_git| dot_git.parent() == Some(path))
+                .is_some_and(|dot_git| normalized(&dot_git).parent() == Some(path))
         })
         .ok_or_else(|| format!("Git keeps no registration for {}.", path.display()))
+}
+
+/// `path` with `.` and `..` worked out by name, for a path that may not
+/// exist to be followed.
+fn normalized(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Every repository with a linked worktree that `search`, the index's
@@ -554,7 +654,7 @@ pub fn scan(
                 let in_trash = entry
                     .path
                     .components()
-                    .any(|part| part.as_os_str() == ".Trash");
+                    .any(|part| matches!(part.as_os_str().to_str(), Some(".Trash" | ".Trashes")));
                 if entry.name != ".git" || in_trash {
                     continue;
                 }
@@ -592,13 +692,14 @@ const SCANNED: usize = 20_000;
 
 /// The common Git folder a linked worktree's `.git` file leads to: its
 /// `gitdir` names `worktrees/<name>`, whose `commondir` names the common
-/// folder, relative to it.
+/// folder, relative to it. A submodule's `.git` names a folder under
+/// `modules` instead, which isn't a worktree.
 fn common_of_link(dot_git: &Path) -> Option<PathBuf> {
     let admin = link(dot_git, b"gitdir: ").ok()??;
-    let common = linked(&admin.join("commondir"), b"")
-        .ok()
-        .flatten()
-        .or_else(|| Some(admin.parent()?.parent()?.to_path_buf()))?;
+    if admin.parent()?.file_name()? != "worktrees" {
+        return None;
+    }
+    let common = linked(&admin.join("commondir"), b"").ok()??;
     std::fs::canonicalize(common).ok()
 }
 
@@ -802,11 +903,17 @@ fn parse_status(out: &[u8]) -> Status {
 
 /// Counts a changed path, and keeps it while fewer than `SHOWN` are.
 fn listed(status: &mut Status, letter: char, path: Option<&str>) {
+    let line = format!("{letter} {}", path.unwrap_or_default());
     status.paths += 1;
+    // FNV-1a, which every Monodrive process works out the same.
+    if status.changed == 0 {
+        status.changed = 0xcbf2_9ce4_8422_2325;
+    }
+    for byte in line.bytes().chain([0]) {
+        status.changed = (status.changed ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+    }
     if status.files.len() < SHOWN {
-        status
-            .files
-            .push(format!("{letter} {}", path.unwrap_or_default()));
+        status.files.push(line);
     }
 }
 

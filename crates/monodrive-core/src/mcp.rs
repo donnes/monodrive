@@ -108,9 +108,9 @@ pub struct Server {
     plans: Vec<Previewed>,
     /// What organize previewed last: its token, when, and the plan.
     organizing: Option<(String, Instant, organize::Proposal)>,
-    /// What worktree_remove showed last: its token, when, and what it would
-    /// remove.
-    removing: Option<(String, Instant, Request)>,
+    /// What worktree_remove showed last: its token, the path it was asked
+    /// about, when, and what it would remove.
+    removing: Option<(String, PathBuf, Instant, Request)>,
     /// Each opened on the first tool that needs it; each session its own.
     remote: Connections,
 }
@@ -949,7 +949,7 @@ impl Server {
                 repo,
                 confirm,
             } => match confirm {
-                Some(token) => self.confirm_removal(&token),
+                Some(token) => self.confirm_removal(&path, &token),
                 None => self.remove_worktree(&path, repo.as_deref()),
             },
             ToolCall::WorktreeStatus {
@@ -1422,16 +1422,20 @@ impl Server {
             out,
             "Call worktree_remove with confirm: {token} within 10 minutes to move it to the Trash anyway. undo brings it back."
         );
-        self.removing = Some((token, Instant::now(), request));
+        self.removing = Some((token, path, Instant::now(), request));
         Ok(out)
     }
 
-    fn confirm_removal(&mut self, token: &str) -> Result<String, String> {
+    /// Runs what `remove_worktree` showed, for the same path.
+    fn confirm_removal(&mut self, path: &str, token: &str) -> Result<String, String> {
+        let path = expand_home(path);
         let request = self
             .removing
             .as_ref()
-            .filter(|(kept, made, _)| kept == token && made.elapsed() < PLAN_LIFE)
-            .map(|(_, _, request)| request.clone())
+            .filter(|(kept, asked, made, _)| {
+                kept == token && *asked == path && made.elapsed() < PLAN_LIFE
+            })
+            .map(|(_, _, _, request)| request.clone())
             .ok_or("No worktree_remove with that token in this session. A token works once, within 10 minutes; call worktree_remove with path again.")?;
         // Kept if the owner refuses it, so it can be confirmed again.
         let done = self.change(request)?;
@@ -1781,7 +1785,8 @@ fn risk_text(removal: &worktrees::Removal) -> String {
         removal.worktree.path.display()
     );
     if risk.paths > 0 {
-        let _ = writeln!(out, "{} uncommitted changes:", risk.paths);
+        let changes = if risk.paths == 1 { "change" } else { "changes" };
+        let _ = writeln!(out, "{} uncommitted {changes}:", risk.paths);
         for file in &risk.files {
             let _ = writeln!(out, "  {file}");
         }
@@ -1794,10 +1799,23 @@ fn risk_text(removal: &worktrees::Removal) -> String {
             Some(branch) => format!("on {branch} that no other branch, tag or remote has"),
             None => "on no branch, tag or remote".into(),
         };
-        let _ = writeln!(out, "{} commits {on}:", risk.unpushed);
+        let commits = if risk.unpushed == 1 {
+            "commit"
+        } else {
+            "commits"
+        };
+        let _ = writeln!(out, "{} {commits} {on}:", risk.unpushed);
         for commit in &risk.commits {
             let _ = writeln!(out, "  {commit}");
         }
+        if risk.detached {
+            out.push_str(
+                "Git may drop them at its next cleanup; undo can't bring them back after that.\n",
+            );
+        }
+    }
+    if removal.folder.is_none() {
+        out.push_str("Its folder isn't where Git expects it, so only Git's registration goes.\n");
     }
     if let Some(branch) = &removal.worktree.branch {
         let _ = writeln!(out, "The branch {branch} stays.");
@@ -3072,7 +3090,8 @@ pub const TOOLS: [Tool; 69] = [
     Tool {
         name: "worktree_remove",
         description: "Move a linked worktree's folder to the Trash, then the folder Git keeps for it, so \
-    Git forgets it; undo brings both back. The branch stays. Refuses the main worktree and one Git has locked. \
+    Git forgets it; undo brings both back. The branch stays. Refuses the main worktree, one Git has locked, \
+    one with submodules checked out, a link and one holding another worktree. \
     When uncommitted changes, or commits no other branch, tag or remote has, would go with it, it prints \
     them and a token and moves nothing; confirm with that token. A missing worktree's registration alone \
     goes; pass repo then.",
@@ -5188,8 +5207,8 @@ mod tests {
             (
                 false,
                 format!(
-                    "{} holds work nothing else does.\n1 uncommitted changes:\n  ? new\n\
-                     1 commits on busy that no other branch, tag or remote has:\n  {} b\n\
+                    "{} holds work nothing else does.\n1 uncommitted change:\n  ? new\n\
+                     1 commit on busy that no other branch, tag or remote has:\n  {} b\n\
                      The branch busy stays.\n\
                      Call worktree_remove with confirm: {token} within 10 minutes to move it to the Trash anyway. undo brings it back.\n",
                     busy.display(),

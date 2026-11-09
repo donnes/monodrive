@@ -328,8 +328,10 @@ fn status_counts_changes_and_known_ahead_behind_without_writing_the_index() {
     let before = std::fs::read(&index).unwrap();
 
     let git = found();
+    let read = status(&git, &feature);
+    let changed = read.as_ref().map_or(0, |read| read.changed);
     assert_eq!(
-        status(&git, &feature),
+        read,
         Ok(Status {
             head: Some(fixture(&feature, &["rev-parse", "HEAD"]).trim().into()),
             branch: Some("feature".into()),
@@ -343,6 +345,7 @@ fn status_counts_changes_and_known_ahead_behind_without_writing_the_index() {
                 .map(String::from)
                 .into(),
             paths: 5,
+            changed,
         })
     );
     assert_eq!(
@@ -574,25 +577,39 @@ fn risk_holds_uncommitted_changes_and_commits_no_other_ref_reaches() {
     std::fs::write(ahead.join("a"), "changed\n").unwrap();
     std::fs::write(ahead.join("new"), "").unwrap();
     let only = risk(&git, &ahead).unwrap();
+    let full = |rev: &str| fixture(&ahead, &["rev-parse", rev]).trim().to_owned();
     assert_eq!(
         only,
         Risk {
             files: vec!["M a".into(), "? new".into()],
             paths: 2,
+            changed: only.changed,
             commits: vec![
-                format!(
-                    "{} c",
-                    fixture(&ahead, &["rev-parse", "--short", "HEAD"]).trim()
-                ),
-                format!(
-                    "{} b",
-                    fixture(&ahead, &["rev-parse", "--short", "HEAD~"]).trim()
-                ),
+                Commit {
+                    hash: full("HEAD"),
+                    subject: "c".into()
+                },
+                Commit {
+                    hash: full("HEAD~"),
+                    subject: "b".into()
+                },
             ],
             unpushed: 2,
             detached: false,
         }
     );
+    // A change past the paths a confirmation lists still changes the risk.
+    for name in ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"] {
+        std::fs::write(ahead.join(name), "").unwrap();
+    }
+    let listed = risk(&git, &ahead).unwrap();
+    std::fs::rename(ahead.join("n9"), ahead.join("n9 renamed")).unwrap();
+    let after = risk(&git, &ahead).unwrap();
+    assert_eq!(
+        (after.files.clone(), after.paths),
+        (listed.files.clone(), listed.paths)
+    );
+    assert_ne!(after, listed);
     // Another branch, or a remote's, holding them takes them out of risk.
     fixture(&main, &["branch", "-q", "copy", "ahead"]);
     assert_eq!(risk(&git, &ahead).unwrap().unpushed, 0);
@@ -719,4 +736,85 @@ fn a_scan_lists_each_repository_once_from_its_worktrees_git_files_and_registrati
         (without.repositories.len(), without.problems),
         (1, vec!["indexing".to_owned()])
     );
+}
+
+#[test]
+fn removal_refuses_what_it_cant_take_whole_and_counts_a_missing_worktrees_commits() {
+    let (_dir, root) = real_tempdir();
+    let main = root.join("repo");
+    repo(&main);
+    let add = |args: &[&str]| fixture(&main, &[&["worktree", "add", "-q"][..], args].concat());
+    let git = found();
+    let refused = |path: &Path| removal(&git, &main, path).unwrap_err();
+
+    // A worktree another one sits inside.
+    add(&["-b", "outer", "../outer"]);
+    add(&["-b", "inner", "../outer/inner"]);
+    let nested = refused(&root.join("outer"));
+    assert!(nested.contains("holds another worktree"), "{nested}");
+
+    // A link where the worktree was: trashing it would leave the checkout.
+    add(&["-b", "linked", "../linked"]);
+    std::fs::rename(root.join("linked"), root.join("real")).unwrap();
+    std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+    assert!(refused(&root.join("linked")).contains("is a link"));
+
+    // A submodule checked out in it, whose repository Git keeps in the
+    // registration.
+    let sub = root.join("sub");
+    repo(&sub);
+    add(&["-b", "with-sub", "../with-sub"]);
+    let with_sub = root.join("with-sub");
+    fixture(
+        &with_sub,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../sub",
+            "sub",
+        ],
+    );
+    assert!(refused(&with_sub).contains("submodules"));
+
+    // Gone, but its registration still holds a detached HEAD's commits.
+    add(&["--detach", "../away"]);
+    let away = root.join("away");
+    commit(&away, "lone", "lone\n");
+    std::fs::rename(&away, root.join("moved")).unwrap();
+    let forget = removal(&git, &main, &away).unwrap();
+    assert_eq!(forget.folder, None);
+    assert_eq!((forget.risk.unpushed, forget.risk.detached), (1, true));
+
+    // Written relative to each other, as worktree.useRelativePaths does.
+    add(&["--relative-paths", "-b", "relative", "../relative"]);
+    let relative = removal(&git, &main, &root.join("relative")).unwrap();
+    assert_eq!(relative.registration, main.join(".git/worktrees/relative"));
+    std::fs::rename(root.join("relative"), root.join("relative moved")).unwrap();
+    let gone = removal(&git, &main, &root.join("relative")).unwrap();
+    assert_eq!(gone.registration, main.join(".git/worktrees/relative"));
+}
+
+#[test]
+fn a_submodules_git_file_isnt_taken_for_a_worktree() {
+    let (_dir, root) = real_tempdir();
+    let (main, sub) = (root.join("repo"), root.join("sub"));
+    repo(&main);
+    repo(&sub);
+    fixture(
+        &main,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../sub",
+            "sub",
+        ],
+    );
+    assert!(main.join("sub/.git").is_file());
+    assert_eq!(common_of_link(&main.join("sub/.git")), None);
 }
