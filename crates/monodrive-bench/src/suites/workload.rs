@@ -28,9 +28,16 @@ fn workload() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/workload")
 }
 
-/// The store `pnpm` installs from, kept in the checkout's `target/bench`.
-pub fn store() -> PathBuf {
+/// The store `prepare` fetches into, kept in the running checkout's
+/// `target/bench`.
+fn store() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bench/pnpm-store")
+}
+
+/// Where `prepare` wrote the store's path, so a baseline built in another
+/// checkout installs from the same store.
+fn store_record(fixture: &Path) -> PathBuf {
+    fixture.join("store-path")
 }
 
 fn run(command: &mut Command) -> Result<String, String> {
@@ -57,6 +64,9 @@ pub fn prepare(fixture: &Path, seed: u64) -> Result<(), String> {
         .args(["fetch", "--frozen-lockfile", NO_BUILDS, "--store-dir"])
         .arg(store())
         .current_dir(&project))?;
+    let store = std::fs::canonicalize(store()).map_err(io(&store()))?;
+    std::fs::write(store_record(fixture), store.as_os_str().as_encoded_bytes())
+        .map_err(io(fixture))?;
     // A repository of generated files with a real tree's shape, the same on
     // every machine for a seed.
     let repo = fixture.join("repo");
@@ -123,6 +133,8 @@ pub fn round(fixture: &Path) -> Result<Vec<Measured>, String> {
                 .map_err(io(&project))?;
         }
         let pnpm = run(Command::new("pnpm").arg("--version"))?;
+        let record = store_record(fixture);
+        let store = std::fs::read_to_string(&record).map_err(io(&record))?;
         let sample = child(
             Command::new("pnpm")
                 .args([
@@ -135,7 +147,7 @@ pub fn round(fixture: &Path) -> Result<Vec<Measured>, String> {
                     "silent",
                     "--store-dir",
                 ])
-                .arg(store())
+                .arg(store.trim())
                 .current_dir(&project),
         )?;
         let modules = project.join("node_modules");
