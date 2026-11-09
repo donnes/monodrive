@@ -94,6 +94,16 @@ fn a_saved_server_opens_in_the_pane_and_back_leaves_it(cx: &mut TestAppContext) 
     // Show Hidden Files lists the dotfile.
     press(cx, "cmd->");
     assert_eq!(listed(&browser, cx).0, ["docs", ".profile", "a.txt"]);
+    // The last row, selected, goes from the server; ⇧ extends from what's left.
+    press(cx, "down down down");
+    assert_eq!(listed(&browser, cx).1, ["a.txt"]);
+    std::fs::rename(far.join("a.txt"), far.join("docs/a.txt")).unwrap();
+    on_pane(&browser, cx, |pane, cx| pane.list(true, cx));
+    cx.run_until_parked();
+    press(cx, "shift-up");
+    assert_eq!(listed(&browser, cx).0, ["docs", ".profile"]);
+    press(cx, "shift-up");
+    assert_eq!(listed(&browser, cx).1, ["docs", ".profile"]);
 }
 
 #[gpui::test]
@@ -321,9 +331,8 @@ fn copy_to_other_pane_downloads_from_a_server_and_uploads_to_one(cx: &mut TestAp
         Some("from the server")
     );
     // Moving off a server isn't offered: there's no Trash to recover from.
-    press(cx, "alt-f6");
-    let said = toast(&browser, cx).unwrap();
-    assert!(said.0.starts_with("Servers have no Trash"), "{said:?}");
+    let moves = cx.update(|window, cx| window.is_action_available(&MoveToOtherPane, cx));
+    assert!(!moves);
 
     // From the local pane, a file goes up into the server's folder.
     let local = browser.read_with(cx, |b, _| b.tabs[b.active].pane.clone());
@@ -333,6 +342,8 @@ fn copy_to_other_pane_downloads_from_a_server_and_uploads_to_one(cx: &mut TestAp
     let serving = serve(cx);
     press(cx, "down down down down down");
     assert_eq!(shown(&browser, cx).1, ["up.txt"]);
+    let moves = cx.update(|window, cx| window.is_action_available(&MoveToOtherPane, cx));
+    assert!(!moves, "nothing moves onto a server");
     press(cx, "alt-f5");
     finish(serving, cx);
     assert_eq!(

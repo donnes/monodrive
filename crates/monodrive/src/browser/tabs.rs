@@ -183,14 +183,9 @@ impl Browser {
         };
         let from_server = focused.read(cx).showing_remote();
         let to_server = other.read(cx).remote_folder().cloned();
+        // Move isn't offered across a server: there's no Trash to recover from.
         if moving && (from_server || to_server.is_some()) {
-            return self.toast(
-                "Servers have no Trash, so nothing moves to or from one. Copy to Other Pane copies instead."
-                    .into(),
-                true,
-                None,
-                cx,
-            );
+            return;
         }
         if from_server {
             if to_server.is_some() {

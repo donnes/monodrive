@@ -1620,8 +1620,12 @@ impl Browser {
         for pane in self.shown_panes() {
             pane.update(cx, |pane, cx| {
                 // A copy to a server may have landed in the folder shown.
+                // One that's disconnected or failed waits to be asked.
                 if pane.showing_remote() {
-                    return pane.list(true, cx);
+                    if pane.remote_folder().is_some() {
+                        pane.list(true, cx);
+                    }
+                    return;
                 }
                 if !pane.showing_folder() {
                     return;
@@ -1969,11 +1973,17 @@ impl Render for Browser {
             )
         });
         let has_query = !self.pane().read(cx).query.is_empty();
-        let other_takes = self.tabs[self.active].other().is_some_and(|other| {
-            let other = other.read(cx);
-            other.takes_files(cx) || other.remote_folder().is_some()
-        }) && selected
-            && !renaming;
+        let (other_takes, other_on_server) =
+            self.tabs[self.active]
+                .other()
+                .map_or((false, false), |other| {
+                    let other = other.read(cx);
+                    let on_server = other.remote_folder().is_some();
+                    (other.takes_files(cx) || on_server, on_server)
+                });
+        let other_takes = other_takes && selected && !renaming;
+        // Nothing moves to or from a server: there's no Trash to recover from.
+        let moves = other_takes && !other_on_server && !self.pane().read(cx).showing_remote();
         let root = div()
             // A sheet or the context menu takes the keys while it's open:
             // the menu's commands act on what it was opened on.
@@ -2054,11 +2064,11 @@ impl Render for Browser {
                         d.on_action(cx.listener(|this, _: &CopyToOtherPane, window, cx| {
                             this.send_to_other_pane(false, window, cx)
                         }))
-                        .on_action(cx.listener(
-                            |this, _: &MoveToOtherPane, window, cx| {
-                                this.send_to_other_pane(true, window, cx)
-                            },
-                        ))
+                    })
+                    .when(moves, |d| {
+                        d.on_action(cx.listener(|this, _: &MoveToOtherPane, window, cx| {
+                            this.send_to_other_pane(true, window, cx)
+                        }))
                     })
                     .on_action(
                         cx.listener(|this, _: &NewTab, window, cx| this.open_tab_here(window, cx)),

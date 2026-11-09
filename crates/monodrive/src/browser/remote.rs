@@ -215,7 +215,12 @@ impl RemotePage {
     }
 
     fn extend_to(&mut self, ix: usize) {
-        let anchor = self.anchor.unwrap_or(ix);
+        // A listing that shrank may have taken the anchor's row.
+        let anchor = self
+            .anchor
+            .filter(|anchor| *anchor < self.entries.len())
+            .unwrap_or(ix);
+        self.anchor = Some(anchor);
         self.selected = self.entries[anchor.min(ix)..=anchor.max(ix)]
             .iter()
             .map(|entry| entry.name.clone())
