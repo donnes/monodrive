@@ -55,8 +55,9 @@ manage them, connect mounts an smb:// share with credentials macOS already has, 
 forget_server forgets a saved address. \
 list_searches, save_search, rename_search and remove_search manage the sidebar's saved searches. \
 Items iCloud Drive or a cloud app hasn't downloaded show (not downloaded); nothing but download \
-fetches them, and remove_download frees a downloaded copy. worktrees lists a Git repository's worktrees \
-and worktree_status shows one's changes, without fetching or changing anything; repo_register, repos \
+fetches them, and remove_download frees a downloaded copy. worktrees lists a Git repository's worktrees, \
+or every repository's on the disk, and worktree_status shows one's changes, without fetching or changing \
+anything; worktree_remove moves one to the Trash and Git forgets it, keeping its branch; repo_register, repos \
 and repo_forget manage the repositories Monodrive remembers. commands_list shows the commands the user \
 saved, command_preview prints exactly what one would run on paths, and command_run runs it, which \
 command_status follows and command_cancel stops. Only the user saves commands. remote_sources shows \
@@ -107,6 +108,9 @@ pub struct Server {
     plans: Vec<Previewed>,
     /// What organize previewed last: its token, when, and the plan.
     organizing: Option<(String, Instant, organize::Proposal)>,
+    /// What worktree_remove showed last: its token, when, and what it would
+    /// remove.
+    removing: Option<(String, Instant, Request)>,
     /// Each opened on the first tool that needs it; each session its own.
     remote: Connections,
 }
@@ -339,7 +343,12 @@ enum ToolCall {
         channel: Option<updates::Channel>,
     },
     Worktrees {
+        path: Option<String>,
+    },
+    WorktreeRemove {
         path: String,
+        repo: Option<String>,
+        confirm: Option<String>,
     },
     WorktreeStatus {
         path: String,
@@ -476,6 +485,7 @@ impl Server {
             places,
             plans: Vec::new(),
             organizing: None,
+            removing: None,
             git: None,
         }
     }
@@ -929,10 +939,19 @@ impl Server {
                     }
                 })
             }
-            ToolCall::Worktrees { path } => self
+            ToolCall::Worktrees { path: Some(path) } => self
                 .git()
                 .and_then(|git| worktrees::list(&git, &expand_home(&path)))
                 .map(|inventory| inventory.worktrees.iter().map(worktree_line).collect()),
+            ToolCall::Worktrees { path: None } => self.scan_worktrees(),
+            ToolCall::WorktreeRemove {
+                path,
+                repo,
+                confirm,
+            } => match confirm {
+                Some(token) => self.confirm_removal(&token),
+                None => self.remove_worktree(&path, repo.as_deref()),
+            },
             ToolCall::WorktreeStatus {
                 path,
                 timeout_seconds,
@@ -1356,6 +1375,70 @@ impl Server {
         Ok(done)
     }
 
+    /// Every repository the index finds a linked worktree of, and every
+    /// registered one, its worktrees a line each, repositories apart by a
+    /// blank line, then what couldn't be read.
+    fn scan_worktrees(&mut self) -> Result<String, String> {
+        let git = self.git()?;
+        let places = self.places.clone();
+        let found = match self.index() {
+            Ok(index) => worktrees::scan(&git, &places, |query, limit| index.find(query, limit)),
+            Err(e) => worktrees::scan(&git, &places, |_, _| Err(e.clone())),
+        };
+        let mut out = found
+            .repositories
+            .iter()
+            .map(|repo| repo.worktrees.iter().map(worktree_line).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if found.repositories.is_empty() {
+            out.push_str("No worktrees found.\n");
+        }
+        for problem in &found.problems {
+            let _ = writeln!(out, "Couldn't read: {problem}");
+        }
+        Ok(out)
+    }
+
+    /// Moves the worktree to the Trash when nothing only it holds is at
+    /// risk. Otherwise prints what is, with a token for `confirm_removal`.
+    fn remove_worktree(&mut self, path: &str, repo: Option<&str>) -> Result<String, String> {
+        self.removing = None;
+        let git = self.git()?;
+        let path = expand_home(path);
+        let repo = repo.map_or_else(|| path.clone(), expand_home);
+        let removal = worktrees::removal(&git, &repo, &path)?;
+        let request = Request::RemoveWorktree {
+            repo,
+            path: removal.worktree.path.clone(),
+            confirmed: removal.risk.clone(),
+        };
+        if removal.risk.is_empty() {
+            return self.change(request);
+        }
+        let token = format!("{:016x}", RandomState::new().hash_one(&path));
+        let mut out = risk_text(&removal);
+        let _ = writeln!(
+            out,
+            "Call worktree_remove with confirm: {token} within 10 minutes to move it to the Trash anyway. undo brings it back."
+        );
+        self.removing = Some((token, Instant::now(), request));
+        Ok(out)
+    }
+
+    fn confirm_removal(&mut self, token: &str) -> Result<String, String> {
+        let request = self
+            .removing
+            .as_ref()
+            .filter(|(kept, made, _)| kept == token && made.elapsed() < PLAN_LIFE)
+            .map(|(_, _, request)| request.clone())
+            .ok_or("No worktree_remove with that token in this session. A token works once, within 10 minutes; call worktree_remove with path again.")?;
+        // Kept if the owner refuses it, so it can be confirmed again.
+        let done = self.change(request)?;
+        self.removing = None;
+        Ok(done)
+    }
+
     /// Asks macOS to download or remove the download of each path, a line
     /// each saying what it came to.
     fn ask_cloud(
@@ -1687,6 +1770,39 @@ fn worktree_line(worktree: &Worktree) -> String {
 
 fn short(head: &str) -> String {
     head.chars().take(7).collect()
+}
+
+/// What only the worktree holds: its changed files, then the commits no other
+/// branch, tag or remote has.
+fn risk_text(removal: &worktrees::Removal) -> String {
+    let risk = &removal.risk;
+    let mut out = format!(
+        "{} holds work nothing else does.\n",
+        removal.worktree.path.display()
+    );
+    if risk.paths > 0 {
+        let _ = writeln!(out, "{} uncommitted changes:", risk.paths);
+        for file in &risk.files {
+            let _ = writeln!(out, "  {file}");
+        }
+        if risk.paths > risk.files.len() {
+            let _ = writeln!(out, "  and {} more", risk.paths - risk.files.len());
+        }
+    }
+    if risk.unpushed > 0 {
+        let on = match &removal.worktree.branch {
+            Some(branch) => format!("on {branch} that no other branch, tag or remote has"),
+            None => "on no branch, tag or remote".into(),
+        };
+        let _ = writeln!(out, "{} commits {on}:", risk.unpushed);
+        for commit in &risk.commits {
+            let _ = writeln!(out, "  {commit}");
+        }
+    }
+    if let Some(branch) = &removal.worktree.branch {
+        let _ = writeln!(out, "The branch {branch} stays.");
+    }
+    out
 }
 
 /// The worktree's branch and HEAD, then its changes, or clean.
@@ -2373,7 +2489,7 @@ pub struct Tool {
     input_schema: fn() -> Value,
 }
 
-pub const TOOLS: [Tool; 68] = [
+pub const TOOLS: [Tool; 69] = [
     Tool {
         name: "find_files",
         description: "Find files and folders by name anywhere on disk. Words are fuzzy and typo-tolerant. \
@@ -2942,10 +3058,35 @@ pub const TOOLS: [Tool; 68] = [
     Tool {
         name: "worktrees",
         description: "The Git worktrees of the repository path is in, reached through any folder or \
-    worktree of it, the main one first. One a line: path, then branch or detached, short HEAD, and \
-    main worktree, locked, missing, stale, replaced, unreadable or prunable. Prunable is Git's view, never a \
-    sign a folder is safe to delete. Fetches nothing and changes nothing.",
-        input_schema: path_schema,
+    worktree of it, the main one first. Without path, every repository on the disk with a linked worktree, \
+    found through the index, and every registered one, a blank line apart. One a line: path, then branch or \
+    detached, short HEAD, and main worktree, locked, missing, stale, replaced, unreadable or prunable. \
+    Prunable is Git's view, never a sign a folder is safe to delete. Fetches nothing and changes nothing.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Absolute; ~ is your home. Leave out to scan the disk."}}
+            })
+        },
+    },
+    Tool {
+        name: "worktree_remove",
+        description: "Move a linked worktree's folder to the Trash, then the folder Git keeps for it, so \
+    Git forgets it; undo brings both back. The branch stays. Refuses the main worktree and one Git has locked. \
+    When uncommitted changes, or commits no other branch, tag or remote has, would go with it, it prints \
+    them and a token and moves nothing; confirm with that token. A missing worktree's registration alone \
+    goes; pass repo then.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The worktree, as worktrees prints it."},
+                    "repo": {"type": "string", "description": "Any folder of its repository, when the worktree's folder is gone."},
+                    "confirm": {"type": "string", "description": "The token worktree_remove printed."}
+                },
+                "required": ["path"]
+            })
+        },
     },
     Tool {
         name: "worktree_status",
@@ -4987,9 +5128,105 @@ mod tests {
         );
         assert_eq!(tool("repos", &root), none);
         assert!(main.join(".git/HEAD").is_file());
+    }
+
+    #[test]
+    fn worktree_remove_trashes_a_clean_worktree_and_shows_work_at_risk_before_a_token() {
+        use crate::worktrees::tests::{commit, fixture, real_tempdir, repo};
+        let (_dir, root) = real_tempdir();
+        let paths = ops::Paths {
+            state: root.join("state"),
+            settings: root.join("settings.json"),
+            trash: root.join("Trash"),
+        };
+        let owner = ops::Owner::bind(paths.clone()).unwrap();
+        let _serving = std::thread::spawn(move || owner.serve());
+        let mut server = Server::new(ops::Client::new(paths, None), places(&root));
+        // A scan that starts no index: the window or a search would have.
+        server.index = Some(Err("The index isn't ready.".into()));
+        let main = root.join("repo");
+        repo(&main);
+        for name in ["clean", "busy"] {
+            fixture(
+                &main,
+                &["worktree", "add", "-q", "-b", name, &format!("../{name}")],
+            );
+        }
+        let (clean, busy) = (root.join("clean"), root.join("busy"));
+        commit(&busy, "b", "b\n");
+        std::fs::write(busy.join("new"), "").unwrap();
+        let tool = |server: &mut Server, arguments: Value| {
+            let reply = call(
+                server,
+                json!({"name": "worktree_remove", "arguments": arguments}),
+            );
+            (reply["result"]["isError"] == true, text(&reply).to_owned())
+        };
+
+        let (failed, out) = tool(&mut server, json!({"path": clean}));
+        // The folder, then Git's registration, each where the Trash put it.
+        let trashed: Vec<&str> = out.lines().collect();
+        assert!(!failed && trashed.len() == 2, "{out}");
+        assert!(
+            trashed.iter().all(|path| path.contains("/.Trash/")),
+            "{out}"
+        );
+        assert!(!clean.exists() && !main.join(".git/worktrees/clean").exists());
+
+        let (failed, shown) = tool(&mut server, json!({"path": busy}));
+        let short = fixture(&busy, &["rev-parse", "--short", "HEAD"]);
+        let token = shown
+            .lines()
+            .last()
+            .unwrap()
+            .split(' ')
+            .nth(4)
+            .unwrap()
+            .to_owned();
         assert_eq!(
-            call(&mut server, json!({"name": "worktrees", "arguments": {}}))["error"]["code"],
-            -32602
+            (failed, shown.clone()),
+            (
+                false,
+                format!(
+                    "{} holds work nothing else does.\n1 uncommitted changes:\n  ? new\n\
+                     1 commits on busy that no other branch, tag or remote has:\n  {} b\n\
+                     The branch busy stays.\n\
+                     Call worktree_remove with confirm: {token} within 10 minutes to move it to the Trash anyway. undo brings it back.\n",
+                    busy.display(),
+                    short.trim()
+                )
+            )
+        );
+        assert!(busy.join("new").exists(), "a preview moves nothing");
+        assert!(tool(&mut server, json!({"path": busy, "confirm": "nope"})).0);
+        let (failed, out) = tool(&mut server, json!({"path": busy, "confirm": token}));
+        assert!(!failed && !busy.exists(), "{out}");
+        assert!(
+            tool(&mut server, json!({"path": busy, "confirm": token})).0,
+            "a token works once"
+        );
+
+        let reply = call(&mut server, json!({"name": "undo"}));
+        assert!(busy.join("new").exists(), "{reply}");
+        let (failed, out) = tool(&mut server, json!({"path": main}));
+        assert!(failed && out.contains("own checkout"), "{out}");
+
+        let reply = call(
+            &mut server,
+            json!({"name": "repo_register", "arguments": {"path": main}}),
+        );
+        assert_eq!(reply["result"]["isError"], false);
+        let reply = call(&mut server, json!({"name": "worktrees", "arguments": {}}));
+        let head = fixture(&main, &["rev-parse", "--short=7", "HEAD"]);
+        assert_eq!(
+            text(&reply),
+            format!(
+                "{} (main, {head}, main worktree)\n{} (busy, {short})\nCouldn't read: The index isn't ready.\n",
+                main.display(),
+                busy.display(),
+                head = head.trim(),
+                short = short.trim()
+            )
         );
     }
 }
