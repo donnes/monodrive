@@ -1012,6 +1012,12 @@ mod tests {
                     for folder in chunk {
                         store.pin(folder, None, root).unwrap();
                         store.opened(&folder.join("a.txt")).unwrap();
+                        let search = SavedSearch {
+                            name: folder.display().to_string(),
+                            query: format!("ext:rs in:{}", folder.display()),
+                            scope: Scope::Everywhere,
+                        };
+                        store.save_search(search, None).unwrap();
                     }
                 });
             }
@@ -1020,6 +1026,7 @@ mod tests {
         let pinned = paths(&store, &root);
         assert!(folders.iter().all(|f| pinned.contains(f)), "{pinned:?}");
         assert_eq!(store.recents().unwrap().len(), folders.len());
+        assert_eq!(store.searches().unwrap().len(), folders.len());
     }
 
     #[test]
@@ -1123,36 +1130,6 @@ mod tests {
         assert!(store.searches().is_err());
         assert!(store.remove_search("Source").is_err());
         assert_eq!(std::fs::read_to_string(&store.places).unwrap(), "{");
-    }
-
-    #[test]
-    fn concurrent_saved_searches_and_pins_all_survive() {
-        let (_dir, dir) = real_tempdir();
-        let root = [volume("Macintosh HD", "/".as_ref(), Some("R"))];
-        let folders: Vec<PathBuf> = (0..20).map(|n| dir.join(format!("f{n}"))).collect();
-        for folder in &folders {
-            std::fs::create_dir(folder).unwrap();
-        }
-        std::thread::scope(|scope| {
-            for (t, chunk) in folders.chunks(4).enumerate() {
-                let (store, root) = (store(&dir), &root);
-                scope.spawn(move || {
-                    for (n, folder) in chunk.iter().enumerate() {
-                        let search = SavedSearch {
-                            name: format!("s{t}-{n}"),
-                            query: format!("ext:rs in:{}", folder.display()),
-                            scope: Scope::Everywhere,
-                        };
-                        store.save_search(search, None).unwrap();
-                        store.pin(folder, None, root).unwrap();
-                    }
-                });
-            }
-        });
-        let store = store(&dir);
-        assert_eq!(store.searches().unwrap().len(), folders.len());
-        let pinned = paths(&store, &root);
-        assert!(folders.iter().all(|f| pinned.contains(f)), "{pinned:?}");
     }
 
     #[test]

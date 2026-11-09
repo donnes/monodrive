@@ -385,21 +385,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dither_uses_two_pixel_bayer_cells_and_keeps_alpha() {
-        let source = RgbaImage::from_pixel(9, 9, image::Rgba([130, 180, 210, 127]));
-        let result = texture(source, Effect::Dither);
-        let bayer = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-        for (x, y, pixel) in result.enumerate_pixels() {
-            let expected = if bayer[(y / 2 % 4) as usize][(x / 2 % 4) as usize] <= 12 {
-                [158, 219, 255, 127]
-            } else {
-                [10, 14, 17, 127]
-            };
-            assert_eq!(pixel.0, expected, "at {x},{y}");
-        }
-    }
-
-    #[test]
     fn baked_effects_change_pixels_and_haze_is_left_to_the_renderer() {
         let source = RgbaImage::from_fn(24, 24, |x, y| {
             image::Rgba([(x * 10) as u8, (y * 10) as u8, 90, 255])

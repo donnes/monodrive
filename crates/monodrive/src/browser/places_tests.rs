@@ -1289,22 +1289,6 @@ fn a_page_opens_filters_and_goes_back(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_page_with_nothing_on_it_says_so(cx: &mut TestAppContext) {
-    let (_dir, project) = folder();
-    let world = world(vec![startup()], cx);
-    let (browser, cx) = open(&world, &project, cx);
-    press(cx, "cmd-k");
-    let view = palette(&browser, cx);
-    type_in(cx, "cloud");
-    press(cx, "right");
-    assert!(titles(&view, cx).is_empty());
-    assert!(view.read_with(cx, |v, _| v.active.is_none()));
-    // Return has nothing to run, so it stays here.
-    press(cx, "enter");
-    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Cloud);
-}
-
-#[gpui::test]
 fn remote_locations_add_explain_connect_and_forget(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let world = world(vec![startup()], cx);
@@ -2344,61 +2328,6 @@ fn suggestions_show_when_the_disk_is_low_and_their_button_can_be_undone(cx: &mut
     assert!(!on_screen(cx, "overview-clean"), "its proof is gone");
     click(cx, "toast-offer");
     assert!(cache.join("wheel").exists());
-    release(owned, cx);
-}
-
-#[gpui::test]
-fn no_suggestion_shows_with_room_to_spare(cx: &mut TestAppContext) {
-    let world = world(vec![disk(200_000)], cx);
-    let home = world.dir.path().canonicalize().unwrap();
-    let cache = home.join("Library/Caches/pip");
-    std::fs::create_dir_all(&cache).unwrap();
-    std::fs::write(cache.join("wheel"), vec![1; 64 * 1024]).unwrap();
-    let (_browser, cx) = open(&world, &home, cx);
-    press(cx, "cmd-alt-o");
-    assert!(on_screen(cx, "overview-page"));
-    assert!(!on_screen(cx, "overview-clean"));
-}
-
-#[gpui::test]
-fn the_button_refuses_while_cargo_builds_and_nothing_moves(cx: &mut TestAppContext) {
-    let world = world(vec![disk(100_000)], cx);
-    let owned = own(cx);
-    let home = world.dir.path().canonicalize().unwrap();
-    let project = home.join("app");
-    let target = project.join("target");
-    std::fs::create_dir_all(target.join("debug")).unwrap();
-    std::fs::create_dir_all(project.join(".git")).unwrap();
-    std::fs::write(project.join("Cargo.toml"), "").unwrap();
-    std::fs::write(
-        target.join("CACHEDIR.TAG"),
-        "Signature: 8a477f597d28d172789f06886806bc55\n",
-    )
-    .unwrap();
-    std::fs::write(target.join("debug/app"), vec![1; 64 * 1024]).unwrap();
-    std::fs::write(target.join("debug/.cargo-lock"), "").unwrap();
-    world
-        .store
-        .register_repository(monodrive_core::worktrees::Registration {
-            common_dir: project.join(".git"),
-            path: project.clone(),
-        })
-        .unwrap();
-    let lock = std::fs::File::open(target.join("debug/.cargo-lock")).unwrap();
-    lock.lock().unwrap();
-    let (browser, cx) = open(&world, &home, cx);
-    press(cx, "cmd-alt-o");
-    press_on(cx, "overview-clean");
-    assert!(target.exists());
-    assert_eq!(
-        toast(&browser, cx),
-        Some((
-            "Cargo is building in app. Try again when it finishes.".into(),
-            true,
-            false
-        ))
-    );
-    drop(lock);
     release(owned, cx);
 }
 

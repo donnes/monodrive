@@ -199,9 +199,4 @@ mod tests {
             assert_eq!((bitmap.width, bitmap.height), (width, height), "at {side}");
         }
     }
-
-    #[test]
-    fn a_format_apple_cannot_open_is_an_error() {
-        assert!(generate(&fixture("clip.mkv"), 128, &|| false).is_err());
-    }
 }

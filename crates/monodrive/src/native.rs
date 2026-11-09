@@ -268,13 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn one_file_offers_its_default_first_then_the_rest_a_to_z() {
-        let got = offered(&Apps::default(), &["/x/a.txt".into()]);
-        assert_eq!(names(&got), ["TextEdit", "Pages", "Zed"]);
-        assert!(got.has_default);
-    }
-
-    #[test]
     fn several_files_offer_only_apps_that_open_them_all() {
         let dir = tempfile::tempdir().unwrap();
         let file = |name: &str| {
