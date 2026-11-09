@@ -567,6 +567,13 @@ pub fn removal(git: &Git, repo: &Path, path: &Path) -> Result<Removal, String> {
     }
     let (folder, risk) = match &worktree.state {
         State::Ok => (Some(worktree.path.clone()), risk(git, &worktree.path)?),
+        // Git would prune it, yet the checkout still leads to it: forgetting
+        // it would leave a checkout whose `.git` leads nowhere.
+        State::Stale if is_checkout(&worktree, &inventory.common_dir).unwrap_or(false) => {
+            return Err(format!(
+                "{shown} is still linked to its repository, though Git would prune it, so Monodrive leaves it alone. git worktree repair can fix the link."
+            ));
+        }
         // The folder's changes can't be read, but its commits can.
         State::Missing | State::Stale => {
             let (unpushed, commits) = match &worktree.head {

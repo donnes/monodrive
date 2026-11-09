@@ -26,7 +26,10 @@ pub fn bind(cx: &mut App) {
 #[derive(Clone, Debug)]
 pub enum Ask {
     /// Git allows it. `repo` is the repository's common Git folder.
-    Remove { repo: PathBuf, removal: Box<Removal> },
+    Remove {
+        repo: PathBuf,
+        removal: Box<Removal>,
+    },
     /// Why it stays, in Monodrive's or Git's words.
     Refused { path: PathBuf, why: String },
 }
@@ -78,6 +81,7 @@ impl RemoveWorktreeView {
                 repo: repo.clone(),
                 path: removal.worktree.path.clone(),
                 confirmed: removal.risk.clone(),
+                with_folder: removal.folder.is_some(),
             }),
             Ask::Refused { .. } => Answer::Cancel,
         });

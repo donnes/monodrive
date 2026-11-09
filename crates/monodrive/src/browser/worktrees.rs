@@ -24,6 +24,8 @@ const MAX_WIDTH: f32 = 880.;
 const ROW_HEIGHT: f32 = 34.;
 const LINE: f32 = 16.;
 const CHIP_HEIGHT: f32 = 18.;
+/// How many repositories that couldn't be read show under the list.
+const PROBLEMS_SHOWN: usize = 3;
 
 /// What the page shows, as last scanned.
 #[derive(Default)]
@@ -410,13 +412,28 @@ impl Pane {
                 .into_any_element()
         } else {
             let items = page.items().len();
-            let problems = found.problems.iter().map(|why| {
+            // A few, so a disk of unreadable repositories can't push the list
+            // off the page.
+            let mut said: Vec<String> = found
+                .problems
+                .iter()
+                .take(PROBLEMS_SHOWN)
+                .map(|why| format!("Couldn't read {why}"))
+                .collect();
+            if found.problems.len() > PROBLEMS_SHOWN {
+                said.push(format!(
+                    "and {} more",
+                    found.problems.len() - PROBLEMS_SHOWN
+                ));
+            }
+            let problems = said.into_iter().map(|line| {
                 div()
                     .px(px(theme::PANE_INSET))
                     .pb_2()
+                    .truncate()
                     .text_size(px(theme::TEXT_SMALL))
                     .text_color(theme::danger())
-                    .child(format!("Couldn't read {why}"))
+                    .child(line)
             });
             div()
                 .flex_1()

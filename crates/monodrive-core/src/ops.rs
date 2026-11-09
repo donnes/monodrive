@@ -198,11 +198,14 @@ pub enum Request {
     /// Moves a linked worktree's folder to the Trash, then the folder Git
     /// keeps for it, as one operation, so one undo brings the worktree back.
     /// The branch stays. Refused unless `worktrees::removal` still allows it
-    /// and finds exactly the risk the person confirmed.
+    /// and finds exactly the risk the person confirmed, and the folder going
+    /// too or not, as they were told.
     RemoveWorktree {
         repo: PathBuf,
         path: PathBuf,
         confirmed: worktrees::Risk,
+        /// The checkout goes, not only Git's registration of it.
+        with_folder: bool,
     },
 }
 
@@ -1046,7 +1049,8 @@ impl Engine {
                 repo,
                 path,
                 confirmed,
-            } => plan_worktree(repo, path, confirmed),
+                with_folder,
+            } => plan_worktree(repo, path, confirmed, *with_folder),
             _ => Vec::new(),
         }
     }
@@ -1294,11 +1298,12 @@ fn plan_worktree(
     repo: &Path,
     path: &Path,
     confirmed: &worktrees::Risk,
+    with_folder: bool,
 ) -> Vec<(PathBuf, Result<Plan, String>)> {
     let removal = worktrees::Git::find()
         .and_then(|git| worktrees::removal(&git, repo, path))
         .and_then(|removal| {
-            if removal.risk == *confirmed {
+            if removal.risk == *confirmed && removal.folder.is_some() == with_folder {
                 Ok(removal)
             } else {
                 Err(format!(

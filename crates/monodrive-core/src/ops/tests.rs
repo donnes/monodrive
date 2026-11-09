@@ -2620,6 +2620,7 @@ fn removing_a_worktree_trashes_it_and_its_registration_and_undo_brings_it_back()
         repo: main.clone(),
         path: feature.clone(),
         confirmed,
+        with_folder: true,
     };
     let listed = || {
         worktrees::list(&Git::find().unwrap(), &main)
@@ -2635,6 +2636,17 @@ fn removing_a_worktree_trashes_it_and_its_registration_and_undo_brings_it_back()
     assert!(feature.exists() && registration.exists());
 
     let seen = worktrees::risk(&Git::find().unwrap(), &feature).unwrap();
+    // Asked to forget it while its folder was away: back now, nothing moves.
+    let forget = Request::RemoveWorktree {
+        repo: main.clone(),
+        path: feature.clone(),
+        confirmed: seen.clone(),
+        with_folder: false,
+    };
+    let refused = run(&mut engine, forget).unwrap_err();
+    assert!(refused.contains("changed since"), "{refused}");
+    assert!(feature.exists() && registration.exists());
+
     let trashed = moved(run(&mut engine, remove(seen)));
     assert_eq!(trashed.len(), 2, "{trashed:?}");
     assert!(!feature.exists() && !registration.exists());
@@ -2662,6 +2674,7 @@ fn removing_a_worktree_trashes_it_and_its_registration_and_undo_brings_it_back()
             repo: main.clone(),
             path: main.clone(),
             confirmed: Risk::default(),
+            with_folder: true,
         },
     )
     .unwrap_err();

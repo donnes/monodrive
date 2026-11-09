@@ -1412,6 +1412,7 @@ impl Server {
             repo,
             path: removal.worktree.path.clone(),
             confirmed: removal.risk.clone(),
+            with_folder: removal.folder.is_some(),
         };
         if removal.risk.is_empty() {
             return self.change(request);
