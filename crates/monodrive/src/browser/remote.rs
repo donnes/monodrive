@@ -746,18 +746,28 @@ impl Pane {
         self.download_from_server(paths, into, window, cx);
     }
 
-    /// What a drag from server row `ix` carries, the row joining the
-    /// selection unless it's in it, and the row's kind and name to draw.
+    /// What a drag from server row `ix` carries, and the row's kind and name
+    /// to draw. A row outside the selection joins it as a click with `keys`
+    /// would: ⌘ adds it, ⇧ extends to it, and otherwise it's alone.
     pub(super) fn remote_drag_from(
         &mut self,
         ix: usize,
+        keys: gpui::Modifiers,
     ) -> (Vec<RemotePath>, Option<(Kind, String)>) {
         let Some(entry) = self.remote.entries.get(ix) else {
             return (Vec::new(), None);
         };
         let picture = Some((entry.kind, entry.name.clone()));
         if !self.remote.selected.contains(&entry.name) {
-            self.remote.select_only(ix);
+            if keys.platform {
+                self.remote.selected.insert(entry.name.clone());
+                self.remote.cursor = Some(ix);
+                self.remote.anchor = Some(ix);
+            } else if keys.shift {
+                self.remote.extend_to(ix);
+            } else {
+                self.remote.select_only(ix);
+            }
         }
         (self.remote_chosen(), picture)
     }

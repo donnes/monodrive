@@ -365,6 +365,7 @@ fn dragging_between_a_server_and_a_local_pane_copies_and_never_moves(cx: &mut Te
         .store
         .add_remote("box.example", Some("box"), Some(&start))
         .unwrap();
+    std::fs::write(far.join("b.md"), "b").unwrap();
     std::fs::write(far.join("notes.md"), "from the server").unwrap();
     std::fs::write(project.join("up.txt"), "from this Mac").unwrap();
     let real = world.dir.path().canonicalize().unwrap();
@@ -389,17 +390,23 @@ fn dragging_between_a_server_and_a_local_pane_copies_and_never_moves(cx: &mut Te
     press(cx, "cmd-alt-s");
     let row = server_row(&browser, 0, cx);
     press_on(cx, &row);
-    assert_eq!(listed(&browser, cx).0, ["docs", "a.txt", "notes.md"]);
+    assert_eq!(
+        listed(&browser, cx).0,
+        ["docs", "a.txt", "b.md", "notes.md"]
+    );
     let local = browser.read_with(cx, |b, _| b.tabs[b.active].pane.clone());
     let into_local = local.read_with(cx, |pane, _| pane.list_bounds.get().center());
 
-    // Down: a server's file onto the local pane. ⌘ asks for a move; it copies.
+    // Down: ⌘ adds the row a drag starts on to the selection, as a click
+    // would, and asks for a move. It copies.
     let serving = serve(cx);
-    let notes = center(cx, "remote-row-2");
+    press_on(cx, "remote-row-2");
+    let notes = center(cx, "remote-row-3");
     carry(notes, into_local, "cmd", cx);
+    assert_eq!(listed(&browser, cx).1, ["b.md", "notes.md"]);
     assert_eq!(
         says(&browser, cx).as_deref(),
-        Some("Copy notes.md to project")
+        Some("Copy 2 items to project")
     );
     cx.simulate_mouse_up(into_local, MouseButton::Left, with("cmd"));
     finish(serving, cx);
@@ -409,11 +416,12 @@ fn dragging_between_a_server_and_a_local_pane_copies_and_never_moves(cx: &mut Te
             .as_deref(),
         Some("from the server")
     );
+    assert!(project.join("b.md").exists());
     assert!(far.join("notes.md").exists(), "nothing moves off a server");
 
     // Over its own folder it takes nothing.
-    let below = center(cx, "remote-row-2") + gpui::point(gpui::px(0.), gpui::px(120.));
-    carry(center(cx, "remote-row-2"), below, "", cx);
+    let below = center(cx, "remote-row-3") + gpui::point(gpui::px(0.), gpui::px(120.));
+    carry(center(cx, "remote-row-3"), below, "", cx);
     assert_eq!(says(&browser, cx).as_deref(), Some("Already in far on box"));
     press(cx, "escape");
     cx.simulate_mouse_up(below, MouseButton::Left, with(""));

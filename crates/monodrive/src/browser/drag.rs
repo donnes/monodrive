@@ -763,24 +763,25 @@ impl Pane {
                 pane: cx.entity(),
                 ix,
             },
-            |dragged, grabbed, _, cx| {
-                let ix = dragged.ix;
+            |dragged, grabbed, window, cx| {
+                let (ix, keys) = (dragged.ix, window.modifiers());
                 dragged
                     .pane
-                    .update(cx, |pane, cx| pane.begin_server_drag(ix, grabbed, cx))
+                    .update(cx, |pane, cx| pane.begin_server_drag(ix, keys, grabbed, cx))
             },
         )
     }
 
-    /// The drag has started on server row `ix`, which joins the selection
-    /// unless it's in it.
+    /// The drag has started on server row `ix`, which joins the selection as
+    /// a click with the keys held would, unless it's in it.
     fn begin_server_drag(
         &mut self,
         ix: usize,
+        keys: Modifiers,
         grabbed: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Entity<DragImage> {
-        let (items, picture) = self.remote_drag_from(ix);
+        let (items, picture) = self.remote_drag_from(ix, keys);
         let count = items.len();
         self.drag.carry_from_server(items);
         cx.notify();
