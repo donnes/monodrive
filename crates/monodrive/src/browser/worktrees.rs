@@ -18,8 +18,6 @@ use std::path::{Path, PathBuf};
 
 actions!(worktrees, [AskRemoveWorktree]);
 
-/// Wider than this, the page stops growing, so a row's end stays near its name.
-const MAX_WIDTH: f32 = 880.;
 /// A row holds a title over a detail, 16 pt each.
 const ROW_HEIGHT: f32 = 34.;
 const LINE: f32 = 16.;
@@ -489,13 +487,7 @@ impl Pane {
                             .into_any_element()
                     }
                 };
-                Some(
-                    div()
-                        .w_full()
-                        .max_w(px(MAX_WIDTH))
-                        .child(shown)
-                        .into_any_element(),
-                )
+                Some(shown)
             })
             .collect()
     }
