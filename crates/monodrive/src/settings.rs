@@ -751,7 +751,7 @@ impl SettingsView {
             .border_b_1()
             .border_color(content(0.06))
             .text_size(px(theme::TEXT_BODY))
-            .child(div().pl_1().text_color(content(0.65)).child("Settings"))
+            .child(div().text_color(content(0.65)).child("Settings"))
             .child(div().text_color(content(0.3)).child("/"))
             .child(
                 div()

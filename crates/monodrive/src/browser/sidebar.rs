@@ -337,6 +337,8 @@ fn row_button(
         theme::row_icon_button(id, label, glyph, content(0.55)),
         label,
     )
+    // Its glyph, not its circle, ends on the row's text edge.
+    .mr(px(-4.))
     .debug_selector(move || selector.clone())
 }
 
@@ -1221,7 +1223,6 @@ impl Browser {
                     div()
                         .debug_selector(move || format!("server-connecting-{at}"))
                         .size(px(12.))
-                        .mr_1()
                         .flex_shrink_0()
                         .rounded_full()
                         .border_1()
@@ -1264,6 +1265,8 @@ impl Browser {
             .child(
                 theme::text_button("favorites-edit", label, ButtonLook::Ghost)
                     .debug_selector(|| "favorites-edit".into())
+                    // Its text, not its pill, ends on the rows' 8 pt line.
+                    .mr(px(-8.))
                     .when(editing, |d| d.text_color(accent()))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_editing(cx))),
             )
@@ -1275,7 +1278,8 @@ impl Browser {
         div()
             .h(px(40.))
             .flex_shrink_0()
-            .px_1()
+            // Puts the buttons' glyphs on the rows' icon column.
+            .px(px(3.))
             .flex()
             .items_center()
             .justify_between()

@@ -779,7 +779,12 @@ impl SearchMenu {
                 theme::field(accent())
                     .debug_selector(|| "search-name".into())
                     .h(px(theme::FIELD_HEIGHT))
-                    .px_2()
+                    // A row's padding and lead column, past the 1 pt border,
+                    // so the name is typed where the row's title was.
+                    .pl(px(7.))
+                    .pr_2()
+                    .gap_2()
+                    .child(theme::lead(None::<Div>))
                     .child(div().flex_1().min_w_0().child(naming.field.clone())),
             )
             .children(self.error_line())
