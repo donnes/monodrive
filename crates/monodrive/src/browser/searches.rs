@@ -763,7 +763,7 @@ impl SearchMenu {
         let on = self.active == Some(item);
         self.slot(id, 0, item, cx).child(
             theme::row(on)
-                .child(lead(checked.then(|| {
+                .child(theme::lead(checked.then(|| {
                     icon("check-hi", 12.).text_color(theme::row_muted(on))
                 })))
                 .child(div().flex_1().min_w_0().truncate().child(title))
@@ -804,7 +804,10 @@ impl SearchMenu {
         self.slot("saved-search", ix, Item::Saved(ix), cx).child(
             theme::row(on)
                 .h(px(TALL_ROW))
-                .child(lead(None::<Div>))
+                // The buttons' glyphs, not their circles, end on the text's
+                // edge, as the shortcuts above do.
+                .pr_1()
+                .child(theme::lead(None::<Div>))
                 .child(
                     div()
                         .flex_1()
@@ -853,7 +856,7 @@ impl SearchMenu {
         let on = self.active == Some(Item::Recent(ix));
         self.slot("recent-search", ix, Item::Recent(ix), cx).child(
             theme::row(on)
-                .child(lead(Some(
+                .child(theme::lead(Some(
                     icon("clock", 14.).text_color(theme::row_muted(on)),
                 )))
                 .child(
@@ -876,7 +879,7 @@ impl SearchMenu {
         let on = self.active == Some(item);
         self.slot(id, 0, item, cx).child(
             theme::row(on)
-                .child(lead(None::<Div>))
+                .child(theme::lead(None::<Div>))
                 .child(div().flex_1().truncate().child(title)),
         )
     }
@@ -902,17 +905,6 @@ impl SearchMenu {
                     .child(key_hint(&["R"], "Rename"))
             })
     }
-}
-
-/// A row's first column, a check or an icon or nothing, so every title
-/// starts on the same line.
-fn lead(mark: Option<impl IntoElement>) -> Div {
-    div()
-        .w(px(16.))
-        .flex_shrink_0()
-        .flex()
-        .justify_center()
-        .children(mark)
 }
 
 /// A kept search in a line: its query, and the folder it's limited to.

@@ -32,6 +32,8 @@ const WIDTH: f32 = 640.;
 const HEIGHT: f32 = 520.;
 /// The drag image of the app, as a file drag's is.
 const DRAG_ICON: f32 = 32.;
+/// A checklist row's logo or agent tile.
+const TILE: f32 = theme::SIDEBAR_ROW_HEIGHT - 6.;
 /// The pane in System Settings that lists what has Full Disk Access.
 const PRIVACY_PANE: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
@@ -736,7 +738,7 @@ impl Onboarding {
         let path = self.app.clone();
         let folder = !self.bare();
         row(
-            logo(theme::SIDEBAR_ROW_HEIGHT - 6.).into_any_element(),
+            logo(TILE).into_any_element(),
             "Full Disk Access",
             div().text_color(content(0.65)).child(subtitle),
             trailing,
@@ -782,7 +784,7 @@ impl Onboarding {
             )
             .aria_label(format!("{label} {}", harness.name()));
         let tile = div()
-            .size(px(theme::SIDEBAR_ROW_HEIGHT - 6.))
+            .size(px(TILE))
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -836,11 +838,9 @@ impl Onboarding {
                     .rounded(px(theme::RADIUS_CARD))
                     .bg(content(0.03))
                     .child(self.access_row(cx))
-                    .children(
-                        agents
-                            .into_iter()
-                            .map(|agent| agent.border_t_1().border_color(content(0.06))),
-                    )
+                    .children(agents.into_iter().flat_map(|agent| {
+                        [hairline().into_any_element(), agent.into_any_element()]
+                    }))
                     .when(empty, |d| {
                         d.child(
                             div()
@@ -937,12 +937,20 @@ fn done(text: &'static str) -> Div {
         .child(text)
 }
 
+/// The line between two rows, from where their names start to their end, as
+/// in System Settings.
+fn hairline() -> Div {
+    div()
+        .h(px(1.))
+        .ml(px(theme::PANE_INSET + TILE + 12.))
+        .mr(px(theme::PANE_INSET))
+        .bg(content(0.06))
+}
+
 fn row(leading: AnyElement, name: &'static str, subtitle: Div, trailing: AnyElement) -> Div {
-    // A margin, not padding, so the hairline between rows starts at their
-    // content, as in System Settings.
     div()
         .min_h(px(44.))
-        .mx(px(theme::PANE_INSET))
+        .px(px(theme::PANE_INSET))
         .py_2()
         .flex()
         .items_center()

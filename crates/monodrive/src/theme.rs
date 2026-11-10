@@ -559,6 +559,17 @@ pub fn field(border: Hsla) -> Div {
         .items_center()
 }
 
+/// A menu row's first column, a check or an icon or nothing, so every
+/// title in the menu starts on the same line.
+pub fn lead(mark: Option<impl IntoElement>) -> Div {
+    div()
+        .w(px(16.))
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .children(mark)
+}
+
 /// A card's column of [`row_slot`]s, `CARD_INSET` from its outer edge on
 /// every side: the last slot's gap counts toward the bottom.
 pub fn inset_rows<E: Styled>(rows: E) -> E {

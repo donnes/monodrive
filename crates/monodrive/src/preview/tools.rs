@@ -2175,6 +2175,10 @@ impl PreviewView {
                 d.child(deferred(
                     menu_card(200., true)
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(cx)))
+                        // The gap every menu keeps between its rows.
+                        .flex()
+                        .flex_col()
+                        .gap(px(theme::ROW_GAP))
                         .child(
                             row("edit-replace", "Replace Original").on_click(cx.listener(
                                 |this, _, window, cx| this.save(SaveTo::Replace, window, cx),

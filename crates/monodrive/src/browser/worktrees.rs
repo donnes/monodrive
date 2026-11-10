@@ -570,28 +570,38 @@ impl Pane {
                                     .text_color(muted)
                                     .child(count),
                             )
-                            // Every header keeps the slot, so the counts line up.
-                            .child(div().size(px(20.)).flex_shrink_0().when(registered, |d| {
-                                d.opacity(0.)
-                                    .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
-                                    .child(tip(
-                                        row_icon_button(
-                                            gpui::ElementId::Name(
-                                                format!("forget-{}", repo.common_dir.display())
-                                                    .into(),
-                                            ),
-                                            "Remove from List",
-                                            "cancel-01",
-                                            muted,
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.forget_repository(common_dir.clone(), cx)
-                                            }),
-                                        ),
-                                        "Remove from List",
-                                    ))
-                            })),
+                            // As wide as a row's Copy Path and Move to Trash,
+                            // so the count ends where the rows' badges do.
+                            .child(
+                                div()
+                                    .w(px(2. * 20. + 4.))
+                                    .h(px(20.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .justify_end()
+                                    .when(registered, |d| {
+                                        d.opacity(0.)
+                                            .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
+                                            .child(tip(
+                                                row_icon_button(
+                                                    gpui::ElementId::Name(
+                                                        format!(
+                                                            "forget-{}",
+                                                            repo.common_dir.display()
+                                                        )
+                                                        .into(),
+                                                    ),
+                                                    "Remove from List",
+                                                    "cancel-01",
+                                                    muted,
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.forget_repository(common_dir.clone(), cx)
+                                                })),
+                                                "Remove from List",
+                                            ))
+                                    }),
+                            ),
                     ),
             )
     }

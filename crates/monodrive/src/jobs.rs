@@ -396,6 +396,8 @@ impl Jobs {
                             ),
                             label,
                         )
+                        // Its glyph, not its circle, ends on the bar's edge.
+                        .mr(px(-4.))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if label == "Cancel" {
                                 this.ask(Request::Cancel { job: id }, false, cx);

@@ -1959,16 +1959,13 @@ impl SettingsView {
                     .aria_selected(selected)
                     .child(
                         theme::row(ix == active)
-                            .pl(px(6.))
-                            .pr_3()
-                            .gap(px(6.))
-                            .child(div().w(px(14.)).flex_shrink_0().when(selected, |d| {
-                                d.child(icon("check-hi", 12.).text_color(if ix == active {
+                            .child(theme::lead(selected.then(|| {
+                                icon("check-hi", 12.).text_color(if ix == active {
                                     on_accent()
                                 } else {
                                     content(1.)
-                                }))
-                            }))
+                                })
+                            })))
                             .children(item_icon.map(|icon| icon()))
                             .child(label),
                     )
