@@ -189,6 +189,8 @@ impl Render for GotoView {
             .debug_selector(|| "goto-body".into())
             .flex()
             .flex_col()
+            // The last row's gap is part of the card's inset.
+            .when(!self.completions.is_empty(), |d| d.mb(px(-theme::ROW_GAP)))
             .children(self.error.clone().map(|error| {
                 // A long name wraps inside the card.
                 div()

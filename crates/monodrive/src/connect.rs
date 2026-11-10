@@ -275,8 +275,9 @@ impl Render for ConnectView {
             .child(
                 div()
                     .pt_2()
-                    .px_1()
-                    .pb_1()
+                    // On the card's 14 pt inset, as its text is.
+                    .px_2()
+                    .pb_2()
                     .flex()
                     .justify_end()
                     .gap_2()

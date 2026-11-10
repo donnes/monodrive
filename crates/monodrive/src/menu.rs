@@ -76,7 +76,8 @@ pub(crate) struct Submenu {
 }
 
 const WIDTH: f32 = 240.;
-const PADDING: f32 = 4.;
+/// A card's top and bottom insets together, its last row's gap counted.
+const EDGES: f32 = 2. * theme::CARD_INSET - theme::ROW_GAP;
 /// A separator's line and the space around it.
 const SEPARATOR: f32 = 9.;
 /// Kept clear of the window's edges.
@@ -438,7 +439,7 @@ impl ContextMenu {
         let rows = self.sub_rows();
         let above = self.rows[..submenu.parent].iter().map(|row| row.separated);
         // Its first row level with the row that opened it.
-        let top = rows_height(above) - 2. * (PADDING + 1.)
+        let top = rows_height(above) - EDGES
             + if self.rows[submenu.parent].separated {
                 SEPARATOR
             } else {
@@ -482,10 +483,14 @@ impl ContextMenu {
                             .child(
                                 theme::row(on)
                                     .when(!enabled, |d| d.text_color(content(0.65)))
-                                    .children(
-                                        row.app
-                                            .as_ref()
-                                            .map(|app| file_icons::icon(app, 16., window, cx)),
+                                    // Every row keeps the icon's column, so
+                                    // Other… lines up with the apps' names.
+                                    .child(
+                                        div().size(px(16.)).flex_shrink_0().children(
+                                            row.app
+                                                .as_ref()
+                                                .map(|app| file_icons::icon(app, 16., window, cx)),
+                                        ),
                                     )
                                     .child(
                                         div()
@@ -499,7 +504,7 @@ impl ContextMenu {
             })
             .collect();
         Some(
-            card(WIDTH, viewport.height - px(2. * MARGIN), items)
+            card(WIDTH, viewport.height - px(2. * MARGIN), items, true)
                 .id("context-submenu")
                 .debug_selector(|| "context-submenu".into())
                 .role(Role::Menu)
@@ -519,9 +524,7 @@ fn rows_height(separated: impl Iterator<Item = bool>) -> f32 {
         rows += 1;
         separators += usize::from(separated);
     }
-    2. * (PADDING + 1.)
-        + (theme::ROW_HEIGHT + theme::ROW_GAP) * rows as f32
-        + SEPARATOR * separators as f32
+    EDGES + (theme::ROW_HEIGHT + theme::ROW_GAP) * rows as f32 + SEPARATOR * separators as f32
 }
 
 /// The row after `from` whose title starts with `letter`, ignoring case,
@@ -643,7 +646,7 @@ impl Render for ContextMenu {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::press_outside))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::press_outside))
             .child(
-                card(WIDTH, viewport.height - px(2. * MARGIN), rows)
+                card(WIDTH, viewport.height - px(2. * MARGIN), rows, true)
                     .id("context-menu")
                     .key_context("ContextMenu")
                     .track_focus(&self.focus)
@@ -684,21 +687,28 @@ impl Render for ContextMenu {
 // The look, Monocode's explorer menu, kept here and in the sizes above so
 // another one is a change to these alone.
 
-/// The card around the rows, `max_height` at most, scrolling past that.
-/// The copies and moves popover is one too.
+/// The card around the rows, `max_height` at most, scrolling past that,
+/// with them `CARD_INSET` from its edge. `slots` says they're `row_slot`s,
+/// whose last gap counts toward that. The copies and moves popover is one
+/// too.
 pub(crate) fn card(
     width: f32,
     max_height: Pixels,
     rows: impl IntoIterator<Item = impl IntoElement>,
+    slots: bool,
 ) -> gpui::Div {
+    let inside = if slots {
+        theme::inset_rows(div())
+    } else {
+        div().p(px(theme::CARD_PADDING))
+    };
     theme::floating(Elevation::Popover)
         .w(px(width))
         .max_h(max_height)
         .child(
-            div()
+            inside
                 .id("context-menu-rows")
                 .relative()
-                .p(px(PADDING))
                 .max_h(max_height - px(2.))
                 .overflow_y_scroll()
                 .flex()

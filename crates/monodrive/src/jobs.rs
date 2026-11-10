@@ -375,7 +375,7 @@ impl Jobs {
         let bar = matches!(job.state, State::Queued | State::Running | State::Completed);
         div()
             .px_2()
-            .py(px(6.))
+            .py_2()
             .flex()
             .flex_col()
             .gap_1()
@@ -396,6 +396,8 @@ impl Jobs {
                             ),
                             label,
                         )
+                        // Its glyph, not its circle, ends on the bar's edge.
+                        .mr(px(-4.))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if label == "Cancel" {
                                 this.ask(Request::Cancel { job: id }, false, cx);
@@ -482,7 +484,7 @@ impl Render for Jobs {
         let lines = note.map(|(text, color)| {
             div()
                 .px_2()
-                .py(px(6.))
+                .py_2()
                 .text_size(px(theme::TEXT_SMALL))
                 .text_color(color)
                 .child(text)
@@ -495,6 +497,7 @@ impl Render for Jobs {
             lines
                 .into_iter()
                 .chain(rows.into_iter().map(IntoElement::into_any_element)),
+            false,
         )
         .id("jobs")
         .role(Role::Dialog)

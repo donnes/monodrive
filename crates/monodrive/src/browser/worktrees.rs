@@ -22,6 +22,9 @@ const ROW_HEIGHT: f32 = 34.;
 /// Between one repository's card and the next.
 const CARD_SPACING: f32 = 8.;
 const LINE: f32 = 16.;
+/// A row's Copy Path and Move to Trash, 20 pt each with 4 pt between, which
+/// a title keeps room for too, so its count ends where the rows' badges do.
+const TRAILING: f32 = 2. * 20. + 4.;
 const CHIP_HEIGHT: f32 = 18.;
 /// How many repositories that couldn't be read show under the list.
 const PROBLEMS_SHOWN: usize = 3;
@@ -570,28 +573,36 @@ impl Pane {
                                     .text_color(muted)
                                     .child(count),
                             )
-                            // Every header keeps the slot, so the counts line up.
-                            .child(div().size(px(20.)).flex_shrink_0().when(registered, |d| {
-                                d.opacity(0.)
-                                    .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
-                                    .child(tip(
-                                        row_icon_button(
-                                            gpui::ElementId::Name(
-                                                format!("forget-{}", repo.common_dir.display())
-                                                    .into(),
-                                            ),
-                                            "Remove from List",
-                                            "cancel-01",
-                                            muted,
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.forget_repository(common_dir.clone(), cx)
-                                            }),
-                                        ),
-                                        "Remove from List",
-                                    ))
-                            })),
+                            .child(
+                                div()
+                                    .w(px(TRAILING))
+                                    .h(px(20.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .justify_end()
+                                    .when(registered, |d| {
+                                        d.opacity(0.)
+                                            .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
+                                            .child(tip(
+                                                row_icon_button(
+                                                    gpui::ElementId::Name(
+                                                        format!(
+                                                            "forget-{}",
+                                                            repo.common_dir.display()
+                                                        )
+                                                        .into(),
+                                                    ),
+                                                    "Remove from List",
+                                                    "cancel-01",
+                                                    muted,
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.forget_repository(common_dir.clone(), cx)
+                                                })),
+                                                "Remove from List",
+                                            ))
+                                    }),
+                            ),
                     ),
             )
     }
@@ -717,6 +728,7 @@ impl Pane {
                     )
                     .child(
                         div()
+                            .w(px(TRAILING))
                             .flex()
                             .gap_1()
                             .flex_shrink_0()

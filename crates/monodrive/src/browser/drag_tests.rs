@@ -222,7 +222,8 @@ fn a_drop_on_the_other_panes_space_and_on_a_crumb_goes_to_that_folder(cx: &mut T
     let row_of_left = |ix: f32, cx: &mut VisualTestContext| {
         left.read_with(cx, |pane, cx| {
             let height = cx.global::<Preferences>().row_size.metrics().0;
-            pane.list_bounds.get().origin + point(px(60.), px(4. + height * (ix + 0.5)))
+            pane.list_bounds.get().origin
+                + point(px(60.), px(theme::CARD_PADDING + height * (ix + 0.5)))
         })
     };
     let space = right.read_with(cx, |pane, _| {

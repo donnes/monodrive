@@ -22,7 +22,7 @@ Someone moving through files fast, mostly from the keyboard, who chose this over
 | Thumbnails and color swatches, which are pictures and not controls | 4 pt | `RADIUS_THUMB` |
 | The marquee, which matches Finder's | Square | none |
 
-Shapes inside shapes are concentric: an inner radius is the outer one less the gap between them. Rows in a card sit `CARD_INSET`, 6 pt, inside its edge on every side, so their 8 pt corners run parallel to its 14 pt ones.
+Shapes inside shapes are concentric: an inner radius is the outer one less the gap between them. Rows in a card sit `CARD_INSET`, 6 pt, inside its edge on every side, so their 8 pt corners run parallel to its 14 pt ones. That holds for every rounded surface with rows: menus, popovers, the palette and quick sheets, Settings' page list, and the pane's list and columns. Inside a 1 pt border that's `CARD_PADDING`, and `inset_rows` counts the last `row_slot`'s gap toward the bottom. Text in a card that isn't in a row, such as its header, footer or a section title, starts where its rows' text does, 14 pt in, with `CARD_TEXT_PADDING`. In a menu or list where some rows have an icon or a check, every row keeps that column, so every title starts on one line.
 
 The header of a sheet with a query (palette, Go to Folder, Connect) is a bare field with no outline, as in Spotlight: there is no shape to round. Any field with a visible outline is a pill.
 
@@ -73,7 +73,7 @@ A nightly has a night sky behind the top of its sidebar in a dark theme, `assets
 
 The field's leading icon button opens its menu (⇧⌘S), a 360 pt `Popover` under the field. From the top: what a search looks at (Search Names, Search File Contents ⌥⌘F), Search Only and the folder, then Saved, each 40 pt with its query as the subtitle and row icon buttons to rename (R) and remove (⌫), then Save Search… while something's typed, then Recent and Clear Recent Searches. A name is typed in place of the row. Saving never runs anything, and removing asks nothing, because a saved search is only words. The ✕ at the field's end or Esc leaves a search, and leaving goes back to names and everywhere; with nothing typed, the first Esc does that alone. The icon turns to primary ink while the mode isn't plain, and to a file while it looks at contents, and the prompt says the mode.
 
-A content search's matching lines are rows under their file, up to 5 a file. A line's row is the height of every file row, so `uniform_list` still measures one row, and the row stands for its file: a press selects, opens or drags the file, and the keys step from file to file. A selection or stripe covers the file and its lines as one block, with the row radius only at its ends. The line number is `TEXT_CAPTION` at 0.65, right-aligned in a 40 pt column, and the line is Menlo `TEXT_SMALL` at 0.65 with each match bold in primary ink, without its indent and cut at the start when the first match is far along. Lines only fit the list, so a grid pane shows these results as a list. `, more not shown` in the status says a limit or the time budget left matches out.
+A content search's matching lines are rows under their file, up to 5 a file. A line's row is the height of every file row, so `uniform_list` still measures one row, and the row stands for its file: a press selects, opens or drags the file, and the keys step from file to file. A selection or stripe covers the file and its lines as one block, with the row radius only at its ends. Selected files next to each other join into one block the same way, as in Finder. The line number is `TEXT_CAPTION` at 0.65, right-aligned in a 40 pt column, and the line is Menlo `TEXT_SMALL` at 0.65 with each match bold in primary ink, without its indent and cut at the start when the first match is far along. Lines only fit the list, so a grid pane shows these results as a list. `, more not shown` in the status says a limit or the time budget left matches out.
 
 ### Batch rename
 
@@ -242,7 +242,7 @@ A button that shows only an icon names itself while the pointer rests on it, as 
 
 All in `theme.rs`, except motion, which `motion.rs` holds and Motion describes. Each returns an element the caller extends.
 
-- `RADIUS_ROW`, `RADIUS_CARD`, `RADIUS_THUMB`; `TEXT_CAPTION`, `TEXT_SMALL`, `TEXT_BODY`, `TEXT_TITLE`; `TITLE_BAR_HEIGHT`, `PATH_BAR_HEIGHT`, `PANE_INSET`, `CARD_INSET`, `ROW_HEIGHT`, `SIDEBAR_ROW_HEIGHT`, `ROW_GAP`, `BUTTON_HEIGHT`, `FIELD_HEIGHT`.
+- `RADIUS_ROW`, `RADIUS_CARD`, `RADIUS_THUMB`; `TEXT_CAPTION`, `TEXT_SMALL`, `TEXT_BODY`, `TEXT_TITLE`; `TITLE_BAR_HEIGHT`, `PATH_BAR_HEIGHT`, `PANE_INSET`, `CARD_INSET`, `CARD_PADDING`, `CARD_TEXT_PADDING`, `ROW_HEIGHT`, `SIDEBAR_ROW_HEIGHT`, `ROW_GAP`, `BUTTON_HEIGHT`, `FIELD_HEIGHT`.
 - `content`, `accent`, `on_accent`, `danger`, `danger_fill`, `on_danger`, `success`, `scrim`, `well`, `knob`, `raised`, `card_fill`: colors. `focus_ring`, `knob_shadow`, `raised_shadow`: shadows.
 - `text_button(id, label, look)`: the usual button. `button(id, look)` is its frame, for a label with an icon or one that changes. `ButtonLook` is `Secondary`, `Primary`, `Destructive`, `Caution`, `Ghost` or `Disabled`.
 - `icon_button(id, label, path, enabled)` in chrome, `row_icon_button(id, label, path, ink)` inside a row, `circle_button(id, label, side)` for a circle with other contents, such as the jobs ring.

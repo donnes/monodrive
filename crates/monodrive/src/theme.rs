@@ -22,6 +22,12 @@ pub const RADIUS_CARD: f32 = 14.;
 /// How far a card's rows sit inside its edge, on every side, so their
 /// corners run parallel to its own.
 pub const CARD_INSET: f32 = RADIUS_CARD - RADIUS_ROW;
+/// The padding that puts rows `CARD_INSET` from a card's outer edge, inside
+/// its 1 pt border.
+pub const CARD_PADDING: f32 = CARD_INSET - 1.;
+/// The padding that puts text that isn't in a row, such as a card's header
+/// or footer, where its rows' text starts: past their own 8 pt padding.
+pub const CARD_TEXT_PADDING: f32 = CARD_PADDING + 8.;
 
 pub const TEXT_CAPTION: f32 = 11.;
 pub const TEXT_SMALL: f32 = 12.;
@@ -551,6 +557,25 @@ pub fn field(border: Hsla) -> Div {
         .border_color(border)
         .flex()
         .items_center()
+}
+
+/// A menu row's first column, a check or an icon or nothing, so every
+/// title in the menu starts on the same line.
+pub fn lead(mark: Option<impl IntoElement>) -> Div {
+    div()
+        .w(px(16.))
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .children(mark)
+}
+
+/// A card's column of [`row_slot`]s, `CARD_INSET` from its outer edge on
+/// every side: the last slot's gap counts toward the bottom.
+pub fn inset_rows<E: Styled>(rows: E) -> E {
+    rows.pt(px(CARD_PADDING))
+        .px(px(CARD_PADDING))
+        .pb(px(CARD_PADDING - ROW_GAP))
 }
 
 /// Where a stacked row lives: the row and the gap under it, so a press in the

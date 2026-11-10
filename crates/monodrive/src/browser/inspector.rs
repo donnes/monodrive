@@ -799,7 +799,17 @@ impl Browser {
                         .flex_col()
                         .children(contents),
                 )
-                .child(div().absolute().top(px(8.)).right(px(8.)).child(hide))
+                // Where Preview's and Settings' close buttons sit: on the
+                // pane's inset, centered in a 40 pt bar, past the 1 pt border.
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(
+                            (theme::TITLE_BAR_HEIGHT - theme::BUTTON_HEIGHT) / 2. - 1.
+                        ))
+                        .right(px(theme::PANE_INSET - 1.))
+                        .child(hide),
+                )
                 .into_any_element(),
         )
     }

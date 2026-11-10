@@ -254,7 +254,8 @@ struct Job {
 /// One choice in a pop-up menu.
 struct MenuItem {
     label: SharedString,
-    icon: Option<AnyElement>,
+    /// Drawn in its row, and again on the button when it's the one chosen.
+    icon: Option<Rc<dyn Fn() -> AnyElement>>,
     selected: bool,
     choose: Choose,
 }
@@ -686,8 +687,8 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(px(theme::ROW_GAP))
-            .p_2()
-            .pt_3()
+            // Its rows' corners run parallel to the sheet's.
+            .p(px(theme::CARD_PADDING))
             .border_r_1()
             .border_color(content(0.06))
             // ↑ and ↓ switch pages from the page list, as in System Settings.
@@ -750,7 +751,7 @@ impl SettingsView {
             .border_b_1()
             .border_color(content(0.06))
             .text_size(px(theme::TEXT_BODY))
-            .child(div().pl_1().text_color(content(0.65)).child("Settings"))
+            .child(div().text_color(content(0.65)).child("Settings"))
             .child(div().text_color(content(0.3)).child("/"))
             .child(
                 div()
@@ -1621,9 +1622,9 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let light = theme::is_light();
-        let swatch_for = |id: &str| {
+        let swatch_for = |id: &str| -> Rc<dyn Fn() -> AnyElement> {
             let palette = palettes::palette(id, light);
-            swatch(palette.surface, palette.accent).into_any_element()
+            Rc::new(move || swatch(palette.surface, palette.accent).into_any_element())
         };
         let presets = PALETTES
             .iter()
@@ -1940,11 +1941,10 @@ impl SettingsView {
                 (item.label.clone(), item.icon.is_some())
             })
             .unwrap_or_default();
-        let mut items = items;
         let trigger_icon = current_icon
-            .then(|| items.iter_mut().find(|item| item.selected))
+            .then(|| items.iter().find(|item| item.selected))
             .flatten()
-            .and_then(|item| item.icon.take());
+            .and_then(|item| item.icon.as_ref().map(|icon| icon()));
         let menu = open.then(|| {
             let rows = items.into_iter().enumerate().map(|(ix, item)| {
                 let MenuItem {
@@ -1959,17 +1959,14 @@ impl SettingsView {
                     .aria_selected(selected)
                     .child(
                         theme::row(ix == active)
-                            .pl(px(6.))
-                            .pr_3()
-                            .gap(px(6.))
-                            .child(div().w(px(14.)).flex_shrink_0().when(selected, |d| {
-                                d.child(icon("check-hi", 12.).text_color(if ix == active {
+                            .child(theme::lead(selected.then(|| {
+                                icon("check-hi", 12.).text_color(if ix == active {
                                     on_accent()
                                 } else {
                                     content(1.)
-                                }))
-                            }))
-                            .children(item_icon)
+                                })
+                            })))
+                            .children(item_icon.map(|icon| icon()))
                             .child(label),
                     )
                     // The pointer and the arrows share one highlight, as in AppKit menus.
@@ -2048,12 +2045,11 @@ impl SettingsView {
                                         .occlude()
                                         .min_w(px(width.max(120.)))
                                         .max_h(px(360.))
-                                        .p_1()
                                         .child(
-                                            div()
+                                            theme::inset_rows(div())
                                                 .id("menu-items")
                                                 .relative()
-                                                .max_h(px(348.))
+                                                .max_h(px(358.))
                                                 .overflow_y_scroll()
                                                 .flex()
                                                 .flex_col()
@@ -2347,7 +2343,8 @@ fn group(
         .gap_2()
         .child(
             div()
-                .px_1()
+                // Over the plate's text, past the plate's border.
+                .px(px(theme::CARD_TEXT_PADDING + 1.))
                 .flex()
                 .flex_col()
                 .gap(px(2.))
@@ -2374,7 +2371,7 @@ fn group(
                 .flex_col()
                 .children(rows.into_iter().enumerate().map(|(ix, row)| {
                     div()
-                        .mx(px(14.))
+                        .mx(px(theme::CARD_TEXT_PADDING))
                         .when(ix > 0, |d| d.border_t_1().border_color(content(0.06)))
                         .child(row)
                 })),

@@ -87,7 +87,7 @@ fn menu_card(width: f32, from_right: bool) -> gpui::Div {
         .when(from_right, |d| d.right_0())
         .when(!from_right, |d| d.left_0())
         .w(px(width))
-        .p_1()
+        .p(px(theme::CARD_PADDING))
         .occlude()
 }
 
@@ -2175,6 +2175,10 @@ impl PreviewView {
                 d.child(deferred(
                     menu_card(200., true)
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(cx)))
+                        // The gap every menu keeps between its rows.
+                        .flex()
+                        .flex_col()
+                        .gap(px(theme::ROW_GAP))
                         .child(
                             row("edit-replace", "Replace Original").on_click(cx.listener(
                                 |this, _, window, cx| this.save(SaveTo::Replace, window, cx),
