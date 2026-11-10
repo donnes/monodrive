@@ -19,6 +19,9 @@ pub const MONO_FONT: &str = "Menlo";
 pub const RADIUS_THUMB: f32 = 4.;
 pub const RADIUS_ROW: f32 = 8.;
 pub const RADIUS_CARD: f32 = 14.;
+/// How far a card's rows sit inside its edge, on every side, so their
+/// corners run parallel to its own.
+pub const CARD_INSET: f32 = RADIUS_CARD - RADIUS_ROW;
 
 pub const TEXT_CAPTION: f32 = 11.;
 pub const TEXT_SMALL: f32 = 12.;
@@ -194,6 +197,21 @@ pub fn on_accent() -> Hsla {
 /// The window's surface over the blurred desktop.
 pub fn shell_fill() -> Hsla {
     tokens().shell
+}
+
+/// A card of content inside the pane, such as a repository on the Worktrees
+/// page: opaque, so its text reads the same over any background image.
+pub fn card_fill() -> Hsla {
+    let Tokens { light, shell, .. } = tokens();
+    if light {
+        gpui::white()
+    } else {
+        Hsla {
+            l: shell.l + 0.03,
+            a: 1.,
+            ..shell
+        }
+    }
 }
 
 /// The content pane: clear over the window's glass, or solid.

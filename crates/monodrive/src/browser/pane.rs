@@ -4439,7 +4439,8 @@ impl Render for Pane {
         let remote = self.showing_remote();
         let sort_shown =
             (self.showing_folder() || self.showing_archive() || remote).then_some(self.sort);
-        let empty = self.root.is_empty() && self.error.is_none();
+        // The Overview and Worktrees list no entries but are full of text.
+        let empty = self.root.is_empty() && self.error.is_none() && !self.showing_page();
         let look = prefs.background.clone().map(|path| Look {
             path,
             effect: prefs.background_effect,
