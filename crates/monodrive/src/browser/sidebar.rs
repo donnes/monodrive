@@ -871,7 +871,8 @@ impl Browser {
                 gpui::transparent_black()
             })
             .flex_shrink_0()
-            .px_2()
+            // 8 pt with the border, so icons sit under the section labels.
+            .px(px(7.))
             .rounded(px(theme::RADIUS_ROW))
             .text_size(px(theme::TEXT_TITLE))
             .font_weight(FontWeight::MEDIUM)

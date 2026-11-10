@@ -87,7 +87,7 @@ fn menu_card(width: f32, from_right: bool) -> gpui::Div {
         .when(from_right, |d| d.right_0())
         .when(!from_right, |d| d.left_0())
         .w(px(width))
-        .p_1()
+        .p(px(theme::CARD_PADDING))
         .occlude()
 }
 

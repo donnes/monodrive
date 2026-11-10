@@ -844,7 +844,8 @@ impl Onboarding {
                     .when(empty, |d| {
                         d.child(
                             div()
-                                .p(px(theme::PANE_INSET))
+                                .mx(px(theme::PANE_INSET))
+                                .py(px(theme::PANE_INSET))
                                 .border_t_1()
                                 .border_color(content(0.06))
                                 .child(note(
@@ -937,9 +938,11 @@ fn done(text: &'static str) -> Div {
 }
 
 fn row(leading: AnyElement, name: &'static str, subtitle: Div, trailing: AnyElement) -> Div {
+    // A margin, not padding, so the hairline between rows starts at their
+    // content, as in System Settings.
     div()
         .min_h(px(44.))
-        .px(px(theme::PANE_INSET))
+        .mx(px(theme::PANE_INSET))
         .py_2()
         .flex()
         .items_center()

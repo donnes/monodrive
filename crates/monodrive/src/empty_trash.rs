@@ -75,8 +75,7 @@ impl EmptyTrashView {
 impl Render for EmptyTrashView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = div()
-            .px_2()
-            .py_1()
+            .p_2()
             .flex()
             .flex_col()
             .gap_3()

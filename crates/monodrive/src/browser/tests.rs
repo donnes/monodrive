@@ -889,7 +889,11 @@ pub(super) fn row(
     cx.run_until_parked();
     in_pane(browser, cx, |browser, cx| {
         let height = cx.global::<Preferences>().row_size.metrics().0;
-        browser.list_bounds.get().origin + gpui::point(px(60.), px(4. + height * (ix as f32 + 0.5)))
+        browser.list_bounds.get().origin
+            + gpui::point(
+                px(60.),
+                px(theme::CARD_PADDING + height * (ix as f32 + 0.5)),
+            )
     })
 }
 

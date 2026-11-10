@@ -252,7 +252,8 @@ impl Pane {
                     uniform_list("entries", self.entries.len(), cx.processor(Self::rows))
                         .track_scroll(&self.scroll)
                         .flex_1()
-                        .p_1(),
+                        // Rows' corners run parallel to the pane's.
+                        .p(px(theme::CARD_PADDING)),
                 )
                 .child(
                     canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
@@ -462,7 +463,7 @@ impl Pane {
                 )
                 .track_scroll(&scroll)
                 .flex_1()
-                .p_1(),
+                .p(px(theme::CARD_PADDING)),
             )
             .into_any_element()
     }
@@ -495,7 +496,7 @@ impl Pane {
                     .aria_selected(here)
                     .w_full()
                     .h(px(row_height))
-                    .px_3()
+                    .px(px(theme::PANE_INSET - theme::CARD_PADDING))
                     .rounded(px(theme::RADIUS_ROW))
                     .flex()
                     .items_center()

@@ -307,15 +307,18 @@ impl Pane {
             .id(row)
             .w_full()
             .h(px(height))
-            .px_3()
+            .px(px(theme::PANE_INSET - theme::CARD_PADDING))
             .flex()
             .items_center()
             .gap_2()
             .map(|d| self.row_fill(d, ix, selected, active))
-            .when(self.matches.ends_entry(row), |d| {
-                // design: the row radius, on the block's bottom corners.
-                d.rounded_b(px(theme::RADIUS_ROW))
-            })
+            .when(
+                self.matches.ends_entry(row) && !self.selected_beside(ix, 1),
+                |d| {
+                    // design: the row radius, on the block's bottom corners.
+                    d.rounded_b(px(theme::RADIUS_ROW))
+                },
+            )
             .child(
                 div()
                     .w(px(number_column))
@@ -348,6 +351,17 @@ impl Pane {
 
     /// What a row of entry `ix` is filled with: the selection, or a stripe
     /// shared by a file and its lines.
+    /// Whether the entry `step` from `ix` is selected along with it, so their
+    /// rows join into one block.
+    pub(super) fn selected_beside(&self, ix: usize, step: isize) -> bool {
+        let selected = |ix: usize| {
+            self.entries
+                .get(ix)
+                .is_some_and(|entry| self.selection.contains(&entry.path))
+        };
+        selected(ix) && ix.checked_add_signed(step).is_some_and(selected)
+    }
+
     pub(super) fn row_fill(
         &self,
         row: Stateful<Div>,
@@ -749,9 +763,9 @@ impl SearchMenu {
         let on = self.active == Some(item);
         self.slot(id, 0, item, cx).child(
             theme::row(on)
-                .child(div().w(px(12.)).flex_shrink_0().when(checked, |d| {
-                    d.child(icon("check-hi", 12.).text_color(theme::row_muted(on)))
-                }))
+                .child(lead(checked.then(|| {
+                    icon("check-hi", 12.).text_color(theme::row_muted(on))
+                })))
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .children(keys.map(|keys| menu::shortcut(keys, theme::row_muted(on)))),
         )
@@ -790,6 +804,7 @@ impl SearchMenu {
         self.slot("saved-search", ix, Item::Saved(ix), cx).child(
             theme::row(on)
                 .h(px(TALL_ROW))
+                .child(lead(None::<Div>))
                 .child(
                     div()
                         .flex_1()
@@ -838,11 +853,9 @@ impl SearchMenu {
         let on = self.active == Some(Item::Recent(ix));
         self.slot("recent-search", ix, Item::Recent(ix), cx).child(
             theme::row(on)
-                .child(
-                    icon("clock", 14.)
-                        .flex_shrink_0()
-                        .text_color(theme::row_muted(on)),
-                )
+                .child(lead(Some(
+                    icon("clock", 14.).text_color(theme::row_muted(on)),
+                )))
                 .child(
                     div()
                         .flex_1()
@@ -861,15 +874,18 @@ impl SearchMenu {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let on = self.active == Some(item);
-        self.slot(id, 0, item, cx)
-            .child(theme::row(on).child(div().flex_1().truncate().child(title)))
+        self.slot(id, 0, item, cx).child(
+            theme::row(on)
+                .child(lead(None::<Div>))
+                .child(div().flex_1().truncate().child(title)),
+        )
     }
 
     fn footer(&self) -> Div {
         let saved = matches!(self.active, Some(Item::Saved(_))) && self.naming.is_none();
         div()
             .h(px(32.))
-            .px_4()
+            .px(px(theme::CARD_TEXT_PADDING))
             .flex()
             .flex_shrink_0()
             .items_center()
@@ -888,6 +904,17 @@ impl SearchMenu {
     }
 }
 
+/// A row's first column, a check or an icon or nothing, so every title
+/// starts on the same line.
+fn lead(mark: Option<impl IntoElement>) -> Div {
+    div()
+        .w(px(16.))
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .children(mark)
+}
+
 /// A kept search in a line: its query, and the folder it's limited to.
 fn about(query: &str, scope: &Where) -> String {
     match scope {
@@ -900,9 +927,9 @@ impl Render for SearchMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = window.viewport_size();
         let anchor = self.anchor.get();
+        // The field's outer edge, past the border its bounds sit inside.
         let at = point(
-            anchor
-                .left()
+            (anchor.left() - px(1.))
                 .min(viewport.width - px(MENU_WIDTH + MENU_MARGIN))
                 .max(px(MENU_MARGIN)),
             anchor.bottom() + px(4.),
@@ -1065,12 +1092,11 @@ impl Render for SearchMenu {
                     .flex()
                     .flex_col()
                     .child(
-                        div()
+                        theme::inset_rows(div())
                             .id("search-menu-rows")
                             .relative()
                             .flex_1()
                             .min_h_0()
-                            .p_1()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll)
                             .flex()
@@ -1094,7 +1120,10 @@ pub(super) fn track_anchor(anchor: Rc<Cell<Bounds<Pixels>>>) -> impl IntoElement
         },
         |_, _, _, _| {},
     )
+    // Placed, or it would start past the field's padding.
     .absolute()
+    .top_0()
+    .left_0()
     .size_full()
 }
 

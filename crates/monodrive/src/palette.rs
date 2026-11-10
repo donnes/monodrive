@@ -903,7 +903,8 @@ impl PaletteView {
             .items_center()
             .gap_2()
             .child(
-                icon("search", 14.)
+                // A row's icon size, so the query starts where their titles do.
+                icon("search", 16.)
                     .flex_shrink_0()
                     .text_color(content(0.55)),
             )
@@ -934,7 +935,7 @@ impl PaletteView {
         };
         div()
             .h(px(FOOTER_HEIGHT))
-            .px_4()
+            .px(px(theme::CARD_TEXT_PADDING))
             .flex()
             .flex_shrink_0()
             .items_center()
@@ -980,7 +981,7 @@ impl Render for PaletteView {
         let error = self.error.clone().map(|why| {
             div()
                 .debug_selector(|| "palette-error".into())
-                .px_4()
+                .px(px(theme::CARD_TEXT_PADDING))
                 .pt_2()
                 .text_size(px(theme::TEXT_SMALL))
                 .text_color(theme::danger())
@@ -999,13 +1000,12 @@ impl Render for PaletteView {
         // The card sits 16% of the way down, with its header and footer.
         let room =
             window.viewport_size().height.as_f32() * 0.8 - theme::TITLE_BAR_HEIGHT - FOOTER_HEIGHT;
-        let list = div()
+        let list = theme::inset_rows(div())
             .id("palette-rows")
             .role(Role::ListBox)
             .track_scroll(&self.scroll)
             .overflow_y_scroll()
             .max_h(px(LIST_HEIGHT.min(room)))
-            .p_2()
             .flex()
             .flex_col()
             .children(rows)
@@ -1096,7 +1096,12 @@ pub fn card(
     header: impl IntoElement,
     body: impl IntoElement,
 ) -> gpui::Stateful<gpui::Div> {
-    bare_card(id, label, header, div().p_2().child(body))
+    bare_card(
+        id,
+        label,
+        header,
+        div().p(px(theme::CARD_PADDING)).child(body),
+    )
 }
 
 /// A quick sheet's card with nothing around `below`, for what runs edge to edge.
@@ -1121,7 +1126,7 @@ fn bare_card(
                 .child(
                     div()
                         .h(px(theme::TITLE_BAR_HEIGHT))
-                        .px_4()
+                        .px(px(theme::CARD_TEXT_PADDING))
                         .flex()
                         .items_center()
                         .border_b_1()

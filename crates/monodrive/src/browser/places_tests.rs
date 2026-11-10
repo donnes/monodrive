@@ -2078,7 +2078,11 @@ fn a_folder_through_a_link_counts_as_the_volume_it_leads_to(cx: &mut TestAppCont
     let file_right = right.read_with(cx, |pane, cx| {
         let height = cx.global::<Preferences>().row_size.metrics().0;
         let ix = pane.entries.iter().position(|e| e.name == "a.txt").unwrap();
-        pane.list_bounds.get().origin + point(px(60.), px(4. + height * (ix as f32 + 0.5)))
+        pane.list_bounds.get().origin
+            + point(
+                px(60.),
+                px(theme::CARD_PADDING + height * (ix as f32 + 0.5)),
+            )
     });
     let space_left = {
         let bounds =

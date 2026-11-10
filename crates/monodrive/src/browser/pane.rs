@@ -1625,7 +1625,11 @@ impl Pane {
     fn rows_in(&self, rect: Bounds<Pixels>, cx: &App) -> Vec<usize> {
         let len = self.entries.len();
         // The list's padding, then in the grid each row's too.
-        let (top, bottom) = (rect.top().as_f32() - 4., rect.bottom().as_f32() - 4.);
+        let pad = match self.layout() {
+            View::List | View::Columns => theme::CARD_PADDING,
+            View::Grid => 4.,
+        };
+        let (top, bottom) = (rect.top().as_f32() - pad, rect.bottom().as_f32() - pad);
         match self.layout() {
             View::List | View::Columns => {
                 let height = cx.global::<Preferences>().row_size.metrics().0;
@@ -3068,15 +3072,17 @@ impl Pane {
                         .aria_selected(selected)
                         .w_full()
                         .h(px(row_height))
-                        .px_3()
-                        // A file and its lines read as one block.
-                        .map(|d| {
-                            if has_lines {
-                                // design: the row radius, on the block's top corners.
-                                d.rounded_t(px(theme::RADIUS_ROW))
-                            } else {
-                                d.rounded(px(theme::RADIUS_ROW))
-                            }
+                        // The text stays on the bars' inset.
+                        .px(px(theme::PANE_INSET - theme::CARD_PADDING))
+                        // A file and its lines read as one block, and so do
+                        // selected files next to each other, as in Finder.
+                        .when(!self.selected_beside(ix, -1), |d| {
+                            // design: the row radius, on the block's top corners.
+                            d.rounded_t(px(theme::RADIUS_ROW))
+                        })
+                        .when(!has_lines && !self.selected_beside(ix, 1), |d| {
+                            // design: the row radius, on the block's bottom corners.
+                            d.rounded_b(px(theme::RADIUS_ROW))
                         })
                         .flex()
                         .items_center()
@@ -4201,7 +4207,8 @@ impl Pane {
             )
             .track_scroll(&self.scroll)
             .flex_1()
-            .p_1()
+            // Rows' corners run parallel to the pane's.
+            .p(px(theme::CARD_PADDING))
             .into_any_element(),
         };
         // Thumbnails the last frame didn't draw (scrolled away, another folder,

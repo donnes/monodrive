@@ -205,8 +205,7 @@ impl Render for RemoveWorktreeView {
         let said = self.said();
         let refused = matches!(self.ask, Ask::Refused { .. });
         let body = div()
-            .px_2()
-            .py_1()
+            .p_2()
             .flex()
             .flex_col()
             .gap_3()

@@ -361,8 +361,10 @@ fn the_bar_and_the_list_hold_still_until_the_owner_answers(cx: &mut TestAppConte
     fill(&browser, cx, |b| &b.find, "IMG");
     fill(&browser, cx, |b| &b.with, "New");
     assert_eq!(names(&browser, cx), ["New_a.jpg", "New_b.jpg"]);
-    let third_row = in_pane(&browser, cx, |pane, _| {
-        pane.list_bounds.get().origin + gpui::point(gpui::px(120.), gpui::px(60.))
+    let third_row = in_pane(&browser, cx, |pane, cx| {
+        let height = cx.global::<Preferences>().row_size.metrics().0;
+        let y = theme::CARD_PADDING + height * 2.5;
+        pane.list_bounds.get().origin + gpui::point(gpui::px(120.), gpui::px(y))
     });
     // The press lands on a row while nothing is running.
     cx.simulate_click(third_row, gpui::Modifiers::none());

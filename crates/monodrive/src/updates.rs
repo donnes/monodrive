@@ -387,7 +387,7 @@ impl Render for Updates {
         let mut lines = vec![
             div()
                 .px_2()
-                .py(px(6.))
+                .py_2()
                 .text_size(px(theme::TEXT_BODY))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(self.headline())
@@ -446,7 +446,7 @@ impl Render for Updates {
             );
         }
         let height = window.viewport_size().height - px(theme::TITLE_BAR_HEIGHT + 16.);
-        menu::card(WIDTH, height, lines)
+        menu::card(WIDTH, height, lines, false)
             .id("updates")
             .role(Role::Dialog)
             .aria_label("Updates")
