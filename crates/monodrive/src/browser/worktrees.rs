@@ -24,8 +24,6 @@ const ROW_HEIGHT: f32 = 34.;
 const ITEM_HEIGHT: f32 = ROW_HEIGHT + theme::ROW_GAP;
 /// Between one repository's card and the next.
 const CARD_SPACING: f32 = 8.;
-/// The tinted circle a repository's title starts with.
-const MARK: f32 = 20.;
 const LINE: f32 = 16.;
 const CHIP_HEIGHT: f32 = 18.;
 /// How many repositories that couldn't be read show under the list.
@@ -503,8 +501,9 @@ impl Pane {
             .collect()
     }
 
-    /// The top of a repository's card: its name, where it is, Forget when
-    /// it's registered, and how many worktrees it has.
+    /// The top of a repository's card, in its rows' columns: a folder in its
+    /// tint, its name, where it is, how many worktrees it has, and Remove
+    /// from List when it was added by hand.
     fn repository_header(
         &self,
         repo: &Inventory,
@@ -521,17 +520,21 @@ impl Pane {
         let registered = self.worktrees.registered.contains(&repo.common_dir);
         let common_dir = repo.common_dir.clone();
         let count = counted(repo.worktrees.len(), "worktree");
+        let muted = content(0.65);
         // A row's height and gap like every line of the list: the space
         // between cards, then the card's top.
         div()
             .h(px(ITEM_HEIGHT))
             .flex_shrink_0()
             .pt(px(CARD_SPACING))
+            .group(theme::ROW_GROUP)
             .child(
                 div()
                     .size_full()
-                    // The mark's center lines up with the row icons' below.
-                    .px_2()
+                    // The same insets as a row inside its slice, so the
+                    // folder, name and button sit over the rows' icons,
+                    // titles and Move to Trash.
+                    .px(px(theme::ROW_GAP + 8.))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -541,17 +544,7 @@ impl Pane {
                     .border_color(content(0.06))
                     // design: a card drawn in slices across uniform_list lines.
                     .rounded_t(px(theme::RADIUS_CARD))
-                    .child(
-                        div()
-                            .size(px(MARK))
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(tint.opacity(0.18))
-                            .child(icon("folder-01", 12.).text_color(tint)),
-                    )
+                    .child(icon("folder-01", 16.).text_color(tint))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -565,33 +558,37 @@ impl Pane {
                             .min_w_0()
                             .truncate()
                             .text_size(px(theme::TEXT_SMALL))
-                            .text_color(content(0.65))
+                            .text_color(muted)
                             .child(shown),
                     )
-                    .when(registered, |d| {
-                        d.child(
-                            text_button(
-                                gpui::ElementId::Name(
-                                    format!("forget-{}", repo.common_dir.display()).into(),
-                                ),
-                                "Forget",
-                                ButtonLook::Ghost,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.forget_repository(common_dir.clone(), cx)
-                                },
-                            )),
-                        )
-                    })
                     .child(
                         div()
                             .flex_shrink_0()
-                            .pr_2()
                             .text_size(px(theme::TEXT_SMALL))
-                            .text_color(content(0.65))
+                            .text_color(muted)
                             .child(count),
-                    ),
+                    )
+                    // Every header keeps the slot, so the counts line up.
+                    .child(div().size(px(20.)).flex_shrink_0().when(registered, |d| {
+                        d.opacity(0.)
+                            .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
+                            .child(tip(
+                                row_icon_button(
+                                    gpui::ElementId::Name(
+                                        format!("forget-{}", repo.common_dir.display()).into(),
+                                    ),
+                                    "Remove from List",
+                                    "cancel-01",
+                                    muted,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.forget_repository(common_dir.clone(), cx)
+                                    },
+                                )),
+                                "Remove from List",
+                            ))
+                    })),
             )
     }
 
