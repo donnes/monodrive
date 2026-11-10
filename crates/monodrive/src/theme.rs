@@ -19,6 +19,9 @@ pub const MONO_FONT: &str = "Menlo";
 pub const RADIUS_THUMB: f32 = 4.;
 pub const RADIUS_ROW: f32 = 8.;
 pub const RADIUS_CARD: f32 = 14.;
+/// How far a card's rows sit inside its edge, on every side, so their
+/// corners run parallel to its own.
+pub const CARD_INSET: f32 = RADIUS_CARD - RADIUS_ROW;
 
 pub const TEXT_CAPTION: f32 = 11.;
 pub const TEXT_SMALL: f32 = 12.;

@@ -9,9 +9,8 @@ use super::sidebar::Places;
 use crate::remove_worktree::Ask;
 use crate::theme::{self, ButtonLook, content, icon, on_accent, row_icon_button, text_button, tip};
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, Hsla, MouseButton, PathPromptOptions, Role,
-    ScrollStrategy, Task, UniformListScrollHandle, Window, actions, div, prelude::*, px,
-    uniform_list,
+    AnyElement, ClickEvent, Context, FontWeight, Hsla, ListAlignment, ListState, MouseButton,
+    PathPromptOptions, Role, Task, Window, actions, div, list, prelude::*, px,
 };
 use monodrive_core::worktrees::{self, Found, Git, Inventory, State, Status, Worktree};
 use std::path::{Path, PathBuf};
@@ -20,8 +19,6 @@ actions!(worktrees, [AskRemoveWorktree]);
 
 /// A row holds a title over a detail, 16 pt each.
 const ROW_HEIGHT: f32 = 34.;
-/// Every line of the list, a row and its gap, so it stays a `uniform_list`.
-const ITEM_HEIGHT: f32 = ROW_HEIGHT + theme::ROW_GAP;
 /// Between one repository's card and the next.
 const CARD_SPACING: f32 = 8.;
 const LINE: f32 = 16.;
@@ -44,11 +41,20 @@ pub(in crate::browser) struct WorktreesPage {
     reading: Option<Task<()>>,
     /// What the window's card asks next.
     pub(in crate::browser) asking: Option<Ask>,
-    scroll: UniformListScrollHandle,
+    lines: Lines,
+}
+
+/// The list's scroll and its lines' heights, which differ: a card's title
+/// and its last row carry its insets.
+struct Lines(ListState);
+
+impl Default for Lines {
+    fn default() -> Self {
+        Self(ListState::new(0, ListAlignment::Top, px(400.)))
+    }
 }
 
 /// One line of the list: a repository's title, or one of its worktrees.
-/// Both are a row's height, so the list stays a `uniform_list`.
 #[derive(Clone, Copy, PartialEq)]
 enum Item {
     Repository(usize),
@@ -127,6 +133,8 @@ impl Pane {
                 let page = &mut this.worktrees;
                 page.found = Some(found);
                 page.registered = registered;
+                let old = page.lines.0.item_count();
+                page.lines.0.splice(0..old, page.items().len());
                 page.scanning = None;
                 // What was selected may have gone; its changes are read again.
                 let kept = page
@@ -200,9 +208,7 @@ impl Pane {
         if let Some(at) = at {
             let title_above = at > 0 && matches!(items[at - 1], Item::Repository(_));
             let target = if !down && title_above { at - 1 } else { at };
-            self.worktrees
-                .scroll
-                .scroll_to_item(target, ScrollStrategy::Nearest);
+            self.worktrees.lines.0.scroll_to_reveal_item(target);
         }
     }
 
@@ -416,7 +422,6 @@ impl Pane {
                 )
                 .into_any_element()
         } else {
-            let items = page.items().len();
             let problems = problem_lines(&found.problems).into_iter().map(|line| {
                 div()
                     .px(px(theme::PANE_INSET))
@@ -432,13 +437,9 @@ impl Pane {
                 .flex()
                 .flex_col()
                 .child(
-                    uniform_list("worktrees-list", items, cx.processor(Self::worktree_items))
-                        .track_scroll(&self.worktrees.scroll)
+                    list(page.lines.0.clone(), cx.processor(Self::worktree_line))
                         .flex_1()
-                        // Rows' icons land on the pane's inset, inside the
-                        // card's gap and their own 8 pt padding.
-                        .px(px(theme::PANE_INSET - theme::ROW_GAP - 8.))
-                        .pb_2(),
+                        .pb(px(CARD_SPACING)),
                 )
                 .children(problems)
                 .into_any_element()
@@ -468,37 +469,40 @@ impl Pane {
         )
     }
 
-    /// The list's lines in `range`.
-    fn worktree_items(
+    /// The list's line `ix`.
+    fn worktree_line(
         &mut self,
-        range: std::ops::Range<usize>,
+        ix: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> AnyElement {
         let keys_here = self.list_focus.contains_focused(window, cx);
-        let items = self.worktrees.items();
-        items
-            .get(range)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|item| {
-                let shown = match *item {
-                    Item::Repository(repo) => {
-                        let (inventory, _) = self.worktrees.worktree_at(repo, 0)?;
-                        self.repository_header(inventory, tint(repo), cx)
-                            .into_any_element()
-                    }
-                    Item::Worktree(repo, w) => {
-                        let (inventory, worktree) = self.worktrees.worktree_at(repo, w)?;
+        let item = self.worktrees.items().get(ix).copied();
+        let shown = match item {
+            Some(Item::Repository(repo)) => {
+                self.worktrees.worktree_at(repo, 0).map(|(inventory, _)| {
+                    self.repository_header(inventory, tint(repo), cx)
+                        .into_any_element()
+                })
+            }
+            Some(Item::Worktree(repo, w)) => {
+                self.worktrees
+                    .worktree_at(repo, w)
+                    .map(|(inventory, worktree)| {
                         let last = w + 1 == inventory.worktrees.len();
                         card_segment(last)
-                            .child(self.worktree_row(worktree, tint(repo), keys_here, last, cx))
+                            .child(self.worktree_row(worktree, tint(repo), keys_here, cx))
                             .into_any_element()
-                    }
-                };
-                Some(shown)
-            })
-            .collect()
+                    })
+            }
+            None => None,
+        };
+        // Cards line up with the bar's title and buttons. A list lays its
+        // lines out across its whole width, so each line takes the inset.
+        div()
+            .px(px(theme::PANE_INSET))
+            .children(shown)
+            .into_any_element()
     }
 
     /// The top of a repository's card, in its rows' columns: a folder in its
@@ -521,74 +525,74 @@ impl Pane {
         let common_dir = repo.common_dir.clone();
         let count = counted(repo.worktrees.len(), "worktree");
         let muted = content(0.65);
-        // A row's height and gap like every line of the list: the space
-        // between cards, then the card's top.
+        // The space between cards, then the card's top, inset like its rows,
+        // so the folder, name and button sit over their icons, titles and
+        // Move to Trash.
         div()
-            .h(px(ITEM_HEIGHT))
             .flex_shrink_0()
             .pt(px(CARD_SPACING))
             .group(theme::ROW_GROUP)
             .child(
-                div()
-                    .size_full()
-                    // The same insets as a row inside its slice, so the
-                    // folder, name and button sit over the rows' icons,
-                    // titles and Move to Trash.
-                    .px(px(theme::ROW_GAP + 8.))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .bg(theme::card_fill())
+                card_slice()
                     .border_t_1()
-                    .border_x_1()
-                    .border_color(content(0.06))
-                    // design: a card drawn in slices across uniform_list lines.
+                    // design: a card drawn in slices, one per line of the list.
                     .rounded_t(px(theme::RADIUS_CARD))
-                    .child(icon("folder-01", 16.).text_color(tint))
+                    .pt(px(theme::CARD_INSET - 1.))
+                    .pb(px(theme::ROW_GAP))
                     .child(
                         div()
-                            .flex_shrink_0()
-                            .text_size(px(theme::TEXT_BODY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(theme::TEXT_SMALL))
-                            .text_color(muted)
-                            .child(shown),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(theme::TEXT_SMALL))
-                            .text_color(muted)
-                            .child(count),
-                    )
-                    // Every header keeps the slot, so the counts line up.
-                    .child(div().size(px(20.)).flex_shrink_0().when(registered, |d| {
-                        d.opacity(0.)
-                            .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
-                            .child(tip(
-                                row_icon_button(
-                                    gpui::ElementId::Name(
-                                        format!("forget-{}", repo.common_dir.display()).into(),
-                                    ),
-                                    "Remove from List",
-                                    "cancel-01",
-                                    muted,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.forget_repository(common_dir.clone(), cx)
-                                    },
-                                )),
-                                "Remove from List",
-                            ))
-                    })),
+                            .h(px(ROW_HEIGHT))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(icon("folder-01", 16.).text_color(tint))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(theme::TEXT_BODY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(theme::TEXT_SMALL))
+                                    .text_color(muted)
+                                    .child(shown),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(theme::TEXT_SMALL))
+                                    .text_color(muted)
+                                    .child(count),
+                            )
+                            // Every header keeps the slot, so the counts line up.
+                            .child(div().size(px(20.)).flex_shrink_0().when(registered, |d| {
+                                d.opacity(0.)
+                                    .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
+                                    .child(tip(
+                                        row_icon_button(
+                                            gpui::ElementId::Name(
+                                                format!("forget-{}", repo.common_dir.display())
+                                                    .into(),
+                                            ),
+                                            "Remove from List",
+                                            "cancel-01",
+                                            muted,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.forget_repository(common_dir.clone(), cx)
+                                            }),
+                                        ),
+                                        "Remove from List",
+                                    ))
+                            })),
+                    ),
             )
     }
 
@@ -599,7 +603,6 @@ impl Pane {
         worktree: &Worktree,
         tint: Hsla,
         keys_here: bool,
-        last: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let page = &self.worktrees;
@@ -669,12 +672,6 @@ impl Pane {
                     .h(px(ROW_HEIGHT))
                     .px_2()
                     .rounded(px(theme::RADIUS_ROW))
-                    // The card's last row follows its corners, so a highlight
-                    // never pokes past them.
-                    .when(last, |d| {
-                        // design: the card's radius less the gap it sits in.
-                        d.rounded_b(px(theme::RADIUS_CARD - theme::ROW_GAP))
-                    })
                     .flex()
                     .items_center()
                     .gap_2()
@@ -753,20 +750,26 @@ impl Pane {
     }
 }
 
-/// One worktree's slice of its repository's card, the bottom one closing it.
-/// Its height is fixed, so the bottom border sits in the last row's gap.
+/// One worktree's slice of its repository's card, the last one closing it
+/// as far below its row as the sides are from it.
 fn card_segment(last: bool) -> gpui::Div {
+    card_slice().when(last, |d| {
+        d.border_b_1()
+            .pb(px(theme::CARD_INSET - 1. - theme::ROW_GAP))
+            // design: a card drawn in slices, one per line of the list.
+            .rounded_b(px(theme::RADIUS_CARD))
+    })
+}
+
+/// A line's part of a card: its fill and sides, with its content
+/// `CARD_INSET` from the card's edge, less the 1 pt border.
+fn card_slice() -> gpui::Div {
     div()
-        .h(px(ITEM_HEIGHT))
         .flex_shrink_0()
-        .px(px(theme::ROW_GAP))
+        .px(px(theme::CARD_INSET - 1.))
         .bg(theme::card_fill())
         .border_x_1()
         .border_color(content(0.06))
-        .when(last, |d| {
-            // design: a card drawn in slices across uniform_list lines.
-            d.border_b_1().rounded_b(px(theme::RADIUS_CARD))
-        })
 }
 
 /// A repository's color, from the Overview's tints, so neighbors differ.
