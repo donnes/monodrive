@@ -80,7 +80,8 @@ jobs:
           # The merge commit and its parents, so the base is here to build.
           fetch-depth: 2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # No rust-cache: main never runs this job, so a PR's first run finds no
+      # cache, and a later one would restore target/bench's stale baseline.
       - name: Run
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
