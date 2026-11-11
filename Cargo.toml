@@ -18,10 +18,13 @@ fsearch = { git = "https://github.com/noahdunnagan/fsearch", rev = "88e63fdf850c
 # Monocode's patched GPUI: the Apple renderer's alpha and font-matching fixes,
 # and no screen-capture dependency. Sync these from Monocode, don't edit them here.
 # Skip the Windows backend when syncing: Monodrive never targets Windows.
+# The macOS backend is crates.io's 0.3.9 plus Monodrive's own drag image, which
+# Monocode doesn't have yet; keep that patch when syncing.
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 
 # GPUI is slow unoptimized and slow to build with full debug info.
 [profile.dev]
@@ -37,6 +40,9 @@ debug = false
 incremental = false
 
 [profile.dev.package.gpui-pre-apple]
+incremental = false
+
+[profile.dev.package.gpui-pre-macos]
 incremental = false
 
 # fsearch shifts a u8 by eight on an eight-word search over many names, which

@@ -548,6 +548,26 @@ fn esc_returns_the_folder_the_selection_and_the_history(cx: &mut TestAppContext)
     assert!(project.join("a.txt").exists());
 }
 
+/// AppKit keeps Esc during its drag and ends the drag itself, as it does for a
+/// drop in another app: the window hears only that the drag is gone.
+#[gpui::test]
+fn a_drag_that_ends_without_a_drop_here_returns_to_where_it_began(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let before = stops(&browser, cx);
+    let (docs, file) = (row(&browser, 0, cx), row(&browser, 2, cx));
+    carry(file, docs, "", cx);
+    rest(cx);
+    assert_eq!(here(&browser, cx), project.join("docs"));
+    assert!(cx.update(|window, cx| cx.stop_active_drag(window)));
+    draw(cx);
+    assert_eq!(here(&browser, cx), project);
+    assert_eq!(stops(&browser, cx), before);
+    assert!(!dragging(&browser, cx));
+    cx.simulate_mouse_up(docs, MouseButton::Left, with(""));
+    assert!(project.join("a.txt").exists());
+}
+
 #[gpui::test]
 fn a_drop_lands_in_what_opened_and_its_stop_stays_in_history(cx: &mut TestAppContext) {
     let (_dir, project) = folder();

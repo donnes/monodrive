@@ -200,6 +200,20 @@ impl Rasters {
 /// The icon at `side` points, or an empty space of that size until it's
 /// rasterized; the view draws again when it lands.
 fn raster(art: Art, side: f32, window: &mut Window, cx: &mut App) -> AnyElement {
+    let raster = keep(art, side, window, cx);
+    let image = window
+        .use_asset::<Raster>(&raster, cx)
+        .flatten()
+        .or_else(|| stand_in(&raster, cx));
+    match image {
+        Some(image) => img(image).size(px(side)).flex_shrink_0().into_any_element(),
+        None => div().size(px(side)).flex_shrink_0().into_any_element(),
+    }
+}
+
+/// Notes the icon at `side` points as drawn, letting go of what that pushes
+/// out, and returns it.
+fn keep(art: Art, side: f32, window: &mut Window, cx: &mut App) -> Raster {
     let raster = Raster {
         art,
         pixels: (side * window.scale_factor()).ceil() as u32,
@@ -212,42 +226,55 @@ fn raster(art: Art, side: f32, window: &mut Window, cx: &mut App) -> AnyElement 
             cx.drop_image(image, Some(window));
         }
     }
-    // Until this size lands, a kept size stands in, so dragging the size
-    // slider doesn't blank the icons.
-    let image = window
-        .use_asset::<Raster>(&raster, cx)
+    raster
+}
+
+/// Until a size lands, a kept size of the same icon stands in, so dragging
+/// the size slider doesn't blank the icons.
+fn stand_in(raster: &Raster, cx: &mut App) -> Option<Arc<RenderImage>> {
+    let rasters = cx.global::<Rasters>();
+    let kept: Vec<u32> = rasters
+        .sizes
+        .iter()
+        .copied()
+        .filter(|pixels| {
+            rasters
+                .icons
+                .get(pixels)
+                .is_some_and(|icons| icons.contains_key(&raster.art))
+        })
+        .collect();
+    kept.into_iter().find_map(|pixels| {
+        let art = raster.art.clone();
+        cx.fetch_asset::<Raster>(&Raster { art, pixels }).flatten()
+    })
+}
+
+/// The icon `icon` draws, as it is now, for what can't wait for it, like a
+/// drag's image: at `side` points, a kept size until that lands, or none.
+/// Asking starts it rasterizing, so ask early.
+pub fn image(
+    entry: &Entry,
+    side: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    let raster = keep(entry_art(entry), side, window, cx);
+    cx.fetch_asset::<Raster>(&raster)
         .flatten()
-        .or_else(|| {
-            let rasters = cx.global::<Rasters>();
-            let kept: Vec<u32> = rasters
-                .sizes
-                .iter()
-                .copied()
-                .filter(|pixels| {
-                    rasters
-                        .icons
-                        .get(pixels)
-                        .is_some_and(|icons| icons.contains_key(&raster.art))
-                })
-                .collect();
-            kept.into_iter().find_map(|pixels| {
-                let art = raster.art.clone();
-                cx.fetch_asset::<Raster>(&Raster { art, pixels }).flatten()
-            })
-        });
-    match image {
-        Some(image) => img(image).size(px(side)).flex_shrink_0().into_any_element(),
-        None => div().size(px(side)).flex_shrink_0().into_any_element(),
-    }
+        .or_else(|| stand_in(&raster, cx))
 }
 
 /// The icon Finder shows for an entry.
 pub fn icon(entry: &Entry, side: f32, window: &mut Window, cx: &mut App) -> AnyElement {
-    let art = match entry.kind {
+    raster(entry_art(entry), side, window, cx)
+}
+
+fn entry_art(entry: &Entry) -> Art {
+    match entry.kind {
         Kind::Dir | Kind::Link => Art::Path(entry.path.clone()),
         Kind::File | Kind::Other => by_extension(&entry.path),
-    };
-    raster(art, side, window, cx)
+    }
 }
 
 /// The icon for what an item is, without looking on the disk: for an

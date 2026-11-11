@@ -1,9 +1,9 @@
 use crate::{
     Bounds, Capslock, Context, Empty, IntoElement, Keystroke, LongPressEvent, Modifiers, Pixels,
-    Point, Render, TouchDragEvent, Window, point, seal::Sealed,
+    Point, Render, RenderImage, TouchDragEvent, Window, point, seal::Sealed,
 };
 use smallvec::SmallVec;
-use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
+use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf, sync::Arc};
 
 /// An event from a platform input source.
 pub trait InputEvent: Sealed + 'static {
@@ -711,17 +711,35 @@ pub enum ExternalDragPayload {
 /// Paths handed to the platform for a native file drag. Directory metadata is
 /// provided by the caller to avoid querying it when the platform drag starts.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
-pub struct FileDragPaths(SmallVec<[(PathBuf, bool); 2]>);
+pub struct FileDragPaths {
+    entries: SmallVec<[(PathBuf, bool); 2]>,
+    image: Option<Arc<RenderImage>>,
+}
 
 impl FileDragPaths {
     /// Creates a native file-drag payload from paths paired with whether each path is a directory.
     pub fn new(entries: impl IntoIterator<Item = (PathBuf, bool)>) -> Self {
-        Self(entries.into_iter().collect())
+        Self {
+            entries: entries.into_iter().collect(),
+            image: None,
+        }
+    }
+
+    /// Draws `image` under the pointer for the whole drag, at the platform's drag icon size,
+    /// in place of an icon per path. The platform still badges the count.
+    pub fn with_image(mut self, image: Arc<RenderImage>) -> Self {
+        self.image = Some(image);
+        self
     }
 
     /// The dragged paths, each paired with whether it is a directory.
     pub fn entries(&self) -> &[(PathBuf, bool)] {
-        &self.0
+        &self.entries
+    }
+
+    /// The image drawn for the whole drag, if the caller gave one.
+    pub fn image(&self) -> Option<&Arc<RenderImage>> {
+        self.image.as_ref()
     }
 }
 
