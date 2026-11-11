@@ -36,8 +36,8 @@ const SPOTS_SHOWN: usize = 12;
 /// How far back the page says what agents changed, and how many.
 const CHANGES_SINCE: u64 = 24 * 60 * 60;
 const CHANGES_SHOWN: usize = 5;
-/// A row holds a title over a detail, 16 pt each.
-const ROW_HEIGHT: f32 = 34.;
+/// A row's title and detail, 16 pt each, in the app's row with a second line.
+const ROW_HEIGHT: f32 = theme::TALL_ROW_HEIGHT;
 const TITLE_LINE: f32 = 16.;
 /// A row's own side padding, which puts its text on the pane's inset.
 const ROW_INSET: f32 = 8.;
@@ -915,11 +915,22 @@ impl Pane {
                             .any(|spot| spot.size.is_none_or(|size| !size.complete)),
                         measuring,
                     ),
-                    Some(chevron.into_any_element()),
+                    End::Button(chevron.into_any_element()),
                 )
                 .group_hover(theme::ROW_GROUP, |s| s.bg(content(0.08))),
             )
             .into_any_element()
+    }
+
+    /// Whether a row of the startup disk's list has a button: a group's
+    /// folders to list, or a cloud folder's download to remove.
+    fn startup_buttons(&self) -> bool {
+        self.overview.about.as_ref().is_some_and(|about| {
+            about.stuff.iter().any(|group| {
+                group.spots.len() > 1
+                    || group.kind == Kind::Cloud && group.spots.iter().any(|spot| spot.reachable)
+            })
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -970,6 +981,11 @@ impl Pane {
             }))
             .into_any_element()
         });
+        let end = match action {
+            Some(button) => End::Button(button),
+            None if self.startup_buttons() => End::Room,
+            None => End::Size,
+        };
         let row = stuff_row(
             (glyph(group.kind), tint(group.kind)),
             name,
@@ -980,7 +996,7 @@ impl Pane {
                 ink: tint(group.kind),
             },
             size_label(spot.size.map(|size| size.on_disk), partial, measuring),
-            action,
+            end,
         );
         if !spot.reachable {
             return still(row).into_any_element();
@@ -1048,7 +1064,7 @@ impl Pane {
                 ink,
             },
             size_label(Some(row.size.on_disk), !row.size.complete, false),
-            action,
+            action.map_or(End::Size, End::Button),
         );
         if location.mount.is_none() {
             return still(shown).into_any_element();
@@ -1222,6 +1238,7 @@ fn free_row(
         .min_h(px(ROW_HEIGHT))
         .flex_shrink_0()
         .px(px(ROW_INSET))
+        .py(px((ROW_HEIGHT - 2. * TITLE_LINE) / 2.))
         .rounded(px(theme::RADIUS_ROW))
         .flex()
         .items_center()
@@ -1250,16 +1267,24 @@ struct Bar {
     ink: Hsla,
 }
 
+/// What a row of the list ends in. A list with a button anywhere keeps its
+/// room on every row, so the bars and sizes line up; one without ends at
+/// the size, on the same inset as the row's start.
+enum End {
+    Size,
+    Room,
+    Button(AnyElement),
+}
+
 /// A row of the list: what it is, where it lives, a bar of its drive,
-/// what it takes up, and its button. Every row keeps the button's room, so
-/// the bars and sizes line up.
+/// what it takes up, and its button.
 fn stuff_row(
     look: (&'static str, Hsla),
     title: String,
     detail: String,
     bar: Bar,
     size: String,
-    action: Option<AnyElement>,
+    end: End,
 ) -> gpui::Div {
     let share = bar.share.clamp(0., 1.);
     let freeable = bar.freeable.clamp(0., share);
@@ -1291,14 +1316,23 @@ fn stuff_row(
                 ),
         )
         .child(size_slot(size))
-        .child(
-            div()
-                .w(px(ACTION_SLOT))
-                .flex_shrink_0()
-                .flex()
-                .justify_center()
-                .children(action),
-        )
+        .map(|row| {
+            let button = match end {
+                End::Size => return row,
+                End::Room => None,
+                End::Button(button) => Some(button),
+            };
+            // The button's glyph, not its circle, ends on the row's inset,
+            // as in every row that ends in buttons.
+            row.pr_1().child(
+                div()
+                    .w(px(ACTION_SLOT))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .children(button),
+            )
+        })
 }
 
 /// A row's size, flush right in its column.
@@ -1337,22 +1371,16 @@ enum Detail {
     Wraps(String),
 }
 
-/// A mark on its title's line, with the detail under the title.
+/// A mark centered on its title and the detail under it, as the bar and
+/// size beside them are.
 fn marked(mark: impl IntoElement, title: String, detail: Detail) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
         .flex()
-        .items_start()
+        .items_center()
         .gap_2()
-        .child(
-            div()
-                .h(px(TITLE_LINE))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .child(mark),
-        )
+        .child(div().flex_shrink_0().flex().child(mark))
         .child(two_lines(title, detail))
 }
 

@@ -240,8 +240,6 @@ const FILE_LIMIT: usize = 8;
 /// So the index's files, which come after them, are never far down.
 const RESULT_LIMIT: usize = 8;
 const WIDTH: f32 = 576.;
-/// A row with a second line.
-const TALL_ROW: f32 = 40.;
 const LIST_HEIGHT: f32 = 360.;
 const FOOTER_HEIGHT: f32 = 32.;
 
@@ -857,7 +855,7 @@ impl PaletteView {
                 .child(
                     frame
                         .debug_selector(move || format!("palette-row-{ix}"))
-                        .when(row.subtitle.is_some(), |d| d.h(px(TALL_ROW)))
+                        .when(row.subtitle.is_some(), |d| d.h(px(theme::TALL_ROW_HEIGHT)))
                         .when(
                             row.eject.is_some() || row.disconnect.is_some() || row.forget.is_some(),
                             |d| d.pr_1(),
