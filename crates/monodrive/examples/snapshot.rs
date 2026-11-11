@@ -87,6 +87,7 @@ use monodrive::browser::{
 };
 use monodrive::connect;
 use monodrive::downloads;
+use monodrive::finder;
 use monodrive::native::{self, Native, SizeDone};
 use monodrive::onboarding::{Onboarding, Setup, Step};
 use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
@@ -1885,6 +1886,23 @@ impl Setup for MadeUpSetup {
 
     fn apply_agent(&self, _: Harness, _: agents::Action) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Taken on the granted Mac, so the snapshots show both of its states.
+    fn show_in_finder(&self) -> finder::Status {
+        finder::Status {
+            viewer: if self.granted {
+                finder::Viewer::Monodrive
+            } else {
+                finder::Viewer::Finder
+            },
+            blocked: None,
+            failed: None,
+        }
+    }
+
+    fn set_show_in_finder(&self, _: bool) -> finder::Status {
+        self.show_in_finder()
     }
 }
 

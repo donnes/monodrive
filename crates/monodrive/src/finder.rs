@@ -31,6 +31,8 @@ const VIEWER_KEY: &str = "NSFileViewer";
 /// builds.
 const MONODRIVE_IDS: &str = "dev.donnes.monodrive";
 
+const FINDER_ID: &str = "com.apple.finder";
+
 /// Who gets other apps' Show in Finder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Viewer {
@@ -68,7 +70,7 @@ pub fn status() -> Status {
     let viewer = match viewer_key() {
         None => Viewer::Finder,
         Some(id) if Some(&id) == own_id().as_ref() => Viewer::Monodrive,
-        Some(id) if id == "com.apple.finder" => Viewer::Finder,
+        Some(id) if id == FINDER_ID => Viewer::Finder,
         Some(id) => Viewer::Other(apps::with_bundle_id(&id).map_or(id, |app| app.name)),
     };
     let blocked = (viewer != Viewer::Monodrive).then(blocker).flatten();
@@ -79,20 +81,52 @@ pub fn status() -> Status {
     }
 }
 
-/// Gives Show in Finder to Monodrive, or hands it back to Finder, and says
-/// who has it after. Taking it first adds the login item that hands it back
-/// if Monodrive is deleted; switching off removes that item. Call it off the
-/// UI thread.
+impl Status {
+    /// What Show in Finder does now, or why it can't change, in a sentence.
+    pub fn summary(&self) -> String {
+        if let Some(why) = &self.failed {
+            return why.clone();
+        }
+        match (&self.blocked, &self.viewer) {
+            (Some(Blocked::DevBuild), _) => {
+                "Only Monodrive installed from a release can open other apps' Show in Finder."
+                    .into()
+            }
+            (Some(Blocked::OutsideApplications), _) => {
+                "Move Monodrive to Applications to open other apps' Show in Finder here.".into()
+            }
+            (None, Viewer::Monodrive) => "Other apps' Show in Finder opens here. A login item hands it back if you delete Monodrive.".into(),
+            (None, Viewer::Other(name)) => {
+                format!("Other apps' Show in Finder opens here instead of {name}.")
+            }
+            (None, Viewer::Finder) => {
+                "Other apps' Show in Finder opens here instead of Finder.".into()
+            }
+        }
+    }
+}
+
+/// Gives Show in Finder to Monodrive, or hands it back, and says who has it
+/// after. Taking it first adds the login item that hands it back if
+/// Monodrive is deleted, which also keeps who had it before; switching off
+/// gives it back to that app if it's still there, and removes the item. Call
+/// it off the UI thread.
 pub fn set(on: bool) -> Status {
     let now = status();
     let guard = own_id().map(|id| guard::Guard::new(id, bundle_path(), &crate::browser::home()));
     let mut failed = None;
     match (write_for(on, &now), &guard) {
-        (Some(Write::Take), Some(guard)) => match guard.install() {
+        (Some(Write::Take), Some(guard)) => match guard.install(previous_viewer().as_ref()) {
             Ok(()) => write_viewer_key(Some(&guard.id)),
             Err(why) => failed = Some(why),
         },
-        (Some(Write::Release), _) => write_viewer_key(None),
+        (Some(Write::Release), guard) => {
+            let previous = guard
+                .as_ref()
+                .and_then(guard::Guard::previous)
+                .filter(|previous| previous.app.exists());
+            write_viewer_key(previous.as_ref().map(|previous| previous.id.as_str()));
+        }
         _ => {}
     }
     if let (false, Some(guard)) = (on, &guard) {
@@ -104,7 +138,8 @@ pub fn set(on: bool) -> Status {
 #[derive(Debug, PartialEq, Eq)]
 enum Write {
     Take,
-    /// Removed rather than set to Finder, which is what macOS does without it.
+    /// Back to the app that had it before, or removed rather than set to
+    /// Finder, which is what macOS does without it.
     Release,
 }
 
@@ -116,6 +151,15 @@ fn write_for(on: bool, now: &Status) -> Option<Write> {
         (true, _) => now.blocked.is_none().then_some(Write::Take),
         (false, Viewer::Monodrive) => Some(Write::Release),
     }
+}
+
+/// The app that has Show in Finder now, if it's another installed app, so it
+/// can have it back later. Finder needs no key, and another Monodrive is
+/// never handed it.
+fn previous_viewer() -> Option<guard::Previous> {
+    let id = viewer_key().filter(|id| id != FINDER_ID && !id.starts_with(MONODRIVE_IDS))?;
+    let app = apps::with_bundle_id(&id)?.path;
+    Some(guard::Previous { id, app })
 }
 
 fn blocker() -> Option<Blocked> {

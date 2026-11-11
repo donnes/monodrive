@@ -24,6 +24,8 @@ pub(crate) struct Fake {
     pub relaunches: AtomicUsize,
     pub detected: Vec<Harness>,
     pub applied: Mutex<Vec<(Harness, Action)>>,
+    /// Each switch of Show in Finder, on or off.
+    pub switched: Mutex<Vec<bool>>,
 }
 
 impl Setup for Fake {
@@ -64,6 +66,24 @@ impl Setup for Fake {
     fn apply_agent(&self, harness: Harness, action: Action) -> Result<(), String> {
         self.applied.lock().unwrap().push((harness, action));
         Ok(())
+    }
+
+    fn show_in_finder(&self) -> finder::Status {
+        let on = self.switched.lock().unwrap().last() == Some(&true);
+        finder::Status {
+            viewer: if on {
+                Viewer::Monodrive
+            } else {
+                Viewer::Finder
+            },
+            blocked: None,
+            failed: None,
+        }
+    }
+
+    fn set_show_in_finder(&self, on: bool) -> finder::Status {
+        self.switched.lock().unwrap().push(on);
+        self.show_in_finder()
     }
 }
 
@@ -447,7 +467,7 @@ fn with_a_saved_index_a_window_starts_it_at_once(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_checklist_writes_no_agent_config_until_a_button_is_pressed(cx: &mut TestAppContext) {
+fn the_checklist_changes_nothing_until_a_button_is_pressed(cx: &mut TestAppContext) {
     let fake = Arc::new(Fake {
         granted: AtomicBool::new(true),
         detected: vec![Harness::Cursor, Harness::Codex],
@@ -457,6 +477,12 @@ fn the_checklist_writes_no_agent_config_until_a_button_is_pressed(cx: &mut TestA
     let (window, cx) = flow(cx);
     assert_eq!(step(window, cx), Step::Checklist);
     assert!(fake.applied.lock().unwrap().is_empty());
+    assert!(fake.switched.lock().unwrap().is_empty());
+
+    // Show in Finder is the whole Mac's, so only its button takes it.
+    click("show-in-finder", cx);
+    click("show-in-finder", cx);
+    assert_eq!(*fake.switched.lock().unwrap(), [true, false]);
 
     click("agent-cursor", cx);
     assert_eq!(

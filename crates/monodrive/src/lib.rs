@@ -11,7 +11,7 @@ pub mod downloads;
 mod empty_trash;
 mod feedback;
 pub mod file_icons;
-mod finder;
+pub mod finder;
 mod frame;
 mod goto;
 mod jobs;

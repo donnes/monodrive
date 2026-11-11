@@ -6,7 +6,7 @@ use crate::agents::{self, Action, Harness, Setup};
 use crate::background::{self, Backdrop, Effect, Look, Scope};
 use crate::browser::CheckForUpdates;
 use crate::commands::{self, Group};
-use crate::finder::{self, Blocked, Viewer};
+use crate::finder::{self, Viewer};
 use crate::frame;
 use crate::motion;
 use crate::native::native;
@@ -915,7 +915,7 @@ impl SettingsView {
     /// macOS says rather than a saved setting, since another app can take
     /// it at any time.
     fn show_in_finder(&self, cx: &mut Context<Self>) -> AnyElement {
-        const LABEL: &str = "Use for Show in Finder";
+        const LABEL: &str = "Make default file browser";
         let on = self
             .finder
             .as_ref()
@@ -924,33 +924,13 @@ impl SettingsView {
             .finder
             .as_ref()
             .is_some_and(|status| status.blocked.is_none());
-        let description = match self.finder.as_ref() {
-            Some(finder::Status {
-                failed: Some(why), ..
-            }) => why.clone().into(),
-            Some(finder::Status {
-                blocked: Some(Blocked::DevBuild),
-                ..
-            }) => "Only Monodrive installed from a release can open other apps' Show in Finder."
-                .into(),
-            Some(finder::Status {
-                blocked: Some(Blocked::OutsideApplications),
-                ..
-            }) => "Move Monodrive to Applications to open other apps' Show in Finder here.".into(),
-            Some(finder::Status {
-                viewer: Viewer::Monodrive,
-                ..
-            }) => "Other apps' Show in Finder opens here. A login item gives it back to Finder if you delete Monodrive."
-                .into(),
-            Some(finder::Status {
-                viewer: Viewer::Other(name),
-                ..
-            }) => format!("Other apps' Show in Finder opens here instead of {name}.").into(),
-            _ => "Other apps' Show in Finder opens here instead of Finder.".into(),
-        };
+        let description = self.finder.as_ref().map_or_else(
+            || "Other apps' Show in Finder opens here instead of Finder.".into(),
+            finder::Status::summary,
+        );
         row_with(
             LABEL,
-            Some(description),
+            Some(description.into()),
             self.focusable(
                 "show-in-finder",
                 enabled,
