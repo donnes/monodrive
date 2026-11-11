@@ -35,7 +35,7 @@ gpui_apple = { package = "gpui-pre-apple", version = "=0.3.9" }
 libc = { version = "0.2", optional = true }
 
 # The preview's players and its sandboxed HTML page.
-objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-media", "objc2-quartz-core", "AVAnimation", "AVPlayer", "AVPlayerItem", "AVPlayerLayer"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-media", "objc2-quartz-core", "AVAnimation", "AVAsset", "AVPlayer", "AVPlayerItem", "AVPlayerLayer", "AVVideoComposition"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "CALayer", "CAShapeLayer", "CATransaction"] }
 # The holes floating cards cut in a native view.

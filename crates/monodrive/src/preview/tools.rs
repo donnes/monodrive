@@ -227,8 +227,8 @@ fn hsla(color: [f64; 4]) -> gpui::Hsla {
     .into()
 }
 
-/// What's being edited. A video keeps its own strip, so its edits only say what
-/// the export will do.
+/// What's being edited. A video keeps its own strip, and its player shows the
+/// crop and turns the export will write.
 enum Subject {
     Picture {
         steps: Vec<Step>,
@@ -245,11 +245,15 @@ enum Subject {
         end: Option<f64>,
         muted: bool,
         turns: i32,
-        /// A frame to crop on, as nothing GPUI draws can sit over the player.
+        /// A frame to crop on, turned as the video is, as nothing GPUI draws
+        /// can sit over the player.
         frozen: Option<Arc<RenderImage>>,
+        /// The video's size as it plays before any turn, known once it's frozen.
+        upright: Option<(f64, f64)>,
         /// The trim bar's frames, made the first time it opens.
         filmstrip: Vec<Arc<RenderImage>>,
         filming: Option<Task<()>>,
+        /// In the picture as the turns leave it.
         crop: Option<Rect>,
         /// What each change replaced, for Undo.
         past: Vec<VideoState>,
@@ -310,6 +314,43 @@ impl Edit {
         {
             past.push((*start, *end, *muted, *turns, *crop));
         }
+    }
+
+    /// A quarter turn clockwise, which takes the crop round with the picture.
+    fn turn_video(&mut self) {
+        let Subject::Video {
+            turns,
+            crop,
+            upright,
+            ..
+        } = &mut self.subject
+        else {
+            return;
+        };
+        // The crop came from a frozen frame, so the size is known with it.
+        if let (Some(rect), Some((width, height))) = (crop.as_mut(), *upright) {
+            let across = if *turns % 2 == 1 { width } else { height };
+            *rect = Rect {
+                x: across - rect.y - rect.height,
+                y: rect.x,
+                width: rect.height,
+                height: rect.width,
+            };
+        }
+        *turns = (*turns + 1) % 4;
+    }
+
+    /// Whether Remove Sound is on, for the player to play silent.
+    pub(super) fn sound_removed(&self) -> bool {
+        matches!(self.subject, Subject::Video { muted: true, .. })
+    }
+
+    /// The crop and turns, for the player to show.
+    pub(super) fn framing(&self) -> Vec<Clip> {
+        self.clips()
+            .into_iter()
+            .filter(|clip| matches!(clip, Clip::Crop { .. } | Clip::Rotate { .. }))
+            .collect()
     }
 
     /// Takes a video back one change.
@@ -501,7 +542,7 @@ impl Edit {
     }
 
     /// The video's edits, in export's order: the crop is chosen on the frame as
-    /// it plays, so it comes before any turn.
+    /// the turns leave it, so it comes after them.
     fn clips(&self) -> Vec<Clip> {
         let Subject::Video {
             start,
@@ -521,13 +562,13 @@ impl Edit {
                 end: end.unwrap_or(f64::MAX),
             });
         }
-        if let Some(rect) = crop {
-            clips.push(Clip::Crop { rect: *rect });
-        }
         if *turns != 0 {
             clips.push(Clip::Rotate {
                 quarter_turns: *turns,
             });
+        }
+        if let Some(rect) = crop {
+            clips.push(Clip::Crop { rect: *rect });
         }
         if *muted {
             clips.push(Clip::Mute);
@@ -635,6 +676,7 @@ impl PreviewView {
                     muted: false,
                     turns: 0,
                     frozen: None,
+                    upright: None,
                     filmstrip: Vec::new(),
                     filming: None,
                     crop: None,
@@ -1472,12 +1514,24 @@ impl PreviewView {
             player.pause();
             player.position()
         });
+        let turns = match self.edit.as_ref().map(|edit| &edit.subject) {
+            Some(Subject::Video { turns, .. }) => *turns,
+            _ => 0,
+        };
         let path = self.path.clone();
         let work = cx.background_executor().spawn(async move {
             let bitmap = edits::frame_bitmap(&path, seconds)?;
-            image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)
-                .map(|pixels| Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
-                .ok_or("couldn't draw the frame".to_string())
+            let pixels = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bytes)
+                .ok_or("couldn't draw the frame".to_string())?;
+            let upright = (f64::from(pixels.width()), f64::from(pixels.height()));
+            let pixels = match turns {
+                1 => image::imageops::rotate90(&pixels),
+                2 => image::imageops::rotate180(&pixels),
+                3 => image::imageops::rotate270(&pixels),
+                _ => pixels,
+            };
+            let frame = Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]));
+            Ok::<_, String>((frame, upright))
         });
         cx.spawn(async move |this, cx| {
             let done = work.await;
@@ -1485,11 +1539,15 @@ impl PreviewView {
                 let Some(edit) = &mut this.edit else {
                     return;
                 };
-                let Subject::Video { frozen, .. } = &mut edit.subject else {
+                let Subject::Video {
+                    frozen, upright, ..
+                } = &mut edit.subject
+                else {
                     return;
                 };
                 match done {
-                    Ok(frame) => {
+                    Ok((frame, size)) => {
+                        *upright = Some(size);
                         if let Some(old) = frozen.replace(frame) {
                             cx.drop_image(old, None);
                         }
@@ -2077,9 +2135,7 @@ impl PreviewView {
                     |this, _, cx| {
                         if let Some(edit) = &mut this.edit {
                             edit.remember();
-                            if let Subject::Video { turns, .. } = &mut edit.subject {
-                                *turns = (*turns + 1) % 4;
-                            }
+                            edit.turn_video();
                         }
                         cx.notify();
                     },
@@ -3286,15 +3342,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn undo_takes_a_video_back_one_change_at_a_time() {
-        let mut edit = Edit {
+    /// Edit mode on a video, with nothing done yet.
+    fn video_edit() -> Edit {
+        Edit {
             subject: Subject::Video {
                 start: None,
                 end: None,
                 muted: false,
                 turns: 0,
                 frozen: None,
+                upright: None,
                 filmstrip: Vec::new(),
                 filming: None,
                 crop: None,
@@ -3320,7 +3377,12 @@ mod tests {
             saving: None,
             error: None,
             opened: None,
-        };
+        }
+    }
+
+    #[test]
+    fn undo_takes_a_video_back_one_change_at_a_time() {
+        let mut edit = video_edit();
         let set = |edit: &mut Edit, change: fn(&mut Option<f64>, &mut i32)| {
             edit.remember();
             if let Subject::Video { start, turns, .. } = &mut edit.subject {
@@ -3343,6 +3405,42 @@ mod tests {
         assert!(!edit.changed());
         edit.undo_video();
         assert!(!edit.changed());
+    }
+
+    #[test]
+    fn a_video_crop_turns_with_the_picture() {
+        let mut edit = video_edit();
+        let rect = Rect {
+            x: 10.,
+            y: 20.,
+            width: 100.,
+            height: 50.,
+        };
+        if let Subject::Video { crop, upright, .. } = &mut edit.subject {
+            *upright = Some((640., 360.));
+            *crop = Some(rect);
+        }
+        edit.turn_video();
+        // Turned clockwise, the 640 by 360 frame is 360 by 640, and the crop's
+        // top left corner comes round to its top right.
+        assert_eq!(
+            edit.clips(),
+            [
+                Clip::Rotate { quarter_turns: 1 },
+                Clip::Crop {
+                    rect: Rect {
+                        x: 290.,
+                        y: 10.,
+                        width: 50.,
+                        height: 100.,
+                    }
+                }
+            ]
+        );
+        for _ in 0..3 {
+            edit.turn_video();
+        }
+        assert_eq!(edit.clips(), [Clip::Crop { rect }]);
     }
 
     #[test]
