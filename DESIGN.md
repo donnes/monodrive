@@ -31,7 +31,7 @@ The header of a sheet with a query (palette, Go to Folder, Connect) is a bare fi
 - Every text button is 24 pt high, with 12 pt side padding, or 8 pt with no fill.
 - Every icon button is a 24 pt circle with a 14 pt icon. Inside a row it's a 20 pt circle with a 12 pt icon.
 - Every outlined text field is 28 pt high. The exception is rename, which fits inside the row it edits.
-- Rows in menus, pickers and popovers are 28 pt, or 40 pt with a muted subtitle on a second line. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt. The Overview's rows hold a subtitle in 34 pt, its two lines at 16 pt each, so a full disk's list fits.
+- Rows in menus, pickers and popovers are 28 pt, or 40 pt with a muted subtitle on a second line. Sidebar rows are 32 pt, or 40 pt for a drive with its capacity bar. File rows follow the Row size setting: 24, 28 or 34 pt. The Overview's rows hold a subtitle in the same 40 pt, `TALL_ROW_HEIGHT`, its two lines at 16 pt each with the icon centered on both. A list keeps a button's room on every row only when one of its rows has a button, as with an icon or check column.
 - Rows in a stacked list of highlightable rows have a 2 pt gap (`ROW_GAP`), so highlights never touch. The gap belongs to the row above it: `row_slot` holds the role and the handlers, the row inside holds the highlight, so a hover, click or drop in the gap lands on that row. Two lists differ. The file list is virtualized, its rows touch as in Finder, and a change to its row height touches `uniform_list`, marquee math and the scrolling budget. Settings' page list keeps a plain gap, because each page is a Tab stop whose focus ring has to fit the row.
 - The top bar, a sheet's header, the Trash and Recents bars and the sidebar's foot are 40 pt. The path bar and the column titles are 28 pt. A toast is 36 pt. A Settings row is at least 44 pt.
 
@@ -242,7 +242,7 @@ A button that shows only an icon names itself while the pointer rests on it, as 
 
 All in `theme.rs`, except motion, which `motion.rs` holds and Motion describes. Each returns an element the caller extends.
 
-- `RADIUS_ROW`, `RADIUS_CARD`, `RADIUS_THUMB`; `TEXT_CAPTION`, `TEXT_SMALL`, `TEXT_BODY`, `TEXT_TITLE`; `TITLE_BAR_HEIGHT`, `PATH_BAR_HEIGHT`, `PANE_INSET`, `CARD_INSET`, `CARD_PADDING`, `CARD_TEXT_PADDING`, `ROW_HEIGHT`, `SIDEBAR_ROW_HEIGHT`, `ROW_GAP`, `BUTTON_HEIGHT`, `FIELD_HEIGHT`.
+- `RADIUS_ROW`, `RADIUS_CARD`, `RADIUS_THUMB`; `TEXT_CAPTION`, `TEXT_SMALL`, `TEXT_BODY`, `TEXT_TITLE`; `TITLE_BAR_HEIGHT`, `PATH_BAR_HEIGHT`, `PANE_INSET`, `CARD_INSET`, `CARD_PADDING`, `CARD_TEXT_PADDING`, `ROW_HEIGHT`, `TALL_ROW_HEIGHT`, `SIDEBAR_ROW_HEIGHT`, `ROW_GAP`, `BUTTON_HEIGHT`, `FIELD_HEIGHT`.
 - `content`, `accent`, `on_accent`, `danger`, `danger_fill`, `on_danger`, `success`, `scrim`, `well`, `knob`, `raised`, `card_fill`: colors. `focus_ring`, `knob_shadow`, `raised_shadow`: shadows.
 - `text_button(id, label, look)`: the usual button. `button(id, look)` is its frame, for a label with an icon or one that changes. `ButtonLook` is `Secondary`, `Primary`, `Destructive`, `Caution`, `Ghost` or `Disabled`.
 - `icon_button(id, label, path, enabled)` in chrome, `row_icon_button(id, label, path, ink)` inside a row, `circle_button(id, label, side)` for a circle with other contents, such as the jobs ring.

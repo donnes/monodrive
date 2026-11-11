@@ -38,6 +38,8 @@ pub const TEXT_DISPLAY: f32 = 22.;
 
 pub const TITLE_BAR_HEIGHT: f32 = 40.;
 pub const ROW_HEIGHT: f32 = 28.;
+/// A row with a muted line under its title.
+pub const TALL_ROW_HEIGHT: f32 = 40.;
 pub const SIDEBAR_ROW_HEIGHT: f32 = 32.;
 /// Under each stacked row, so highlights never touch.
 pub const ROW_GAP: f32 = 2.;

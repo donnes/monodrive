@@ -41,8 +41,6 @@ pub(super) const REMEMBER_AFTER: Duration = Duration::from_secs(2);
 
 const MENU_WIDTH: f32 = 360.;
 const MENU_MARGIN: f32 = 8.;
-/// A row with a muted line under its title.
-const TALL_ROW: f32 = 40.;
 /// The column of line numbers, under the file's icon and into its name.
 const LINE_NUMBERS: f32 = 40.;
 
@@ -808,7 +806,7 @@ impl SearchMenu {
         let about = about(&saved.query, &saved.scope);
         self.slot("saved-search", ix, Item::Saved(ix), cx).child(
             theme::row(on)
-                .h(px(TALL_ROW))
+                .h(px(theme::TALL_ROW_HEIGHT))
                 // The buttons' glyphs, not their circles, end on the text's
                 // edge, as the shortcuts above do.
                 .pr_1()
