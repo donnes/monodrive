@@ -688,6 +688,119 @@ pub fn render(results: &Results, judged: &[(Budget, Status)], saved: Option<&Res
     page
 }
 
+/// `results.json` as Markdown for a pull request: a first line that says
+/// whether anything needs a look, then each result of this build beside the
+/// baseline's and its budget.
+pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
+    let commit = |label: &str| {
+        results
+            .builds
+            .iter()
+            .find(|b| b.label == label)
+            .map_or("", |b| b.commit.as_str())
+    };
+    let count = |n: usize| {
+        if n == 1 {
+            "1 result".to_string()
+        } else {
+            format!("{n} results")
+        }
+    };
+    let (mut slower, mut over) = (0, 0);
+    let mut rows = String::new();
+    for run in &results.suites {
+        for bench in &run.benches {
+            for this in bench.series.iter().filter(|s| s.build == "this") {
+                let Some(now) = summary(this) else {
+                    continue;
+                };
+                // A bench the baseline doesn't have is new: no change, but
+                // still a budget.
+                let base = bench
+                    .series
+                    .iter()
+                    .find(|s| s.build == "baseline" && s.variant == this.variant)
+                    .filter(|s| !s.samples.is_empty());
+                let (before, change) = match base {
+                    Some(base) => {
+                        let change = stats::compare(&this.wall(), &base.wall());
+                        if matches!(change, Verdict::Slower { .. }) {
+                            slower += 1;
+                        }
+                        (ms(stats::median(&base.wall())), verdict(change).0)
+                    }
+                    None => ("–".to_string(), "new".to_string()),
+                };
+                let key = format!("{}/{}", run.suite, bench.bench);
+                let budget = judged
+                    .iter()
+                    .find(|(b, _)| this.variant.is_empty() && b.bench == key);
+                let (limit, status) = match budget {
+                    Some((b, Status::Within { .. })) => (ms(b.median_ms), "✅"),
+                    Some((b, Status::Over { .. })) => {
+                        over += 1;
+                        (ms(b.median_ms), "❌")
+                    }
+                    Some((b, _)) => (ms(b.median_ms), "noisy"),
+                    None => (String::new(), ""),
+                };
+                let title = if this.variant.is_empty() {
+                    bench.title.clone()
+                } else {
+                    format!("{}, {}", bench.title, this.variant)
+                };
+                let _ = writeln!(
+                    rows,
+                    "| {} | {} | {} | {} | {limit} | {status} |",
+                    title.replace('|', "\\|"),
+                    before,
+                    ms(now.median),
+                    change,
+                );
+            }
+        }
+    }
+
+    let mut out = String::from("## Benchmarks\n\n");
+    if over > 0 {
+        let _ = writeln!(out, "❌ {} over budget.\n", count(over));
+    }
+    if slower > 0 {
+        let _ = writeln!(out, "⚠️ {} slower than the baseline.\n", count(slower));
+    }
+    let mut noisy = false;
+    for run in &results.suites {
+        let reasons = stats::noise(run);
+        if !reasons.is_empty() {
+            noisy = true;
+            let _ = writeln!(
+                out,
+                "⚠️ The {} suite ran on a busy machine, so its budgets aren't judged: {}.\n",
+                run.suite,
+                reasons.join("; ")
+            );
+        }
+    }
+    if over == 0 && slower == 0 && !noisy {
+        out.push_str("✅ Nothing ran slower than the baseline, and every budget holds.\n\n");
+    }
+    let _ = writeln!(
+        out,
+        "| What | Baseline `{}` | This build `{}` | Change | Budget | |\n|---|--:|--:|---|--:|:-:|\n{rows}",
+        commit("baseline"),
+        commit("this"),
+    );
+    if let Some(run) = results.suites.first() {
+        let c = &run.conditions;
+        let _ = writeln!(
+            out,
+            "Medians of {} rounds a build, the builds taking turns on one {}, {} cores, macOS {}. A change is one only when a 95% bootstrap interval on the ratio of medians clears even. Budgets come from `benchmarks/budgets.toml` and are for an M3 Pro-class Mac.",
+            run.rounds, c.model, c.cores, c.macos_build
+        );
+    }
+    out
+}
+
 fn read(path: &Path) -> Result<Results, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
@@ -695,6 +808,14 @@ fn read(path: &Path) -> Result<Results, String> {
 
 pub fn budgets_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/budgets.toml")
+}
+
+/// Prints `results_json` as Markdown, judged against the budgets.
+pub fn print_markdown(results_json: &Path) -> Result<(), String> {
+    let results = read(results_json)?;
+    let judged = budgets::judge(&budgets::load(&budgets_path())?, &results);
+    print!("{}", markdown(&results, &judged));
+    Ok(())
 }
 
 /// Writes `report.html` beside `results_json` and returns its path.
@@ -766,5 +887,84 @@ mod tests {
         );
         assert!(slower_instructions(&results(1_010_000)).is_empty());
         assert!(slower_instructions(&results(500_000)).is_empty());
+    }
+
+    #[test]
+    fn markdown_leads_with_what_got_slower_or_went_past_its_budget() {
+        use crate::measure::Sample;
+        let series = |build: &str, wall_ms: f64| Series {
+            build: build.into(),
+            variant: String::new(),
+            warmup: None,
+            samples: (0..12)
+                .map(|i| Sample {
+                    wall_ms: wall_ms + i as f64 * 0.01,
+                    cpu_ms: None,
+                    instructions: None,
+                    cycles: None,
+                })
+                .collect(),
+            checks: vec![],
+        };
+        let results = |this: f64| Results {
+            version: crate::format::RESULTS,
+            started: String::new(),
+            builds: vec![],
+            suites: vec![SuiteRun {
+                suite: "core".into(),
+                conditions: crate::conditions::tests::quiet(),
+                rounds: 12,
+                notes: vec![],
+                benches: vec![Bench {
+                    bench: "list_dir/10000".into(),
+                    title: "List 10,000".into(),
+                    group: String::new(),
+                    items: None,
+                    cache: Cache::Warm,
+                    series: vec![series("this", this), series("baseline", 10.)],
+                }],
+            }],
+        };
+        let budgets: budgets::Budgets = toml::from_str(
+            r#"
+            [[budget]]
+            bench = "core/list_dir/10000"
+            what = "List 10,000"
+            median_ms = 20
+            "#,
+        )
+        .unwrap();
+        let comment = |this: f64| {
+            let results = results(this);
+            markdown(&results, &budgets::judge(&budgets, &results))
+        };
+
+        let same = comment(10.);
+        assert!(same.contains("✅ Nothing ran slower"), "{same}");
+        assert!(
+            same.contains(
+                "| List 10,000 | 10.1 ms | 10.1 ms | no clear difference | 20.0 ms | ✅ |"
+            ),
+            "{same}"
+        );
+
+        let worse = comment(30.);
+        assert!(worse.contains("❌ 1 result over budget."), "{worse}");
+        assert!(
+            worse.contains("⚠️ 1 result slower than the baseline."),
+            "{worse}"
+        );
+        assert!(!worse.contains('✅'), "{worse}");
+
+        let mut added = results(30.);
+        added.suites[0].benches[0]
+            .series
+            .retain(|s| s.build == "this");
+        let added = markdown(&added, &budgets::judge(&budgets, &added));
+        assert!(added.contains("❌ 1 result over budget."), "{added}");
+        assert!(
+            added.contains("| List 10,000 | – | 30.1 ms | new | 20.0 ms | ❌ |"),
+            "{added}"
+        );
     }
 }

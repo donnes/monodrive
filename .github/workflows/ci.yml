@@ -61,6 +61,66 @@ jobs:
       - name: Tests
         run: scripts/check test
 
+  # The PR against its base, the builds taking turns on one hosted Mac, as a
+  # comment the bot edits in place. A shared VM is noisy, so this reports and
+  # never fails; the quiet Mac's bench.yml gates main. A fork's token can't
+  # comment, so its table goes to the run's summary only.
+  bench:
+    name: Benchmarks
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merge commit and its parents, so the base is here to build.
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BENCH_ROUNDS: "20"
+        run: scripts/bench --against "$BASE" core search
+      - name: Report
+        id: report
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          results="$(ls -d target/bench/2*/ | tail -1)results.json"
+          {
+            echo "<!-- monodrive-bench -->"
+            target/release/monodrive-bench markdown "$results"
+            echo
+            echo "Raw samples and the full report are in [this run's artifact]($RUN_URL)."
+          } >"$RUNNER_TEMP/comment.md"
+          cat "$RUNNER_TEMP/comment.md" >>"$GITHUB_STEP_SUMMARY"
+      - name: Comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- monodrive-bench -->"))) | .id' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          else
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ github.event.pull_request.head.sha }}
+          path: |
+            target/bench/*/results.json
+            target/bench/*/report.html
+          if-no-files-found: ignore
+
   deny:
     name: Dependencies and licenses
     runs-on: ubuntu-latest
