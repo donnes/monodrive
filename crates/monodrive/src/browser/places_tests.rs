@@ -9,7 +9,7 @@ use super::*;
 use crate::palette::{Page, PaletteView};
 use crate::preferences::View;
 use crate::session::{self, PaneState, Session, Shows, StopState};
-use gpui::{Action, Keystroke, Modifiers, TestAppContext, VisualTestContext, point};
+use gpui::{Action, Keystroke, Modifiers, Pixels, TestAppContext, VisualTestContext, point};
 use monodrive_core::cloud::CloudFolder;
 use monodrive_core::entries::Sort;
 use monodrive_core::entries::{Entry, Kind};
@@ -2441,6 +2441,74 @@ fn the_worktrees_page_opens_a_worktree_and_moves_one_to_the_trash_once_asked(
         Some(("Moved \"app-feature\" to the Trash".into(), false, true))
     );
     assert!(!on_screen(cx, "worktree-app-feature"));
+    release(owned, cx);
+}
+
+#[gpui::test]
+fn removing_a_worktree_keeps_the_list_where_it_was_scrolled(cx: &mut TestAppContext) {
+    let world = world(vec![disk(900_000)], cx);
+    let owned = own(cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    let app = home.join("app");
+    std::fs::create_dir(&app).unwrap();
+    git(&app, &["init", "-q", "-b", "main"]);
+    std::fs::write(app.join("a"), "a\n").unwrap();
+    git(&app, &["add", "a"]);
+    git(&app, &["commit", "-q", "-m", "a"]);
+    let names: Vec<String> = (0..12).map(|n| format!("w{n:02}")).collect();
+    for name in &names {
+        git(
+            &app,
+            &["worktree", "add", "-q", "-b", name, &format!("../{name}")],
+        );
+    }
+    world
+        .store
+        .register_repository(monodrive_core::worktrees::Registration {
+            common_dir: app.join(".git"),
+            path: app.clone(),
+        })
+        .unwrap();
+    let (browser, cx) = open(&world, &home, cx);
+    cx.simulate_resize(gpui::size(px(800.), px(300.)));
+    press(cx, "cmd-alt-g");
+    // Far enough down that the list has scrolled.
+    press(cx, &["down"; 10].join(" "));
+    let tops = |cx: &mut VisualTestContext| -> Vec<(String, Pixels)> {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let mut tops: Vec<_> = names
+            .iter()
+            .filter_map(|name| {
+                let selector = format!("worktree-{name}").leak();
+                Some((name.clone(), cx.debug_bounds(selector)?.top()))
+            })
+            .collect();
+        tops.sort_by(|a, b| a.1.as_f32().total_cmp(&b.1.as_f32()));
+        tops
+    };
+    let before = tops(cx);
+    assert!(
+        cx.debug_bounds("worktree-app").is_none(),
+        "the list scrolled"
+    );
+    let selected = in_pane(&browser, cx, |pane, _| {
+        pane.worktrees.selected().map(Path::to_path_buf)
+    })
+    .unwrap();
+    let gone = selected.file_name().unwrap().to_string_lossy().into_owned();
+    let at = before.iter().position(|(name, _)| *name == gone).unwrap();
+    let (next, _) = &before[at + 1];
+
+    press(cx, "cmd-backspace enter");
+    assert!(!selected.exists());
+    // The row below takes the removed one's place, where the eye was.
+    let after = tops(cx);
+    let moved = after
+        .iter()
+        .find(|(name, _)| name == next)
+        .map(|(_, top)| *top);
+    assert_eq!(moved, Some(before[at].1));
     release(owned, cx);
 }
 

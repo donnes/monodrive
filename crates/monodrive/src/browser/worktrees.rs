@@ -22,9 +22,6 @@ const ROW_HEIGHT: f32 = 34.;
 /// Between one repository's card and the next.
 const CARD_SPACING: f32 = 8.;
 const LINE: f32 = 16.;
-/// A row's Copy Path and Move to Trash, 20 pt each with 4 pt between, which
-/// a title keeps room for too, so its count ends where the rows' badges do.
-const TRAILING: f32 = 2. * 20. + 4.;
 const CHIP_HEIGHT: f32 = 18.;
 /// How many repositories that couldn't be read show under the list.
 const PROBLEMS_SHOWN: usize = 3;
@@ -39,6 +36,9 @@ pub(in crate::browser) struct WorktreesPage {
     scanning: Option<Task<()>>,
     /// The selected worktree's path, which stays selected across scans.
     selected: Option<PathBuf>,
+    /// The row under the pointer, which shows its buttons. They take no room
+    /// elsewhere, so a row's badges end where its card's count does.
+    hovered: Option<PathBuf>,
     /// The selected worktree's changes, once read, for the path they're of.
     status: Option<(PathBuf, Result<Status, String>)>,
     reading: Option<Task<()>>,
@@ -136,8 +136,12 @@ impl Pane {
                 let page = &mut this.worktrees;
                 page.found = Some(found);
                 page.registered = registered;
+                // Replacing every line sends the list to the top, so a removal
+                // far down would lose the reader's place.
+                let top = page.lines.0.logical_scroll_top();
                 let old = page.lines.0.item_count();
                 page.lines.0.splice(0..old, page.items().len());
+                page.lines.0.scroll_to(top);
                 page.scanning = None;
                 // What was selected may have gone; its changes are read again.
                 let kept = page
@@ -566,42 +570,38 @@ impl Pane {
                                     .text_color(muted)
                                     .child(shown),
                             )
+                            .when(registered, |d| {
+                                d.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .opacity(0.)
+                                        .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
+                                        .child(tip(
+                                            row_icon_button(
+                                                gpui::ElementId::Name(
+                                                    format!("forget-{}", repo.common_dir.display())
+                                                        .into(),
+                                                ),
+                                                "Remove from List",
+                                                "cancel-01",
+                                                muted,
+                                            )
+                                            .on_click(
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.forget_repository(common_dir.clone(), cx)
+                                                }),
+                                            ),
+                                            "Remove from List",
+                                        )),
+                                )
+                            })
+                            // Ends where the rows' buttons do.
                             .child(
                                 div()
                                     .flex_shrink_0()
                                     .text_size(px(theme::TEXT_SMALL))
                                     .text_color(muted)
                                     .child(count),
-                            )
-                            .child(
-                                div()
-                                    .w(px(TRAILING))
-                                    .h(px(20.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .justify_end()
-                                    .when(registered, |d| {
-                                        d.opacity(0.)
-                                            .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
-                                            .child(tip(
-                                                row_icon_button(
-                                                    gpui::ElementId::Name(
-                                                        format!(
-                                                            "forget-{}",
-                                                            repo.common_dir.display()
-                                                        )
-                                                        .into(),
-                                                    ),
-                                                    "Remove from List",
-                                                    "cancel-01",
-                                                    muted,
-                                                )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.forget_repository(common_dir.clone(), cx)
-                                                })),
-                                                "Remove from List",
-                                            ))
-                                    }),
                             ),
                     ),
             )
@@ -618,6 +618,7 @@ impl Pane {
     ) -> impl IntoElement + use<> {
         let page = &self.worktrees;
         let selected = page.selected.as_ref() == Some(&worktree.path);
+        let buttons = selected || page.hovered.as_ref() == Some(&worktree.path);
         let accented = selected && keys_here;
         let (ink, muted) = if accented {
             (on_accent(), on_accent())
@@ -664,13 +665,24 @@ impl Pane {
         let id = |what: &str| -> gpui::ElementId {
             gpui::ElementId::Name(format!("{what}-{}", path.display()).into())
         };
-        let (select, copy, trash) = (path.clone(), path.clone(), path.clone());
+        let (select, copy, trash, hover) = (path.clone(), path.clone(), path.clone(), path.clone());
         let selector = format!("worktree-{name}");
         theme::row_slot(id("worktree"))
             .debug_selector(move || selector.clone())
             .role(Role::ListBoxOption)
             .aria_label(name.clone())
             .aria_selected(selected)
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let page = &mut this.worktrees;
+                if *hovered {
+                    page.hovered = Some(hover.clone());
+                } else if page.hovered.as_ref() == Some(&hover) {
+                    page.hovered = None;
+                } else {
+                    return;
+                }
+                cx.notify();
+            }))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.focus_list(window, cx);
                 this.select_worktree(Some(select.clone()), cx);
@@ -721,42 +733,54 @@ impl Pane {
                                     .child(detail),
                             ),
                     )
+                    .when(buttons, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .gap_1()
+                                .flex_shrink_0()
+                                .child(tip(
+                                    row_icon_button(id("copy"), "Copy Path", "copy", muted)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            let text = copy.display().to_string();
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                text,
+                                            ));
+                                            let said = format!(
+                                                "Copied the path of {}",
+                                                crate::jobs::quoted(&copy)
+                                            );
+                                            this.toast(said, false, None, cx);
+                                        })),
+                                    "Copy Path",
+                                ))
+                                // The main worktree is the repository; it never goes.
+                                .when(!worktree.main, |d| {
+                                    d.child(tip(
+                                        row_icon_button(
+                                            id("trash"),
+                                            "Move to Trash",
+                                            "trash",
+                                            muted,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.select_worktree(Some(trash.clone()), cx);
+                                                this.ask_remove_worktree(window, cx);
+                                            }),
+                                        ),
+                                        "Move to Trash",
+                                    ))
+                                }),
+                        )
+                    })
+                    // Last, so they hold still under the count as buttons come and go.
                     .children(
                         chips
                             .into_iter()
                             .map(|(label, bad)| chip(label, bad, accented)),
-                    )
-                    .child(
-                        div()
-                            .w(px(TRAILING))
-                            .flex()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .when(!selected, |d| {
-                                d.opacity(0.)
-                                    .group_hover(theme::ROW_GROUP, |s| s.opacity(1.))
-                            })
-                            .child(tip(
-                                row_icon_button(id("copy"), "Copy Path", "copy", muted).on_click(
-                                    cx.listener(move |_, _, _, cx| {
-                                        cx.stop_propagation();
-                                        let text = copy.display().to_string();
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            text,
-                                        ));
-                                    }),
-                                ),
-                                "Copy Path",
-                            ))
-                            .child(tip(
-                                row_icon_button(id("trash"), "Move to Trash", "trash", muted)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.select_worktree(Some(trash.clone()), cx);
-                                        this.ask_remove_worktree(window, cx);
-                                    })),
-                                "Move to Trash",
-                            )),
                     ),
             )
     }

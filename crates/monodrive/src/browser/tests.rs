@@ -163,13 +163,16 @@ fn space_previews_the_selection_and_quick_look_follows_it(cx: &mut TestAppContex
         previewed(&browser, cx),
         Some((vec!["b.txt".into(), "c.txt".into()], 1))
     );
-    // Esc closes it and keeps the selection; ⌘Y opens and closes it too.
+    // Space again leaves it open, as it plays and pauses there; Esc closes
+    // it and keeps the selection. ⌘Y opens it too.
+    press(cx, "space");
+    assert!(previewed(&browser, cx).is_some());
     press(cx, "escape");
     assert_eq!(previewed(&browser, cx), None);
     assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
     press(cx, "cmd-y");
     assert!(previewed(&browser, cx).is_some());
-    press(cx, "cmd-y");
+    press(cx, "escape");
     assert_eq!(previewed(&browser, cx), None);
     // The arrows moving onto a folder close it.
     press(cx, "alt-up down down space up");
@@ -801,10 +804,7 @@ fn unsaved_edits_hold_the_preview_until_discarded(cx: &mut TestAppContext) {
         })
     };
     assert_eq!(name(cx), Some(project.join("xb.png")));
-    // Space and Done ask, as Esc does, and nothing's lost.
-    press(cx, "space");
-    assert!(drawn(cx, "edit-discard"));
-    click(cx, "edit-keep");
+    // Done asks, as Esc does, and nothing's lost.
     click(cx, "edit-done");
     assert!(drawn(cx, "edit-discard"));
     click(cx, "edit-keep");

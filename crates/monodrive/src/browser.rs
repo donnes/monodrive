@@ -1001,9 +1001,15 @@ impl Browser {
         }
     }
 
-    /// Space and ⌘Y: the selection's preview in the pane, or closes it.
-    fn toggle_preview(&mut self, cx: &mut Context<Self>) {
-        if self.tools_kept_it(cx) || self.close_preview(cx) {
+    /// Space and ⌘Y: the selection's preview in the pane. Once it's open they
+    /// play or pause what it plays, and Esc closes it. Apple's panel still
+    /// closes on them, as it does in Finder.
+    fn preview_or_play(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, view)) = &self.previewing {
+            view.update(cx, |view, cx| view.toggle_playing(cx));
+            return;
+        }
+        if self.close_preview(cx) {
             return;
         }
         let pane = self.pane().read(cx);
@@ -2153,7 +2159,7 @@ impl Render for Browser {
                                 .pane()
                                 .update(cx, |pane, cx| pane.remote_open(true, cx));
                         }
-                        this.toggle_preview(cx)
+                        this.preview_or_play(cx)
                     }))
                     .on_action(cx.listener(
                         |this, _: &OpenInQuickLook, window, cx| {
