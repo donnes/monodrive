@@ -3756,10 +3756,13 @@ impl Window {
             prompt_element = Some(element);
             self.prompt = Some(prompt);
         } else if let Some(active_drag) = cx.active_drag.take() {
-            let mut element = active_drag.view.clone().into_any_element();
-            let offset = self.mouse_position() - active_drag.cursor_offset;
-            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
-            active_drag_element = Some(element);
+            // The platform draws the image of a drag it runs.
+            if !cx.has_platform_drag() {
+                let mut element = active_drag.view.clone().into_any_element();
+                let offset = self.mouse_position() - active_drag.cursor_offset;
+                element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
+                active_drag_element = Some(element);
+            }
             cx.active_drag = Some(active_drag);
         } else {
             tooltip_element = self.prepaint_tooltip(cx);
@@ -5772,7 +5775,7 @@ impl Window {
         }
 
         // Must run after the move is dispatched: the platform owns the gesture afterwards, so this
-        // is the last chance for drag listeners to see the pointer leave and reset their state.
+        // is the last chance for drag listeners to see the move that started the drag.
         self.promote_external_drag_to_platform(&event, cx);
 
         let caused_invalidation = self.invalidator.update_count() > update_count_before;
@@ -5788,14 +5791,14 @@ impl Window {
         }
     }
 
+    /// Hands a drag with an external payload to the platform on the move that starts it, as
+    /// Finder does, so it outlives app switching and the platform moves its image. While it's
+    /// over this window, the platform's drag events bring it back as the active drag.
     fn promote_external_drag_to_platform(&mut self, event: &PlatformInput, cx: &mut App) {
         let PlatformInput::MouseMove(mouse_move) = event else {
             return;
         };
         if mouse_move.pressed_button != Some(MouseButton::Left) {
-            return;
-        }
-        if Bounds::new(Point::default(), self.viewport_size).contains(&mouse_move.position) {
             return;
         }
         if !self.platform_window.can_start_external_drag() {
@@ -8767,14 +8770,15 @@ mod tests {
                     .to_platform_input(),
                     cx,
                 );
-                assert!(cx.active_drag.is_some());
+                // The move that starts the drag hands it to the platform, unless it declines.
+                assert_eq!(cx.active_drag.is_some(), !platform_result);
+                assert_eq!(cx.has_platform_drag(), platform_result);
             });
             assert!(
                 update_result.is_ok(),
                 "failed to start drag: {update_result:?}"
             );
 
-            assert!(cx.test_window(window).external_drag_files().is_empty());
             Drag {
                 window,
                 observed_drag_moves,
@@ -8784,32 +8788,9 @@ mod tests {
 
         let successful_path = PathBuf::from("/tmp/successful-drag");
         let successful = start_drag(cx, successful_path.clone(), true);
-        let outside_position = point(px(-1.), px(20.));
-        let update_result = cx.update_window(successful.window, |_, window, cx| {
-            window.dispatch_event(
-                MouseMoveEvent {
-                    position: outside_position,
-                    pressed_button: Some(MouseButton::Left),
-                    modifiers: Default::default(),
-                }
-                .to_platform_input(),
-                cx,
-            );
-            assert!(cx.active_drag.is_none());
-        });
-        assert!(
-            update_result.is_ok(),
-            "failed to promote drag: {update_result:?}"
-        );
         assert_eq!(
             cx.test_window(successful.window).external_drag_files(),
             [(successful_path.clone(), true)]
-        );
-        // Views must still see the move that leaves the window, otherwise they never learn to tear
-        // down the drag state they built up while the pointer was inside.
-        assert_eq!(
-            successful.observed_drag_moves.borrow().last(),
-            Some(&outside_position)
         );
 
         let first_destination_exit_count = Rc::new(Cell::new(0));
@@ -8967,17 +8948,6 @@ mod tests {
         let cancelled = start_drag(cx, cancelled_path.clone(), true);
         let update_result = cx.update_window(cancelled.window, |_, window, cx| {
             window.dispatch_event(
-                MouseMoveEvent {
-                    position: outside_position,
-                    pressed_button: Some(MouseButton::Left),
-                    modifiers: Default::default(),
-                }
-                .to_platform_input(),
-                cx,
-            );
-            assert!(cx.active_drag.is_none());
-
-            window.dispatch_event(
                 FileDropEvent::Entered {
                     position: reentry_position,
                     paths: ExternalPaths([cancelled_path].into_iter().collect()),
@@ -9002,17 +8972,7 @@ mod tests {
         let removed_path = PathBuf::from("/tmp/removed-window-drag");
         let removed = start_drag(cx, removed_path, true);
         let removed_window_id = removed.window.window_id();
-        let update_result = cx.update_window(removed.window, |_, window, cx| {
-            window.dispatch_event(
-                MouseMoveEvent {
-                    position: outside_position,
-                    pressed_button: Some(MouseButton::Left),
-                    modifiers: Default::default(),
-                }
-                .to_platform_input(),
-                cx,
-            );
-            assert!(cx.active_drag.is_none());
+        let update_result = cx.update_window(removed.window, |_, window, _| {
             window.remove_window();
         });
         assert!(

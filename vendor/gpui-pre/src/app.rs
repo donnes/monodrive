@@ -2911,6 +2911,12 @@ impl App {
         }
     }
 
+    /// Whether the platform runs a drag that started in this app and hasn't ended, wherever
+    /// the pointer is. [`App::has_active_drag`] is true only while it's over the source window.
+    pub fn has_platform_drag(&self) -> bool {
+        self.platform_owned_drag.is_some()
+    }
+
     pub(crate) fn hand_active_drag_to_platform(&mut self, source_window: WindowId) -> bool {
         let Some(drag) = self.active_drag.take() else {
             return false;

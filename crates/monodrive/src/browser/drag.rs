@@ -1,8 +1,10 @@
-//! Dragging files. GPUI's drag covers all of it: within the window; out of it,
-//! where it hands AppKit a session of file URLs once the pointer leaves
-//! (`external_drag_payload`); and in from another app, as a drag of
-//! `ExternalPaths`. What's here decides what a drop would do, draws that, and
-//! runs it through the operation owner like any copy or move.
+//! Dragging files. A drag out of a pane is AppKit's from its first move, as
+//! Finder's is: GPUI hands it a session of file URLs (`external_drag_payload`),
+//! which survives ⌘-Tab, and gives the drag back while it's over the window.
+//! AppKit keeps the keys meanwhile, and ends the drag for Esc. Drags in from
+//! another app arrive as `ExternalPaths`, and a server folder's drag stays the
+//! window's own. What's here decides what a drop would do, draws that, and runs
+//! it through the operation owner like any copy or move.
 //!
 //! Outside the app, GPUI's session offers only Copy. That's the right mask for
 //! us: a move Finder carried out wouldn't be in the journal, so it couldn't be
@@ -19,8 +21,8 @@ use crate::theme::{self, Elevation, content};
 use gpui::{
     AnimationExt, AnyElement, App, Context, Div, DragMoveEvent, Entity, EntityId,
     ExternalDragPayload, ExternalPaths, FileDragPaths, FontWeight, Modifiers, MouseButton,
-    MouseUpEvent, Pixels, PlatformInput, Point, Render, Stateful, Task, Window, div, prelude::*,
-    px,
+    MouseUpEvent, Pixels, PlatformInput, Point, Render, RenderImage, Stateful, Task, Window, div,
+    prelude::*, px,
 };
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::remote::RemotePath;
@@ -362,9 +364,10 @@ pub(super) struct SpringBack {
 #[derive(Default)]
 struct DragState {
     /// What the drag out of a pane took when it started, each path with
-    /// whether it's a folder, whatever the keys select meanwhile. It outlasts
-    /// the session, for a drag that comes back from outside the window.
+    /// whether it's a folder, whatever the keys select meanwhile.
     carried: Vec<(PathBuf, bool)>,
+    /// The icon of what the drag was grabbed by, for AppKit to draw.
+    carried_image: Option<Arc<RenderImage>>,
     /// What the drag out of a server folder took, in place of `carried`.
     carried_from_server: Vec<RemotePath>,
     session: Option<Session>,
@@ -401,10 +404,11 @@ impl Drag {
         });
     }
 
-    /// A drag out of a pane starts, with `files`.
-    fn carry(&self, files: Vec<(PathBuf, bool)>) {
+    /// A drag out of a pane starts, with `files`, under `image`.
+    fn carry(&self, files: Vec<(PathBuf, bool)>, image: Option<Arc<RenderImage>>) {
         let mut state = self.0.borrow_mut();
         state.carried = files;
+        state.carried_image = image;
         state.carried_from_server.clear();
         drop(state);
         self.resume();
@@ -414,6 +418,7 @@ impl Drag {
     fn carry_from_server(&self, items: Vec<RemotePath>) {
         let mut state = self.0.borrow_mut();
         state.carried.clear();
+        state.carried_image = None;
         state.carried_from_server = items;
         drop(state);
         self.resume();
@@ -459,13 +464,10 @@ impl Drag {
         self.0.borrow().session.as_ref().is_some_and(|s| s.folders)
     }
 
-    /// Before a frame: ends with GPUI's drag, and works out what it would do,
-    /// with the tap a change in that earns.
-    fn settle(&self, dragging: bool, keys: Modifiers) -> Option<Haptic> {
+    /// Before a frame: works out what a drop would do, with the tap a change
+    /// in that earns.
+    fn settle(&self, keys: Modifiers) -> Option<Haptic> {
         let mut state = self.0.borrow_mut();
-        if !dragging {
-            state.session = None;
-        }
         let session = state.session.as_mut()?;
         let Some(target) = session.target.clone() else {
             session.decided = None;
@@ -579,6 +581,25 @@ impl Drag {
                 outline.opacity(0.3 + 0.7 * (2. * t - 1.).abs())
             })
             .into_any_element()
+    }
+
+    /// The drag is outside the window, where AppKit carries it on: nothing
+    /// here is under the pointer, so nothing shows a drop or waits to open.
+    fn away(&self) {
+        if let Some(session) = self.0.borrow_mut().session.as_mut() {
+            session.target = None;
+        }
+    }
+
+    /// The drag is over without a drop here, which takes the session first:
+    /// the window goes back to where it began, as for Esc, which AppKit keeps
+    /// for itself. A drag from another app may only have left, which AppKit
+    /// doesn't tell apart, so it just ends.
+    fn end(&self) -> Option<SpringBack> {
+        let external = self.0.borrow().session.as_ref()?.external;
+        let back = self.cancel();
+        let sprang = back.tab.is_some() || !back.panes.is_empty();
+        (sprang && !external).then_some(back)
     }
 
     /// The drag ends for Esc: what to go back to.
@@ -797,7 +818,13 @@ impl Pane {
         element
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.grabbed = true),
+                cx.listener(move |this, _, window, cx| {
+                    this.grabbed = true;
+                    // The drag's image, ready by the time the drag starts.
+                    if let Some(entry) = this.entries.get(ix) {
+                        file_icons::image(entry, IMAGE_SIDE, window, cx);
+                    }
+                }),
             )
             .on_drag(
                 FileDrag {
@@ -820,7 +847,7 @@ impl Pane {
         &mut self,
         ix: usize,
         grabbed: Point<Pixels>,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<DragImage> {
         let entry = self.entries.get(ix).cloned();
@@ -841,7 +868,10 @@ impl Pane {
         let files = dragged
             .into_iter()
             .map(|entry| (entry.path.clone(), entry.kind == Kind::Dir));
-        self.drag.carry(files.collect());
+        let image = entry
+            .as_ref()
+            .and_then(|entry| file_icons::image(entry, IMAGE_SIDE, window, cx));
+        self.drag.carry(files.collect(), image);
         cx.notify();
         cx.new(|_| DragImage {
             picture: entry.map(Picture::Entry),
@@ -850,11 +880,17 @@ impl Pane {
         })
     }
 
-    /// What AppKit gets once a drag leaves the window: file URLs, built without
-    /// asking the disk, so nothing downloads a cloud placeholder.
+    /// What AppKit gets as the drag starts: file URLs, built without asking
+    /// the disk, so nothing downloads a cloud placeholder, and our icon of
+    /// what was grabbed.
     pub(super) fn drag_out(&self) -> Option<ExternalDragPayload> {
-        let files = self.drag.0.borrow().carried.clone();
-        Some(ExternalDragPayload::Files(FileDragPaths::new(files)))
+        let state = self.drag.0.borrow();
+        let files = FileDragPaths::new(state.carried.clone());
+        let files = match &state.carried_image {
+            Some(image) => files.with_image(image.clone()),
+            None => files,
+        };
+        Some(ExternalDragPayload::Files(files))
     }
 
     /// Makes row or cell `ix` offer itself to a drag.
@@ -906,10 +942,7 @@ impl Browser {
     /// The window's end of a drag: what starts each move and what a drop does.
     pub(super) fn drags(&self, root: Div, cx: &mut Context<Self>) -> Div {
         root.on_drag_move::<FileDrag>(cx.listener(|this, _: &DragMoveEvent<FileDrag>, _, _| {
-            if !this.drag.next_move() {
-                // Back from outside the window, where GPUI gave it to AppKit.
-                this.drag.resume();
-            }
+            this.drag.next_move();
         }))
         .on_drag_move::<ExternalPaths>(cx.listener(
             |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
@@ -924,9 +957,7 @@ impl Browser {
             this.drag.next_move();
         }))
         .on_drag_move::<ServerDrag>(cx.listener(|this, _: &DragMoveEvent<ServerDrag>, _, _| {
-            if !this.drag.next_move() {
-                this.drag.resume();
-            }
+            this.drag.next_move();
         }))
         .on_drop::<FileDrag>(cx.listener(|this, _, window, cx| this.drop_files(window, cx)))
         .on_drop::<ServerDrag>(cx.listener(|this, _, window, cx| this.drop_files(window, cx)))
@@ -965,7 +996,16 @@ impl Browser {
     /// the platform replays the last move, and AppKit its dragging updates, so
     /// the pill catches up with a scroll or a closed tab under the pointer.
     pub(super) fn settle_drag(&self, window: &Window, cx: &mut Context<Self>) {
-        if let Some(tap) = self.drag.settle(cx.has_active_drag(), held_keys(window)) {
+        if !cx.has_active_drag() {
+            if cx.has_platform_drag() {
+                self.drag.away();
+            } else if let Some(back) = self.drag.end() {
+                cx.defer_in(window, |this, window, cx| {
+                    this.spring_back(back, window, cx)
+                });
+            }
+        }
+        if let Some(tap) = self.drag.settle(held_keys(window)) {
             feedback::haptic(tap, cx);
         }
         self.read_volumes(cx);
@@ -974,7 +1014,7 @@ impl Browser {
     }
 
     /// Times the rest on what's under the pointer, with one timer, which a new
-    /// place replaces. A drag out of the window ends the session, and the timer.
+    /// place replaces. A drag out of the window is over nothing, which ends the timer.
     fn time_spring(&self, window: &Window, cx: &mut Context<Self>) {
         let wanted = cx
             .global::<Preferences>()
@@ -1103,10 +1143,14 @@ impl Browser {
 
     /// A mouse-up can go missing, as GPUI's own drag replay allows for when a
     /// native menu takes one, and a drag then has nothing to end it. So while
-    /// the window owns a drag, the button itself is what says it's over. A
-    /// window with no AppKit behind it, as in tests, has only its events.
+    /// the window owns a drag, the button itself is what says it's over. AppKit
+    /// ends its own drags. A window with no AppKit behind it, as in tests, has
+    /// only its events.
     fn watch_button(&self, window: &Window, cx: &mut Context<Self>) {
-        if crate::traffic_lights::ns_window(window).is_none() || !self.drag.needs_button_watch() {
+        if crate::traffic_lights::ns_window(window).is_none()
+            || cx.has_platform_drag()
+            || !self.drag.needs_button_watch()
+        {
             return;
         }
         let watch = cx.spawn_in(window, async move |_, cx| {
@@ -1324,7 +1368,7 @@ mod tests {
         let target = folder("/b", "b");
         let settle_and_say = |drag: &Drag| {
             drag.offer(target.clone());
-            drag.settle(true, Modifiers::default());
+            drag.settle(Modifiers::default());
             drag.decision(|_, d| d.says()).unwrap()
         };
         assert_eq!(settle_and_say(&drag), "Copy f to b");
@@ -1341,11 +1385,11 @@ mod tests {
         drag.next_move();
         let other = folder("/ext", "ext");
         drag.offer(other);
-        drag.settle(true, Modifiers::default());
+        drag.settle(Modifiers::default());
         assert_eq!(drag.decision(|_, d| d.says()).unwrap(), "Copy f to ext");
         assert_eq!(drag.target_to_read(), Some("/ext".into()));
         drag.target_read(Path::new("/ext"), Some(2));
-        drag.settle(true, Modifiers::default());
+        drag.settle(Modifiers::default());
         assert_eq!(drag.decision(|_, d| d.says()).unwrap(), "Copy f to ext");
     }
 
@@ -1354,12 +1398,12 @@ mod tests {
         let drag = Drag::default();
         drag.begin(paths(&["/a/f", "/ext/g"]), false);
         drag.offer(folder("/b", "b"));
-        drag.settle(true, Modifiers::default());
+        drag.settle(Modifiers::default());
         drag.target_to_read();
         drag.target_read(Path::new("/b"), Some(1));
         drag.sources_read(&paths(&["/a/f", "/ext/g"]), Some(HashSet::from([1, 2])));
         drag.offer(folder("/b", "b"));
-        drag.settle(true, Modifiers::default());
+        drag.settle(Modifiers::default());
         assert_eq!(drag.decision(|_, d| d.says()).unwrap(), "Copy 2 items to b");
     }
 
@@ -1434,11 +1478,8 @@ mod tests {
         // What leaves the window is what the image shows.
         let Payload::Files(files) = in_pane(&browser, cx, |pane, _| pane.drag_out()).unwrap();
         assert_eq!(files.entries(), [(project.join("a.txt"), false)]);
-        // GPUI handing it to AppKit ends what the window knows of it, and it
-        // comes back the same drag.
-        browser.read_with(cx, |b, _| {
-            b.drag.settle(false, Modifiers::default());
-        });
+        // Out of the window, AppKit carries it, and it comes back the same drag.
+        browser.read_with(cx, |b, _| b.drag.away());
         hover(docs, "", cx);
         hover(docs, "", cx);
         draw(cx);
