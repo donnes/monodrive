@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 /// Raise it to show onboarding once more to everyone who finished this one.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 const WIDTH: f32 = 640.;
 const HEIGHT: f32 = 520.;
