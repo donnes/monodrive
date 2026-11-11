@@ -12,6 +12,8 @@ Decisions made while building it:
 - Suggestions only move to the Trash. No tool's own cleanup command runs, so tools that own their cleanup, npm among them, aren't suggested.
 - A share gets no Trash button, because nothing says cheaply whether it has a Trash.
 - `storage_scan` on a volume's mount saves that scan, so an agent can do what the Scan button does.
+- On 2026-11-11 "Other" held 326 GB on the maintainer's Mac, so the page now measures where the rest goes: Applications, App data (each folder in ~/Library not measured as something else), Developer tools (Xcode's and Android's folders, pnpm's store, Homebrew, /usr/local), Hidden folders in Home, System files (/Library and /private), and each other visible folder in Home. macOS's own volumes come from `ATTR_VOL_SPACEUSED`, without a walk. Each byte counts under the innermost measured folder holding it, so a project inside ~/Work counts as a project. The bar's key adds Apps, Developer and macOS. A group of many folders lists its 12 largest when pressed.
+- Measuring belongs to the app, not the page: it starts 10 s after launch and whenever the page opens, and leaving the page doesn't stop it. It walks with `storage::total`, which keeps nothing per file, so it has no item budget, and stays on one volume, so the simulators' mounted runtimes and the VM volume aren't counted twice.
 
 ## Goal
 
@@ -114,7 +116,7 @@ On 2026-11-09 the maintainer picked option B of four, with option A's report lin
 ## Open questions
 
 - Should the 20% threshold be a constant, or also absolute (under 50 GB free) for large drives?
-- Which group holds the unexplained 284 GB on this Mac? It stays "everything else" until a scan says otherwise, and step 1 should measure how much of it the index's sizes can explain without walking.
+- The index has every file's length, so it could break the disk down without walking, but fsearch doesn't expose sizes by folder and lengths aren't blocks. Worth asking upstream if walking turns out too slow.
 
 ## Verification
 

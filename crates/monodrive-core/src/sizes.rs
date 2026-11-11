@@ -54,24 +54,30 @@ pub fn measure(
         || cancelled.load(Ordering::Relaxed) || deadline.is_some_and(|end| Instant::now() >= end);
     let mut size = FolderSize::default();
     let mut counted = None;
-    size.complete = walk(folder, &gated(), &mut stopped, &mut |met| match met {
-        Met::Folder { placeholder, .. } => {
-            size.folders += 1;
-            size.placeholders += u64::from(placeholder);
-        }
-        Met::Item {
-            meta, placeholder, ..
-        } => {
-            size.files += 1;
-            size.placeholders += u64::from(placeholder);
-            size.bytes += meta.len();
-            size.on_disk += meta.blocks() * 512;
-        }
-        Met::Unreadable { at, .. } => {
-            size.unreadable += u64::from(counted != Some(at));
-            counted = Some(at);
-        }
-    })?;
+    size.complete = walk(
+        folder,
+        &gated(),
+        false,
+        &mut stopped,
+        &mut |met| match met {
+            Met::Folder { placeholder, .. } => {
+                size.folders += 1;
+                size.placeholders += u64::from(placeholder);
+            }
+            Met::Item {
+                meta, placeholder, ..
+            } => {
+                size.files += 1;
+                size.placeholders += u64::from(placeholder);
+                size.bytes += meta.len();
+                size.on_disk += meta.blocks() * 512;
+            }
+            Met::Unreadable { at, .. } => {
+                size.unreadable += u64::from(counted != Some(at));
+                counted = Some(at);
+            }
+        },
+    )?;
     Ok(size)
 }
 
@@ -84,10 +90,11 @@ pub(crate) enum Met<'a> {
         path: &'a Path,
         placeholder: bool,
     },
-    /// An item in folder `at` that isn't a folder. A hard-linked file comes
-    /// only the first time.
+    /// An item in folder `at`, which is `dir`, that isn't a folder. A
+    /// hard-linked file comes only the first time.
     Item {
         at: usize,
+        dir: &'a Path,
         name: OsString,
         meta: &'a Metadata,
         /// A cloud placeholder: reading it would download it.
@@ -186,22 +193,29 @@ pub(crate) fn guarded(path: &Path, gated: &[PathBuf]) -> Option<std::io::Error> 
 }
 
 /// Walks every item under `folder` without following links or opening
-/// `gated` or placeholder folders, until `stopped` says to stop. A link given as `folder`
-/// is resolved first, so it can't lead into one. True if it met
-/// everything. Fails only when `folder` itself can't be listed, or is a
-/// placeholder.
+/// `gated` or placeholder folders, until `stopped` says to stop. With
+/// `one_volume`, it also leaves out the folders where another volume is
+/// mounted, as `du -x` does. A link given as `folder` is resolved first, so it
+/// can't lead into one. True if it met everything. Fails only when `folder`
+/// itself can't be listed, or is a placeholder.
 pub(crate) fn walk(
     folder: &Path,
     gated: &[PathBuf],
+    one_volume: bool,
     stopped: &mut dyn FnMut() -> bool,
     met: &mut dyn FnMut(Met),
 ) -> Result<bool, String> {
     let root = folder
         .canonicalize()
         .map_err(|e| format!("{}: {e}", folder.display()))?;
-    if std::fs::symlink_metadata(&root).is_ok_and(|meta| !Availability::of(&meta).is_local()) {
+    let root_meta = std::fs::symlink_metadata(&root).ok();
+    if root_meta
+        .as_ref()
+        .is_some_and(|meta| !Availability::of(meta).is_local())
+    {
         return Err(crate::cloud::not_downloaded(folder));
     }
+    let device = root_meta.filter(|_| one_volume).map(|meta| meta.dev());
     let mut linked = HashSet::new();
     let mut found = 0;
     let mut pending = vec![(root, 0)];
@@ -266,6 +280,9 @@ pub(crate) fn walk(
             };
             let placeholder = !Availability::of(&meta).is_local();
             if meta.is_dir() {
+                if device.is_some_and(|device| meta.dev() != device) {
+                    continue;
+                }
                 found += 1;
                 let path = item.path();
                 met(Met::Folder {
@@ -289,6 +306,7 @@ pub(crate) fn walk(
             }
             met(Met::Item {
                 at,
+                dir: &dir,
                 name: item.file_name(),
                 meta: &meta,
                 placeholder,
@@ -519,15 +537,15 @@ mod tests {
             std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o000)).unwrap();
         }
         let (mut bytes, mut unreadable) = (0, Vec::new());
-        let complete = walk(&home, &gated, &mut || false, &mut |met| match met {
+        let complete = walk(&home, &gated, false, &mut || false, &mut |met| match met {
             Met::Item { meta, .. } => bytes += meta.len(),
             Met::Unreadable { path, why, .. } => {
                 unreadable.push(format!("{}: {why}", path.display()));
             }
             Met::Folder { .. } => {}
         });
-        let inside = walk(&desktop, &gated, &mut || false, &mut |_| {});
-        let linked = walk(&link, &gated, &mut || false, &mut |_| {});
+        let inside = walk(&desktop, &gated, false, &mut || false, &mut |_| {});
+        let linked = walk(&link, &gated, false, &mut || false, &mut |_| {});
         for folder in [&desktop, &containers] {
             std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o755)).unwrap();
         }

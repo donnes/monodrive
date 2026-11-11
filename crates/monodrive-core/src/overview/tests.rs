@@ -6,14 +6,21 @@ const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
 const NOW: u64 = 1_000_000;
 
 fn env(dir: &TempDir) -> Env {
-    let home = dir.path().canonicalize().unwrap();
-    Env::new(
-        home.join(".Trash"),
-        places::Store {
-            places: home.join("support/places.json"),
-            recents: home.join("support/recents.json"),
-        },
-    )
+    let at = dir.path().canonicalize().unwrap();
+    let home = at.join("home");
+    std::fs::create_dir(&home).unwrap();
+    Env {
+        // A made-up startup disk beside Home, so nothing reads the real one's
+        // folders.
+        root: at.join("disk"),
+        ..Env::new(
+            home.join(".Trash"),
+            places::Store {
+                places: at.join("support/places.json"),
+                recents: at.join("support/recents.json"),
+            },
+        )
+    }
 }
 
 fn startup(total: u64, free: u64) -> Volume {
@@ -29,6 +36,7 @@ fn startup(total: u64, free: u64) -> Volume {
         ejectable: false,
         removable: false,
         startup: true,
+        system: None,
     }
 }
 
@@ -333,10 +341,11 @@ fn what_is_due_is_what_has_no_total_or_an_old_one() {
 }
 
 #[test]
-fn everything_else_counts_nested_folders_once_and_waits_for_every_total() {
+fn the_rest_of_the_disk_is_measured_where_it_goes_and_each_folder_once() {
     let dir = TempDir::new().unwrap();
     let env = env(&dir);
-    let documents = env.home.join("Documents");
+    let home = env.home.clone();
+    let documents = home.join("Documents");
     let project = cargo_project(&documents, "app");
     env.store
         .register_repository(worktrees::Registration {
@@ -344,22 +353,133 @@ fn everything_else_counts_nested_folders_once_and_waits_for_every_total() {
             path: project.clone(),
         })
         .unwrap();
-    let disk = startup(1_000, 100);
+    let cloud = home.join("Library/CloudStorage/Drive");
+    let folders = [
+        home.join("Library/Application Support"),
+        home.join("Library/Developer"),
+        home.join(".tool"),
+        home.join("Work"),
+        env.root.join("Applications"),
+        env.root.join("Library"),
+        env.root.join("Library/Developer"),
+    ];
+    for folder in folders.iter().chain([&cloud, &env.trash]) {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::os::unix::fs::symlink(&documents, home.join(".link")).unwrap();
+    let brew = env.root.join("opt/homebrew");
+    std::fs::create_dir_all(brew.join(".git")).unwrap();
+    save(&env, |saved| saved.projects.push(brew.clone()));
+    let disk = Volume {
+        system: Some(50),
+        ..startup(1_000, 250)
+    };
+    let about = read(&env, std::slice::from_ref(&disk));
+    let groups: Vec<(&str, Kind, Vec<&Path>)> = about
+        .stuff
+        .iter()
+        .map(|group| {
+            let spots = group.spots.iter().map(|spot| spot.path.as_path()).collect();
+            (group.name.as_str(), group.kind, spots)
+        })
+        .collect();
+    let [support, xcode, tool, work, apps, system, system_xcode] = folders.each_ref();
+    assert_eq!(
+        groups,
+        vec![
+            ("App data", Kind::Apps, vec![support.as_path()]),
+            ("Applications", Kind::Apps, vec![apps]),
+            (
+                "Developer tools",
+                Kind::Developer,
+                vec![xcode, system_xcode, &brew]
+            ),
+            ("Documents", Kind::Documents, vec![&documents]),
+            ("Hidden folders", Kind::Developer, vec![tool]),
+            ("System files", Kind::System, vec![system]),
+            ("Work", Kind::Documents, vec![work]),
+            ("app", Kind::Projects, vec![&project]),
+        ],
+        "Homebrew's repository is a tool, and the cloud folders' own folder, the Trash and \
+         links aren't measured again"
+    );
+    for folder in folders.iter().chain([&documents, &project]) {
+        assert!(about.due.contains(folder), "{}", folder.display());
+    }
+
     save(&env, |saved| {
+        for (folder, bytes) in folders.iter().zip([100, 80, 70, 10, 60, 40, 30]) {
+            saved.totals.insert(folder.clone(), size(bytes, NOW));
+        }
         saved.totals.insert(documents.clone(), size(300, NOW));
+        saved.totals.insert(brew.clone(), size(20, NOW));
     });
     assert_eq!(
-        read(&env, std::slice::from_ref(&disk)).everything_else,
-        None
+        read(&env, std::slice::from_ref(&disk)).everything_else(),
+        None,
+        "it waits for every total"
     );
-
     save(&env, |saved| {
         saved.totals.insert(project.clone(), size(200, NOW));
     });
+    let about = read(&env, &[disk]);
     assert_eq!(
-        read(&env, &[disk]).everything_else,
-        Some(600),
-        "900 used, less Documents, which already holds the project"
+        about.parts(),
+        vec![
+            (Part::Kind(Kind::Projects), 200),
+            (Part::Kind(Kind::Developer), 200),
+            (Part::Kind(Kind::Apps), 160),
+            (Part::Kind(Kind::Documents), 110),
+            (Part::Kind(Kind::System), 60),
+            (Part::Other, 20),
+        ],
+        "the project leaves Documents, and the system's Developer leaves its Library"
+    );
+    assert_eq!(about.everything_else(), Some(20));
+}
+
+#[test]
+fn what_a_suggestion_frees_leaves_the_innermost_folder_holding_it() {
+    let at = |path: &str, kind: Kind, bytes: u64| Group {
+        name: path.into(),
+        kind,
+        spots: vec![Spot {
+            location: "Mac".into(),
+            path: path.into(),
+            size: Some(size(bytes, NOW)),
+            reachable: true,
+        }],
+    };
+    let about = Overview {
+        headline: Some(Headline {
+            name: "Mac".into(),
+            total: 100,
+            free: 20,
+            trash: Some(size(4, NOW)),
+            system: None,
+            low: true,
+        }),
+        suggestions: vec![Suggestion {
+            path: "/h/Documents/app/target".into(),
+            evidence: Evidence::BuildOutput {
+                project: "app".into(),
+            },
+            size: size(5, NOW),
+        }],
+        stuff: vec![
+            at("/h/Documents", Kind::Documents, 30),
+            at("/h/Documents/app", Kind::Projects, 15),
+        ],
+        ..Overview::default()
+    };
+    assert_eq!(
+        about.parts(),
+        vec![
+            (Part::Kind(Kind::Documents), 15),
+            (Part::Kind(Kind::Projects), 10),
+            (Part::Freeable, 9),
+            (Part::Other, 46),
+        ]
     );
 }
 

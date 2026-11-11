@@ -1,34 +1,38 @@
 //! The Overview page, which takes the pane's list while it's on screen: how
 //! much is free and what fills the startup disk, what could free more, the
-//! user's largest things across every location, and the other locations. Everything it says comes from
-//! `monodrive_core::overview`, read off the UI thread; opening it draws what's
-//! saved at once and measures what's due behind it, and leaving stops that.
+//! user's largest things across every location, and the other locations.
+//! Everything it says comes from `monodrive_core::overview`, read off the UI
+//! thread. Opening it draws what's saved at once. Measuring is the app's, not
+//! the page's: it starts a little after launch and whenever a page opens, and
+//! goes on whatever is on screen.
 
 use super::pane::Pane;
 use super::sidebar::Places;
 use super::{ConnectToServer, EmptyTrash, Offer, Operations, lock, with_owner};
 use crate::theme::{self, ButtonLook, content, icon, row_icon_button, section_label, text_button};
 use gpui::{
-    AnyElement, Context, FontWeight, Hsla, MouseButton, Role, Task, Window, div, prelude::*, px,
-    relative,
+    AnyElement, App, Context, FontWeight, Global, Hsla, MouseButton, Role, Task, Window, div,
+    prelude::*, px, relative,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::ops::{self, AgentChange, Origin, Request};
 use monodrive_core::overview::{
-    self, Env, Group, GroupKind, Headline, Location, LocationKind, Measured, Overview, ScanRow,
+    self, Env, Group, Headline, Kind, Location, LocationKind, Measured, Overview, Part, ScanRow,
     Spot, Suggestion,
 };
 use monodrive_core::paths;
 use monodrive_core::storage::{self, Stop};
 use monodrive_core::volumes::Volume;
 use monodrive_core::worktrees::Git;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
-/// Folders measured at once, whichever way the page was opened.
+/// Folders measured at once.
 const MEASURING: usize = 2;
+/// How many of a group's folders it lists when opened, largest first.
+const SPOTS_SHOWN: usize = 12;
 /// How far back the page says what agents changed, and how many.
 const CHANGES_SINCE: u64 = 24 * 60 * 60;
 const CHANGES_SHOWN: usize = 5;
@@ -53,12 +57,12 @@ const CHIP_HEIGHT: f32 = 48.;
 pub(in crate::browser) struct OverviewPage {
     about: Option<Overview>,
     changes: Vec<AgentChange>,
-    /// Tells the measuring threads to stop.
-    stop: Option<Arc<storage::Progress>>,
+    /// Reads what's saved, then again each time a folder is measured, while
+    /// the page is on screen.
     reading: Option<Task<()>>,
     /// The mount being scanned, because someone asked.
     scanning: Option<Scanning>,
-    /// The groups in several places, listing each copy.
+    /// The groups in several places, listing each of them.
     open: HashSet<String>,
 }
 
@@ -68,6 +72,14 @@ struct Scanning {
     _task: Task<()>,
 }
 
+/// Where the Overview reads and saves, for this app's places.
+fn env_of(places: &Places) -> Env {
+    Env {
+        root: places.root.clone(),
+        ..Env::new(places.trash.clone(), places.store.clone())
+    }
+}
+
 /// What a read needs, each kept from the first read of a page: asking macOS
 /// for volumes can wait on a slow share.
 #[derive(Clone)]
@@ -75,23 +87,172 @@ struct Reader {
     env: Env,
     volumes: Arc<Vec<Volume>>,
     cloud: Arc<Vec<CloudFolder>>,
-    ops: Option<Arc<Mutex<ops::Client>>>,
 }
 
 impl Reader {
-    fn read(&self) -> (Overview, Vec<AgentChange>) {
-        let now = overview::now();
-        let about = overview::read(&self.env, &self.volumes, &self.cloud, &|_| false, now);
-        let changes = self.ops.as_ref().map_or_else(Vec::new, |ops| {
-            lock(ops).agent_changes(now.saturating_sub(CHANGES_SINCE), CHANGES_SHOWN)
+    /// Asks macOS for the volumes and cloud folders, so call it off the UI
+    /// thread.
+    fn new(places: &Places) -> Self {
+        Self {
+            env: env_of(places),
+            volumes: Arc::new(places.drives.list()),
+            cloud: Arc::new(places.drives.cloud()),
+        }
+    }
+
+    fn read(&self) -> Overview {
+        overview::read(
+            &self.env,
+            &self.volumes,
+            &self.cloud,
+            &|_| false,
+            overview::now(),
+        )
+    }
+
+    /// The Overview and what agents changed lately, through `ops`, which the
+    /// read lets go of so the owner can exit when the window does.
+    fn read_with(&self, ops: Option<Arc<Mutex<ops::Client>>>) -> (Overview, Vec<AgentChange>) {
+        let since = overview::now().saturating_sub(CHANGES_SINCE);
+        let changes = ops.map_or_else(Vec::new, |ops| {
+            lock(&ops).agent_changes(since, CHANGES_SHOWN)
         });
-        (about, changes)
+        (self.read(), changes)
     }
 }
 
+/// The owner's client, for one read.
+fn operations(cx: &App) -> Option<Arc<Mutex<ops::Client>>> {
+    cx.try_global::<Operations>().map(|ops| ops.0.clone())
+}
+
+/// Measures what the Overview has due for the whole app, so it goes on
+/// whichever page is on screen, and tells each open page as each folder
+/// finishes.
+#[derive(Clone, Default)]
+pub(crate) struct Measurer(Arc<Mutex<Measuring>>);
+
+#[derive(Default)]
+struct Measuring {
+    /// Folders measured so far in this run, and how many it has, while one
+    /// runs.
+    run: Option<(usize, usize)>,
+    /// What's due changed during the run, so another follows it.
+    again: bool,
+    heard: Vec<async_channel::Sender<()>>,
+}
+
+impl Global for Measurer {}
+
+impl Measurer {
+    fn state(&self) -> std::sync::MutexGuard<'_, Measuring> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn say(&self) {
+        self.state().heard.retain(|page| page.try_send(()).is_ok());
+    }
+
+    fn listen(&self) -> async_channel::Receiver<()> {
+        let (send, receive) = async_channel::unbounded();
+        self.state().heard.push(send);
+        receive
+    }
+
+    /// Folders measured and how many there are, while a run is underway.
+    fn progress(&self) -> Option<(usize, usize)> {
+        self.state().run
+    }
+
+    /// Starts a run, or asks for another once this one ends. False when one is
+    /// already underway.
+    fn begin(&self) -> bool {
+        let mut state = self.state();
+        if state.run.is_some() {
+            state.again = true;
+            return false;
+        }
+        state.run = Some((0, 0));
+        true
+    }
+
+    fn set(&self, run: Option<(usize, usize)>) {
+        self.state().run = run;
+        self.say();
+    }
+
+    fn measured_one(&self) {
+        if let Some((done, _)) = &mut self.state().run {
+            *done += 1;
+        }
+        self.say();
+    }
+
+    /// Ends a run, unless what's due changed while it ran.
+    fn end(&self) -> bool {
+        let mut state = self.state();
+        if std::mem::take(&mut state.again) {
+            return false;
+        }
+        state.run = None;
+        drop(state);
+        self.say();
+        true
+    }
+}
+
+/// Measures every folder the Overview has due, `MEASURING` at a time, saving
+/// each total as it finishes. When a run is already underway, another
+/// follows it, for what became due since.
+pub(crate) fn measure_overview(cx: &mut App) {
+    let Some(places) = cx.try_global::<Places>().cloned() else {
+        return;
+    };
+    let measurer = cx.default_global::<Measurer>().clone();
+    if !measurer.begin() {
+        return;
+    }
+    let background = cx.background_executor().clone();
+    cx.background_executor()
+        .spawn(async move {
+            loop {
+                let reader = Reader::new(&places);
+                let due: VecDeque<PathBuf> = reader.read().due.into();
+                measurer.set(Some((0, due.len())));
+                let queue = Arc::new(Mutex::new(due));
+                let workers: Vec<Task<()>> = (0..MEASURING)
+                    .map(|_| {
+                        let (queue, measurer, env) =
+                            (queue.clone(), measurer.clone(), reader.env.clone());
+                        background.spawn(async move {
+                            let progress = storage::Progress::default();
+                            loop {
+                                let next = queue
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .pop_front();
+                                let Some(folder) = next else { return };
+                                overview::measure(&env, &folder, &progress, None, overview::now());
+                                measurer.measured_one();
+                            }
+                        })
+                    })
+                    .collect();
+                for worker in workers {
+                    worker.await;
+                }
+                if measurer.end() {
+                    return;
+                }
+            }
+        })
+        .detach();
+}
+
 impl Pane {
-    /// Reads what's saved and draws it, then measures what's due, a row at a
-    /// time. Connects to nothing: a scan or a server is someone's choice.
+    /// Reads what's saved and draws it, then has what's due measured, and
+    /// reads again as each folder finishes. Connects to nothing: a scan or a
+    /// server is someone's choice.
     pub(super) fn read_overview(&mut self, cx: &mut Context<Self>) {
         let Some(places) = cx.try_global::<Places>().cloned() else {
             return;
@@ -99,23 +260,16 @@ impl Pane {
         if self.overview.reading.is_some() {
             return;
         }
-        let env = Env::new(places.trash.clone(), places.store.clone());
-        let ops = cx.try_global::<Operations>().map(|ops| ops.0.clone());
+        let ops = operations(cx);
         let index = self.index.clone();
-        let drives = places.drives.clone();
-        let stop = Arc::new(storage::Progress::default());
-        self.overview.stop = Some(stop.clone());
+        let heard = cx.default_global::<Measurer>().listen();
         self.overview.reading = Some(cx.spawn(async move |this, cx| {
             let background = cx.background_executor().clone();
+            let drives = places.drives.clone();
             let (reader, first) = background
                 .spawn(async move {
-                    let reader = Reader {
-                        volumes: Arc::new(places.drives.list()),
-                        cloud: Arc::new(places.drives.cloud()),
-                        env,
-                        ops,
-                    };
-                    let first = reader.read();
+                    let reader = Reader::new(&places);
+                    let first = reader.read_with(ops);
                     (reader, first)
                 })
                 .await;
@@ -125,6 +279,7 @@ impl Pane {
                 cx.notify();
             };
             let _ = this.update(cx, |this, cx| take(this, first, cx));
+            let ops = cx.update(|cx| operations(cx));
             let found = background.spawn({
                 let reader = reader.clone();
                 async move {
@@ -132,75 +287,38 @@ impl Pane {
                     let _ = overview::discover(&reader.env, git.as_ref(), |name, limit| {
                         drives.find_files(&index, name, limit)
                     });
-                    reader.read()
+                    reader.read_with(ops)
                 }
             });
-            let (about, changes) = found.await;
-            let due = about.due.clone();
-            let _ = this.update(cx, |this, cx| take(this, (about, changes), cx));
-
-            let queue = Arc::new(Mutex::new(due));
-            let (measured, heard) = async_channel::unbounded::<()>();
-            let workers: Vec<Task<()>> = (0..MEASURING)
-                .map(|_| {
-                    let (queue, measured, stop, env) = (
-                        queue.clone(),
-                        measured.clone(),
-                        stop.clone(),
-                        reader.env.clone(),
-                    );
-                    background.spawn(async move {
-                        loop {
-                            let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
-                            let Some(folder) = next else { return };
-                            if stop.cancel.load(Ordering::Relaxed) {
-                                return;
-                            }
-                            let now = overview::now();
-                            if overview::measure(&env, &folder, &stop, None, now).is_some() {
-                                let _ = measured.send(()).await;
-                            }
-                        }
-                    })
-                })
-                .collect();
-            drop(measured);
+            let found = found.await;
+            let _ = this.update(cx, |this, cx| take(this, found, cx));
+            cx.update(measure_overview);
             while heard.recv().await.is_ok() {
-                let reader = reader.clone();
-                let read = background.spawn(async move { reader.read() }).await;
+                // One read for every folder finished since the last.
+                while heard.try_recv().is_ok() {}
+                let (reader, ops) = (reader.clone(), cx.update(|cx| operations(cx)));
+                let read = background.spawn(async move { reader.read_with(ops) }).await;
                 let _ = this.update(cx, |this, cx| take(this, read, cx));
             }
-            drop(workers);
-            let _ = this.update(cx, |this, cx| {
-                this.overview.reading = None;
-                cx.notify();
-            });
         }));
     }
 
-    fn stop_measuring(&mut self) {
-        if let Some(stop) = self.overview.stop.take() {
-            stop.cancel.store(true, Ordering::Relaxed);
-        }
-        self.overview.reading = None;
-    }
-
-    /// The page is off screen: what it was measuring or scanning stops.
+    /// The page is off screen: it stops reading, and what it was scanning
+    /// stops. Measuring goes on.
     pub(super) fn leave_overview(&mut self) {
-        self.stop_measuring();
+        self.overview.reading = None;
         if let Some(scanning) = self.overview.scanning.take() {
             scanning.progress.cancel.store(true, Ordering::Relaxed);
         }
     }
 
     fn overview_env(&self, cx: &Context<Self>) -> Option<Env> {
-        let places = cx.try_global::<Places>()?;
-        Some(Env::new(places.trash.clone(), places.store.clone()))
+        cx.try_global::<Places>().map(env_of)
     }
 
     /// Reads again after something changed what's saved.
     fn reread_overview(&mut self, cx: &mut Context<Self>) {
-        self.stop_measuring();
+        self.overview.reading = None;
         self.read_overview(cx);
     }
 
@@ -308,7 +426,7 @@ impl Pane {
         let Some(places) = cx.try_global::<Places>().cloned() else {
             return;
         };
-        let env = Env::new(places.trash.clone(), places.store.clone());
+        let env = env_of(&places);
         let progress = Arc::new(storage::Progress::default());
         let scanned = cx.background_executor().spawn({
             let (progress, mount) = (progress.clone(), mount.clone());
@@ -355,7 +473,8 @@ impl Pane {
             return None;
         }
         let about = self.overview.about.clone().unwrap_or_default();
-        let measuring = self.overview.reading.is_some();
+        let progress = cx.try_global::<Measurer>().and_then(Measurer::progress);
+        let measuring = progress.is_some();
         let now = overview::now();
 
         let headline = about
@@ -467,7 +586,7 @@ impl Pane {
                                 .children(changes),
                         ),
                 )
-                .child(footer(&about, measuring, now))
+                .child(footer(&about, progress, now))
                 .into_any_element(),
         )
     }
@@ -475,19 +594,14 @@ impl Pane {
     /// How much is free, in the page's one large figure, and the disk drawn
     /// by what fills it, with a key.
     fn headline(&self, about: &Overview, disk: &Headline) -> impl IntoElement + use<> {
-        let parts = parts(about, disk);
+        let parts = about.parts();
         let key = parts.iter().map(|(part, bytes)| {
-            let name = match part {
-                Part::Kind(kind) => kind.name(),
-                Part::Freeable => "Can be freed",
-                Part::Other => "Other",
-            };
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .child(swatch(*part))
-                .child(div().text_color(content(0.65)).child(name))
+                .child(div().text_color(content(0.65)).child(part.name()))
                 .child(amount(*bytes))
         });
         div()
@@ -642,9 +756,19 @@ impl Pane {
                 ),
             ));
             if self.overview.open.contains(&group.name) {
-                for spot in &group.spots {
+                // A project's copies are named for where they are; the rest
+                // of the disk's folders for themselves.
+                let shown = match group.kind {
+                    Kind::Projects => group.spots.len(),
+                    _ => SPOTS_SHOWN,
+                };
+                for spot in group.spots.iter().take(shown) {
+                    let name = match group.kind {
+                        Kind::Projects => spot.location.clone(),
+                        _ => file_name(&spot.path),
+                    };
                     let copy = self.spot_row(
-                        spot.location.clone(),
+                        name,
                         spot,
                         group,
                         (
@@ -728,21 +852,31 @@ impl Pane {
             .spots
             .iter()
             .partition(|spot| Some(spot.location.as_str()) == startup);
-        let places = on_startup
-            .iter()
-            .map(|spot| paths::abbreviate(&spot.path))
-            .chain(elsewhere.iter().map(|spot| match spot.size {
-                Some(size) => format!(
-                    "{} on {}",
-                    size_label(Some(size.on_disk), !size.complete, false),
-                    spot.location
-                ),
-                None => format!("Not measured on {}", spot.location),
-            }))
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let places = if group.kind == Kind::Projects {
+            on_startup
+                .iter()
+                .map(|spot| paths::abbreviate(&spot.path))
+                .chain(elsewhere.iter().map(|spot| match spot.size {
+                    Some(size) => format!(
+                        "{} on {}",
+                        size_label(Some(size.on_disk), !size.complete, false),
+                        spot.location
+                    ),
+                    None => format!("Not measured on {}", spot.location),
+                }))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        } else {
+            // Its folders, largest first.
+            group
+                .spots
+                .iter()
+                .map(|spot| file_name(&spot.path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let selector = format!("overview-spot-{name}");
-        let tint = Kind::of(group).tint();
+        let tint = tint(group.kind);
         let open = self.overview.open.contains(&name);
         let chevron = icon(
             if open {
@@ -765,7 +899,7 @@ impl Pane {
             }))
             .child(
                 stuff_row(
-                    (Kind::of(group).glyph(), tint),
+                    (glyph(group.kind), tint),
                     group.name.clone(),
                     places,
                     Bar {
@@ -819,7 +953,7 @@ impl Pane {
         let path = spot.path.clone();
         let label = name.clone();
         let id = format!("overview-spot-{}", path.display());
-        let action = (group.kind == GroupKind::Cloud && spot.reachable).then(|| {
+        let action = (group.kind == Kind::Cloud && spot.reachable).then(|| {
             let path = path.clone();
             theme::tip(
                 row_icon_button(
@@ -836,15 +970,14 @@ impl Pane {
             }))
             .into_any_element()
         });
-        let kind = Kind::of(group);
         let row = stuff_row(
-            (kind.glyph(), kind.tint()),
+            (glyph(group.kind), tint(group.kind)),
             name,
             said,
             Bar {
                 share,
                 freeable,
-                ink: kind.tint(),
+                ink: tint(group.kind),
             },
             size_label(spot.size.map(|size| size.on_disk), partial, measuring),
             action,
@@ -1002,123 +1135,26 @@ impl Pane {
     }
 }
 
-/// What fills the startup disk, by the kind of thing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Kind {
-    Documents,
-    Projects,
-    Pictures,
-    Media,
-    Cloud,
-}
-
-impl Kind {
-    fn of(group: &Group) -> Self {
-        match (group.kind, group.name.as_str()) {
-            (GroupKind::Project, _) => Kind::Projects,
-            (GroupKind::Cloud, _) => Kind::Cloud,
-            (GroupKind::Folder, "Pictures") => Kind::Pictures,
-            (GroupKind::Folder, "Movies" | "Music") => Kind::Media,
-            (GroupKind::Folder, _) => Kind::Documents,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Kind::Documents => "Documents, Desktop and Downloads",
-            Kind::Projects => "Projects",
-            Kind::Pictures => "Pictures",
-            Kind::Media => "Movies and music",
-            Kind::Cloud => "Cloud",
-        }
-    }
-
-    fn glyph(self) -> &'static str {
-        match self {
-            Kind::Cloud => "cloud",
-            _ => "folder-01",
-        }
-    }
-
-    /// Fixed, not the accent, so no accent can make two kinds look alike.
-    fn tint(self) -> Hsla {
-        match self {
-            Kind::Documents => theme::tint_blue(),
-            Kind::Projects => theme::tint_pink(),
-            Kind::Pictures => theme::tint_orange(),
-            Kind::Media => theme::tint_purple(),
-            Kind::Cloud => theme::tint_cyan(),
-        }
+/// A kind's icon in its rows.
+fn glyph(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Cloud => "cloud",
+        _ => "folder-01",
     }
 }
 
-/// A part of the startup disk's bar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Part {
-    Kind(Kind),
-    /// What the suggestions and the Trash would give back.
-    Freeable,
-    /// Used, and in none of the above or not measured yet.
-    Other,
-}
-
-/// What the startup disk's used space is made of, largest kind first, then
-/// what can be freed, then the rest. Nothing is counted twice: a folder inside
-/// another counts in the outer one, and what a suggestion frees leaves the
-/// kind that holds it.
-fn parts(about: &Overview, disk: &Headline) -> Vec<(Part, u64)> {
-    let spots: Vec<(&Path, Kind, u64)> = about
-        .stuff
-        .iter()
-        .flat_map(|group| group.spots.iter().map(move |spot| (group, spot)))
-        .filter(|(_, spot)| spot.location == disk.name)
-        .filter_map(|(group, spot)| {
-            Some((spot.path.as_path(), Kind::of(group), spot.size?.on_disk))
-        })
-        .collect();
-    let outer: Vec<_> = spots
-        .iter()
-        .filter(|(path, ..)| {
-            !spots
-                .iter()
-                .any(|(other, ..)| other != path && path.starts_with(other))
-        })
-        .collect();
-    let mut kinds: Vec<(Kind, u64)> = Vec::new();
-    for (_, kind, bytes) in &outer {
-        match kinds.iter_mut().find(|(k, _)| k == kind) {
-            Some((_, total)) => *total += bytes,
-            None => kinds.push((*kind, *bytes)),
-        }
+/// Fixed, not the accent, so no accent can make two kinds look alike.
+fn tint(kind: Kind) -> Hsla {
+    match kind {
+        Kind::Documents => theme::tint_blue(),
+        Kind::Projects => theme::tint_pink(),
+        Kind::Pictures => theme::tint_orange(),
+        Kind::Media => theme::tint_purple(),
+        Kind::Cloud => theme::tint_cyan(),
+        Kind::Apps => theme::tint_indigo(),
+        Kind::Developer => theme::tint_yellow(),
+        Kind::System => content(0.55),
     }
-    for suggestion in &about.suggestions {
-        let holder = outer
-            .iter()
-            .find(|(path, ..)| suggestion.path.starts_with(path));
-        if let Some((_, kind, _)) = holder
-            && let Some((_, total)) = kinds.iter_mut().find(|(k, _)| k == kind)
-        {
-            *total = total.saturating_sub(suggestion.size.unshared);
-        }
-    }
-    kinds.retain(|(_, bytes)| *bytes > 0);
-    kinds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
-    let freeable = about
-        .suggestions
-        .iter()
-        .map(|suggestion| suggestion.size.unshared)
-        .sum::<u64>()
-        + disk.trash.map_or(0, |trash| trash.unshared);
-    let used = disk.total.saturating_sub(disk.free);
-    let known: u64 = kinds.iter().map(|(_, bytes)| bytes).sum();
-    let other = used.saturating_sub(known + freeable);
-    kinds
-        .into_iter()
-        .map(|(kind, bytes)| (Part::Kind(kind), bytes))
-        .chain((freeable > 0).then_some((Part::Freeable, freeable)))
-        .chain((other > 0).then_some((Part::Other, other)))
-        .collect()
 }
 
 /// The startup disk as one pill of touching parts: each part in its color,
@@ -1148,7 +1184,7 @@ fn disk_bar(parts: &[(Part, u64)], disk: &Headline) -> impl IntoElement + use<> 
 
 fn part_color(part: Part) -> Hsla {
     match part {
-        Part::Kind(kind) => kind.tint(),
+        Part::Kind(kind) => tint(kind),
         Part::Freeable => theme::tint_green(),
         Part::Other => content(0.3),
     }
@@ -1430,7 +1466,11 @@ fn change_row(change: &AgentChange, now: u64) -> impl IntoElement + use<> {
 
 /// The bar under the page: how old the startup disk's sizes are. Each other
 /// location says its own scan's age.
-fn footer(about: &Overview, measuring: bool, now: u64) -> impl IntoElement + use<> {
+fn footer(
+    about: &Overview,
+    progress: Option<(usize, usize)>,
+    now: u64,
+) -> impl IntoElement + use<> {
     let startup = about.headline.as_ref().map(|disk| {
         let oldest = about
             .stuff
@@ -1440,7 +1480,11 @@ fn footer(about: &Overview, measuring: bool, now: u64) -> impl IntoElement + use
             .filter_map(|spot| spot.size.map(|size| size.at))
             .min();
         match oldest {
-            _ if measuring => format!("Measuring {}…", disk.name),
+            _ if progress.is_some_and(|(_, of)| of > 0) => {
+                let (done, of) = progress.unwrap_or_default();
+                format!("Measuring {}, {done} of {of} folders…", disk.name)
+            }
+            _ if progress.is_some() => format!("Measuring {}…", disk.name),
             Some(at) => format!(
                 "{} measured {}",
                 disk.name,
@@ -1458,77 +1502,13 @@ fn footer(about: &Overview, measuring: bool, now: u64) -> impl IntoElement + use
         .child(div().min_w_0().truncate().children(startup))
 }
 
-fn quoted(path: &Path) -> String {
-    format!(
-        "\"{}\"",
-        path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into_owned()
-        )
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use monodrive_core::overview::{Evidence, Measured};
-
-    fn measured(bytes: u64) -> Measured {
-        Measured {
-            on_disk: bytes,
-            unshared: bytes,
-            at: 0,
-            complete: true,
-        }
-    }
-
-    fn group(name: &str, kind: GroupKind, path: &str, bytes: u64) -> Group {
-        Group {
-            name: name.into(),
-            kind,
-            spots: vec![Spot {
-                location: "Macintosh HD".into(),
-                path: path.into(),
-                size: Some(measured(bytes)),
-                reachable: true,
-            }],
-        }
-    }
-
-    #[test]
-    fn the_disk_bar_counts_nothing_twice() {
-        let disk = Headline {
-            name: "Macintosh HD".into(),
-            total: 100,
-            free: 20,
-            trash: Some(measured(4)),
-            low: true,
-        };
-        let about = Overview {
-            headline: Some(disk.clone()),
-            suggestions: vec![Suggestion {
-                path: "/h/app/target".into(),
-                evidence: Evidence::BuildOutput {
-                    project: "app".into(),
-                },
-                size: measured(5),
-            }],
-            stuff: vec![
-                group("Documents", GroupKind::Folder, "/h/Documents", 30),
-                // Inside Documents, so already in its 30.
-                group("notes", GroupKind::Project, "/h/Documents/notes", 10),
-                group("app", GroupKind::Project, "/h/app", 15),
-            ],
-            ..Overview::default()
-        };
-        assert_eq!(
-            parts(&about, &disk),
-            vec![
-                (Part::Kind(Kind::Documents), 30),
-                (Part::Kind(Kind::Projects), 10),
-                (Part::Freeable, 9),
-                (Part::Other, 31),
-            ]
-        );
-    }
+fn quoted(path: &Path) -> String {
+    format!("\"{}\"", file_name(path))
 }

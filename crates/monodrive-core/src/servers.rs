@@ -503,6 +503,7 @@ mod tests {
             ejectable: false,
             removable: false,
             startup: false,
+            system: None,
         }
     }
 

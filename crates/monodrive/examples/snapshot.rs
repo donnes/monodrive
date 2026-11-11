@@ -741,6 +741,7 @@ fn worktrees_fixture(home: &Path, empty: bool) -> gpui::Result<Places> {
         drives: Arc::new(MadeUp),
         remote: Arc::new(Connections::new(store.clone(), local_sftp())),
         previews: support.join("previews"),
+        root: support.join("disk"),
     };
     if empty {
         return Ok(places);
@@ -832,6 +833,7 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
     let startup = |free: u64| Volume {
         mount: "/".into(),
         startup: true,
+        system: Some(15 * GB),
         ..disk("Macintosh HD", 460 * GB, free * GB)
     };
     let backup = disk("Backup", 2000 * GB, 340 * GB);
@@ -883,8 +885,10 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
     // Paths under the made-up home read as they would on a Mac, from `~`.
     let real_home = std::env::var_os("HOME");
     for (name, volumes, more, folders) in cases {
-        let home = tempfile::tempdir()?;
-        let places = overview_fixture(home.path(), volumes, more, folders)?;
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home)?;
+        let places = overview_fixture(&home, &dir.path().join("disk"), volumes, more, folders)?;
         cx.update(|cx| cx.set_global(places));
         let window = match name {
             "overview-smallest" => open_at(cx, folder, 720., 440.)?,
@@ -894,7 +898,7 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
         };
         // SAFETY: the headless app is parked between shots, and nothing else
         // in this process reads the environment while it changes.
-        unsafe { std::env::set_var("HOME", home.path().canonicalize()?) };
+        unsafe { std::env::set_var("HOME", home.canonicalize()?) };
         dispatch(cx, window, &GoOverview)?;
         save(cx, window, out, name)?;
         // Before its fixture goes, so nothing reads a folder that's gone.
@@ -921,19 +925,24 @@ fn disk(name: &str, total: u64, free: u64) -> Volume {
         ejectable: true,
         removable: true,
         startup: false,
+        system: None,
     }
 }
 
-/// A made-up home with what the Overview looks for, and saved totals that are
-/// fresh, so the sizes drawn are these and not the fixture's few bytes.
+/// A made-up home and startup disk with what the Overview looks for, and saved
+/// totals that are fresh, so the sizes drawn are these and not the fixture's
+/// few bytes.
 fn overview_fixture(
     home: &Path,
+    root: &Path,
     volumes: Vec<Volume>,
     more: bool,
     folders: bool,
 ) -> gpui::Result<Places> {
     const GB: u64 = 1_000_000_000;
     let home = home.canonicalize()?;
+    std::fs::create_dir(root)?;
+    let root = root.canonicalize()?;
     let trash = home.join(".Trash");
     std::fs::create_dir(&trash)?;
     let store = Store {
@@ -1005,6 +1014,19 @@ fn overview_fixture(
     std::fs::create_dir_all(&brew)?;
     total(&brew, 6);
     total(&trash, 9);
+    // Where the rest of the disk goes.
+    for (path, gb) in [
+        (root.join("Applications"), 12),
+        (root.join("Library"), 4),
+        (home.join("Library/Application Support"), 6),
+        (home.join("Library/Caches"), 8),
+        (home.join("Library/Developer"), 24),
+        (home.join(".t3"), 5),
+        (home.join("Work"), 50),
+    ] {
+        std::fs::create_dir_all(&path)?;
+        total(&path, gb);
+    }
     let scans = if more {
         store
             .save_server("smb://studio.local/projects")
@@ -1058,6 +1080,7 @@ fn overview_fixture(
         trash,
         applications: Vec::new(),
         drives: Arc::new(Disks(volumes)),
+        root,
     })
 }
 
@@ -1671,6 +1694,7 @@ impl Drives for MadeUp {
             ejectable: true,
             removable: true,
             startup: false,
+            system: None,
         };
         vec![
             Volume {
@@ -1923,6 +1947,7 @@ fn made_up_places(dir: &Path, trash: &Path) -> gpui::Result<Places> {
         ejectable: true,
         removable: true,
         startup: false,
+        system: None,
     };
     store
         .pin(&photos, None, &[archive])
@@ -1966,6 +1991,7 @@ fn made_up_places(dir: &Path, trash: &Path) -> gpui::Result<Places> {
         trash: trash.into(),
         applications: Vec::new(),
         drives: Arc::new(MadeUp),
+        root: dir.join("disk"),
     })
 }
 

@@ -35,6 +35,7 @@ mod search_tests;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use overview::measure_overview;
 pub use pane::format_bytes;
 pub use sidebar::{Drives, Places, System};
 pub(crate) use sidebar::{glyph_of, label_of};

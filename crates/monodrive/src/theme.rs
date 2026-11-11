@@ -182,6 +182,14 @@ pub fn tint_pink() -> Hsla {
     rgb(if is_light() { 0xc4307e } else { 0xf07ab0 }).into()
 }
 
+pub fn tint_indigo() -> Hsla {
+    rgb(if is_light() { 0x4f46e5 } else { 0x818cf8 }).into()
+}
+
+pub fn tint_yellow() -> Hsla {
+    rgb(if is_light() { 0xa16207 } else { 0xfacc15 }).into()
+}
+
 /// Black or white, whichever reads on the accent.
 pub fn on_accent() -> Hsla {
     let rgba = accent().to_rgb();

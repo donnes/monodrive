@@ -122,6 +122,15 @@ pub struct Disk {
     /// What emptying the Trash would free, once measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash: Option<u64>,
+    /// What its used space is made of, as the window's bar shows it; Other
+    /// holds what isn't measured yet.
+    pub used_by: Vec<UsedBy>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct UsedBy {
+    pub kind: String,
+    pub on_disk: u64,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -204,6 +213,14 @@ impl Call for Overview {
                 total: disk.total,
                 low: disk.low,
                 trash: disk.trash.map(|trash| trash.unshared),
+                used_by: about
+                    .parts()
+                    .into_iter()
+                    .map(|(part, on_disk)| UsedBy {
+                        kind: part.name().to_string(),
+                        on_disk,
+                    })
+                    .collect(),
             }),
             suggestions: about
                 .suggestions
@@ -296,6 +313,14 @@ fn overview_text(about: &overview::Overview, now: u64) -> String {
             }
         }
         out.push('\n');
+        let parts: Vec<String> = about
+            .parts()
+            .into_iter()
+            .map(|(part, on_disk)| format!("{} {}", part.name(), bytes(on_disk)))
+            .collect();
+        if !parts.is_empty() {
+            let _ = writeln!(out, "used by: {}", parts.join(", "));
+        }
     }
     if !about.suggestions.is_empty() {
         out.push_str("suggestions:\n");
@@ -333,9 +358,6 @@ fn overview_text(about: &overview::Overview, now: u64) -> String {
                 spot.location
             );
         }
-    }
-    if let Some(rest) = about.everything_else {
-        let _ = writeln!(out, "everything else: {}", bytes(rest));
     }
     if !about.locations.is_empty() {
         out.push_str("locations:\n");
