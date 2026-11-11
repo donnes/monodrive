@@ -804,6 +804,12 @@ impl PreviewView {
         let poster = (!framed || self.menu_open()).then(|| self.poster(modified, window, cx));
         let player = self.player.clone();
         let path = self.path.clone();
+        let framing = self
+            .edit
+            .as_ref()
+            .map(tools::Edit::framing)
+            .unwrap_or_default();
+        let silenced = self.edit.as_ref().is_some_and(tools::Edit::sound_removed);
         // Only floating cards cut through the player, so it steps aside for a
         // menu's scrim.
         let covered = self.covered || self.menu_open();
@@ -823,6 +829,8 @@ impl PreviewView {
                     *player = Player::new(&path, video, window);
                 }
                 if let Some(player) = player.as_ref() {
+                    player.reframe(&framing);
+                    player.silence(silenced);
                     player.place(bounds, window);
                 }
             },
@@ -903,7 +911,10 @@ impl PreviewView {
     fn strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let held = self.player.borrow();
         let playing = held.as_ref().is_some_and(Player::playing);
-        let muted = held.as_ref().is_some_and(Player::muted);
+        // Remove Sound decides while it's on, so the button can't contradict it.
+        // Read from the edit, as the player only hears of it when it's painted.
+        let silenced = self.edit.as_ref().is_some_and(tools::Edit::sound_removed);
+        let muted = silenced || held.as_ref().is_some_and(Player::muted);
         let position = held.as_ref().map_or(0., Player::position);
         let duration = held.as_ref().and_then(Player::duration);
         drop(held);
@@ -997,12 +1008,14 @@ impl PreviewView {
             )
             .child(
                 theme::tip_below(
-                    theme::icon_button("preview-mute", mute.0, mute.1, true),
+                    theme::icon_button("preview-mute", mute.0, mute.1, !silenced),
                     mute.0,
                 )
                 .debug_selector(|| "preview-mute".into())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(player) = this.player.borrow().as_ref() {
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(player) = this.player.borrow().as_ref()
+                        && !silenced
+                    {
                         player.toggle_muted();
                     }
                     cx.notify();

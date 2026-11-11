@@ -4,18 +4,26 @@
 
 use crate::native_view::Host;
 use gpui::{Bounds, Pixels, Window};
+use monodrive_core::edits::{self, Clip};
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::NSView;
 use objc2_av_foundation::{AVLayerVideoGravityResizeAspect, AVPlayer, AVPlayerLayer};
 use objc2_core_media::{CMTime, kCMTimeInvalid};
 use objc2_foundation::{NSRect, NSString, NSURL};
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 
 pub struct Player {
     player: Retained<AVPlayer>,
     /// `None` for audio, which has nothing to draw.
     host: Option<(Host<NSView>, Retained<AVPlayerLayer>)>,
+    /// The crop and turns it shows, as last given to `reframe`.
+    framed: RefCell<Vec<Clip>>,
+    /// Muted with the strip's button, which an edit's Remove Sound overrides.
+    muted: Cell<bool>,
+    /// Silent because the edit removes the sound.
+    silenced: Cell<bool>,
 }
 
 impl Player {
@@ -41,7 +49,13 @@ impl Player {
         } else {
             None
         };
-        Some(Self { player, host })
+        Some(Self {
+            player,
+            host,
+            framed: RefCell::new(Vec::new()),
+            muted: Cell::new(false),
+            silenced: Cell::new(false),
+        })
     }
 
     pub fn place(&self, bounds: Bounds<Pixels>, window: &Window) {
@@ -50,6 +64,28 @@ impl Player {
             // A view doesn't size a layer it hosts.
             layer.setFrame(host.view.bounds());
         }
+    }
+
+    /// Shows the video cropped and turned as `clips` say, as Save will write
+    /// it. Does nothing when they haven't changed.
+    pub fn reframe(&self, clips: &[Clip]) {
+        if self.host.is_none() || *self.framed.borrow() == clips {
+            return;
+        }
+        *self.framed.borrow_mut() = clips.to_vec();
+        // SAFETY: plain properties, on the main thread that made it. The item's
+        // tracks are loaded by the time it plays, so these reads don't wait.
+        unsafe {
+            let Some(item) = self.player.currentItem() else {
+                return;
+            };
+            // A crop that no longer fits shows the whole frame, and Save says
+            // what's wrong with it.
+            let framing = edits::framing(&item.asset(), clips).ok().flatten();
+            item.setVideoComposition(framing.as_deref());
+        }
+        // A paused player shows the new framing once it seeks.
+        self.seek(self.position());
     }
 
     pub fn hide(&self) {
@@ -142,14 +178,30 @@ impl Player {
         }
     }
 
+    /// Whether the strip's button muted it. The edit's silence is the
+    /// caller's to add, as it reaches the player only when it's painted.
     pub fn muted(&self) -> bool {
-        // SAFETY: a plain property, on the main thread that made it.
-        unsafe { self.player.isMuted() }
+        self.muted.get()
     }
 
     pub fn toggle_muted(&self) {
+        self.muted.set(!self.muted.get());
+        self.apply_mute();
+    }
+
+    /// Plays without sound while `silenced`, as Save will write it.
+    pub fn silence(&self, silenced: bool) {
+        if self.silenced.replace(silenced) != silenced {
+            self.apply_mute();
+        }
+    }
+
+    fn apply_mute(&self) {
         // SAFETY: a plain property, on the main thread that made it.
-        unsafe { self.player.setMuted(!self.player.isMuted()) };
+        unsafe {
+            self.player
+                .setMuted(self.muted.get() || self.silenced.get())
+        };
     }
 }
 

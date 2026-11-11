@@ -17,7 +17,8 @@ use objc2_av_foundation::{
     AVAssetExportSession, AVAssetExportSessionStatus, AVAssetImageGenerator, AVAssetTrack,
     AVFileTypeMPEG4, AVFileTypeQuickTimeMovie, AVMediaTypeAudio, AVMediaTypeVideo,
     AVMutableComposition, AVMutableVideoComposition, AVMutableVideoCompositionInstruction,
-    AVMutableVideoCompositionLayerInstruction, AVURLAsset, AVVideoCompositionInstructionProtocol,
+    AVMutableVideoCompositionLayerInstruction, AVURLAsset, AVVideoComposition,
+    AVVideoCompositionInstructionProtocol,
 };
 use objc2_core_foundation::{CGAffineTransform, CGSize};
 use objc2_core_media::{CMTime, CMTimeRange};
@@ -233,7 +234,8 @@ pub fn export(
         [_] => return Err("A trim's end must come after its start.".into()),
         _ => return Err("A video can only be trimmed once at a time.".into()),
     };
-    let (transform, render) = framed(upright(&track), recipe)?;
+    // Before any work, so a bad crop says so at once.
+    framed(upright(&track), recipe)?;
 
     // SAFETY: valid objects throughout, on this thread until the export takes them.
     unsafe {
@@ -290,19 +292,7 @@ pub fn export(
         if reframed {
             let tracks = composition.tracksWithMediaType(video);
             let placed = tracks.firstObject().ok_or("couldn't build the video")?;
-            let layer = AVMutableVideoCompositionLayerInstruction::videoCompositionLayerInstructionWithAssetTrack(&placed);
-            layer.setTransform_atTime(transform, time(0.));
-            let instruction = AVMutableVideoCompositionInstruction::videoCompositionInstruction();
-            instruction.setTimeRange(whole);
-            instruction.setLayerInstructions(&NSArray::from_retained_slice(&[
-                Retained::into_super(layer),
-            ]));
-            let framing = AVMutableVideoComposition::videoComposition();
-            framing.setRenderSize(render);
-            framing.setFrameDuration(CMTime::new(1, 30));
-            let steps: Retained<ProtocolObject<dyn AVVideoCompositionInstructionProtocol>> =
-                ProtocolObject::from_retained(instruction);
-            framing.setInstructions(&NSArray::from_retained_slice(&[steps]));
+            let framing = framing_of(&track, &placed, recipe, whole)?;
             session.setVideoComposition(Some(&framing));
         }
         let (send, receive) = mpsc::channel();
@@ -330,6 +320,62 @@ pub fn export(
                 })),
         }
     }
+}
+
+/// How `recipe` crops and turns the picture of `source`, which `placed` plays,
+/// for `range` of it.
+fn framing_of(
+    source: &AVAssetTrack,
+    placed: &AVAssetTrack,
+    recipe: &[Clip],
+    range: CMTimeRange,
+) -> Result<Retained<AVVideoComposition>, String> {
+    let (transform, render) = framed(upright(source), recipe)?;
+    // SAFETY: new objects, and plain properties of a loaded track.
+    unsafe {
+        let layer = AVMutableVideoCompositionLayerInstruction::videoCompositionLayerInstructionWithAssetTrack(placed);
+        layer.setTransform_atTime(transform, time(0.));
+        let instruction = AVMutableVideoCompositionInstruction::videoCompositionInstruction();
+        instruction.setTimeRange(range);
+        instruction.setLayerInstructions(&NSArray::from_retained_slice(&[Retained::into_super(
+            layer,
+        )]));
+        let framing = AVMutableVideoComposition::videoComposition();
+        framing.setRenderSize(render);
+        // The track's own rate, as a fixed one would drop a 60 fps recording's
+        // every other frame.
+        let step = source.minFrameDuration();
+        framing.setFrameDuration(if step.value > 0 && step.timescale > 0 {
+            step
+        } else {
+            CMTime::new(1, 30)
+        });
+        let steps: Retained<ProtocolObject<dyn AVVideoCompositionInstructionProtocol>> =
+            ProtocolObject::from_retained(instruction);
+        framing.setInstructions(&NSArray::from_retained_slice(&[steps]));
+        Ok(Retained::into_super(framing))
+    }
+}
+
+/// What a player of `asset` shows for `recipe`'s crop and turns, the same as
+/// `export` writes: `None` when there are none.
+pub fn framing(
+    asset: &AVAsset,
+    recipe: &[Clip],
+) -> Result<Option<Retained<AVVideoComposition>>, String> {
+    if !recipe
+        .iter()
+        .any(|step| matches!(step, Clip::Crop { .. } | Clip::Rotate { .. }))
+    {
+        return Ok(None);
+    }
+    let track = video_track(asset).ok_or("This file has no video macOS can read.")?;
+    // SAFETY: a plain property of a loaded asset.
+    let whole = CMTimeRange {
+        start: time(0.),
+        duration: unsafe { asset.duration() },
+    };
+    framing_of(&track, &track, recipe, whole).map(Some)
 }
 
 /// The frame at `seconds`, as a picture at `into`.
@@ -521,6 +567,40 @@ mod tests {
             export(&source, &twice, &dir.path().join("twice.mp4"), &|| false),
             Err("A video can only be trimmed once at a time.".into())
         );
+    }
+
+    #[test]
+    fn a_player_shows_the_turn_and_crop_that_export_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        // 36 by 64 as it plays, so 64 by 36 once turned, then cropped in that.
+        let source = fixture("rotated.mp4");
+        let recipe = [
+            Clip::Rotate { quarter_turns: 1 },
+            Clip::Crop {
+                rect: Rect {
+                    x: 40.,
+                    y: 0.,
+                    width: 24.,
+                    height: 20.,
+                },
+            },
+        ];
+        let asset = asset(&source);
+        let shape = framing(&asset, &recipe).unwrap().unwrap();
+        // SAFETY: valid objects, on this thread only.
+        let shown = unsafe {
+            let generator = AVAssetImageGenerator::assetImageGeneratorWithAsset(&asset);
+            generator.setVideoComposition(Some(&shape));
+            let image = generator
+                .copyCGImageAtTime_actualTime_error(time(0.2), std::ptr::null_mut())
+                .unwrap();
+            crate::thumbnails::bitmap(&image).unwrap()
+        };
+        assert_eq!((shown.width, shown.height), (24, 20));
+        let out = dir.path().join("out.mp4");
+        export(&source, &recipe, &out, &|| false).unwrap();
+        assert_eq!(size(&out).unwrap(), (24., 20.));
+        assert!(framing(&asset, &[Clip::Mute]).unwrap().is_none());
     }
 
     #[test]
