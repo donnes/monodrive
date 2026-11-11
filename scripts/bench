@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Monodrive's benchmarks. See docs/performance.md.
 #
-#   scripts/bench [suite...]                     runs the suites (platform core search mcp workload compare) and writes
+#   scripts/bench [suite...]                     runs the suites (platform core search storage mcp workload compare) and writes
 #                                                results.json and report.html to target/bench/<time>
 #   scripts/bench --against <commit> [suite...]  the same, alternating with a build of <commit>
 #   scripts/bench report <results.json> [saved]  rewrites a run's report, beside a saved run's medians

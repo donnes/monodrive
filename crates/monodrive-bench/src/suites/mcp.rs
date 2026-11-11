@@ -276,6 +276,7 @@ fn measured(bench: &str, title: &str, sample: Sample, check: String) -> Measured
         cache: Cache::Warm,
         sample,
         check,
+        peak_bytes: None,
     }
 }
 
