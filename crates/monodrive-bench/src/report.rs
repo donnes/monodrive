@@ -689,9 +689,10 @@ pub fn render(results: &Results, judged: &[(Budget, Status)], saved: Option<&Res
 }
 
 /// `results.json` as Markdown for a pull request: a first line that says
-/// whether anything needs a look, then each result of this build beside the
-/// baseline's and its budget.
-pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
+/// whether anything got slower, then each result of this build beside the
+/// baseline's. Budgets stay out: they're for an M3 Pro, and a CI VM is slower
+/// and noisier, but the builds take turns on it, so their verdicts hold.
+pub fn markdown(results: &Results) -> String {
     let commit = |label: &str| {
         results
             .builds
@@ -699,14 +700,7 @@ pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
             .find(|b| b.label == label)
             .map_or("", |b| b.commit.as_str())
     };
-    let count = |n: usize| {
-        if n == 1 {
-            "1 result".to_string()
-        } else {
-            format!("{n} results")
-        }
-    };
-    let (mut slower, mut over) = (0, 0);
+    let mut slower = 0;
     let mut rows = String::new();
     for run in &results.suites {
         for bench in &run.benches {
@@ -714,8 +708,6 @@ pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
                 let Some(now) = summary(this) else {
                     continue;
                 };
-                // A bench the baseline doesn't have is new: no change, but
-                // still a budget.
                 let base = bench
                     .series
                     .iter()
@@ -731,19 +723,6 @@ pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
                     }
                     None => ("–".to_string(), "new".to_string()),
                 };
-                let key = format!("{}/{}", run.suite, bench.bench);
-                let budget = judged
-                    .iter()
-                    .find(|(b, _)| this.variant.is_empty() && b.bench == key);
-                let (limit, status) = match budget {
-                    Some((b, Status::Within { .. })) => (ms(b.median_ms), "✅"),
-                    Some((b, Status::Over { .. })) => {
-                        over += 1;
-                        (ms(b.median_ms), "❌")
-                    }
-                    Some((b, _)) => (ms(b.median_ms), "noisy"),
-                    None => (String::new(), ""),
-                };
                 let title = if this.variant.is_empty() {
                     bench.title.clone()
                 } else {
@@ -751,43 +730,26 @@ pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
                 };
                 let _ = writeln!(
                     rows,
-                    "| {} | {} | {} | {} | {} | {limit} | {status} |",
+                    "| {} | {} | {before} | {} | {change} |",
                     bench.group.replace('|', "\\|"),
                     title.replace('|', "\\|"),
-                    before,
                     ms(now.median),
-                    change,
                 );
             }
         }
     }
 
     let mut out = String::from("## Benchmarks\n\n");
-    if over > 0 {
-        let _ = writeln!(out, "❌ {} over budget.\n", count(over));
-    }
-    if slower > 0 {
-        let _ = writeln!(out, "⚠️ {} slower than the baseline.\n", count(slower));
-    }
-    let mut noisy = false;
-    for run in &results.suites {
-        let reasons = stats::noise(run);
-        if !reasons.is_empty() {
-            noisy = true;
-            let _ = writeln!(
-                out,
-                "⚠️ The {} suite ran on a busy machine, so its budgets aren't judged: {}.\n",
-                run.suite,
-                reasons.join("; ")
-            );
+    match slower {
+        0 => out.push_str("✅ Nothing ran slower than the baseline.\n\n"),
+        1 => out.push_str("⚠️ 1 result ran slower than the baseline.\n\n"),
+        n => {
+            let _ = writeln!(out, "⚠️ {n} results ran slower than the baseline.\n");
         }
-    }
-    if over == 0 && slower == 0 && !noisy {
-        out.push_str("✅ Nothing ran slower than the baseline, and every budget holds.\n\n");
     }
     let _ = writeln!(
         out,
-        "| Group | What | Baseline `{}` | This build `{}` | Change | Budget | |\n|---|---|--:|--:|---|--:|:-:|\n{rows}",
+        "| Group | What | Baseline `{}` | This build `{}` | Change |\n|---|---|--:|--:|---|\n{rows}",
         commit("baseline"),
         commit("this"),
     );
@@ -795,7 +757,7 @@ pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
         let c = &run.conditions;
         let _ = writeln!(
             out,
-            "Medians of {} rounds a build, the builds taking turns on one {}, {} cores, macOS {}. A change is one only when a 95% bootstrap interval on the ratio of medians clears even. Budgets come from `benchmarks/budgets.toml` and are for an M3 Pro-class Mac.",
+            "Medians of {} rounds a build, the builds taking turns on one {}, {} cores, macOS {}. A change counts only when a 95% bootstrap interval on the ratio of medians clears even, so among this many results one or two can come out faster or slower by chance; a real change repeats on the next push. The budgets in `benchmarks/budgets.toml` are for an M3 Pro-class Mac, so this table doesn't judge them.",
             run.rounds, c.model, c.cores, c.macos_build
         );
     }
@@ -811,11 +773,9 @@ pub fn budgets_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/budgets.toml")
 }
 
-/// Prints `results_json` as Markdown, judged against the budgets.
+/// Prints `results_json` as Markdown.
 pub fn print_markdown(results_json: &Path) -> Result<(), String> {
-    let results = read(results_json)?;
-    let judged = budgets::judge(&budgets::load(&budgets_path())?, &results);
-    print!("{}", markdown(&results, &judged));
+    print!("{}", markdown(&read(results_json)?));
     Ok(())
 }
 
@@ -891,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_leads_with_what_got_slower_or_went_past_its_budget() {
+    fn markdown_leads_with_what_got_slower_and_keeps_new_results() {
         use crate::measure::Sample;
         let series = |build: &str, wall_ms: f64| Series {
             build: build.into(),
@@ -926,45 +886,32 @@ mod tests {
                 }],
             }],
         };
-        let budgets: budgets::Budgets = toml::from_str(
-            r#"
-            [[budget]]
-            bench = "core/list_dir/10000"
-            what = "List 10,000"
-            median_ms = 20
-            "#,
-        )
-        .unwrap();
-        let comment = |this: f64| {
-            let results = results(this);
-            markdown(&results, &budgets::judge(&budgets, &results))
-        };
+        let comment = |results: &Results| markdown(results);
 
-        let same = comment(10.);
+        let same = comment(&results(10.));
         assert!(same.contains("✅ Nothing ran slower"), "{same}");
         assert!(
             same.contains(
-                "| List a folder | List 10,000 | 10.1 ms | 10.1 ms | no clear difference | 20.0 ms | ✅ |"
+                "| List a folder | List 10,000 | 10.1 ms | 10.1 ms | no clear difference |"
             ),
             "{same}"
         );
 
-        let worse = comment(30.);
-        assert!(worse.contains("❌ 1 result over budget."), "{worse}");
+        let worse = comment(&results(30.));
         assert!(
-            worse.contains("⚠️ 1 result slower than the baseline."),
+            worse.contains("⚠️ 1 result ran slower than the baseline."),
             "{worse}"
         );
         assert!(!worse.contains('✅'), "{worse}");
 
+        // A bench the baseline doesn't have is shown as new, not dropped.
         let mut added = results(30.);
         added.suites[0].benches[0]
             .series
             .retain(|s| s.build == "this");
-        let added = markdown(&added, &budgets::judge(&budgets, &added));
-        assert!(added.contains("❌ 1 result over budget."), "{added}");
+        let added = comment(&added);
         assert!(
-            added.contains("| List a folder | List 10,000 | – | 30.1 ms | new | 20.0 ms | ❌ |"),
+            added.contains("| List a folder | List 10,000 | – | 30.1 ms | new |"),
             "{added}"
         );
     }

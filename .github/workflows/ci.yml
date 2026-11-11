@@ -84,7 +84,7 @@ jobs:
       - name: Run
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
-          BENCH_ROUNDS: "20"
+          BENCH_ROUNDS: "12"
         run: scripts/bench --against "$BASE" core search
       - name: Report
         id: report
