@@ -10,7 +10,7 @@ mod zoom;
 
 pub use tools::Saved;
 
-use crate::browser::{OpenSelected, QuickLook};
+use crate::browser::{ClearSearch, OpenSelected};
 use crate::downloads::{self, Changed, State};
 use crate::native_view::Host;
 use crate::theme::{self, ButtonLook, content, danger, text_button};
@@ -408,6 +408,14 @@ impl PreviewView {
             .into_any_element()
     }
 
+    /// Space: plays or pauses a video or song, and does nothing to the rest.
+    pub fn toggle_playing(&mut self, cx: &mut Context<Self>) {
+        if let Some(player) = self.player.borrow().as_ref() {
+            player.toggle(self.trimmed(player.duration()));
+        }
+        cx.notify();
+    }
+
     pub fn release(&mut self, cx: &mut App) {
         if let Body::Picture { image, .. } = std::mem::replace(&mut self.body, Body::Loading) {
             give_back_image(image, cx);
@@ -519,7 +527,7 @@ impl PreviewView {
                     "Close (Esc)",
                 )
                 .debug_selector(|| "preview-close".into())
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(QuickLook), cx)),
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ClearSearch), cx)),
             )
     }
 
