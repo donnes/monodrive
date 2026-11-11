@@ -22,7 +22,7 @@ Update a plan's row when its work lands on `main`.
 | 12 Batch rename | Done | 1574337, 13200b7 |
 | 13 Archives | Done; archives from the wild (encrypted, huge, made on Windows) need a person to check | |
 | 14 Remote locations | Done; Apple's Quick Look panel, Open on a server file and dragging in the real app need a person to check | |
-| 17 Storage inspection | Core on main; UI picked, not built | |
+| 17 Storage inspection | Done, narrowed to Find Duplicates in the window (page A with a review card). Moving copies to the real Trash and Undo in the full app, and a folder behind a privacy prompt, need a person to check | |
 | 18 Cloud storage | Done; downloading and removing downloads from a real iCloud Drive or File Provider folder needs a person to check | |
 | 19 Column view | Done; layout A with preview P1. Frame times need a quiet machine to record against the budget, and the privacy-prompt Open needs a person to check | |
 | 21 User commands | Core on main; UI picked, not built; parked | |
@@ -50,7 +50,7 @@ The maintainer chose these from drawn options. Mockups are not in the repo. Show
 - 12: rename in the list, with a bar across it.
 - 13: browse a ZIP like a folder, with a read-only header and Extract buttons.
 - 14: servers under Locations.
-- 17: a report of largest files and verified duplicates, with a review before anything goes to the Trash.
+- 17: a report of largest files and verified duplicates, with a review before anything goes to the Trash. Narrowed on 2026-11-11 to Find Duplicates, page A of three, with the review in the window's card.
 - 18: a cloud badge at the end of the row or on a grid icon's corner; clicking it downloads. The inspector shows where an item is as a chip by its kind, which is the button.
 - 19: columns with a preview in the last column.
 - 21: a Commands page in Settings.

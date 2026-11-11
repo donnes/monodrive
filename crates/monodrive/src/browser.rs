@@ -6,6 +6,7 @@ mod batch_rename;
 mod cloud;
 mod columns;
 mod drag;
+mod duplicates;
 mod inspector;
 mod open_with;
 mod organize;
@@ -24,6 +25,8 @@ mod batch_rename_tests;
 mod cloud_tests;
 #[cfg(test)]
 mod drag_tests;
+#[cfg(test)]
+mod duplicates_tests;
 #[cfg(test)]
 mod inspector_tests;
 #[cfg(test)]
@@ -54,6 +57,7 @@ use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
 use crate::preview::{PreviewView, Saved};
 use crate::quick_look::{self, Preview};
 use crate::remove_worktree::{self, RemoveWorktreeView};
+use crate::review_duplicates::{self, ReviewDuplicatesView};
 use crate::session::{self, TabState, WindowState};
 use crate::settings::{self, SettingsView};
 use crate::text_field;
@@ -142,6 +146,7 @@ actions!(
         Rename,
         SuggestNames,
         OrganizeFolder,
+        FindDuplicates,
         CommitRename,
         CancelRename,
         NewFolder,
@@ -1774,6 +1779,37 @@ impl Browser {
         self.set_sheet(Some(Sheet::RemoveWorktree(view)), cx);
     }
 
+    /// Lists the copies Find Duplicates would move, from the active pane,
+    /// before any of them do.
+    fn review_duplicates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(review) = self
+            .pane()
+            .update(cx, |pane, _| pane.duplicates.asking.take())
+        else {
+            return;
+        };
+        self.remember_focus(window, cx);
+        let view = cx.new(|cx| ReviewDuplicatesView::new(review, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, answer: &review_duplicates::Answer, window, cx| {
+                let request = match answer {
+                    review_duplicates::Answer::Trash(request) => Some(request.clone()),
+                    review_duplicates::Answer::Cancel => None,
+                };
+                this.close_sheet(window, cx);
+                if let Some(request) = request {
+                    this.pane()
+                        .update(cx, |pane, cx| pane.trash_duplicates(request, window, cx));
+                }
+            },
+        )
+        .detach();
+        window.focus(&view.focus_handle(cx), cx);
+        self.set_sheet(Some(Sheet::ReviewDuplicates(view)), cx);
+    }
+
     /// Follows a drag of the sidebar's edge. Element mouse handlers only fire
     /// while hovered, so this listens to the whole window, which keeps the
     /// resize cursor and tracking even when the pointer outruns the edge or
@@ -2114,6 +2150,11 @@ impl Render for Browser {
                             this.ask_remove_worktree(window, cx)
                         }),
                     )
+                    .on_action(
+                        cx.listener(|this, _: &duplicates::ReviewDuplicates, window, cx| {
+                            this.review_duplicates(window, cx)
+                        }),
+                    )
                     .on_action(cx.listener(|this, _: &ToggleSplit, window, cx| {
                         this.toggle_split(window, cx)
                     }))
@@ -2280,6 +2321,7 @@ impl Render for Browser {
                     Sheet::Searches(view) => view.clone().into_any_element(),
                     Sheet::EmptyTrash(view) => view.clone().into_any_element(),
                     Sheet::RemoveWorktree(view) => view.clone().into_any_element(),
+                    Sheet::ReviewDuplicates(view) => view.clone().into_any_element(),
                     Sheet::Connect(view) => view.clone().into_any_element(),
                 }
             }))
@@ -2418,6 +2460,7 @@ enum Sheet {
     Searches(Entity<SearchMenu>),
     EmptyTrash(Entity<EmptyTrashView>),
     RemoveWorktree(Entity<RemoveWorktreeView>),
+    ReviewDuplicates(Entity<ReviewDuplicatesView>),
     Connect(Entity<ConnectView>),
 }
 

@@ -79,8 +79,8 @@ use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Back, Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives,
     EditFavorites, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder, ExtendNext,
-    ExtendPrevious, FocusNext, FocusSearch, GoOverview, GoRecents, GoToFolder, GoTrash,
-    GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations,
+    ExtendPrevious, FindDuplicates, FocusNext, FocusSearch, GoOverview, GoRecents, GoToFolder,
+    GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations,
     OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast, SelectNext,
     SelectPrevious, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit,
     Undo, ViewAsGrid, ViewAsList,
@@ -536,6 +536,7 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     shoot_batch_rename(&mut cx, out, folder, &base)?;
     shoot_inspector(&mut cx, out, folder, &base)?;
     shoot_worktrees(&mut cx, out, folder, &base)?;
+    shoot_duplicates(&mut cx, out, &base)?;
     shoot_columns(&mut cx, out, made_up, &base)?;
     shoot_overview(&mut cx, out, folder, &base)?;
     shoot_downloads(&mut cx, out, made_up, &base)
@@ -683,6 +684,86 @@ fn shoot_worktrees(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -
             // SAFETY: as above.
             unsafe { std::env::set_var("HOME", home) };
         }
+    }
+    Ok(())
+}
+
+/// Find Duplicates over a made-up Downloads: `duplicates.png` with a group
+/// open and a copy chosen, `duplicates-review.png` asking before it moves,
+/// `duplicates-empty.png` with no copies of 1 MB and up, and
+/// `duplicates-error.png` for a folder that went. Nothing is moved.
+fn shoot_duplicates(cx: &mut Cx, out: &Path, base: &Preferences) -> gpui::Result<()> {
+    const MB: usize = 1_000_000;
+    cx.update(|cx| cx.set_global(base.clone()));
+    let dir = tempfile::tempdir()?;
+    let home = dir.path().canonicalize()?;
+    let downloads = home.join("Downloads");
+    let copies: [(&str, &[&str], usize); 4] = [
+        (
+            "Sequoia trip.mov",
+            &["", "Videos to edit", "Shared from Sam"],
+            9 * MB,
+        ),
+        ("Xcode_16.2.xip", &["", "Old installers"], 12 * MB),
+        ("Figma-126.4.dmg", &["", "Old installers"], 4 * MB),
+        ("IMG_2041.HEIC", &["", "AirDrop"], 2 * MB),
+    ];
+    for (fill, (name, folders, size)) in copies.into_iter().enumerate() {
+        let bytes = vec![fill as u8 + 1; size];
+        for folder in folders {
+            let at = downloads.join(folder);
+            std::fs::create_dir_all(&at)?;
+            std::fs::write(at.join(name), &bytes)?;
+        }
+    }
+    std::fs::write(downloads.join("Notes.txt"), "a few words")?;
+    let empty = home.join("Documents");
+    std::fs::create_dir_all(&empty)?;
+    std::fs::write(empty.join("Résumé.pdf"), vec![1u8; 2 * MB])?;
+    std::fs::write(empty.join("Taxes 2025.pdf"), vec![2u8; 3 * MB])?;
+    // Never made, as a folder that went would be.
+    let gone = home.join("Gone");
+
+    let real_home = std::env::var_os("HOME");
+    // SAFETY: the headless app is parked between shots, and nothing else in
+    // this process reads the environment while it changes.
+    unsafe { std::env::set_var("HOME", &home) };
+    let window = open(cx, &downloads)?;
+    dispatch(cx, window, &FindDuplicates)?;
+    settle_git(cx);
+    for step in [
+        &SelectNext as &dyn Action,
+        &ExpandFolder,
+        &SelectNext,
+        &SelectNext,
+        &QuickLook,
+        &SelectNext,
+    ] {
+        dispatch(cx, window, step)?;
+    }
+    save(cx, window, out, "duplicates")?;
+    dispatch(cx, window, &MoveToTrash)?;
+    settle_git(cx);
+    save(cx, window, out, "duplicates-review")?;
+    let cancel = named(cx, "review_duplicates::Cancel")?;
+    dispatch(cx, window, &*cancel)?;
+    cx.update_window(window.into(), |_, window, _| window.remove_window())?;
+
+    let window = open(cx, &empty)?;
+    dispatch(cx, window, &FindDuplicates)?;
+    settle_git(cx);
+    save(cx, window, out, "duplicates-empty")?;
+    cx.update_window(window.into(), |_, window, _| window.remove_window())?;
+
+    let window = open(cx, &gone)?;
+    dispatch(cx, window, &FindDuplicates)?;
+    settle_git(cx);
+    save(cx, window, out, "duplicates-error")?;
+    cx.update_window(window.into(), |_, window, _| window.remove_window())?;
+    cx.run_until_parked();
+    if let Some(home) = &real_home {
+        // SAFETY: as above.
+        unsafe { std::env::set_var("HOME", home) };
     }
     Ok(())
 }

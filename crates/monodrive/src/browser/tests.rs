@@ -1831,6 +1831,7 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
         "New Folder",
         "New File",
         "Organize Folder…",
+        "Find Duplicates",
         "Get Info",
         "Paste",
         "as List",

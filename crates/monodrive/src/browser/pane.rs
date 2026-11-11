@@ -7,6 +7,7 @@ use super::archive;
 use super::batch_rename::BatchRename;
 use super::columns::{COLUMN_WIDTH, Columns, chevron};
 use super::drag::{Drag, Spot, Target, offers};
+use super::duplicates::DuplicatesPage;
 use super::organize::Review;
 use super::overview::OverviewPage;
 use super::remote::RemotePage;
@@ -15,11 +16,11 @@ use super::worktrees::WorktreesPage;
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, Compress, CopyPath, DeselectAll, Download,
     Duplicate, EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext,
-    ExtendPrevious, ExtendRight, Extract, FocusSearch, Forward, GoApplications, GoComputer,
-    GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash,
-    GoWorktrees, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, Offer,
-    OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places, PutBack, Redo,
-    RemoveDownload, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
+    ExtendPrevious, ExtendRight, Extract, FindDuplicates, FocusSearch, Forward, GoApplications,
+    GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder,
+    GoTrash, GoWorktrees, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, Offer,
+    OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places, PutBack, QuickLook,
+    Redo, RemoveDownload, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
     SearchContents, SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious,
     ShowContextMenu, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
     SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash,
@@ -318,6 +319,8 @@ pub struct Pane {
     pub(super) overview: OverviewPage,
     /// The worktrees, as last scanned.
     pub(super) worktrees: WorktreesPage,
+    /// What Find Duplicates found, as last looked through.
+    pub(super) duplicates: DuplicatesPage,
     /// The archive on screen, as last read; dropped on leaving it.
     pub(super) archived: Option<archive::Archived>,
     /// The server folder, as last listed.
@@ -434,6 +437,7 @@ impl Pane {
             open_after_download: HashSet::new(),
             overview: OverviewPage::default(),
             worktrees: WorktreesPage::default(),
+            duplicates: DuplicatesPage::default(),
             archived: None,
             remote: RemotePage::default(),
             backdrop: cx.new(|_| Backdrop::default()),
@@ -452,6 +456,7 @@ impl Pane {
             self.held.clear();
             self.marquee = None;
             self.leave_overview();
+            self.leave_duplicates();
         }
     }
 
@@ -524,7 +529,7 @@ impl Pane {
                 Some(StopState {
                     place: stop.place.clone()?,
                     shows: match stop.shows {
-                        Shows::Archive => Shows::Folder,
+                        Shows::Archive | Shows::Duplicates => Shows::Folder,
                         shows => shows,
                     },
                     remote: stop.remote.clone(),
@@ -622,6 +627,8 @@ impl Pane {
             "Overview".to_string()
         } else if self.showing_worktrees() {
             "Worktrees".to_string()
+        } else if self.showing_duplicates() {
+            format!("Duplicates in {}", level_name(self.folder()))
         } else if self.showing_remote() {
             self.remote_title()
         } else if self.showing_recents() {
@@ -781,6 +788,7 @@ impl Pane {
         if self.showing_remote() {
             // Nothing local is on screen, so nothing local can be chosen.
             self.leave_overview();
+            self.leave_duplicates();
             self.loading = Task::ready(());
             self.listing = false;
             self.root.clear();
@@ -807,6 +815,11 @@ impl Pane {
         }
         if self.showing_worktrees() {
             self.scan_worktrees(cx);
+        }
+        if self.showing_duplicates() {
+            self.read_duplicates(cx);
+        } else {
+            self.leave_duplicates();
         }
         let mut folder = self.folder().to_path_buf();
         let query = self.query.clone();
@@ -1261,6 +1274,9 @@ impl Pane {
 
     /// → opens the selected folder in place, or steps into it if it's open.
     fn expand(&mut self, cx: &mut Context<Self>) {
+        if self.showing_duplicates() {
+            return self.open_duplicate_group(cx);
+        }
         match self.layout() {
             View::Grid => return self.select(Move::By(1), false, cx),
             View::Columns => return self.enter_column(cx),
@@ -1830,6 +1846,9 @@ impl Pane {
         if self.showing_worktrees() {
             return self.open_worktree(window, cx);
         }
+        if self.showing_duplicates() {
+            return self.open_duplicate(window, cx);
+        }
         if self.batch.is_some() {
             return;
         }
@@ -2009,6 +2028,9 @@ impl Pane {
     pub(super) fn select_vertically(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
         if self.showing_worktrees() {
             return self.step_worktree(down, cx);
+        }
+        if self.showing_duplicates() {
+            return self.step_duplicates(down, cx);
         }
         let step = match (self.layout(), down) {
             (View::List | View::Columns, true) => Move::Next,
@@ -3893,6 +3915,9 @@ impl Pane {
         if self.organizing.is_some() {
             return self.end_organize(window, cx);
         }
+        if self.showing_duplicates() && self.stop_duplicates(cx) {
+            return;
+        }
         if self.query.is_empty() {
             if self.search_mode_is_plain() {
                 self.selection.clear();
@@ -3962,6 +3987,11 @@ impl Pane {
                 .on_action(cx.listener(|this, _: &GoWorktrees, window, cx| {
                     this.open_page(Shows::Worktrees, window, cx)
                 }))
+                .when(self.showing_folder(), |d| {
+                    d.on_action(cx.listener(|this, _: &FindDuplicates, window, cx| {
+                        this.find_duplicates(window, cx)
+                    }))
+                })
                 .on_action(cx.listener(|this, _: &GoTrash, window, cx| this.open_trash(window, cx)))
                 .on_action(cx.listener(|this, _: &GoDesktop, window, cx| {
                     this.go(home().join("Desktop"), window, cx)
@@ -4313,6 +4343,13 @@ impl Pane {
                     }))
                 },
             )
+            // Move to Trash lists the chosen copies first; Space chooses one.
+            .when(self.showing_duplicates(), |d| {
+                d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
+                    this.review_duplicates(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &QuickLook, _, cx| this.choose_duplicate(cx)))
+            })
             .when(
                 writable && !self.changing_names() && !self.selection.is_empty(),
                 |d| {
@@ -4422,6 +4459,7 @@ impl Pane {
                 self.organize_page(cx)
                     .or_else(|| self.overview_page(cx))
                     .or_else(|| self.worktrees_page(cx))
+                    .or_else(|| self.duplicates_page(cx))
                     .or_else(|| {
                         // Until it has something to show, so it never
                         // appears in pieces.

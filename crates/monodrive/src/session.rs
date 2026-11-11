@@ -83,6 +83,9 @@ pub enum Shows {
     Recents,
     Overview,
     Worktrees,
+    /// The copies of each other in `folder`, which reads every file there.
+    /// Saved as the folder, so a launch never starts that read.
+    Duplicates,
     /// A folder inside a ZIP archive, read only. Saved as the folder that
     /// holds the archive, so it's never saved itself.
     Archive,

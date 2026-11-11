@@ -29,6 +29,7 @@ pub mod preview;
 mod profile;
 mod quick_look;
 mod remove_worktree;
+mod review_duplicates;
 mod selection;
 pub mod session;
 mod settings;

@@ -1202,6 +1202,7 @@ fn glyph_for(command: &Command) -> &'static str {
         "Recents" => "clock",
         "Overview" => "hard-drive",
         "Worktrees" => "git-branch",
+        "Find Duplicates" => "copy",
         "Connect to Server…" => "server",
         "Search" | "Search This Folder" | "Searches…" | "Save Search…" | "Reveal in Finder" => {
             "search"
