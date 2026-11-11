@@ -31,6 +31,14 @@ debug = "line-tables-only"
 opt-level = 1
 debug = false
 
+# Cargo compiles path dependencies incrementally, and GPUI's incremental cache
+# is large while the vendored copy rarely changes.
+[profile.dev.package.gpui-pre]
+incremental = false
+
+[profile.dev.package.gpui-pre-apple]
+incremental = false
+
 # fsearch shifts a u8 by eight on an eight-word search over many names, which
 # panics with overflow checks. Without them dev builds act as release builds
 # do. Remove this once a fsearch with `all` fixed in `score_names` is pinned.
