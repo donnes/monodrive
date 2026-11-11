@@ -751,7 +751,8 @@ pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
                 };
                 let _ = writeln!(
                     rows,
-                    "| {} | {} | {} | {} | {limit} | {status} |",
+                    "| {} | {} | {} | {} | {} | {limit} | {status} |",
+                    bench.group.replace('|', "\\|"),
                     title.replace('|', "\\|"),
                     before,
                     ms(now.median),
@@ -786,7 +787,7 @@ pub fn markdown(results: &Results, judged: &[(Budget, Status)]) -> String {
     }
     let _ = writeln!(
         out,
-        "| What | Baseline `{}` | This build `{}` | Change | Budget | |\n|---|--:|--:|---|--:|:-:|\n{rows}",
+        "| Group | What | Baseline `{}` | This build `{}` | Change | Budget | |\n|---|---|--:|--:|---|--:|:-:|\n{rows}",
         commit("baseline"),
         commit("this"),
     );
@@ -918,7 +919,7 @@ mod tests {
                 benches: vec![Bench {
                     bench: "list_dir/10000".into(),
                     title: "List 10,000".into(),
-                    group: String::new(),
+                    group: "List a folder".into(),
                     items: None,
                     cache: Cache::Warm,
                     series: vec![series("this", this), series("baseline", 10.)],
@@ -943,7 +944,7 @@ mod tests {
         assert!(same.contains("✅ Nothing ran slower"), "{same}");
         assert!(
             same.contains(
-                "| List 10,000 | 10.1 ms | 10.1 ms | no clear difference | 20.0 ms | ✅ |"
+                "| List a folder | List 10,000 | 10.1 ms | 10.1 ms | no clear difference | 20.0 ms | ✅ |"
             ),
             "{same}"
         );
@@ -963,7 +964,7 @@ mod tests {
         let added = markdown(&added, &budgets::judge(&budgets, &added));
         assert!(added.contains("❌ 1 result over budget."), "{added}");
         assert!(
-            added.contains("| List 10,000 | – | 30.1 ms | new | 20.0 ms | ❌ |"),
+            added.contains("| List a folder | List 10,000 | – | 30.1 ms | new | 20.0 ms | ❌ |"),
             "{added}"
         );
     }
