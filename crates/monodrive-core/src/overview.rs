@@ -6,6 +6,11 @@
 //! the saved summary, so it answers at once and connects to nothing. Sizes are
 //! measured separately, a folder at a time, and each is saved with its date.
 //! The summary holds totals and the folders they're for, never a file list.
+//!
+//! Besides the user's folders and projects, it measures where the rest of a
+//! Mac's space goes: apps, their data in Library, developer tools, hidden
+//! folders in Home and the system's folders. Each byte counts once, under the
+//! innermost of those folders that holds it.
 
 use crate::cloud::CloudFolder;
 use crate::entries::Entry;
@@ -47,6 +52,22 @@ const KNOWN_FOLDERS: [&str; 6] = [
 /// Downloads each tool fetches again when it needs them, and whose cleanup it
 /// doesn't own. The pnpm store isn't here: `node_modules` folders hard-link
 /// into it, and only pnpm knows what's unused.
+/// Where developer tools keep what they download and build: relative paths
+/// are in Home, absolute ones on the startup disk.
+const DEVELOPER_TOOLS: [&str; 6] = [
+    "Library/Developer",
+    "Library/Android",
+    "Library/pnpm",
+    "/Library/Developer",
+    "/opt/homebrew",
+    "/usr/local",
+];
+const APPLICATIONS: [&str; 2] = ["/Applications", "Applications"];
+/// The system's own folders on the Data volume. macOS's volumes are counted
+/// from the volumes themselves.
+const SYSTEM_FILES: [&str; 2] = ["/Library", "/private"];
+/// Folders in Library that cloud folders are in, which are measured as those.
+const CLOUD_HOMES: [&str; 2] = ["Library/CloudStorage", "Library/Mobile Documents"];
 const TOOL_CACHES: [(&str, &str); 6] = [
     ("Homebrew", "Library/Caches/Homebrew"),
     ("Xcode", "Library/Developer/Xcode/DerivedData"),
@@ -62,6 +83,9 @@ const CACHE_TAG: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 #[derive(Clone, Debug)]
 pub struct Env {
     pub home: PathBuf,
+    /// Where the startup disk's own folders, such as Applications, are: `/`,
+    /// except where a test makes up a Mac.
+    pub root: PathBuf,
     pub trash: PathBuf,
     pub store: places::Store,
 }
@@ -71,8 +95,17 @@ impl Env {
     pub fn new(trash: PathBuf, store: places::Store) -> Self {
         Self {
             home: trash.parent().map_or_else(PathBuf::new, Path::to_path_buf),
+            root: PathBuf::from("/"),
             trash,
             store,
+        }
+    }
+
+    /// `at` from one of the lists above: in Home, or on the startup disk.
+    fn place(&self, at: &str) -> PathBuf {
+        match at.strip_prefix('/') {
+            Some(on_disk) => self.root.join(on_disk),
+            None => self.home.join(at),
         }
     }
 
@@ -136,6 +169,8 @@ pub struct Headline {
     /// What Empty Trash would free, once measured. The Trash can't be read
     /// without Full Disk Access.
     pub trash: Option<Measured>,
+    /// What macOS's own volumes take.
+    pub system: Option<u64>,
     /// Under the share where suggestions appear.
     pub low: bool,
 }
@@ -183,11 +218,59 @@ pub struct Suggestion {
     pub size: Measured,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GroupKind {
-    Folder,
-    Project,
+/// What fills the startup disk, by the kind of thing: a group's part of the
+/// disk's bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Kind {
+    /// Desktop, Documents, Downloads, and the other folders in Home.
+    Documents,
+    Projects,
+    Pictures,
+    /// Movies and Music.
+    Media,
     Cloud,
+    /// Applications and what apps keep in Library.
+    Apps,
+    /// Developer tools, and the hidden folders in Home, which are mostly
+    /// theirs.
+    Developer,
+    /// macOS's own volumes and the system's folders.
+    System,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Documents => "Documents and folders",
+            Kind::Projects => "Projects",
+            Kind::Pictures => "Pictures",
+            Kind::Media => "Movies and music",
+            Kind::Cloud => "Cloud",
+            Kind::Apps => "Apps",
+            Kind::Developer => "Developer",
+            Kind::System => "macOS",
+        }
+    }
+}
+
+/// A part of the startup disk's used space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Kind(Kind),
+    /// What the suggestions and the Trash would give back.
+    Freeable,
+    /// Used, and in none of the above or not measured yet.
+    Other,
+}
+
+impl Part {
+    pub fn name(self) -> &'static str {
+        match self {
+            Part::Kind(kind) => kind.name(),
+            Part::Freeable => "Can be freed",
+            Part::Other => "Other",
+        }
+    }
 }
 
 /// Where a group has things.
@@ -202,11 +285,13 @@ pub struct Spot {
 }
 
 /// A row of "your stuff": a kind of thing or a project, in one place or, for a
-/// project with the same remote in several, each of them.
+/// project with the same remote in several, each of them. A group of the rest
+/// of the disk, such as App data, has a spot for each folder it measures,
+/// largest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
     pub name: String,
-    pub kind: GroupKind,
+    pub kind: Kind,
     pub spots: Vec<Spot>,
 }
 
@@ -297,9 +382,6 @@ pub struct Overview {
     pub suggestions: Vec<Suggestion>,
     /// Largest first; what hasn't been measured comes last.
     pub stuff: Vec<Group>,
-    /// What the startup disk holds that no group explains, once all are
-    /// measured.
-    pub everything_else: Option<u64>,
     /// Every location but the startup disk.
     pub locations: Vec<Location>,
     /// Folders to measure now, because no total is saved or it's old.
@@ -507,20 +589,6 @@ fn changed_since(folder: &Path, at: u64) -> bool {
         .is_some_and(|changed| changed.as_secs() > at)
 }
 
-/// Outermost folders only, so nested ones don't count twice.
-fn outermost<'a>(paths: impl Iterator<Item = (&'a Path, u64)>) -> u64 {
-    let spots: Vec<_> = paths.collect();
-    spots
-        .iter()
-        .filter(|(path, _)| {
-            !spots
-                .iter()
-                .any(|(other, _)| other != path && path.starts_with(other))
-        })
-        .map(|(_, size)| size)
-        .sum()
-}
-
 /// What's connected, for a saved SFTP source. Each process has its own
 /// connections, so the caller says.
 pub type Connected<'a> = &'a dyn Fn(&str) -> bool;
@@ -562,9 +630,14 @@ pub fn read(
         let path = env.home.join(name);
         if path.is_dir() {
             wanted(&path, total(&path));
+            let kind = match name {
+                "Pictures" => Kind::Pictures,
+                "Movies" | "Music" => Kind::Media,
+                _ => Kind::Documents,
+            };
             stuff.push(Group {
                 name: name.to_string(),
-                kind: GroupKind::Folder,
+                kind,
                 spots: vec![spot_here(&path, total(&path))],
             });
         }
@@ -574,16 +647,24 @@ pub fn read(
         wanted(&folder.path, total(&folder.path));
         stuff.push(Group {
             name: folder.name.clone(),
-            kind: GroupKind::Cloud,
+            kind: Kind::Cloud,
             spots: vec![spot_here(&folder.path, total(&folder.path))],
         });
     }
     let registered = env.store.repositories().unwrap_or_default();
+    // Homebrew is a repository, but it's a tool, not the user's project.
+    let tooling: Vec<PathBuf> = DEVELOPER_TOOLS
+        .iter()
+        .chain(&APPLICATIONS)
+        .chain(&SYSTEM_FILES)
+        .map(|at| env.place(at))
+        .collect();
     let mut seen = HashSet::new();
     let projects: Vec<PathBuf> = registered
         .into_iter()
         .map(|repo| repo.path)
         .chain(saved.projects.iter().cloned())
+        .filter(|path| !tooling.iter().any(|tool| path.starts_with(tool)))
         .filter(|path| here(path) && path.join(".git").exists() && seen.insert(path.clone()))
         .collect();
     // A project's remote is what says two copies are one project.
@@ -602,9 +683,68 @@ pub fn read(
         }
         stuff.push(Group {
             name: name_of(path),
-            kind: GroupKind::Project,
+            kind: Kind::Projects,
             spots: vec![spot],
         });
+    }
+
+    // Where the rest of the disk goes, each folder once: a project or a known
+    // folder is measured as that.
+    let existing = |list: &[&str]| -> Vec<PathBuf> {
+        list.iter()
+            .map(|at| env.place(at))
+            .filter(|path| path.is_dir())
+            .collect()
+    };
+    let tools = existing(&DEVELOPER_TOOLS);
+    let applications = existing(&APPLICATIONS);
+    let library = env.home.join("Library");
+    let taken: HashSet<PathBuf> = stuff
+        .iter()
+        .flat_map(|group| group.spots.iter().map(|spot| spot.path.clone()))
+        .chain(tools.iter().cloned())
+        .chain(applications.iter().cloned())
+        .chain(CLOUD_HOMES.iter().map(|at| env.place(at)))
+        .chain([env.trash.clone(), library.clone()])
+        .chain(KNOWN_FOLDERS.iter().map(|name| env.home.join(name)))
+        .collect();
+    let untaken = |dir: &Path| -> Vec<PathBuf> {
+        folders_in(dir)
+            .into_iter()
+            .filter(|path| !taken.contains(path))
+            .collect()
+    };
+    let (hidden, visible): (Vec<PathBuf>, Vec<PathBuf>) = untaken(&env.home)
+        .into_iter()
+        .partition(|path| name_of(path).starts_with('.'));
+    let rest = [
+        ("Applications", Kind::Apps, applications),
+        ("App data", Kind::Apps, untaken(&library)),
+        ("Developer tools", Kind::Developer, tools),
+        ("Hidden folders", Kind::Developer, hidden),
+        ("System files", Kind::System, existing(&SYSTEM_FILES)),
+    ]
+    .map(|(name, kind, paths)| (name.to_string(), kind, paths))
+    .into_iter()
+    .chain(
+        visible
+            .into_iter()
+            .map(|path| (name_of(&path), Kind::Documents, vec![path])),
+    );
+    for (name, kind, paths) in rest {
+        let mut spots: Vec<Spot> = paths
+            .iter()
+            .filter(|path| here(path))
+            .map(|path| {
+                wanted(path, total(path));
+                spot_here(path, total(path))
+            })
+            .collect();
+        if spots.is_empty() {
+            continue;
+        }
+        spots.sort_by_key(|spot| std::cmp::Reverse(spot.size.map(|size| size.on_disk)));
+        stuff.push(Group { name, kind, spots });
     }
 
     // The Trash changes whenever anything goes in or comes out, so a total from
@@ -615,6 +755,7 @@ pub fn read(
         total: volume.total,
         free: volume.free,
         trash,
+        system: volume.system,
         low: (volume.free as f64) < volume.total as f64 * LOW_FREE,
     });
     wanted(&env.trash, trash);
@@ -751,26 +892,116 @@ pub fn read(
             .cmp(&a.on_disk())
             .then_with(|| a.name.cmp(&b.name))
     });
-    let everything_else = headline.as_ref().and_then(|headline| {
-        let here: Vec<_> = stuff
-            .iter()
-            .flat_map(|group| &group.spots)
-            .filter(|spot| spot.location == headline.name)
-            .collect();
-        let sized: Option<Vec<_>> = here
-            .iter()
-            .map(|spot| Some((spot.path.as_path(), spot.size?.on_disk)))
-            .collect();
-        let used = headline.total.saturating_sub(headline.free);
-        sized.map(|sized| used.saturating_sub(outermost(sized.into_iter())))
-    });
+    // What was never measured first, then the oldest.
+    due.sort_by_key(|path| total(path).map(|size| size.at));
     Overview {
         headline,
         suggestions,
         stuff,
-        everything_else,
         locations,
         due,
+    }
+}
+
+/// The folders directly in `dir`, without following links, by name.
+fn folders_in(dir: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .collect();
+    folders.sort();
+    folders
+}
+
+impl Overview {
+    /// What the startup disk's used space is made of: each kind, largest
+    /// first, then what can be freed, then the rest. Nothing counts twice: a
+    /// folder inside another counts as itself and leaves the outer one, and
+    /// what a suggestion frees leaves the folder that holds it.
+    pub fn parts(&self) -> Vec<(Part, u64)> {
+        let Some(disk) = &self.headline else {
+            return Vec::new();
+        };
+        let spots: Vec<(&Path, Kind, u64)> = self
+            .stuff
+            .iter()
+            .flat_map(|group| group.spots.iter().map(move |spot| (group, spot)))
+            .filter(|(_, spot)| spot.location == disk.name)
+            .filter_map(|(group, spot)| Some((spot.path.as_path(), group.kind, spot.size?.on_disk)))
+            .collect();
+        // The innermost spot that holds `path`, other than `path` itself.
+        let holder = |path: &Path| {
+            (0..spots.len())
+                .filter(|&at| spots[at].0 != path && path.starts_with(spots[at].0))
+                .max_by_key(|&at| spots[at].0.components().count())
+        };
+        let mut own: Vec<u64> = spots.iter().map(|(.., bytes)| *bytes).collect();
+        for (path, _, bytes) in &spots {
+            if let Some(at) = holder(path) {
+                own[at] = own[at].saturating_sub(*bytes);
+            }
+        }
+        for suggestion in &self.suggestions {
+            let held = spots
+                .iter()
+                .position(|(path, ..)| *path == suggestion.path)
+                .or_else(|| holder(&suggestion.path));
+            if let Some(at) = held {
+                own[at] = own[at].saturating_sub(suggestion.size.unshared);
+            }
+        }
+        let mut kinds: Vec<(Kind, u64)> = Vec::new();
+        let system = disk.system.map(|bytes| (Kind::System, bytes));
+        for (kind, bytes) in spots
+            .iter()
+            .zip(own)
+            .map(|((_, kind, _), own)| (*kind, own))
+            .chain(system)
+        {
+            match kinds.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, total)) => *total += bytes,
+                None => kinds.push((kind, bytes)),
+            }
+        }
+        kinds.retain(|(_, bytes)| *bytes > 0);
+        kinds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        let freeable = self
+            .suggestions
+            .iter()
+            .map(|suggestion| suggestion.size.unshared)
+            .sum::<u64>()
+            + disk.trash.map_or(0, |trash| trash.unshared);
+        let used = disk.total.saturating_sub(disk.free);
+        let known: u64 = kinds.iter().map(|(_, bytes)| bytes).sum();
+        let other = used.saturating_sub(known + freeable);
+        kinds
+            .into_iter()
+            .map(|(kind, bytes)| (Part::Kind(kind), bytes))
+            .chain((freeable > 0).then_some((Part::Freeable, freeable)))
+            .chain((other > 0).then_some((Part::Other, other)))
+            .collect()
+    }
+
+    /// What the startup disk holds that nothing explains, once everything on
+    /// it is measured.
+    pub fn everything_else(&self) -> Option<u64> {
+        let disk = self.headline.as_ref()?;
+        let measured = self
+            .stuff
+            .iter()
+            .flat_map(|group| &group.spots)
+            .filter(|spot| spot.location == disk.name)
+            .all(|spot| spot.size.is_some());
+        measured.then(|| {
+            self.parts()
+                .into_iter()
+                .find(|(part, _)| *part == Part::Other)
+                .map_or(0, |(_, bytes)| bytes)
+        })
     }
 }
 
@@ -785,14 +1016,13 @@ pub fn measure(
     deadline: Option<Instant>,
     now: u64,
 ) -> Option<Measured> {
-    let report = storage::scan(folder, progress, deadline).ok()?;
-    if report.stopped == Some(Stop::Cancelled) {
+    let total = storage::total(folder, progress, deadline).ok()?;
+    if total.stopped == Some(Stop::Cancelled) {
         return None;
     }
-    let root = report.root();
     let size = Measured::of(
-        root.usage,
-        report.stopped.is_none() && !root.unreadable,
+        total.usage,
+        total.stopped.is_none() && !total.unreadable,
         now,
     );
     let _ = Saved::change(&env.saved(), |saved| {

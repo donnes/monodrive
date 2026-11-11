@@ -51,6 +51,8 @@ pub struct Volume {
     /// Its drive can be unplugged, as a USB drive can.
     pub removable: bool,
     pub startup: bool,
+    /// What macOS's own volumes beside it take, for the startup disk.
+    pub system: Option<u64>,
 }
 
 /// The volumes Finder shows, the startup disk first. Each read can wait on
@@ -211,10 +213,65 @@ fn volume(
             ejectable: flag(NSURLVolumeIsEjectableKey),
             removable: flag(NSURLVolumeIsRemovableKey),
             startup: flag(NSURLVolumeIsRootFileSystemKey),
+            system: flag(NSURLVolumeIsRootFileSystemKey)
+                .then(system_space)
+                .flatten(),
             disk,
             mount,
         }
     }
+}
+
+/// Where macOS's own volumes are mounted: the sealed System volume at `/`,
+/// then Preboot, VM and Update. Recovery isn't mounted, and Data is the
+/// user's.
+const SYSTEM_VOLUMES: [&str; 4] = [
+    "/",
+    "/System/Volumes/Preboot",
+    "/System/Volumes/VM",
+    "/System/Volumes/Update",
+];
+
+/// What macOS's own volumes take, which no walk of a folder sees. `None` on a
+/// Mac without a separate Data volume, where `/` holds everything.
+fn system_space() -> Option<u64> {
+    if !Path::new("/System/Volumes/Data").is_dir() {
+        return None;
+    }
+    Some(SYSTEM_VOLUMES.iter().filter_map(|at| space_used(at)).sum())
+}
+
+/// What the volume mounted at `mount` takes in its container.
+fn space_used(mount: &str) -> Option<u64> {
+    #[repr(C, packed(4))]
+    struct Reply {
+        length: u32,
+        used: libc::off_t,
+    }
+    let path = CString::new(mount).ok()?;
+    let mut asked = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_SPACEUSED,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    // SAFETY: all-zero is a valid `Reply`, and getattrlist writes at most
+    // its size into it; the path is NUL-terminated and outlives the call.
+    let mut reply: Reply = unsafe { std::mem::zeroed() };
+    let got = unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            (&raw mut asked).cast(),
+            (&raw mut reply).cast(),
+            size_of::<Reply>(),
+            0,
+        )
+    };
+    let used = reply.used;
+    (got == 0).then(|| u64::try_from(used).ok()).flatten()
 }
 
 /// The volume `path` is on: the one mounted deepest above it.
@@ -455,6 +512,7 @@ mod tests {
         assert!(matches!(startup.id, Some(VolumeId::Uuid(_))));
         assert!(!startup.network);
         assert!(startup.disk.is_some());
+        assert!(startup.system.is_some_and(|system| system > 0));
     }
 
     #[test]
@@ -498,6 +556,7 @@ mod tests {
             ejectable,
             removable: false,
             startup: mount == Path::new("/"),
+            system: None,
         };
         let volumes = [
             volume("Macintosh HD", "/".as_ref(), 0, false),

@@ -734,6 +734,7 @@ mod tests {
             ejectable: true,
             removable: false,
             startup: mount == Path::new("/"),
+            system: None,
         }
     }
 

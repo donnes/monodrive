@@ -193,7 +193,7 @@ pub fn scan(
             .or_else(|| (met.get() >= MAX_ITEMS).then_some(Stop::Budget));
         stopped.is_some()
     };
-    let complete = sizes::walk(&root, &sizes::gated(), &mut check, &mut |event| {
+    let complete = sizes::walk(&root, &sizes::gated(), false, &mut check, &mut |event| {
         met.set(met.get() + 1);
         progress.add(&progress.items, 1, NOTIFY_ITEMS);
         match event {
@@ -214,22 +214,13 @@ pub fn scan(
             }),
             Met::Item {
                 at,
+                dir,
                 name,
                 meta,
                 placeholder,
             } => {
-                let mut usage = Usage {
-                    bytes: meta.len(),
-                    on_disk: meta.blocks() * 512,
-                    unshared: meta.blocks() * 512,
-                    files: 1,
-                    placeholders: u64::from(placeholder),
-                };
+                let usage = usage_of(&dir.join(&name), meta, placeholder);
                 if meta.is_file() {
-                    let path = report.folders[at].path.join(&name);
-                    if let Some(unshared) = unshared(&path) {
-                        usage.unshared = unshared.min(usage.on_disk);
-                    }
                     report.files.push(Record {
                         folder: at as u32,
                         name,
@@ -272,6 +263,68 @@ pub fn scan(
         report.folders[at].children = children;
     }
     Ok(report)
+}
+
+/// What a folder holds, without anything per file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Total {
+    pub usage: Usage,
+    /// Some of it couldn't be read, so `usage` is short.
+    pub unreadable: bool,
+    /// `None` when it met everything.
+    pub stopped: Option<Stop>,
+}
+
+/// Adds up `folder` as `scan` does, but keeps nothing per file, so it has no
+/// item budget, and leaves out other volumes mounted inside it. Stops when
+/// cancelled or at `deadline`. Fails only when `folder` can't be found or
+/// listed.
+pub fn total(
+    folder: &Path,
+    progress: &Progress,
+    deadline: Option<Instant>,
+) -> Result<Total, String> {
+    let mut total = Total::default();
+    let mut stopped = None;
+    let mut check = || {
+        stopped = stopped.or_else(|| progress.stop(deadline));
+        stopped.is_some()
+    };
+    let complete = sizes::walk(folder, &sizes::gated(), true, &mut check, &mut |event| {
+        progress.add(&progress.items, 1, NOTIFY_ITEMS);
+        match event {
+            Met::Folder { placeholder, .. } => total.usage.placeholders += u64::from(placeholder),
+            Met::Item {
+                dir,
+                name,
+                meta,
+                placeholder,
+                ..
+            } => total
+                .usage
+                .add(&usage_of(&dir.join(&name), meta, placeholder)),
+            Met::Unreadable { .. } => total.unreadable = true,
+        }
+    })?;
+    total.stopped = if complete { None } else { stopped };
+    Ok(total)
+}
+
+/// What the item at `path` takes up.
+fn usage_of(path: &Path, meta: &Metadata, placeholder: bool) -> Usage {
+    let on_disk = meta.blocks() * 512;
+    let unshared = meta
+        .is_file()
+        .then(|| unshared(path))
+        .flatten()
+        .map_or(on_disk, |unshared| unshared.min(on_disk));
+    Usage {
+        bytes: meta.len(),
+        on_disk,
+        unshared,
+        files: 1,
+        placeholders: u64::from(placeholder),
+    }
 }
 
 /// What APFS says deleting the file at `path` would free: the bytes no

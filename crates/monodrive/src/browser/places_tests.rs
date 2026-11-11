@@ -119,6 +119,7 @@ fn volume(name: &str, mount: &Path, id: &str, total: u64, free: u64) -> Volume {
         ejectable: true,
         removable: true,
         startup: false,
+        system: None,
     }
 }
 
@@ -167,6 +168,7 @@ pub(super) fn world(volumes: Vec<Volume>, cx: &mut TestAppContext) -> World {
         trash: trash.clone(),
         drives: fake.clone(),
         applications: vec![real.join("Applications")],
+        root: real.join("disk"),
     };
     cx.update(|cx| cx.set_global(places));
     let (volumes_changed, volume_changes) = async_channel::unbounded();

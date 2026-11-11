@@ -151,6 +151,9 @@ pub struct Places {
     pub remote: Arc<Connections>,
     /// Where files from servers come down to open, removed as the app quits.
     pub previews: PathBuf,
+    /// Where the startup disk's own folders, such as Applications, are: `/`,
+    /// except on a made-up Mac.
+    pub root: PathBuf,
 }
 
 impl Global for Places {}

@@ -972,13 +972,34 @@
                 "description": "What emptying the Trash would free, once measured.",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "used_by": {
+                "description": "What its used space is made of, as the window's bar shows it; Other holds what isn't measured yet.",
+                "items": {
+                  "properties": {
+                    "kind": {
+                      "type": "string"
+                    },
+                    "on_disk": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "on_disk"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "required": [
               "name",
               "free",
               "total",
-              "low"
+              "low",
+              "used_by"
             ],
             "type": "object"
           },

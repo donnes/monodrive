@@ -89,6 +89,8 @@ enum Opening {
 /// How long launch holds its windows back for their listings: a 10,000 entry
 /// folder's budget. A slower folder, or a volume that hangs, opens without one.
 const LISTING_WAIT: Duration = Duration::from_millis(40);
+/// How long after launch the Overview's folders start being measured.
+const MEASURE_AFTER: Duration = Duration::from_secs(10);
 
 /// Opens the app: onboarding if it's due, else the windows. With a `folder`,
 /// only the window, and the session stays as it was for the next launch
@@ -142,6 +144,7 @@ pub fn run(folder: Option<PathBuf>) {
                     trash: paths.trash,
                     drives: Arc::new(browser::System),
                     applications: browser::application_roots(&browser::home()),
+                    root: "/".into(),
                 });
             }
             cx.set_global(Shared {
@@ -174,6 +177,12 @@ pub fn run(folder: Option<PathBuf>) {
             cx.on_action(|_: &ShowWelcome, cx| onboarding::show(onboarding::Step::Welcome, cx));
             window_commands(cx);
             updates::start(cx);
+            // Once the first listings are done, so it doesn't compete with them.
+            cx.spawn(async |cx| {
+                cx.background_executor().timer(MEASURE_AFTER).await;
+                cx.update(browser::measure_overview);
+            })
+            .detach();
             let explicit = folder.is_some();
             // Closing onboarding opens the windows at once: the app quits when
             // its last window closes and none has replaced it.

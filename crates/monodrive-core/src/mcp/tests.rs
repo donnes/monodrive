@@ -911,6 +911,7 @@ fn overview_says_what_is_measured_and_what_is_not() {
         ..paths(&home)
     };
     let mut server = Server::new(ops::Client::new(paths, None), places(&home), Profile::All);
+    server.root = home.join("disk");
     let timed_out = call(&mut server, "overview", json!({"timeout_seconds": 0}));
     assert!(
         text(&timed_out).contains(&format!("{}/Documents/", home.display()))

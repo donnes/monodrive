@@ -84,6 +84,8 @@ pub struct Server {
     /// The name the agent's MCP client gave, to attribute its changes.
     client: Option<String>,
     pub(super) places: places::Store,
+    /// Where the startup disk's own folders are, which the Overview measures.
+    pub(super) root: std::path::PathBuf,
     /// Found on the first Git tool, and again until one is found.
     git: Option<Git>,
     /// What dry runs planned, oldest first, so a confirm runs only that.
@@ -110,6 +112,7 @@ impl Server {
             client: None,
             remote: Connections::new(places.clone(), remote::ssh::connector()),
             places,
+            root: "/".into(),
             previews: Vec::new(),
             git: None,
         }
@@ -342,7 +345,10 @@ impl Server {
 
     /// Where the index is, without starting it.
     pub(super) fn overview_env(&self) -> crate::overview::Env {
-        crate::overview::Env::new(self.ops.trash().to_path_buf(), self.places.clone())
+        crate::overview::Env {
+            root: self.root.clone(),
+            ..crate::overview::Env::new(self.ops.trash().to_path_buf(), self.places.clone())
+        }
     }
 
     pub(super) fn status(&self) -> Result<Status, ToolError> {
