@@ -29,6 +29,7 @@ const USAGE: &str = "usage:
   monodrive-bench run [suite...] --out <folder> [--rounds N] [--seed N] [--tree N] [--against <tool> --against-commit <commit>]
   monodrive-bench run-one --suite <suite> --fixture <folder>
   monodrive-bench report <results.json> [saved results.json]
+  monodrive-bench markdown <results.json>
   monodrive-bench merge <results.json> <more results.json>
   monodrive-bench shape <folder> <source>
   monodrive-bench search-real <copy of index.bin> --out <folder> [--rounds N]
@@ -47,6 +48,9 @@ enum Task {
     Report {
         results: PathBuf,
         saved: Option<PathBuf>,
+    },
+    Markdown {
+        results: PathBuf,
     },
     Merge {
         into: PathBuf,
@@ -186,6 +190,9 @@ fn decode(args: impl Iterator<Item = String>) -> Result<Task, String> {
             results: path(&args.words, 0)?,
             saved: args.words.get(1).map(PathBuf::from),
         }),
+        "markdown" => Ok(Task::Markdown {
+            results: path(&args.words, 0)?,
+        }),
         "merge" => Ok(Task::Merge {
             into: path(&args.words, 0)?,
             from: path(&args.words, 1)?,
@@ -260,6 +267,7 @@ fn run(task: Task) -> Result<(), String> {
             println!("{}", page.display());
             Ok(())
         }
+        Task::Markdown { results } => report::print_markdown(&results),
         Task::Merge { into, from } => {
             let read = |path: &PathBuf| -> Result<format::Results, String> {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
