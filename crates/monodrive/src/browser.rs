@@ -60,10 +60,10 @@ use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
 use crate::traffic_lights;
 use crate::updates;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
-    FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window, WindowAppearance, WindowControlArea,
-    actions, canvas, div, prelude::*, px,
+    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, DisplayId, Entity, FocusHandle,
+    Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window, WindowAppearance,
+    WindowControlArea, actions, canvas, div, prelude::*, px,
 };
 use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Request};
@@ -306,6 +306,10 @@ pub struct Browser {
     index: Arc<OnceLock<Result<Index, String>>>,
     /// Saves the window's frame once a move or resize settles.
     frame_save: Task<()>,
+    /// The display the window's size was last worked out for.
+    display: Option<DisplayId>,
+    /// Refits the window to a display it was dropped on.
+    display_fit: Task<()>,
     /// Hands disk changes from fsearch's thread to this view.
     _changes: Task<()>,
     /// What the last change did or why it didn't happen, at the bottom of
@@ -568,6 +572,8 @@ impl Browser {
             drag: drag::Drag::default(),
             index,
             frame_save: Task::ready(()),
+            display: None,
+            display_fit: Task::ready(()),
             _changes: Task::ready(()),
             toast: None,
             jobs,
@@ -1137,10 +1143,11 @@ impl Browser {
         }
     }
 
-    /// Resizes the window when Default size changes, and keeps its frame for
-    /// Last Used once a move or resize settles, rather than on every step of
-    /// a drag.
+    /// Resizes the window when Default size changes or it lands on another
+    /// display, and keeps its frame for Last Used once a move or resize
+    /// settles, rather than on every step of a drag.
     pub fn track_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.display = window.display(cx).map(|display| display.id());
         // Choosing a Default size shows it on this window at once.
         let mut size = cx.global::<Preferences>().window_size;
         cx.observe_global_in::<Preferences>(window, move |_, window, cx| {
@@ -1151,10 +1158,15 @@ impl Browser {
             }
         })
         .detach();
+        // GPUI learns the new display after AppKit's last move, so a window
+        // that stops as it crosses only shows up here.
+        cx.observe_window_display(window, Self::refit_on_new_display)
+            .detach();
         cx.observe_window_bounds(window, |this, window, cx| {
             if window.is_fullscreen() {
                 return;
             }
+            this.refit_on_new_display(window, cx);
             let bounds = window.bounds();
             let frame = preferences::Frame {
                 x: bounds.origin.x.as_f32(),
@@ -1173,6 +1185,28 @@ impl Browser {
             });
         })
         .detach();
+    }
+
+    /// Once the window comes to rest on a display other than the one its size
+    /// was worked out for, resizes it to Default size there. It waits for the
+    /// mouse to come up, since a drag that pauses sends no more moves.
+    fn refit_on_new_display(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.display(cx).map(|display| display.id()) == self.display {
+            self.display_fit = Task::ready(());
+            return;
+        }
+        self.display_fit = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(FRAME_SETTLE).await;
+                if !crate::frame::mouse_held() {
+                    break;
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.display = window.display(cx).map(|display| display.id());
+                crate::frame::refit(cx.global::<Preferences>().window_size, window, cx);
+            });
+        });
     }
 
     fn sheet_open(&self) -> bool {
