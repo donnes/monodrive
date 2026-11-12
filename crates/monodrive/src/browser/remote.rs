@@ -550,22 +550,22 @@ impl Pane {
     }
 
     /// Copy Path: `source:/path` a line, as agents name them.
-    fn remote_copy_path(&self, cx: &mut Context<Self>) {
-        let chosen = self.remote_chosen();
-        let text = if chosen.is_empty() {
-            self.remote.at.as_ref().map(ToString::to_string)
-        } else {
-            Some(
-                chosen
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-        };
-        if let Some(text) = text {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+    fn remote_copy_path(&mut self, cx: &mut Context<Self>) {
+        let mut paths = self.remote_chosen();
+        if paths.is_empty() {
+            paths.extend(self.remote.at.clone());
         }
+        let said = match paths.as_slice() {
+            [] => return,
+            [one] => format!(
+                "Copied the path of \"{}\"",
+                one.name().unwrap_or(one.source())
+            ),
+            many => format!("Copied {} paths", many.len()),
+        };
+        let text: Vec<String> = paths.iter().map(ToString::to_string).collect();
+        cx.write_to_clipboard(ClipboardItem::new_string(text.join("\n")));
+        self.toast(said, false, None, cx);
     }
 
     /// Runs `change` on the server's connection off the UI thread, then lists
@@ -1682,7 +1682,7 @@ impl super::Browser {
         disconnect(id, cx);
         self.sidebar.remotes.retain(|source| source.id != id);
         let id = id.to_owned();
-        self.change_places(cx, move |store, _| store.forget_remote(&id).map(drop));
+        self.change_places(cx, None, move |store, _| store.forget_remote(&id).map(drop));
     }
 }
 

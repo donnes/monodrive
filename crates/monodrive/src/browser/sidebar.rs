@@ -471,11 +471,12 @@ impl Browser {
         }));
     }
 
-    /// Changes a saved list off the UI thread, says why if it can't, and
-    /// reads the lists again.
+    /// Changes a saved list off the UI thread, says `said` once it has or
+    /// why it couldn't, and reads the lists again.
     pub(super) fn change_places(
         &mut self,
         cx: &mut Context<Self>,
+        said: Option<String>,
         change: impl FnOnce(&Store, &[Volume]) -> Result<(), String> + Send + 'static,
     ) {
         let Some(store) = cx.try_global::<Places>().map(|places| places.store.clone()) else {
@@ -488,8 +489,10 @@ impl Browser {
         cx.spawn(async move |this, cx| {
             let changed = changed.await;
             let _ = this.update(cx, |this, cx| {
-                if let Err(why) = changed {
-                    this.toast(why, true, None, cx);
+                match (changed, said) {
+                    (Err(why), _) => this.toast(why, true, None, cx),
+                    (Ok(()), Some(said)) => this.toast(said, false, None, cx),
+                    (Ok(()), None) => {}
                 }
                 this.load_lists(cx);
                 this.relist_recents(cx);
@@ -509,16 +512,18 @@ impl Browser {
         }
     }
 
-    /// Add to Sidebar: pins the folder selected, last.
+    /// Add to Sidebar: pins the folder selected, last, and says so, as the
+    /// sidebar may be hidden.
     pub(super) fn add_to_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.change_places(cx, move |store, volumes| {
+        let said = format!("Added {} to the sidebar", crate::jobs::quoted(&path));
+        self.change_places(cx, Some(said), move |store, volumes| {
             store.pin(&path, None, volumes).map(|_| ())
         });
     }
 
     /// A drop between favorites: pins `paths` before the row at position `at`.
     pub(super) fn pin_folders(&mut self, paths: Vec<PathBuf>, at: usize, cx: &mut Context<Self>) {
-        self.change_places(cx, move |store, volumes| {
+        self.change_places(cx, None, move |store, volumes| {
             store.pin_before(&paths, at, volumes)
         });
     }
@@ -531,7 +536,7 @@ impl Browser {
         let place = self.sidebar.places.remove(ix);
         cx.notify();
         let path = place.at().unwrap_or(&place.favorite.path).to_path_buf();
-        self.change_places(cx, move |store, volumes| store.unpin(&path, volumes));
+        self.change_places(cx, None, move |store, volumes| store.unpin(&path, volumes));
     }
 
     /// Moves favorite `from` to position `to`, on screen at once. One with
@@ -544,7 +549,7 @@ impl Browser {
         let place = places.remove(from);
         places.insert(to, place.clone());
         cx.notify();
-        self.change_places(cx, move |store, volumes| match place.at() {
+        self.change_places(cx, None, move |store, volumes| match place.at() {
             Some(path) => store.pin(path, Some(to), volumes).map(|_| ()),
             None => store.move_favorite(&place.favorite, to),
         });

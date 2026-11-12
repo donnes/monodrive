@@ -2236,9 +2236,15 @@ impl Render for Browser {
                     this.check_for_updates(window, cx)
                 }))
             })
-            .on_action(|_: &ToggleHiddenFiles, _, cx| {
-                preferences::update(cx, |p| p.show_hidden = !p.show_hidden)
-            })
+            // Said, as a folder with nothing hidden looks the same either way.
+            .on_action(cx.listener(|this, _: &ToggleHiddenFiles, _, cx| {
+                preferences::update(cx, |p| p.show_hidden = !p.show_hidden);
+                let said = match cx.global::<Preferences>().show_hidden {
+                    true => "Showing hidden files",
+                    false => "Hiding hidden files",
+                };
+                this.toast(said.into(), false, None, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)),
             )

@@ -2243,10 +2243,14 @@ impl Pane {
                 self.toast(why, true, download, cx);
             }
         } else if let Some(said) = said(&request, &outcome) {
-            // Undo from the toast undoes this change or nothing.
+            // Undo from the toast undoes this change or nothing. Erasing
+            // can't be undone, and an undo or redo leaves the rest to ⌘Z and ⌘⇧Z.
             let changed = !outcome.items.is_empty();
-            let undo = (changed && !matches!(request, Request::EmptyTrash { .. }))
-                .then_some(Offer::Undo(outcome.op));
+            let undoable = !matches!(
+                request,
+                Request::EmptyTrash { .. } | Request::Undo | Request::UndoOf { .. } | Request::Redo
+            );
+            let undo = (changed && undoable).then_some(Offer::Undo(outcome.op));
             self.toast(said, false, undo, cx);
             match &request {
                 Request::Trash { .. } if changed => feedback::sound(Sound::MoveToTrash, cx),
@@ -2257,7 +2261,7 @@ impl Pane {
                 cx.emit(PaneEvent::VolumesChanged);
             }
         } else {
-            // An undo leaves the last toast's Undo stale.
+            // Whatever the last toast offered may be stale now.
             cx.emit(PaneEvent::ClearToast);
         }
         let landed = outcome
@@ -2360,10 +2364,17 @@ impl Pane {
     }
 
     /// Copy: the selected files on the pasteboard, for any app to paste.
-    fn copy_files(&self, cx: &App) {
-        if let Some(board) = cx.try_global::<Pasteboard>() {
-            board.write_files(&self.chosen());
-        }
+    fn copy_files(&mut self, cx: &mut Context<Self>) {
+        let chosen = self.chosen();
+        let Some(board) = cx.try_global::<Pasteboard>().filter(|_| !chosen.is_empty()) else {
+            return;
+        };
+        board.write_files(&chosen);
+        let what = match chosen.as_slice() {
+            [one] => jobs::quoted(one),
+            many => format!("{} items", many.len()),
+        };
+        self.toast(format!("Copied {what} to the clipboard"), false, None, cx);
     }
 
     /// Paste, or with `moving` Move Here: the files on the pasteboard, from
@@ -2669,26 +2680,28 @@ impl Pane {
 
     /// Copies the selected paths, one per line in the order shown, or the
     /// folder's, ready to paste into an agent's prompt or a terminal.
-    pub(super) fn copy_path(&self, cx: &mut Context<Self>) {
+    pub(super) fn copy_path(&mut self, cx: &mut Context<Self>) {
         if let Some(worktree) = self
             .worktrees
             .selected()
             .filter(|_| self.showing_worktrees())
         {
             let text = worktree.display().to_string();
-            return cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            let said = format!("Copied the path of {}", jobs::quoted(worktree));
+            return self.toast(said, false, None, cx);
         }
-        let chosen = self.selection.in_order(&self.entries);
-        let text = if chosen.is_empty() {
-            self.disk_folder().display().to_string()
-        } else {
-            let paths: Vec<String> = chosen
-                .iter()
-                .map(|e| e.path.display().to_string())
-                .collect();
-            paths.join("\n")
+        let mut paths = self.chosen();
+        if paths.is_empty() {
+            paths.push(self.disk_folder().to_path_buf());
+        }
+        let text: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        cx.write_to_clipboard(ClipboardItem::new_string(text.join("\n")));
+        let said = match paths.as_slice() {
+            [one] => format!("Copied the path of {}", jobs::quoted(one)),
+            many => format!("Copied {} paths", many.len()),
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.toast(said, false, None, cx);
     }
 
     /// The folder's path as clickable steps, from the disk to here.
@@ -3381,6 +3394,15 @@ pub(super) fn said(request: &Request, outcome: &Outcome) -> Option<String> {
             format!("Moved {} to the Trash", jobs::quoted(path))
         }
         Request::RemoveWorktree { path, .. } => format!("Forgot {}", jobs::quoted(path)),
+        // The owner titles these "Undo Rename", from the change they reverse.
+        Request::Undo | Request::UndoOf { .. } | Request::Redo => {
+            let of = outcome.title.strip_prefix(request.title()).unwrap_or("");
+            let verb = match request {
+                Request::Redo => "Redid",
+                _ => "Undid",
+            };
+            format!("{verb}{of}")
+        }
         _ => return None,
     })
 }
