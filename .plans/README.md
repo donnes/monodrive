@@ -32,9 +32,9 @@ Update a plan's row when its work lands on `main`.
 | 25 Filesystem speed | Done; cold listing waits for the quiet Mac, and `fseventsd`'s load and the Developer Tools permission need a person to check | |
 | 26 MCP contract v1 | Done; tried with Claude Code and Codex, not Cursor, whose CLI wasn't signed in | |
 | 27 Overview | Done except step 5: worktree suggestions (one row for all clean worktrees, picked) wait for plan 22's view, and Free up's link waits for plan 17's report | 82cb1cf |
-| 28 Built-in previews and editing | Done; the full app, with a real shared owner and session, needs a person to check | |
-| 29 Video thumbnails | Done; a real share and a folder behind a privacy prompt need a person to check | |
-| 30 Name and organize files | Suggest Names and rules-only Organize done, for text-based files with no model; a model is held behind a speed gate; the review page is option A, picked without drawn options | |
+| 28 Built-in previews and editing | Done | |
+| 29 Video thumbnails | Done | |
+| 30 Name and organize files | Refactor; later | |
 
 ## UI picks
 
