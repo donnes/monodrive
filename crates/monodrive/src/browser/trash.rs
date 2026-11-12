@@ -110,6 +110,7 @@ impl Pane {
 
     /// A page in front of the folder, as a place in the history.
     pub(super) fn open_page(&mut self, shows: Shows, window: &mut Window, cx: &mut Context<Self>) {
+        self.worktrees.suggested.clear();
         if self.stop().shows != shows {
             self.collapse_all();
             self.history.truncate(self.at + 1);

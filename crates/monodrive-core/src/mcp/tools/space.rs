@@ -135,11 +135,16 @@ pub struct UsedBy {
 
 #[derive(Serialize, JsonSchema)]
 pub struct Suggestion {
+    /// The folder to move to the Trash. Empty for clean worktrees, which
+    /// `worktrees` lists.
     pub path: String,
     /// What trashing it frees once the Trash is emptied, at least.
     pub frees: u64,
     pub title: String,
     pub why: String,
+    /// Clean worktrees, to remove one at a time with remove_worktree.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub worktrees: Vec<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -192,9 +197,20 @@ impl Call for Overview {
         };
         // Only an index this session already started: looking at the
         // Overview must never start one.
-        if let Some(index) = server.started_index() {
-            let git = Git::find().ok();
+        let index = server.started_index();
+        let git = Git::find().ok();
+        if let Some(index) = index {
             let _ = overview::discover(&env, git.as_ref(), |name, limit| index.find(name, limit));
+        }
+        // Worktrees are worth asking Git about only when suggestions show.
+        // Without the index, those registered or clean last time are asked
+        // about again.
+        let low = read(overview::now()).headline.is_some_and(|disk| disk.low);
+        if let (true, Some(git)) = (low, &git) {
+            let _ = overview::check_worktrees(&env, git, |name, limit| match index {
+                Some(index) => index.find(name, limit),
+                None => Err("The index isn't running.".to_string()),
+            });
         }
         let now = overview::now();
         for folder in read(now).due {
@@ -226,10 +242,15 @@ impl Call for Overview {
                 .suggestions
                 .iter()
                 .map(|suggestion| Suggestion {
-                    path: shown(&suggestion.path),
+                    path: suggestion.trash().map_or_else(String::new, shown),
                     frees: suggestion.size.unshared,
-                    title: suggestion.evidence.title(),
-                    why: suggestion.evidence.why(),
+                    title: suggestion.title(),
+                    why: suggestion.why(),
+                    worktrees: suggestion
+                        .worktrees()
+                        .iter()
+                        .map(|path| shown(path))
+                        .collect(),
                 })
                 .collect(),
             stuff: about
@@ -335,14 +356,20 @@ fn overview_text(about: &overview::Overview, now: u64) -> String {
             .size
             .age(now)
             .map_or(String::new(), |age| format!(", {age}"));
+        let what = suggestion.trash().map_or_else(
+            || "worktrees".to_string(),
+            |path| path.display().to_string(),
+        );
         let _ = writeln!(
             out,
-            "frees {short}{}{age} {}: {}. {}",
+            "frees {short}{}{age} {what}: {}. {}",
             bytes(suggestion.size.unshared),
-            suggestion.path.display(),
-            suggestion.evidence.title(),
-            suggestion.evidence.why()
+            suggestion.title(),
+            suggestion.why()
         );
+        for worktree in suggestion.worktrees() {
+            let _ = writeln!(out, "  {}", worktree.display());
+        }
     }
     if !about.stuff.is_empty() {
         out.push_str("stuff:\n");
@@ -915,4 +942,37 @@ fn cleanup_text(plan: &Cleanup) -> String {
         plan.frees
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_worktrees_print_each_path_for_remove_worktree() {
+        let size = overview::Measured {
+            on_disk: 3_000_000_000,
+            unshared: 3_000_000_000,
+            at: 0,
+            complete: false,
+        };
+        let worktrees = vec![PathBuf::from("/w/app-a"), PathBuf::from("/w/lib-b")];
+        let about = overview::Overview {
+            suggestions: vec![overview::Suggestion {
+                evidence: overview::Evidence::Worktrees {
+                    worktrees: worktrees.clone(),
+                    repositories: vec!["app".into(), "lib".into()],
+                },
+                folders: vec![(worktrees[0].clone(), size)],
+                size,
+            }],
+            ..overview::Overview::default()
+        };
+        assert_eq!(
+            overview_text(&about, 0),
+            "suggestions:\n\
+             frees at least 3.0 GB worktrees: Remove 2 clean worktrees. Measured 1 of 2. No changes or commits only they hold. In app and lib.\n  \
+             /w/app-a\n  /w/lib-b\n"
+        );
+    }
 }
