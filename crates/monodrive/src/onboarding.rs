@@ -1,5 +1,6 @@
 //! First launch, in a window of its own: what Monodrive is and the keys to
-//! know, then one checklist of Full Disk Access and coding agents. It comes
+//! know, then one checklist of Full Disk Access, Show in Finder and coding
+//! agents. It comes
 //! before the main windows and before the first crawl, which would otherwise
 //! run without the access and again after it. Show Welcome and the sidebar's
 //! notice open it later.
@@ -8,6 +9,7 @@ use crate::agents::{self, Action, Harness};
 use crate::assets::LOGO;
 use crate::browser::{self, QuickLook, SharedIndex};
 use crate::commands::{self, OpenPalette};
+use crate::finder::{self, Viewer};
 use crate::preferences::{self, Preferences};
 use crate::theme::{self, ButtonLook, content, icon, text_button};
 use crate::traffic_lights;
@@ -26,7 +28,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 /// Raise it to show onboarding once more to everyone who finished this one.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 const WIDTH: f32 = 640.;
 const HEIGHT: f32 = 520.;
@@ -85,6 +87,11 @@ pub trait Setup: Send + Sync {
     fn agents(&self) -> (Vec<Harness>, Vec<Harness>);
     /// Blocks on the disk and the agent's CLI, so call it off the UI thread.
     fn apply_agent(&self, harness: Harness, action: Action) -> Result<(), String>;
+    /// Who gets other apps' Show in Finder. Call it off the UI thread.
+    fn show_in_finder(&self) -> finder::Status;
+    /// Gives other apps' Show in Finder to Monodrive, or hands it back. Call
+    /// it off the UI thread.
+    fn set_show_in_finder(&self, on: bool) -> finder::Status;
 }
 
 /// The real thing.
@@ -141,6 +148,14 @@ impl Setup for System {
     fn apply_agent(&self, harness: Harness, action: Action) -> Result<(), String> {
         let home = agents::home().ok_or("HOME isn't set.")?;
         harness.apply(action, &agents::exe(), &home)
+    }
+
+    fn show_in_finder(&self) -> finder::Status {
+        finder::status()
+    }
+
+    fn set_show_in_finder(&self, on: bool) -> finder::Status {
+        finder::set(on)
     }
 }
 
@@ -436,6 +451,10 @@ pub struct Onboarding {
     added: Vec<Harness>,
     busy: Option<Harness>,
     failed: Option<(Harness, String)>,
+    /// Who gets other apps' Show in Finder, once macOS has said.
+    finder: Option<finder::Status>,
+    /// Show in Finder is being switched.
+    switching: bool,
     focus: FocusHandle,
     /// The Tab stops, kept across frames.
     stops: RefCell<HashMap<&'static str, FocusHandle>>,
@@ -461,6 +480,8 @@ impl Onboarding {
             added: Vec::new(),
             busy: None,
             failed: None,
+            finder: None,
+            switching: false,
             focus: cx.focus_handle(),
             stops: RefCell::default(),
             glass: None,
@@ -474,6 +495,7 @@ impl Onboarding {
         self.step = step;
         if step == Step::Checklist {
             self.read_agents(cx);
+            self.ask_finder(None, cx);
         }
         cx.notify();
     }
@@ -517,6 +539,36 @@ impl Onboarding {
                 let shown = detected.iter().copied().chain(also).collect();
                 this.agents = Some(shown);
                 this.added = added;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Who gets Show in Finder, after switching it `on` or off if asked. Off
+    /// the UI thread, as it writes macOS's preferences and a login item.
+    fn ask_finder(&mut self, switch: Option<bool>, cx: &mut Context<Self>) {
+        if switch.is_some() {
+            if self.switching {
+                return;
+            }
+            self.switching = true;
+            cx.notify();
+        }
+        let setup = self.setup.clone();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move {
+                    match switch {
+                        Some(on) => setup.set_show_in_finder(on),
+                        None => setup.show_in_finder(),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.switching &= switch.is_none();
+                this.finder = Some(status);
                 cx.notify();
             });
         })
@@ -806,6 +858,69 @@ impl Onboarding {
         )
     }
 
+    /// Offers other apps' Show in Finder. Off by default, so it's a choice
+    /// here like an agent, never a step to get past.
+    fn finder_row(&self, cx: &mut Context<Self>) -> Div {
+        let status = self.finder.as_ref();
+        let on = status.is_some_and(|status| status.viewer == Viewer::Monodrive);
+        let can_switch = !self.switching && status.is_some_and(|status| status.blocked.is_none());
+        let failed = status.is_some_and(|status| status.failed.is_some());
+        let subtitle = div()
+            .text_color(if failed {
+                theme::danger()
+            } else {
+                content(0.65)
+            })
+            .child(status.map_or_else(
+                || "Other apps' Show in Finder opens here instead of Finder.".into(),
+                finder::Status::summary,
+            ));
+        let (label, look) = match (on, can_switch) {
+            (true, true) => ("Turn Off", ButtonLook::Ghost),
+            (false, true) => ("Make Default", ButtonLook::Secondary),
+            (true, false) => ("Turn Off", ButtonLook::Disabled),
+            (false, false) => ("Make Default", ButtonLook::Disabled),
+        };
+        let toggle = self
+            .button(
+                "show-in-finder",
+                label,
+                look,
+                move |this, _, cx| {
+                    if can_switch {
+                        this.ask_finder(Some(!on), cx);
+                    }
+                },
+                cx,
+            )
+            .aria_label(if on {
+                "Stop using Monodrive as the default file browser"
+            } else {
+                "Make Monodrive the default file browser"
+            });
+        let tile = div()
+            .size(px(TILE))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(theme::RADIUS_THUMB))
+            .bg(content(0.08))
+            .child(icon("folder-01", 16.).text_color(content(1.)));
+        row(
+            tile.into_any_element(),
+            "Default file browser",
+            subtitle,
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .when(on, |d| d.child(done("On")))
+                .child(toggle)
+                .into_any_element(),
+        )
+    }
+
     fn checklist(&self, cx: &mut Context<Self>) -> Div {
         let shown = self.agents.clone().unwrap_or_default();
         let empty = self.agents.as_ref().is_some_and(Vec::is_empty);
@@ -838,6 +953,8 @@ impl Onboarding {
                     .rounded(px(theme::RADIUS_CARD))
                     .bg(content(0.03))
                     .child(self.access_row(cx))
+                    .child(hairline())
+                    .child(self.finder_row(cx))
                     .children(agents.into_iter().flat_map(|agent| {
                         [hairline().into_any_element(), agent.into_any_element()]
                     }))

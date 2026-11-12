@@ -6,6 +6,7 @@ use crate::agents::{self, Action, Harness, Setup};
 use crate::background::{self, Backdrop, Effect, Look, Scope};
 use crate::browser::CheckForUpdates;
 use crate::commands::{self, Group};
+use crate::finder::{self, Viewer};
 use crate::frame;
 use crate::motion;
 use crate::native::native;
@@ -204,6 +205,8 @@ impl Slider {
 pub struct SettingsView {
     /// The terminals on offer.
     terminals: Vec<Terminal>,
+    /// Who gets other apps' Show in Finder, once macOS has said.
+    finder: Option<finder::Status>,
     focus: FocusHandle,
     page: Page,
     /// Each slider's track as last laid out, to turn a pointer into a value.
@@ -274,8 +277,10 @@ impl Focusable for SettingsView {
 impl SettingsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self::find_terminals(cx);
+        Self::ask_finder(None, cx);
         Self {
             terminals: vec![Terminal::Terminal],
+            finder: None,
             focus: cx.focus_handle(),
             page: Page::General,
             tracks: Rc::default(),
@@ -408,6 +413,22 @@ impl SettingsView {
             self.check_agents(cx);
         }
         cx.notify();
+    }
+
+    /// Who gets other apps' Show in Finder, after switching it `on` or off
+    /// if asked. Off the UI thread, as LaunchServices names the app.
+    fn ask_finder(switch: Option<bool>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { switch.map_or_else(finder::status, finder::set) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.finder = Some(status);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Which terminals are installed, asked off the UI thread. The one chosen
@@ -885,8 +906,48 @@ impl SettingsView {
                     ),
                 ],
             ),
+            group("Finder", None, vec![self.show_in_finder(cx)]),
             self.updates_group(p, cx),
         ]
+    }
+
+    /// The switch that sends other apps' Show in Finder here. It shows what
+    /// macOS says rather than a saved setting, since another app can take
+    /// it at any time.
+    fn show_in_finder(&self, cx: &mut Context<Self>) -> AnyElement {
+        const LABEL: &str = "Make default file browser";
+        let on = self
+            .finder
+            .as_ref()
+            .is_some_and(|status| status.viewer == Viewer::Monodrive);
+        let enabled = self
+            .finder
+            .as_ref()
+            .is_some_and(|status| status.blocked.is_none());
+        let description = self.finder.as_ref().map_or_else(
+            || "Other apps' Show in Finder opens here instead of Finder.".into(),
+            finder::Status::summary,
+        );
+        row_with(
+            LABEL,
+            Some(description.into()),
+            self.focusable(
+                "show-in-finder",
+                enabled,
+                theme::switch(on)
+                    .id("show-in-finder")
+                    .role(Role::Switch)
+                    .aria_label(LABEL)
+                    .aria_toggled(if on { Toggled::True } else { Toggled::False })
+                    .when(!enabled, |d| d.opacity(0.4))
+                    .when(enabled, |d| {
+                        d.cursor_pointer().on_click(
+                            cx.listener(move |_, _, _, cx| Self::ask_finder(Some(!on), cx)),
+                        )
+                    }),
+                cx,
+            ),
+        )
     }
 
     fn updates_group(&self, p: &Preferences, cx: &mut Context<Self>) -> AnyElement {
@@ -2383,6 +2444,15 @@ fn group(
 fn row(
     label: &'static str,
     description: Option<&'static str>,
+    control: impl IntoElement,
+) -> AnyElement {
+    row_with(label, description.map(SharedString::from), control)
+}
+
+/// A row whose description changes.
+fn row_with(
+    label: &'static str,
+    description: Option<SharedString>,
     control: impl IntoElement,
 ) -> AnyElement {
     div()

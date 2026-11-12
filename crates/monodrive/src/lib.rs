@@ -11,6 +11,7 @@ pub mod downloads;
 mod empty_trash;
 mod feedback;
 pub mod file_icons;
+pub mod finder;
 mod frame;
 mod goto;
 mod jobs;
@@ -97,104 +98,110 @@ const MEASURE_AFTER: Duration = Duration::from_secs(10);
 /// without one.
 pub fn run(folder: Option<PathBuf>) {
     let platform = gpui_platform::current_platform(false);
-    gpui::Application::with_platform(platform)
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            #[cfg(feature = "profile")]
-            profile::start(cx);
-            preferences::init(cx);
-            // Read at launch. GPUI's animations and the sidebar's slide skip
-            // to where they end with it.
-            cx.set_reduce_motion(
-                objc2_app_kit::NSWorkspace::sharedWorkspace()
-                    .accessibilityDisplayShouldReduceMotion(),
-            );
-            let index: browser::SharedIndex = browser::SharedIndex(Arc::default());
-            let setup = Arc::new(onboarding::System::new(index.0.clone()));
-            cx.set_global(index);
-            let (jobs, volumes, lists) = (Hub::default(), Hub::default(), Hub::default());
-            // Connects on the first change or look at the jobs, starting the
-            // owner if needed. The watch on its journal connects to nothing.
-            let mut job_watch = None;
-            if let Some(paths) = monodrive_core::ops::Paths::user() {
-                let client = monodrive_core::ops::Client::new(paths, frame::owner_exe());
-                let heard = jobs.clone();
-                job_watch = client.watch(move || heard.say()).ok();
-                cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));
-            }
-            let mut place_watches = None;
-            if let (Some(store), Some(paths)) = (
-                monodrive_core::places::Store::user(),
-                monodrive_core::ops::Paths::user(),
-            ) {
-                let (heard_volumes, heard_lists) = (volumes.clone(), lists.clone());
-                place_watches = Some((
-                    monodrive_core::volumes::watch(move || heard_volumes.say()).ok(),
-                    store.watch(move || heard_lists.say()).ok(),
-                ));
-                cx.set_global(browser::Places {
-                    previews: monodrive_core::support_dir()
-                        .unwrap_or_default()
-                        .join("previews"),
-                    remote: Arc::new(monodrive_core::remote::Connections::new(
-                        store.clone(),
-                        monodrive_core::remote::ssh::connector(),
-                    )),
-                    store,
-                    trash: paths.trash,
-                    drives: Arc::new(browser::System),
-                    applications: browser::application_roots(&browser::home()),
-                    root: "/".into(),
-                });
-            }
-            cx.set_global(Shared {
-                jobs,
-                volumes,
-                lists,
-                _watches: Box::new((job_watch, place_watches)),
+    let app = gpui::Application::with_platform(platform).with_assets(assets::Assets);
+    // Before launch finishes: a Show in Finder that launches the app arrives
+    // before `run`'s callback does.
+    let (requests, arrived) = async_channel::unbounded();
+    let opened = requests.clone();
+    app.on_open_urls(move |urls| {
+        let _ = opened.try_send(finder::Request::opened(&urls));
+    });
+    app.run(move |cx: &mut App| {
+        #[cfg(feature = "profile")]
+        profile::start(cx);
+        preferences::init(cx);
+        // Read at launch. GPUI's animations and the sidebar's slide skip
+        // to where they end with it.
+        cx.set_reduce_motion(
+            objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion(),
+        );
+        let index: browser::SharedIndex = browser::SharedIndex(Arc::default());
+        let setup = Arc::new(onboarding::System::new(index.0.clone()));
+        cx.set_global(index);
+        let (jobs, volumes, lists) = (Hub::default(), Hub::default(), Hub::default());
+        // Connects on the first change or look at the jobs, starting the
+        // owner if needed. The watch on its journal connects to nothing.
+        let mut job_watch = None;
+        if let Some(paths) = monodrive_core::ops::Paths::user() {
+            let client = monodrive_core::ops::Client::new(paths, frame::owner_exe());
+            let heard = jobs.clone();
+            job_watch = client.watch(move || heard.say()).ok();
+            cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));
+        }
+        let mut place_watches = None;
+        if let (Some(store), Some(paths)) = (
+            monodrive_core::places::Store::user(),
+            monodrive_core::ops::Paths::user(),
+        ) {
+            let (heard_volumes, heard_lists) = (volumes.clone(), lists.clone());
+            place_watches = Some((
+                monodrive_core::volumes::watch(move || heard_volumes.say()).ok(),
+                store.watch(move || heard_lists.say()).ok(),
+            ));
+            cx.set_global(browser::Places {
+                previews: monodrive_core::support_dir()
+                    .unwrap_or_default()
+                    .join("previews"),
+                remote: Arc::new(monodrive_core::remote::Connections::new(
+                    store.clone(),
+                    monodrive_core::remote::ssh::connector(),
+                )),
+                store,
+                trash: paths.trash,
+                drives: Arc::new(browser::System),
+                applications: browser::application_roots(&browser::home()),
+                root: "/".into(),
             });
-            cx.set_global(pasteboard::Pasteboard::general());
-            cx.set_global(feedback::Feedback::default());
-            commands::apply(cx);
-            // A changed shortcut rebuilds the keymap and the menu bar; Show
-            // Hidden Files' checkmark rebuilds the menu bar alone.
-            cx.observe_global::<Preferences>(|cx| {
-                commands::apply(cx);
-                commands::refresh_menus(cx);
-            })
-            .detach();
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.on_action(|_: &Hide, cx| cx.hide());
-            cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
-            cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-            cx.on_action(|_: &NewWindow, cx| {
-                // During first launch, the windows onboarding is holding back.
-                if !onboarding::open_windows_now(cx) {
-                    open_window(Opening::Folder(browser::home()), cx);
-                }
-                frame::bring_forward(cx);
-            });
-            cx.on_action(|_: &ShowWelcome, cx| onboarding::show(onboarding::Step::Welcome, cx));
-            window_commands(cx);
-            updates::start(cx);
-            // Once the first listings are done, so it doesn't compete with them.
-            cx.spawn(async |cx| {
-                cx.background_executor().timer(MEASURE_AFTER).await;
-                cx.update(browser::measure_overview);
-            })
-            .detach();
-            let explicit = folder.is_some();
-            // Closing onboarding opens the windows at once: the app quits when
-            // its last window closes and none has replaced it.
-            let wait_for_listing = !onboarding::due(explicit, cx);
-            onboarding::launch(
-                explicit,
-                setup,
-                move |cx| open_windows(folder, wait_for_listing, cx),
-                open_main_window,
-                cx,
-            );
+        }
+        cx.set_global(Shared {
+            jobs,
+            volumes,
+            lists,
+            _watches: Box::new((job_watch, place_watches)),
         });
+        cx.set_global(pasteboard::Pasteboard::general());
+        cx.set_global(feedback::Feedback::default());
+        commands::apply(cx);
+        // A changed shortcut rebuilds the keymap and the menu bar; Show
+        // Hidden Files' checkmark rebuilds the menu bar alone.
+        cx.observe_global::<Preferences>(|cx| {
+            commands::apply(cx);
+            commands::refresh_menus(cx);
+        })
+        .detach();
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Hide, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        cx.on_action(|_: &NewWindow, cx| {
+            // During first launch, the windows onboarding is holding back.
+            if !onboarding::open_windows_now(cx) {
+                open_window(Opening::Folder(browser::home()), cx);
+            }
+            frame::bring_forward(cx);
+        });
+        cx.on_action(|_: &ShowWelcome, cx| onboarding::show(onboarding::Step::Welcome, cx));
+        window_commands(cx);
+        finder::serve(requests, arrived, cx);
+        updates::start(cx);
+        // Once the first listings are done, so it doesn't compete with them.
+        cx.spawn(async |cx| {
+            cx.background_executor().timer(MEASURE_AFTER).await;
+            cx.update(browser::measure_overview);
+        })
+        .detach();
+        let explicit = folder.is_some();
+        // Closing onboarding opens the windows at once: the app quits when
+        // its last window closes and none has replaced it.
+        let wait_for_listing = !onboarding::due(explicit, cx);
+        onboarding::launch(
+            explicit,
+            setup,
+            move |cx| open_windows(folder, wait_for_listing, cx),
+            open_main_window,
+            cx,
+        );
+    });
 }
 
 /// Opens `folder`, or the windows of the last session. The session starts
@@ -231,6 +238,7 @@ fn open_windows(folder: Option<PathBuf>, wait_for_listing: bool, cx: &mut App) {
             show_window(view, frame, cx);
         }
         frame::bring_forward(cx);
+        finder::deliver(cx);
     };
     if wait_for_listing {
         when_listed(views, show, cx);
@@ -320,6 +328,7 @@ fn window_commands(cx: &mut App) {
 fn open_window(opening: Opening, cx: &mut App) {
     let view = browser_for(opening, cx);
     show_window(view, None, cx);
+    finder::deliver(cx);
 }
 
 /// A browser on `opening`, its listing on the way, with no window yet.
