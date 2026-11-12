@@ -133,8 +133,9 @@ impl Pane {
         cx.spawn(async move |this, cx| {
             let cleared = cleared.await;
             let _ = this.update(cx, |this, cx| {
-                if let Err(why) = cleared {
-                    this.toast(why, true, None, cx);
+                match cleared {
+                    Ok(()) => this.toast("Cleared Recents".into(), false, None, cx),
+                    Err(why) => this.toast(why, true, None, cx),
                 }
                 if this.showing_recents() {
                     this.list(true, cx);

@@ -2422,6 +2422,11 @@ fn the_worktrees_page_opens_a_worktree_and_moves_one_to_the_trash_once_asked(
     assert_eq!(here(&browser, cx), app);
     press(cx, "cmd-[");
     assert!(on_screen(cx, "worktrees-page"));
+    press(cx, "cmd-alt-c");
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Copied the path of \"app\"".into(), false, false))
+    );
 
     // The repository's own checkout stays, and the card says why.
     press(cx, "cmd-backspace");

@@ -1317,8 +1317,16 @@ fn undo_reverses_an_agents_rename_after_that_agent_has_gone(cx: &mut TestAppCont
     let (browser, cx) = browse(&project, cx);
     press(cx, "cmd-z");
     assert!(a.exists() && !b.exists());
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Undid Rename".into(), false, false))
+    );
     press(cx, "cmd-shift-z");
     assert!(b.exists() && !a.exists());
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Redid Rename".into(), false, false))
+    );
     press(cx, "cmd-shift-z");
     assert_eq!(
         toast(&browser, cx),
@@ -1671,7 +1679,11 @@ fn duplicate_selects_the_copy_and_trash_undoes(cx: &mut TestAppContext) {
     click(cx, "toast-offer");
     assert!(project.join("a copy.txt").exists());
     assert_eq!(shown(&browser, cx).1, ["a copy.txt"]);
-    assert_eq!(toast(&browser, cx), None);
+    // It says what it undid, and offers no Undo of the undo.
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Undid Move to Trash".into(), false, false))
+    );
     release(owned, cx);
 }
 

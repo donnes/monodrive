@@ -97,6 +97,13 @@ fn a_saved_server_opens_in_the_pane_and_back_leaves_it(cx: &mut TestAppContext) 
     // The last row, selected, goes from the server; ⇧ extends from what's left.
     press(cx, "down down down");
     assert_eq!(listed(&browser, cx).1, ["a.txt"]);
+    // Copy Path names it as agents do, and says so.
+    press(cx, "cmd-alt-c");
+    assert_eq!(copied(cx), format!("box:{start}/a.txt"));
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Copied the path of \"a.txt\"".into(), false, false))
+    );
     std::fs::rename(far.join("a.txt"), far.join("docs/a.txt")).unwrap();
     on_pane(&browser, cx, |pane, cx| pane.list(true, cx));
     cx.run_until_parked();
@@ -104,6 +111,21 @@ fn a_saved_server_opens_in_the_pane_and_back_leaves_it(cx: &mut TestAppContext) 
     assert_eq!(listed(&browser, cx).0, ["docs", ".profile"]);
     press(cx, "shift-up");
     assert_eq!(listed(&browser, cx).1, ["docs", ".profile"]);
+    press(cx, "cmd-alt-c");
+    assert_eq!(
+        copied(cx),
+        format!("box:{start}/docs\nbox:{start}/.profile")
+    );
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Copied 2 paths".into(), false, false))
+    );
+}
+
+/// The text on the clipboard.
+fn copied(cx: &mut VisualTestContext) -> String {
+    cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap_or_default()
 }
 
 #[gpui::test]
