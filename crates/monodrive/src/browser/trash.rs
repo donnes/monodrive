@@ -77,10 +77,10 @@ impl Pane {
         self.query.is_empty() && self.history[self.at].shows == Shows::Worktrees
     }
 
-    /// Whether a page that isn't a listing, the Overview or Worktrees, is on
-    /// screen.
+    /// Whether a page that isn't a listing, the Overview, Worktrees or
+    /// Find Duplicates, is on screen.
     pub(super) fn showing_page(&self) -> bool {
-        self.showing_overview() || self.showing_worktrees()
+        self.showing_overview() || self.showing_worktrees() || self.showing_duplicates()
     }
 
     /// Whether the rows are a folder's, rather than search results or Recents.

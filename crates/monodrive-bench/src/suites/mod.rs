@@ -12,6 +12,8 @@ pub mod mcp;
 pub mod platform;
 #[cfg(target_os = "macos")]
 pub mod search;
+#[cfg(target_os = "macos")]
+pub mod storage;
 pub mod workload;
 
 use crate::format::Measured;
@@ -24,6 +26,8 @@ pub enum Suite {
     Core,
     #[cfg(target_os = "macos")]
     Search,
+    #[cfg(target_os = "macos")]
+    Storage,
     #[cfg(target_os = "macos")]
     Mcp,
     Workload,
@@ -39,6 +43,7 @@ impl Suite {
             Suite::Platform,
             Suite::Core,
             Suite::Search,
+            Suite::Storage,
             Suite::Mcp,
             Suite::Workload,
             Suite::Compare,
@@ -55,6 +60,8 @@ impl Suite {
             #[cfg(target_os = "macos")]
             Suite::Search => "search",
             #[cfg(target_os = "macos")]
+            Suite::Storage => "storage",
+            #[cfg(target_os = "macos")]
             Suite::Mcp => "mcp",
             Suite::Workload => "workload",
             #[cfg(target_os = "macos")]
@@ -69,6 +76,8 @@ impl Suite {
             "core" => Ok(Suite::Core),
             #[cfg(target_os = "macos")]
             "search" => Ok(Suite::Search),
+            #[cfg(target_os = "macos")]
+            "storage" => Ok(Suite::Storage),
             #[cfg(target_os = "macos")]
             "mcp" => Ok(Suite::Mcp),
             "workload" => Ok(Suite::Workload),
@@ -99,6 +108,8 @@ impl Suite {
             #[cfg(target_os = "macos")]
             Suite::Search => search::prepare(fixture, seed),
             #[cfg(target_os = "macos")]
+            Suite::Storage => storage::prepare(fixture, seed),
+            #[cfg(target_os = "macos")]
             Suite::Mcp => mcp::prepare(fixture, seed),
             Suite::Workload => workload::prepare(fixture, seed),
             #[cfg(target_os = "macos")]
@@ -114,6 +125,8 @@ impl Suite {
             Suite::Core => core::round(fixture),
             #[cfg(target_os = "macos")]
             Suite::Search => search::round(fixture),
+            #[cfg(target_os = "macos")]
+            Suite::Storage => storage::round(fixture),
             #[cfg(target_os = "macos")]
             Suite::Mcp => mcp::round(fixture),
             Suite::Workload => workload::round(fixture),

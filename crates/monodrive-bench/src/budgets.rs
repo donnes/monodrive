@@ -119,6 +119,7 @@ mod tests {
                             })
                             .collect(),
                         checks: vec![],
+                        peaks: Vec::new(),
                     }],
                 }],
             }],

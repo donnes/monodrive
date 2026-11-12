@@ -260,6 +260,7 @@ fn measured(
         cache: Cache::Warm,
         sample,
         check,
+        peak_bytes: None,
     }
 }
 

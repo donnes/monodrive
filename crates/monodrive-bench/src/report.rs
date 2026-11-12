@@ -441,13 +441,16 @@ fn group(
                 .map(|s| s.instructions.map(|n| n as f64)),
         )
         .map_or_else(|| "–".to_string(), |n| format!("{:.1}M", n / 1e6));
-        let checks = match row.series.checks.as_slice() {
+        let mut checks = match row.series.checks.as_slice() {
             [one] => escape(one),
             many => format!(
                 "<span class=\"slower\">rounds disagree: {}</span>",
                 escape(&many.join("; "))
             ),
         };
+        if let Some(peak) = median_of(row.series.peaks.iter().map(|&n| Some(n as f64))) {
+            let _ = write!(checks, ", memory grew {:.0} MB at most", peak / 1e6);
+        }
         let _ = write!(
             page,
             r#"<tr><td>{}<small>{checks}</small></td><td class="series">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{per_item}</td><td>{cpu}</td><td>{instructions}</td>"#,
@@ -822,6 +825,7 @@ mod tests {
                 })
                 .collect(),
             checks: vec![],
+            peaks: Vec::new(),
         };
         let results = |this: u64| Results {
             version: crate::format::RESULTS,
@@ -866,6 +870,7 @@ mod tests {
                 })
                 .collect(),
             checks: vec![],
+            peaks: Vec::new(),
         };
         let results = |this: f64| Results {
             version: crate::format::RESULTS,

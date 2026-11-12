@@ -10,22 +10,23 @@
 use crate::browser::{
     AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab, Compress,
     ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Download, Duplicate, EditFavorites,
-    EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract, FocusSearch, Forward, GetInfo,
-    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2,
-    GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9,
-    GoFavorite10, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, HideInspector,
-    MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab,
-    NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
-    OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo, RemoveDownload, RemoveFromSidebar,
-    Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder,
-    ShowCopiesAndMoves, ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName,
-    SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo,
-    ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract, FindDuplicates, FocusSearch, Forward,
+    GetInfo, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1,
+    GoFavorite2, GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8,
+    GoFavorite9, GoFavorite10, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees,
+    HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
+    NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal,
+    OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo,
+    RemoveDownload, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch,
+    SearchContents, SearchThisFolder, ShowCopiesAndMoves, ShowPackageContents, ShowSearches,
+    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles,
+    TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn,
+    ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
     browser, connect, empty_trash, goto, jobs, menu, onboarding, palette, remove_worktree,
-    settings, text_field, updates,
+    review_duplicates, settings, text_field, updates,
 };
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
@@ -312,6 +313,14 @@ pub fn all() -> Vec<Command> {
             FOLDER,
             command("Organize Folder…", File, &[], LIST, || {
                 Box::new(OrganizeFolder)
+            }),
+        ),
+        // The lone selected folder, else the folder shown; its menu is the
+        // folder's own, since a file's would scan somewhere unexpected.
+        on(
+            FOLDER,
+            command("Find Duplicates", File, &["cmd-alt-u"], BROWSER, || {
+                Box::new(FindDuplicates)
             }),
         ),
         on(
@@ -866,6 +875,7 @@ pub fn apply(cx: &mut App) {
     updates::bind(cx);
     empty_trash::bind(cx);
     remove_worktree::bind(cx);
+    review_duplicates::bind(cx);
     menu::bind(cx);
     onboarding::bind(cx);
     let mut bindings = Vec::new();
@@ -1138,6 +1148,7 @@ mod tests {
                 "New Folder ⇧⌘N",
                 "New File",
                 "| Organize Folder…",
+                "Find Duplicates ⌥⌘U",
                 "Get Info ⌘I",
                 "| Extract ⇧⌘E",
                 "| Paste ⌘V",

@@ -42,6 +42,10 @@ pub struct Measured {
     /// Proof the work happened, such as "10000 entries". Rounds that disagree
     /// didn't all measure the same work, and the report says so.
     pub check: String,
+    /// How far the process's memory footprint rose during the work, for
+    /// benches that report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +73,9 @@ pub struct Series {
     /// Each distinct check, in the order seen. More than one means the rounds
     /// measured different work.
     pub checks: Vec<String>,
+    /// Each sample's `Measured::peak_bytes`, where the bench reports it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peaks: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,6 +141,7 @@ impl SuiteRun {
                         warmup: None,
                         samples: Vec::new(),
                         checks: Vec::new(),
+                        peaks: Vec::new(),
                     });
                     bench.series.last_mut().expect("just pushed")
                 }
@@ -142,6 +150,7 @@ impl SuiteRun {
                 series.warmup = Some(measured.sample);
             } else {
                 series.samples.push(measured.sample);
+                series.peaks.extend(measured.peak_bytes);
             }
             if !series.checks.contains(&measured.check) {
                 series.checks.push(measured.check);
@@ -193,6 +202,7 @@ mod tests {
                 cycles: None,
             },
             check: check.into(),
+            peak_bytes: None,
         }
     }
 
