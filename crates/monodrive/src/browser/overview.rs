@@ -278,15 +278,19 @@ impl Pane {
                 this.overview.changes = changes;
                 cx.notify();
             };
+            // Worktrees are worth asking Git about only when suggestions show.
+            let low = first.0.headline.as_ref().is_some_and(|disk| disk.low);
             let _ = this.update(cx, |this, cx| take(this, first, cx));
             let ops = cx.update(|cx| operations(cx));
             let found = background.spawn({
                 let reader = reader.clone();
                 async move {
                     let git = Git::find().ok();
-                    let _ = overview::discover(&reader.env, git.as_ref(), |name, limit| {
-                        drives.find_files(&index, name, limit)
-                    });
+                    let search = |name: &str, limit| drives.find_files(&index, name, limit);
+                    let _ = overview::discover(&reader.env, git.as_ref(), search);
+                    if let (true, Some(git)) = (low, &git) {
+                        let _ = overview::check_worktrees(&reader.env, git, search);
+                    }
                     reader.read_with(ops)
                 }
             });
@@ -657,28 +661,52 @@ impl Pane {
         suggestion: &Suggestion,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let evidence = &suggestion.evidence;
-        let dir = suggestion.path.clone();
-        let button = text_button(
-            format!("overview-clean-{}", dir.display()),
-            "Move to Trash",
-            ButtonLook::Secondary,
-        )
-        .debug_selector(|| "overview-clean".into())
-        .on_click(
-            cx.listener(move |this, _, window, cx| this.clean_suggestion(dir.clone(), window, cx)),
-        );
+        let title = suggestion.title();
+        let (glyph, button, id) = match suggestion.trash() {
+            Some(dir) => {
+                let dir = dir.to_path_buf();
+                let id = format!("overview-suggestion-{}", dir.display());
+                let button = text_button(
+                    format!("overview-clean-{}", dir.display()),
+                    "Move to Trash",
+                    ButtonLook::Secondary,
+                )
+                .debug_selector(|| "overview-clean".into())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.clean_suggestion(dir.clone(), window, cx)
+                }));
+                ("folder-01", button, id)
+            }
+            // Nothing here removes a worktree: plan 22's page reviews each.
+            None => {
+                let worktrees = suggestion.worktrees().to_vec();
+                let button = text_button(
+                    "overview-review-worktrees",
+                    "Review…",
+                    ButtonLook::Secondary,
+                )
+                .debug_selector(|| "overview-review-worktrees".into())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.review_worktrees(worktrees.clone(), window, cx)
+                }));
+                (
+                    "git-branch",
+                    button,
+                    "overview-suggestion-worktrees".to_string(),
+                )
+            }
+        };
         still(
             free_row(
-                "folder-01",
-                evidence.title(),
-                evidence.why(),
+                glyph,
+                title.clone(),
+                suggestion.why(),
                 size_of(suggestion.size),
                 button,
             )
-            .id(format!("overview-suggestion-{}", suggestion.path.display()))
+            .id(id)
             .role(Role::Group)
-            .aria_label(evidence.title()),
+            .aria_label(title),
         )
     }
 
@@ -736,8 +764,9 @@ impl Pane {
             about
                 .suggestions
                 .iter()
-                .filter(|suggestion| suggestion.path.starts_with(&spot.path))
-                .map(|suggestion| suggestion.size.unshared)
+                .flat_map(|suggestion| &suggestion.folders)
+                .filter(|(path, _)| path.starts_with(&spot.path))
+                .map(|(_, size)| size.unshared)
                 .sum()
         };
         let mut ranked: Vec<(Option<u64>, AnyElement)> = Vec::new();

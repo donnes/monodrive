@@ -105,9 +105,13 @@ fn a_low_disk_ranks_at_most_three_suggestions_by_what_they_free() {
     });
 
     let low = read(&env, &[startup(1_000, 199)]);
-    let paths: Vec<_> = low.suggestions.iter().map(|s| s.path.clone()).collect();
-    assert_eq!(paths, [pip.clone(), yarn, pods]);
-    assert_eq!(low.suggestions[0].evidence.title(), "Clear pip's cache");
+    let paths: Vec<_> = low
+        .suggestions
+        .iter()
+        .filter_map(Suggestion::trash)
+        .collect();
+    assert_eq!(paths, [pip.as_path(), &yarn, &pods]);
+    assert_eq!(low.suggestions[0].title(), "Clear pip's cache");
 
     let roomy = read(&env, &[startup(1_000, 200)]);
     assert!(
@@ -460,10 +464,10 @@ fn what_a_suggestion_frees_leaves_the_innermost_folder_holding_it() {
             low: true,
         }),
         suggestions: vec![Suggestion {
-            path: "/h/Documents/app/target".into(),
             evidence: Evidence::BuildOutput {
                 project: "app".into(),
             },
+            folders: vec![("/h/Documents/app/target".into(), size(5, NOW))],
             size: size(5, NOW),
         }],
         stuff: vec![
@@ -663,4 +667,113 @@ fn changes_from_two_threads_both_land() {
         }
     });
     assert_eq!(Saved::read(&env.saved()).totals.len(), 8);
+}
+
+#[test]
+fn clean_worktrees_are_one_suggestion_ranked_by_what_they_free_together() {
+    use crate::worktrees::tests::{commit, fixture, repo};
+    let dir = TempDir::new().unwrap();
+    let env = env(&dir);
+    let git = Git::find().unwrap();
+    let (app, lib) = (env.home.join("app"), env.home.join("lib"));
+    for main in [&app, &lib] {
+        repo(main);
+        env.store
+            .register_repository(worktrees::Registration {
+                common_dir: main.join(".git"),
+                path: main.clone(),
+            })
+            .unwrap();
+    }
+    // A build the next build makes again, which Git ignores.
+    commit(&app, ".gitignore", "target/\n");
+    commit(&app, "Cargo.toml", "");
+    let add = |main: &Path, name: &str| {
+        let at = env.home.join(name);
+        fixture(
+            main,
+            &["worktree", "add", "-q", "-b", name, at.to_str().unwrap()],
+        );
+        at
+    };
+    let (clean, other, dirty, unpushed, locked) = (
+        add(&app, "app-clean"),
+        add(&lib, "lib-clean"),
+        add(&app, "app-dirty"),
+        add(&app, "app-unpushed"),
+        add(&app, "app-locked"),
+    );
+    std::fs::write(dirty.join("notes.md"), "").unwrap();
+    commit(&unpushed, "b", "b\n");
+    fixture(&app, &["worktree", "lock", locked.to_str().unwrap()]);
+    let built = clean.join("target");
+    std::fs::create_dir(&built).unwrap();
+    std::fs::write(built.join("CACHEDIR.TAG"), TAG).unwrap();
+
+    // Without the index, the registered repositories are still asked about.
+    check_worktrees(&env, &git, |_, _| Err("The index isn't running.".into())).unwrap();
+    let saved: Vec<PathBuf> = Saved::read(&env.saved())
+        .worktrees
+        .into_iter()
+        .map(|worktree| worktree.path)
+        .collect();
+    assert_eq!(saved, [clean.clone(), other.clone()]);
+
+    let pip = env.home.join("Library/Caches/pip");
+    let yarn = env.home.join("Library/Caches/Yarn");
+    for cache in [&pip, &yarn] {
+        std::fs::create_dir_all(cache).unwrap();
+    }
+    save(&env, |saved| {
+        saved.tagged.push(built.clone());
+        saved.totals.insert(built.clone(), size(450, NOW));
+        saved.totals.insert(pip.clone(), size(500, NOW));
+        saved.totals.insert(yarn.clone(), size(400, NOW));
+        saved.totals.insert(clean.clone(), size(300, NOW));
+    });
+
+    // One measured of two: at least what it has, and it says how far it got.
+    let low = read(&env, &[startup(10_000, 1_000)]);
+    assert!(low.due.contains(&other));
+    let worktrees = &low.suggestions[2];
+    assert_eq!(worktrees.title(), "Remove 2 clean worktrees");
+    assert_eq!(
+        worktrees.why(),
+        "Measured 1 of 2. No changes or commits only they hold. In app and lib."
+    );
+    assert_eq!(
+        (worktrees.size.unshared, worktrees.size.complete),
+        (300, false)
+    );
+    assert_eq!(worktrees.trash(), None);
+    assert_eq!(worktrees.worktrees(), [clean.clone(), other.clone()]);
+
+    // Together they beat any one cache, though neither does alone. The build
+    // inside a clean worktree goes with it, so it isn't counted twice.
+    save(&env, |saved| {
+        saved.totals.insert(other.clone(), size(300, NOW - 7_200));
+    });
+    let low = read(&env, &[startup(10_000, 1_000)]);
+    let titles: Vec<String> = low.suggestions.iter().map(Suggestion::title).collect();
+    assert_eq!(
+        titles,
+        [
+            "Remove 2 clean worktrees",
+            "Clear pip's cache",
+            "Clear Yarn's cache"
+        ]
+    );
+    let freed = low.suggestions[0].size;
+    assert_eq!(
+        (freed.unshared, freed.complete, freed.at),
+        (600, true, NOW - 7_200)
+    );
+    assert!(read(&env, &[startup(10_000, 2_000)]).suggestions.is_empty());
+
+    // Asked again, one that changed since drops out, index or not.
+    std::fs::write(other.join("new"), "").unwrap();
+    check_worktrees(&env, &git, |_, _| Ok(Vec::new())).unwrap();
+    let saved = Saved::read(&env.saved()).worktrees;
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].path, clean);
 }

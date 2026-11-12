@@ -908,7 +908,8 @@ fn worktrees_fixture(home: &Path, empty: bool) -> gpui::Result<Places> {
 /// that's gone; `overview-roomy.png` over it; `overview-locations.png` with the
 /// drives on screen, `overview-one-drive.png` with nothing else to say, and
 /// the low one again in a 900×600 window, the smallest, 720×440, and a wide
-/// 1600×900.
+/// 1600×900. `overview-review.png` is the Worktrees page that the low one's
+/// Review… opens, its clean worktrees marked.
 fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
     const GB: u64 = 1_000_000_000;
     cx.update(|cx| cx.set_global(base.clone()));
@@ -983,6 +984,20 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
         unsafe { std::env::set_var("HOME", home.canonicalize()?) };
         dispatch(cx, window, &GoOverview)?;
         save(cx, window, out, name)?;
+        if name == "overview-low" {
+            // Review… on the worktrees' row, the third of Free up.
+            let review = point(px(1038.), px(302.));
+            let none = Modifiers::default();
+            let away = point(px(120.), px(680.));
+            let click = vec![
+                press_at(review, none),
+                release_at(review, none),
+                move_to(away),
+            ];
+            mouse(cx, window, click)?;
+            settle_git(cx);
+            save(cx, window, out, "overview-review")?;
+        }
         // Before its fixture goes, so nothing reads a folder that's gone.
         cx.update_window(window.into(), |_, window, _| window.remove_window())?;
         cx.run_until_parked();
@@ -1071,15 +1086,20 @@ fn overview_fixture(
     let project = home.join("Work/monodrive");
     let target = project.join("target");
     std::fs::create_dir_all(&target)?;
-    std::fs::create_dir(project.join(".git"))?;
     std::fs::write(project.join("Cargo.toml"), "")?;
     std::fs::write(
         target.join("CACHEDIR.TAG"),
         "Signature: 8a477f597d28d172789f06886806bc55\n",
     )?;
-    std::fs::write(
-        project.join(".git/config"),
-        "[remote \"origin\"]\n\turl = git@github.com:you/monodrive.git\n",
+    git(&project, &["init", "-q", "-b", "main"])?;
+    git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:you/monodrive.git",
+        ],
     )?;
     store
         .register_repository(monodrive_core::worktrees::Registration {
@@ -1096,6 +1116,37 @@ fn overview_fixture(
     std::fs::create_dir_all(&brew)?;
     total(&brew, 6);
     total(&trash, 9);
+    // Clean worktrees in two repositories, as Git confirms when the page asks.
+    let mut clean = Vec::new();
+    let repositories: [(&str, &[(&str, u64)]); 2] = [
+        (
+            "monocode",
+            &[("mc-popover-port", 3), ("mc-settings", 3), ("mc-theme", 2)],
+        ),
+        ("t3code", &[("t3-1c1e18ad", 2), ("t3-0f7b3c85", 2)]),
+    ];
+    for (name, worktrees) in repositories {
+        let repo = home.join("Work").join(name);
+        std::fs::create_dir_all(&repo)?;
+        git(&repo, &["init", "-q", "-b", "main"])?;
+        commit(&repo, "README.md", "first commit")?;
+        store
+            .register_repository(monodrive_core::worktrees::Registration {
+                common_dir: repo.join(".git"),
+                path: repo.clone(),
+            })
+            .map_err(std::io::Error::other)?;
+        total(&repo, 1);
+        for (worktree, gb) in worktrees {
+            let at = home.join(".t3/worktrees").join(name).join(worktree);
+            let shown = at.display().to_string();
+            git(&repo, &["worktree", "add", "-q", "-b", worktree, &shown])?;
+            total(&at, *gb);
+            clean.push(serde_json::json!({
+                "path": at, "common_dir": repo.join(".git"), "repository": name,
+            }));
+        }
+    }
     // Where the rest of the disk goes.
     for (path, gb) in [
         (root.join("Applications"), 12),
@@ -1103,7 +1154,7 @@ fn overview_fixture(
         (home.join("Library/Application Support"), 6),
         (home.join("Library/Caches"), 8),
         (home.join("Library/Developer"), 24),
-        (home.join(".t3"), 5),
+        (home.join(".t3"), 14),
         (home.join("Work"), 50),
     ] {
         std::fs::create_dir_all(&path)?;
@@ -1153,6 +1204,7 @@ fn overview_fixture(
         "version": 1,
         "totals": totals,
         "scans": scans,
+        "worktrees": clean,
     });
     std::fs::write(home.join("overview.json"), serde_json::to_vec(&saved)?)?;
     Ok(Places {

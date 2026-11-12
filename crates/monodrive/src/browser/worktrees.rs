@@ -7,11 +7,13 @@
 use super::pane::Pane;
 use super::sidebar::Places;
 use crate::remove_worktree::Ask;
+use crate::session::Shows;
 use crate::theme::{self, ButtonLook, content, icon, on_accent, row_icon_button, text_button, tip};
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, Hsla, ListAlignment, ListState, MouseButton,
     PathPromptOptions, Role, Task, Window, actions, div, list, prelude::*, px,
 };
+use monodrive_core::entries;
 use monodrive_core::worktrees::{self, Found, Git, Inventory, State, Status, Worktree};
 use std::path::{Path, PathBuf};
 
@@ -42,6 +44,11 @@ pub(in crate::browser) struct WorktreesPage {
     /// The selected worktree's changes, once read, for the path they're of.
     status: Option<(PathBuf, Result<Status, String>)>,
     reading: Option<Task<()>>,
+    /// The clean worktrees the Overview sent here to review, each marked
+    /// Suggested, until the page is opened another way.
+    pub(in crate::browser) suggested: Vec<PathBuf>,
+    /// The next scan selects the first of `suggested` and scrolls to it.
+    reviewing: bool,
     /// What the window's card asks next.
     pub(in crate::browser) asking: Option<Ask>,
     lines: Lines,
@@ -111,6 +118,7 @@ impl Pane {
             return;
         };
         let index = self.index.clone();
+        let suggested = self.worktrees.suggested.clone();
         let scanned = cx.background_executor().spawn(async move {
             let registered = places
                 .store
@@ -121,7 +129,14 @@ impl Pane {
                 .collect();
             let found = match Git::find() {
                 Ok(git) => worktrees::scan(&git, &places.store, |query, limit| {
-                    places.drives.find_files(&index, query, limit)
+                    let mut found = places.drives.find_files(&index, query, limit)?;
+                    // What the Overview sent here is listed even before the
+                    // index is ready, as the Overview found it.
+                    let own = suggested
+                        .iter()
+                        .map(|path| entries::entry_at(&path.join(".git")));
+                    found.extend(own.flatten());
+                    Ok(found)
                 }),
                 Err(why) => Found {
                     problems: vec![why],
@@ -144,11 +159,20 @@ impl Pane {
                 page.lines.0.scroll_to(top);
                 page.scanning = None;
                 // What was selected may have gone; its changes are read again.
-                let kept = page
-                    .selected
-                    .clone()
-                    .filter(|path| page.row_of(path).is_some());
+                let reviewing = std::mem::take(&mut page.reviewing);
+                let kept = if reviewing {
+                    page.rows()
+                        .map(|(_, w)| w.path.clone())
+                        .find(|path| page.suggested.contains(path))
+                } else {
+                    page.selected
+                        .clone()
+                        .filter(|path| page.row_of(path).is_some())
+                };
                 this.select_worktree(kept, cx);
+                if reviewing {
+                    this.reveal_worktree(true);
+                }
             });
         }));
         cx.notify();
@@ -188,6 +212,22 @@ impl Pane {
         cx.notify();
     }
 
+    /// The Overview's Review…: the page, with the clean worktrees marked and
+    /// the first selected. Each still goes through the card that asks, and
+    /// the page shows what Git says now, which may have changed.
+    pub(super) fn review_worktrees(
+        &mut self,
+        worktrees: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_page(Shows::Worktrees, window, cx);
+        self.worktrees.suggested = worktrees;
+        self.worktrees.reviewing = true;
+        // Again, now that the scan has them.
+        self.rescan_worktrees(cx);
+    }
+
     /// ↑ and ↓ on the page.
     pub(super) fn step_worktree(&mut self, down: bool, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self.worktrees.rows().map(|(_, w)| w.path.clone()).collect();
@@ -203,7 +243,13 @@ impl Pane {
             (Some(at), false) => paths.get(at.saturating_sub(1)),
         };
         self.select_worktree(next.cloned(), cx);
-        // In view, and its repository's title with it when going up to it.
+        // Its repository's title with it when going up to it.
+        self.reveal_worktree(!down);
+    }
+
+    /// Scrolls the selected worktree into view, and its repository's title
+    /// with it when `with_title` and the title is just above.
+    fn reveal_worktree(&mut self, with_title: bool) {
         let items = self.worktrees.items();
         let page = &self.worktrees;
         let at = items.iter().position(|item| match item {
@@ -214,7 +260,11 @@ impl Pane {
         });
         if let Some(at) = at {
             let title_above = at > 0 && matches!(items[at - 1], Item::Repository(_));
-            let target = if !down && title_above { at - 1 } else { at };
+            let target = if with_title && title_above {
+                at - 1
+            } else {
+                at
+            };
             self.worktrees.lines.0.scroll_to_reveal_item(target);
         }
     }
@@ -653,6 +703,9 @@ impl Pane {
         }
         if worktree.locked.is_some() {
             chips.push(("Locked".into(), false));
+        }
+        if page.suggested.contains(&worktree.path) {
+            chips.push(("Suggested".into(), false));
         }
         match &worktree.state {
             State::Ok => {}

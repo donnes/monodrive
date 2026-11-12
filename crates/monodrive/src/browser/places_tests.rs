@@ -2445,6 +2445,63 @@ fn the_worktrees_page_opens_a_worktree_and_moves_one_to_the_trash_once_asked(
 }
 
 #[gpui::test]
+fn clean_worktrees_are_one_suggestion_whose_review_opens_the_worktrees_page(
+    cx: &mut TestAppContext,
+) {
+    let world = world(vec![disk(100_000)], cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    let app = home.join("app");
+    std::fs::create_dir(&app).unwrap();
+    git(&app, &["init", "-q", "-b", "main"]);
+    std::fs::write(app.join("a"), "a\n").unwrap();
+    git(&app, &["add", "a"]);
+    git(&app, &["commit", "-q", "-m", "a"]);
+    for name in ["app-clean", "app-dirty"] {
+        git(
+            &app,
+            &["worktree", "add", "-q", "-b", name, &format!("../{name}")],
+        );
+    }
+    std::fs::write(home.join("app-dirty/notes.md"), "").unwrap();
+    // Found clean through the index before, which isn't ready now, and in no
+    // registered repository.
+    let clean = home.join("app-clean");
+    let saved = serde_json::json!({
+        "version": 1,
+        "worktrees": [{"path": clean, "common_dir": app.join(".git"), "repository": "app"}],
+    });
+    let file = world.store.places.with_file_name("overview.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let (browser, cx) = open(&world, &home, cx);
+    press(cx, "cmd-alt-o");
+    // Git said it's still clean, and measuring it brought the suggestion.
+    assert!(on_screen(cx, "overview-review-worktrees"));
+
+    // Review… removes nothing: the Worktrees page does, under its own card.
+    press_on(cx, "overview-review-worktrees");
+    assert!(on_screen(cx, "worktrees-page"));
+    let (selected, suggested) = in_pane(&browser, cx, |pane, _| {
+        let page = &pane.worktrees;
+        (
+            page.selected().map(Path::to_path_buf),
+            page.suggested.clone(),
+        )
+    });
+    assert_eq!(selected.as_ref(), Some(&clean));
+    assert_eq!(suggested, std::slice::from_ref(&clean));
+    assert!(clean.exists());
+
+    // Back returns to the Overview, and opening the page another way drops
+    // the marks.
+    press(cx, "cmd-[");
+    assert!(on_the_page(&browser, cx));
+    press(cx, "cmd-alt-g");
+    let suggested = in_pane(&browser, cx, |pane, _| pane.worktrees.suggested.clone());
+    assert!(suggested.is_empty());
+}
+
+#[gpui::test]
 fn removing_a_worktree_keeps_the_list_where_it_was_scrolled(cx: &mut TestAppContext) {
     let world = world(vec![disk(900_000)], cx);
     let owned = own(cx);

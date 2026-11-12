@@ -1,6 +1,6 @@
 # Overview
 
-Status: steps 1 to 4 done. Step 5's design is picked; building it waits for plan 22's worktree view. Its report link was dropped with plan 17's report.
+Status: done. Step 5 shows every clean worktree as one suggestion whose Review… opens plan 22's Worktrees page. Its report link was dropped with plan 17's report.
 
 Decisions made while building it:
 
@@ -14,6 +14,10 @@ Decisions made while building it:
 - `storage_scan` on a volume's mount saves that scan, so an agent can do what the Scan button does.
 - On 2026-11-11 "Other" held 326 GB on the maintainer's Mac, so the page now measures where the rest goes: Applications, App data (each folder in ~/Library not measured as something else), Developer tools (Xcode's and Android's folders, pnpm's store, Homebrew, /usr/local), Hidden folders in Home, System files (/Library and /private), and each other visible folder in Home. macOS's own volumes come from `ATTR_VOL_SPACEUSED`, without a walk. Each byte counts under the innermost measured folder holding it, so a project inside ~/Work counts as a project. The bar's key adds Apps, Developer and macOS. A group of many folders lists its 12 largest when pressed.
 - Measuring belongs to the app, not the page: it starts 10 s after launch and whenever the page opens, and leaving the page doesn't stop it. It walks with `storage::total`, which keeps nothing per file, so it has no item budget, and stays on one volume, so the simulators' mounted runtimes and the VM volume aren't counted twice.
+- Clean worktrees are what plan 22's removal would move without asking: no changes, no commits only they hold, not locked and not the main checkout. Git is asked about them only when the disk is under 20% free, about every worktree a scan finds and again about each one that was clean last time, so an index that isn't ready loses none. The answer is saved with the totals; the Worktrees page shows what Git says when it opens.
+- Plan 22's page selects one worktree at a time, so Review… marks the clean ones Suggested and selects the first. Each still goes through plan 22's card. Opening the page another way drops the marks.
+- A build output inside a clean worktree isn't a suggestion of its own, since removing the worktree frees it too.
+- The `overview` tool lists the worktrees under the suggestion, one path a line, with an empty `path`, and agents remove each with `remove_worktree`.
 
 ## Goal
 

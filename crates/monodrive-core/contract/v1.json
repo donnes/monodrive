@@ -1122,6 +1122,7 @@
                   "type": "integer"
                 },
                 "path": {
+                  "description": "The folder to move to the Trash. Empty for clean worktrees, which `worktrees` lists.",
                   "type": "string"
                 },
                 "title": {
@@ -1129,6 +1130,13 @@
                 },
                 "why": {
                   "type": "string"
+                },
+                "worktrees": {
+                  "description": "Clean worktrees, to remove one at a time with remove_worktree.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               },
               "required": [

@@ -188,34 +188,104 @@ pub enum Evidence {
     BuildOutput { project: String },
     /// A tool's download cache, at the path that tool uses.
     ToolCache { tool: String },
+    /// Linked worktrees that Git says hold nothing their repositories don't,
+    /// across every repository, and those repositories' names. Plan 22's
+    /// Worktrees page removes them, one at a time, under its own review.
+    Worktrees {
+        worktrees: Vec<PathBuf>,
+        repositories: Vec<String>,
+    },
 }
 
-impl Evidence {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggestion {
+    pub evidence: Evidence,
+    /// What it frees, folder by folder, as measured: the one folder it moves
+    /// to the Trash, or each clean worktree measured so far.
+    pub folders: Vec<(PathBuf, Measured)>,
+    /// All of `folders` together. Incomplete while a worktree isn't measured.
+    pub size: Measured,
+}
+
+impl Suggestion {
     pub fn title(&self) -> String {
-        match self {
+        match &self.evidence {
             Evidence::BuildOutput { project } => format!("Clean {project}'s build"),
             Evidence::ToolCache { tool } => format!("Clear {tool}'s cache"),
+            Evidence::Worktrees { worktrees, .. } => match worktrees.len() {
+                1 => "Remove 1 clean worktree".to_string(),
+                n => format!("Remove {n} clean worktrees"),
+            },
         }
     }
 
-    /// Why it's safe.
+    /// Why it's safe, and for worktrees, which repositories hold them.
     pub fn why(&self) -> String {
-        match self {
+        match &self.evidence {
             Evidence::BuildOutput { .. } => {
                 "Tagged as a cache. The next build makes it again.".to_string()
             }
             Evidence::ToolCache { tool } => {
                 format!("{tool} downloads it again when it needs it.")
             }
+            Evidence::Worktrees {
+                worktrees,
+                repositories,
+            } => {
+                let (measured, all) = (self.folders.len(), worktrees.len());
+                let measuring = if measured < all {
+                    format!("Measured {measured} of {all}. ")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{measuring}No changes or commits only they hold. In {}.",
+                    listed(repositories)
+                )
+            }
+        }
+    }
+
+    /// The clean worktrees it's about, all of them, measured or not. Empty
+    /// for the rest.
+    pub fn worktrees(&self) -> &[PathBuf] {
+        match &self.evidence {
+            Evidence::Worktrees { worktrees, .. } => worktrees,
+            _ => &[],
+        }
+    }
+
+    /// The one folder its button moves to the Trash. `None` for worktrees,
+    /// which go through the Worktrees page's review instead.
+    pub fn trash(&self) -> Option<&Path> {
+        match self.evidence {
+            Evidence::Worktrees { .. } => None,
+            _ => self.folders.first().map(|(path, _)| path.as_path()),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Suggestion {
+/// Names as a sentence lists them, the first three and how many more.
+fn listed(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second} and {third}"),
+        [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
+    }
+}
+
+/// A linked worktree that Git said, when last asked, could go with nothing
+/// lost, and its repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanWorktree {
     pub path: PathBuf,
-    pub evidence: Evidence,
-    pub size: Measured,
+    /// Its repository's common Git folder, which plan 22's removal starts
+    /// from.
+    pub common_dir: PathBuf,
+    /// Its repository's name, as the suggestion says it.
+    pub repository: String,
 }
 
 /// What fills the startup disk, by the kind of thing: a group's part of the
@@ -403,6 +473,9 @@ struct Saved {
     /// Folders the index found with a cache directory tag.
     #[serde(default)]
     tagged: Vec<PathBuf>,
+    /// Linked worktrees Git last said could go, as `check_worktrees` found.
+    #[serde(default)]
+    worktrees: Vec<CleanWorktree>,
 }
 
 impl Saved {
@@ -763,11 +836,18 @@ pub fn read(
     // Worth measuring only when suggestions would show.
     let mut suggestions = Vec::new();
     if headline.as_ref().is_some_and(|headline| headline.low) {
+        let clean: Vec<&CleanWorktree> = saved
+            .worktrees
+            .iter()
+            .filter(|worktree| here(&worktree.path) && worktree.path.is_dir())
+            .collect();
+        // Removing a worktree frees its build too.
+        let in_clean = |dir: &Path| clean.iter().any(|worktree| dir.starts_with(&worktree.path));
         let caches = TOOL_CACHES.iter().map(|(_, at)| env.home.join(at));
         let targets = projects.iter().map(|project| project.join("target"));
         let mut seen = HashSet::new();
         for dir in caches.chain(targets).chain(saved.tagged.iter().cloned()) {
-            if !here(&dir) || !seen.insert(dir.clone()) {
+            if !here(&dir) || in_clean(&dir) || !seen.insert(dir.clone()) {
                 continue;
             }
             let Some(evidence) = evidence(env, &dir) else {
@@ -776,17 +856,20 @@ pub fn read(
             wanted(&dir, total(&dir));
             if let Some(size) = total(&dir).filter(|size| size.unshared > 0) {
                 suggestions.push(Suggestion {
-                    path: dir,
                     evidence,
+                    folders: vec![(dir, size)],
                     size,
                 });
             }
         }
+        suggestions.extend(worktrees_suggestion(&clean, total, &mut wanted));
+        let first =
+            |suggestion: &Suggestion| suggestion.folders.first().map(|(path, _)| path.clone());
         suggestions.sort_by(|a, b| {
             b.size
                 .unshared
                 .cmp(&a.size.unshared)
-                .then(a.path.cmp(&b.path))
+                .then_with(|| first(a).cmp(&first(b)))
         });
         suggestions.truncate(MAX_SUGGESTIONS);
     }
@@ -903,6 +986,44 @@ pub fn read(
     }
 }
 
+/// Every clean worktree as one suggestion, ranked by what they free together,
+/// once any of them is measured. Until all are, it says how far it got and
+/// counts what it has as "at least".
+fn worktrees_suggestion(
+    clean: &[&CleanWorktree],
+    total: impl Fn(&Path) -> Option<Measured>,
+    wanted: &mut impl FnMut(&Path, Option<Measured>),
+) -> Option<Suggestion> {
+    let mut folders = Vec::new();
+    for worktree in clean {
+        wanted(&worktree.path, total(&worktree.path));
+        if let Some(size) = total(&worktree.path) {
+            folders.push((worktree.path.clone(), size));
+        }
+    }
+    let size = Measured {
+        on_disk: folders.iter().map(|(_, size)| size.on_disk).sum(),
+        unshared: folders.iter().map(|(_, size)| size.unshared).sum(),
+        // The oldest, so the age it shows is never better than the truth.
+        at: folders.iter().map(|(_, size)| size.at).min()?,
+        complete: folders.len() == clean.len() && folders.iter().all(|(_, size)| size.complete),
+    };
+    let mut repositories: Vec<String> = Vec::new();
+    for worktree in clean {
+        if !repositories.contains(&worktree.repository) {
+            repositories.push(worktree.repository.clone());
+        }
+    }
+    (size.unshared > 0).then(|| Suggestion {
+        evidence: Evidence::Worktrees {
+            worktrees: clean.iter().map(|worktree| worktree.path.clone()).collect(),
+            repositories,
+        },
+        folders,
+        size,
+    })
+}
+
 /// The folders directly in `dir`, without following links, by name.
 fn folders_in(dir: &Path) -> Vec<PathBuf> {
     let mut folders: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -944,13 +1065,13 @@ impl Overview {
                 own[at] = own[at].saturating_sub(*bytes);
             }
         }
-        for suggestion in &self.suggestions {
+        for (folder, size) in self.suggestions.iter().flat_map(|s| &s.folders) {
             let held = spots
                 .iter()
-                .position(|(path, ..)| *path == suggestion.path)
-                .or_else(|| holder(&suggestion.path));
+                .position(|(path, ..)| path == folder)
+                .or_else(|| holder(folder));
             if let Some(at) = held {
-                own[at] = own[at].saturating_sub(suggestion.size.unshared);
+                own[at] = own[at].saturating_sub(size.unshared);
             }
         }
         let mut kinds: Vec<(Kind, u64)> = Vec::new();
@@ -1124,6 +1245,52 @@ pub fn discover(
         saved.projects.extend(projects);
         saved.tagged.extend(tagged);
     })
+}
+
+/// Asks Git which linked worktrees could go to the Trash with nothing lost,
+/// and saves them for `read`. A worktree is clean when plan 22's removal would
+/// move it without asking about anything: no changes, no commits only it
+/// holds, not locked and not the repository's own checkout. Asks about every
+/// worktree a scan finds through `search`, and again about each one that was
+/// clean last time, so an index that isn't ready loses none. Runs Git a few
+/// times a worktree, so call it off the UI thread.
+pub fn check_worktrees(
+    env: &Env,
+    git: &Git,
+    search: impl Fn(&str, usize) -> Result<Vec<Entry>, String>,
+) -> Result<(), String> {
+    let found = worktrees::scan(git, &env.store, search);
+    let mut candidates: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    for repo in &found.repositories {
+        let name = repo
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.main)
+            .map_or_else(|| name_of(&repo.common_dir), |main| name_of(&main.path));
+        let linked = repo.worktrees.iter().filter(|w| !w.main && !w.bare);
+        for worktree in linked {
+            candidates.push((worktree.path.clone(), repo.common_dir.clone(), name.clone()));
+        }
+    }
+    for old in Saved::read(&env.saved()).worktrees {
+        if !candidates.iter().any(|(path, ..)| *path == old.path) {
+            candidates.push((old.path, old.common_dir, old.repository));
+        }
+    }
+    let mut clean: Vec<CleanWorktree> = candidates
+        .into_iter()
+        .filter(|(path, common_dir, _)| {
+            worktrees::removal(git, common_dir, path)
+                .is_ok_and(|removal| removal.folder.is_some() && removal.risk.is_empty())
+        })
+        .map(|(path, common_dir, repository)| CleanWorktree {
+            path,
+            common_dir,
+            repository,
+        })
+        .collect();
+    clean.sort_by(|a, b| a.path.cmp(&b.path));
+    Saved::change(&env.saved(), |saved| saved.worktrees = clean)
 }
 
 /// A repository's own checkout: Git knows it, and it isn't a linked worktree.
