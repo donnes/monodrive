@@ -2463,22 +2463,24 @@ fn clean_worktrees_are_one_suggestion_whose_review_opens_the_worktrees_page(
         );
     }
     std::fs::write(home.join("app-dirty/notes.md"), "").unwrap();
-    world
-        .store
-        .register_repository(monodrive_core::worktrees::Registration {
-            common_dir: app.join(".git"),
-            path: app.clone(),
-        })
-        .unwrap();
+    // Found clean through the index before, which isn't ready now, and in no
+    // registered repository.
+    let clean = home.join("app-clean");
+    let saved = serde_json::json!({
+        "version": 1,
+        "worktrees": [{"path": clean, "common_dir": app.join(".git"), "repository": "app"}],
+    });
+    let file = world.store.places.with_file_name("overview.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, serde_json::to_vec(&saved).unwrap()).unwrap();
     let (browser, cx) = open(&world, &home, cx);
     press(cx, "cmd-alt-o");
-    // Git found the clean one, and measuring it brought the suggestion.
+    // Git said it's still clean, and measuring it brought the suggestion.
     assert!(on_screen(cx, "overview-review-worktrees"));
 
     // Review… removes nothing: the Worktrees page does, under its own card.
     press_on(cx, "overview-review-worktrees");
     assert!(on_screen(cx, "worktrees-page"));
-    let clean = home.join("app-clean");
     let (selected, suggested) = in_pane(&browser, cx, |pane, _| {
         let page = &pane.worktrees;
         (

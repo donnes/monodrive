@@ -13,6 +13,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, Hsla, ListAlignment, ListState, MouseButton,
     PathPromptOptions, Role, Task, Window, actions, div, list, prelude::*, px,
 };
+use monodrive_core::entries;
 use monodrive_core::worktrees::{self, Found, Git, Inventory, State, Status, Worktree};
 use std::path::{Path, PathBuf};
 
@@ -117,6 +118,7 @@ impl Pane {
             return;
         };
         let index = self.index.clone();
+        let suggested = self.worktrees.suggested.clone();
         let scanned = cx.background_executor().spawn(async move {
             let registered = places
                 .store
@@ -127,7 +129,14 @@ impl Pane {
                 .collect();
             let found = match Git::find() {
                 Ok(git) => worktrees::scan(&git, &places.store, |query, limit| {
-                    places.drives.find_files(&index, query, limit)
+                    let mut found = places.drives.find_files(&index, query, limit)?;
+                    // What the Overview sent here is listed even before the
+                    // index is ready, as the Overview found it.
+                    let own = suggested
+                        .iter()
+                        .map(|path| entries::entry_at(&path.join(".git")));
+                    found.extend(own.flatten());
+                    Ok(found)
                 }),
                 Err(why) => Found {
                     problems: vec![why],
@@ -215,7 +224,8 @@ impl Pane {
         self.open_page(Shows::Worktrees, window, cx);
         self.worktrees.suggested = worktrees;
         self.worktrees.reviewing = true;
-        cx.notify();
+        // Again, now that the scan has them.
+        self.rescan_worktrees(cx);
     }
 
     /// ↑ and ↓ on the page.
