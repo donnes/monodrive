@@ -857,6 +857,26 @@ impl Pane {
         let cached = archive
             .as_deref()
             .and_then(|archive| self.cached_archive(archive));
+        // The folder the keys move to in column view usually has a column
+        // already, so its rows show now rather than the last folder's until
+        // this listing lands.
+        if !quiet
+            && query.is_empty()
+            && check.is_none()
+            && self.layout() == View::Columns
+            && let Some(listed) = self.children.get(&folder)
+        {
+            self.root = listed.clone();
+            self.error = None;
+            self.unavailable = None;
+            self.relayout(false);
+            let left = self.reselect.take();
+            self.pick_selection(left);
+            match self.cursor_ix() {
+                Some(ix) => self.reveal(ix, ScrollStrategy::Center),
+                None => self.scroll.scroll_to_item(0, ScrollStrategy::Top),
+            }
+        }
         // This listing covers the expanded folders too.
         self.expanding.clear();
         self.listing = true;

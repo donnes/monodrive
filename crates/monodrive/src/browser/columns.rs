@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Every column but the last.
 pub(super) const COLUMN_WIDTH: f32 = 220.;
@@ -51,6 +52,9 @@ pub(super) struct Columns {
     gated: HashSet<PathBuf>,
     /// Folders a person asked to open anyway.
     opened: HashSet<PathBuf>,
+    /// When the selection last moved onto a folder the last column hadn't
+    /// listed.
+    moved: Option<Instant>,
 }
 
 /// What a side column's listing turned out to be.
@@ -132,9 +136,10 @@ impl Pane {
         }
     }
 
-    /// Lists the selected folder for the last column once the selection has
-    /// rested, so holding ↓ lists nothing it passes. One that could show a
-    /// privacy prompt waits for a person to ask.
+    /// Lists the selected folder for the last column: at once after a single
+    /// step, and once the selection rests while a key is held, so holding ↓
+    /// lists nothing it passes. One that could show a privacy prompt waits
+    /// for a person to ask.
     pub(super) fn follow_columns(&mut self, cx: &mut Context<Self>) {
         if self.layout() != View::Columns || self.listing {
             return;
@@ -158,7 +163,15 @@ impl Pane {
         {
             return;
         }
-        let rest = cx.background_executor().timer(READ_DELAY);
+        let now = cx.background_executor().now();
+        let held = self
+            .columns
+            .moved
+            .replace(now)
+            .is_some_and(|at| now - at < READ_DELAY);
+        let rest = cx
+            .background_executor()
+            .timer(if held { READ_DELAY } else { Duration::ZERO });
         let drives: Arc<dyn sidebar::Drives> = match cx.try_global::<super::Places>() {
             Some(places) => places.drives.clone(),
             None => Arc::new(sidebar::System),

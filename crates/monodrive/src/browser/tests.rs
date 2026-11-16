@@ -89,6 +89,12 @@ pub(super) fn press(cx: &mut VisualTestContext, keys: &str) {
     }
 }
 
+/// Presses `key` without running what it started, so a check sees what's
+/// drawn before a listing it began lands.
+fn press_unlanded(cx: &mut VisualTestContext, key: &str) {
+    cx.update(|window, cx| window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx));
+}
+
 /// `project/` holding `docs/` (with `inner.md`), `zeta/`, `a.txt` and
 /// the hidden `.env`. It sits in a temp folder, since tempfile's own
 /// folders are hidden and wouldn't list in their parent.
@@ -2651,17 +2657,31 @@ fn column_view_moves_the_keys_across_columns(cx: &mut TestAppContext) {
         View::Columns
     );
     assert_eq!(shown(&browser, cx).1, ["docs"]);
-    // The last column lists the selected folder once the selection rests.
-    cx.executor().advance_clock(super::inspector::READ_DELAY);
-    cx.run_until_parked();
+    // The last column lists a folder one step selected at once.
     let docs = project.join("docs");
     assert_eq!(
         column_names(&browser, &docs, cx),
         Some(vec!["inner.md".into()])
     );
+    // A step right after another, as a held key makes, waits for the
+    // selection to rest.
+    let zeta = project.join("zeta");
+    press(cx, "down");
+    assert_eq!(column_names(&browser, &zeta, cx), None);
+    cx.executor().advance_clock(super::inspector::READ_DELAY);
+    cx.run_until_parked();
+    assert_eq!(column_names(&browser, &zeta, cx), Some(vec![]));
+    press(cx, "up");
     // →: into it, with its first item selected and the folder a column back.
-    press(cx, "right");
+    // Its column's rows show before the new listing lands, never the
+    // folder just left.
+    press_unlanded(cx, "right");
     assert_eq!(location(&browser, cx), docs);
+    assert_eq!(
+        shown(&browser, cx),
+        (vec!["inner.md".into()], vec!["inner.md".into()])
+    );
+    cx.run_until_parked();
     assert_eq!(shown(&browser, cx).1, ["inner.md"]);
     assert_eq!(
         in_pane(&browser, cx, |pane, _| pane.trail()),
@@ -2688,8 +2708,17 @@ fn column_view_moves_the_keys_across_columns(cx: &mut TestAppContext) {
     assert_eq!(shown(&browser, cx).1, ["zeta"]);
     // ←: back a column with the folder left selected, then past the first
     // column, where the chain starts again.
-    press(cx, "up right left");
+    press(cx, "up right");
+    press_unlanded(cx, "left");
     assert_eq!(location(&browser, cx), project);
+    assert_eq!(
+        shown(&browser, cx),
+        (
+            vec!["docs".into(), "zeta".into(), "a.txt".into()],
+            vec!["docs".into()]
+        )
+    );
+    cx.run_until_parked();
     assert_eq!(shown(&browser, cx).1, ["docs"]);
     press(cx, "left");
     assert_eq!(location(&browser, cx), project.parent().unwrap());
