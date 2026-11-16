@@ -199,16 +199,37 @@ impl Rasters {
 
 /// The icon at `side` points, or an empty space of that size until it's
 /// rasterized; the view draws again when it lands.
-fn raster(art: Art, side: f32, window: &mut Window, cx: &mut App) -> AnyElement {
-    let raster = keep(art, side, window, cx);
-    let image = window
-        .use_asset::<Raster>(&raster, cx)
-        .flatten()
-        .or_else(|| stand_in(&raster, cx));
-    match image {
+fn raster(
+    art: Art,
+    generic: Option<Art>,
+    side: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match shown(art, generic, side, window, cx) {
         Some(image) => img(image).size(px(side)).flex_shrink_0().into_any_element(),
         None => div().size(px(side)).flex_shrink_0().into_any_element(),
     }
+}
+
+/// What draws for `art` now: it, a kept size of it, or `generic` while it's
+/// on its way, so a folder never seen before doesn't flash blank.
+fn shown(
+    art: Art,
+    generic: Option<Art>,
+    side: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    let raster = keep(art, side, window, cx);
+    window
+        .use_asset::<Raster>(&raster, cx)
+        .flatten()
+        .or_else(|| stand_in(&raster, cx))
+        .or_else(|| {
+            let generic = keep(generic?, side, window, cx);
+            window.use_asset::<Raster>(&generic, cx).flatten()
+        })
 }
 
 /// Notes the icon at `side` points as drawn, letting go of what that pushes
@@ -267,7 +288,19 @@ pub fn image(
 
 /// The icon Finder shows for an entry.
 pub fn icon(entry: &Entry, side: f32, window: &mut Window, cx: &mut App) -> AnyElement {
-    raster(entry_art(entry), side, window, cx)
+    raster(entry_art(entry), generic_art(entry), side, window, cx)
+}
+
+/// What a folder or package looks like before its own icon is drawn: most
+/// folders look like any folder, and an app like any app.
+fn generic_art(entry: &Entry) -> Option<Art> {
+    (entry.kind == Kind::Dir).then(|| {
+        if crate::workspace::is_package(&entry.path) {
+            by_extension(&entry.path)
+        } else {
+            Art::Folder
+        }
+    })
 }
 
 fn entry_art(entry: &Entry) -> Art {
@@ -290,7 +323,7 @@ pub fn kind_icon(
         Kind::Dir => Art::Folder,
         Kind::File | Kind::Link | Kind::Other => by_extension(path),
     };
-    raster(art, side, window, cx)
+    raster(art, None, side, window, cx)
 }
 
 fn by_extension(path: &Path) -> Art {
@@ -341,6 +374,44 @@ mod tests {
         assert!(rasters.draw(at("a", 2048)).is_empty());
         assert_eq!(rasters.draw(at("e", 2048)), vec![at("b", 2048)]);
         assert_eq!(rasters.icons[&2048].len(), 4);
+    }
+
+    /// Draws `art` and notes whether a picture showed.
+    struct Probe {
+        art: Art,
+        showed: Option<bool>,
+    }
+
+    impl Render for Probe {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let image = shown(self.art.clone(), Some(Art::Folder), 32., window, cx);
+            self.showed = Some(image.is_some());
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn a_folder_draws_as_any_folder_until_its_own_icon_lands(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (seen, new) = (dir.path().join("seen"), dir.path().join("new"));
+        std::fs::create_dir(&seen).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        let (probe, cx) = cx.add_window_view(|_, _| Probe {
+            art: Art::Path(seen),
+            showed: None,
+        });
+        cx.run_until_parked();
+        // The next frame draws a folder whose own icon hasn't been drawn yet.
+        probe.update(cx, |probe, cx| {
+            probe.art = Art::Path(new);
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(probe.read_with(cx, |probe, _| probe.showed), Some(true));
     }
 
     #[test]

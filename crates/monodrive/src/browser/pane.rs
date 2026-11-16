@@ -2970,7 +2970,8 @@ impl Pane {
         let id = cx.entity_id();
         // Sharp on Retina screens.
         let pixels = (side * window.scale_factor()).ceil() as u32;
-        range
+        let shown = range.clone();
+        let rows = range
             .map(|row| {
                 let cells =
                     (row * across..((row + 1) * across).min(self.entries.len())).map(|ix| {
@@ -3085,7 +3086,39 @@ impl Pane {
                     });
                 div().flex().px_1().children(cells).into_any_element()
             })
-            .collect()
+            .collect();
+        // After the cells on screen, so their pictures decode first.
+        if !archive {
+            self.prefetch_pictures(shown, pixels, window, cx);
+        }
+        rows
+    }
+
+    /// Starts the pictures of the grid's rows a screen above and below
+    /// `shown`, so scrolling finds them decoded rather than as icons.
+    fn prefetch_pictures(
+        &mut self,
+        shown: std::ops::Range<usize>,
+        pixels: u32,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let (across, len) = (self.across.max(1), self.entries.len());
+        let near = shown.start.saturating_sub(shown.len())..shown.end + shown.len();
+        let cells = |rows: std::ops::Range<usize>| {
+            (rows.start * across).min(len)..(rows.end * across).min(len)
+        };
+        let (above, below) = (cells(near.start..shown.start), cells(shown.end..near.end));
+        for ix in above.chain(below) {
+            let entry = &self.entries[ix];
+            thumbnail(
+                (&mut self.thumbs, &mut self.drawn),
+                entry,
+                pixels,
+                window,
+                cx,
+            );
+        }
     }
 
     pub(super) fn rows(
