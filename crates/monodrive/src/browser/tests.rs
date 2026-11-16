@@ -886,6 +886,7 @@ fn sized() -> (tempfile::TempDir, PathBuf) {
 }
 
 /// The middle of list row `ix` in the window, as the last frame laid out.
+/// In column view, the keys' column's row.
 pub(super) fn row(
     browser: &Entity<Browser>,
     ix: usize,
@@ -895,10 +896,14 @@ pub(super) fn row(
     cx.run_until_parked();
     in_pane(browser, cx, |browser, cx| {
         let height = cx.global::<Preferences>().row_size.metrics().0;
+        let gap = match browser.layout() {
+            View::Columns => theme::ROW_GAP,
+            _ => 0.,
+        };
         browser.list_bounds.get().origin
             + gpui::point(
                 px(60.),
-                px(theme::CARD_PADDING + height * (ix as f32 + 0.5)),
+                px(theme::CARD_PADDING + (height + gap) * ix as f32 + height / 2.),
             )
     })
 }
@@ -1062,6 +1067,25 @@ fn a_dragged_rectangle_selects_what_it_touches(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(to, MouseButton::Left, with(""));
     cx.simulate_mouse_up(to, MouseButton::Left, with(""));
     assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
+}
+
+#[gpui::test]
+fn a_rectangle_in_column_view_counts_the_gaps_between_rows(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("many");
+    std::fs::create_dir(&folder).unwrap();
+    for ix in 0..20 {
+        std::fs::write(folder.join(format!("f{ix:02}.txt")), "").unwrap();
+    }
+    let (browser, cx) = browse(&folder, cx);
+    press(cx, "cmd-alt-3");
+    // Far enough down that rows counted without their gaps are a row off.
+    let side = gpui::point(px(100.), px(0.));
+    let (from, to) = (row(&browser, 16, cx) + side, row(&browser, 17, cx) + side);
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    assert_eq!(shown(&browser, cx).1, ["f16.txt", "f17.txt"]);
 }
 
 /// A tap releases before the frame that follows the press is drawn. It

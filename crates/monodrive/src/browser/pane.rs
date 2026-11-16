@@ -1567,7 +1567,7 @@ impl Pane {
         };
         let below = match self.layout() {
             View::List | View::Columns => {
-                let height = cx.global::<Preferences>().row_size.metrics().0;
+                let height = self.row_pitch(cx);
                 let row = self.matches.row_of(ix);
                 point(px(60.), px(4. + height * (row as f32 + 1.)))
             }
@@ -1650,6 +1650,16 @@ impl Pane {
                 || self.chrome.menu_here)
     }
 
+    /// From one list row's top to the next. Column view's rows have the gap
+    /// stacked rows elsewhere do; the list's touch, as in Finder.
+    fn row_pitch(&self, cx: &App) -> f32 {
+        let height = cx.global::<Preferences>().row_size.metrics().0;
+        match self.layout() {
+            View::Columns => height + theme::ROW_GAP,
+            _ => height,
+        }
+    }
+
     /// A point in the window as a point in the listing, measured from the
     /// top left of all its rows, scrolled or not.
     pub(super) fn listing_point(&self, point: Point<Pixels>) -> Point<Pixels> {
@@ -1668,7 +1678,7 @@ impl Pane {
         let (top, bottom) = (rect.top().as_f32() - pad, rect.bottom().as_f32() - pad);
         match self.layout() {
             View::List | View::Columns => {
-                let height = cx.global::<Preferences>().row_size.metrics().0;
+                let height = self.row_pitch(cx);
                 let rows = span(top, bottom, height, self.matches.row_count(len));
                 self.matches.entries_in(rows)
             }
@@ -2067,8 +2077,7 @@ impl Pane {
     fn page(&mut self, down: bool, cx: &mut Context<Self>) {
         let scroll = &self.scroll.0.borrow().base_handle;
         // A page less one row, so the row at the edge stays in view.
-        let row_height = cx.global::<Preferences>().row_size.metrics().0;
-        let page = scroll.bounds().size.height - px(row_height);
+        let page = scroll.bounds().size.height - px(self.row_pitch(cx));
         let mut offset = scroll.offset();
         // Offsets run negative as the list scrolls down.
         offset.y = if down {
@@ -3141,6 +3150,182 @@ impl Pane {
                     .as_ref()
                     .filter(|_| selected)
                     .and_then(|batch| batch.row(&entry.path, &entry.name, self.folder()));
+                let fill = div()
+                    .id(("fill", row))
+                    .w_full()
+                    .h(px(row_height))
+                    // The text stays on the bars' inset.
+                    .px(px(theme::PANE_INSET - theme::CARD_PADDING))
+                    // A file and its lines read as one block, and so do
+                    // selected files next to each other, as in Finder.
+                    // Column view's rows stand apart, as the sidebar's do.
+                    .when(in_columns || !self.selected_beside(ix, -1), |d| {
+                        // design: the row radius, on the block's top corners.
+                        d.rounded_t(px(theme::RADIUS_ROW))
+                    })
+                    .when(
+                        in_columns || !has_lines && !self.selected_beside(ix, 1),
+                        |d| {
+                            // design: the row radius, on the block's bottom corners.
+                            d.rounded_b(px(theme::RADIUS_ROW))
+                        },
+                    )
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_size(px(text_size))
+                    .map(|d| self.row_fill(d, ix, selected, active))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(tree, |d| d.child(self.disclosure(ix, depth, open, cx)))
+                            // As in Finder, the rest of a row that isn't
+                            // selected starts a rectangle. The name gives
+                            // way only once its note or parent has none
+                            // left, since those two have no width of their own.
+                            .child(
+                                div()
+                                    .id(("grab", ix))
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when(grabs && !selected, |d| Self::grab(d, ix, cx))
+                                    .child(if archived.is_some() {
+                                        file_icons::kind_icon(
+                                            entry.kind,
+                                            &entry.path,
+                                            icon_size,
+                                            window,
+                                            cx,
+                                        )
+                                    } else {
+                                        file_icons::icon(entry, icon_size, window, cx)
+                                    })
+                                    // The badge sits closer to the name than the
+                                    // name to its icon.
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(match rename {
+                                                // The name stays put; its outline grows around it.
+                                                Some(field) => field.ml(px(-7.)).into_any_element(),
+                                                None => {
+                                                    let name = new
+                                                        .as_ref()
+                                                        .map_or(&entry.name, |new| &new.name);
+                                                    div()
+                                                        .min_w_0()
+                                                        .max_w(px(360.))
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_overflow(name_overflow(name))
+                                                        .map(|d| match &new {
+                                                            Some(new) if new.problem => {
+                                                                d.text_color(danger())
+                                                            }
+                                                            Some(new) if new.renamed => {
+                                                                d.font_weight(FontWeight::MEDIUM)
+                                                            }
+                                                            _ => d,
+                                                        })
+                                                        .child(name.clone())
+                                                        .map(|d| match selected && new.is_some() {
+                                                            true => self.suggested_name(
+                                                                d,
+                                                                &entry.path,
+                                                                name,
+                                                                cx,
+                                                            ),
+                                                            false => d,
+                                                        })
+                                                        .into_any_element()
+                                                }
+                                            })
+                                            .children(self.cloud_badge(
+                                                entry,
+                                                ix,
+                                                LIST_BADGE,
+                                                if selected {
+                                                    selected_ink
+                                                } else {
+                                                    content(0.55)
+                                                },
+                                                cx,
+                                            )),
+                                    ),
+                            )
+                            .children(new.and_then(|new| {
+                                let ink = if new.problem { danger() } else { content(0.65) };
+                                let note = new.note?;
+                                Some(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(ink)
+                                        .child(note),
+                                )
+                            }))
+                            .children(parent.map(|parent| {
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(muted)
+                                    .child(parent)
+                            })),
+                    )
+                    .when(chevron_here, |d| {
+                        d.child(chevron(if selected {
+                            selected_ink
+                        } else {
+                            content(0.55)
+                        }))
+                    })
+                    .when(date, |d| {
+                        d.child(column(180., false).text_color(muted).child(if missing {
+                            "--".to_string()
+                        } else {
+                            format_date(entry.modified, today)
+                        }))
+                    })
+                    .when(size, |d| {
+                        d.child(
+                            column(80., true)
+                                .text_color(muted)
+                                .child(format_size(entry)),
+                        )
+                    })
+                    .when(kind, |d| {
+                        d.child(match problem {
+                            // Selecting it shows why in the archive's bar.
+                            Some(_) => column(110., false)
+                                .text_color(if selected { selected_ink } else { danger() })
+                                .child("Can't extract"),
+                            None => column(110., false).text_color(muted).child(if missing {
+                                "Missing".to_string()
+                            } else {
+                                entry.kind_label()
+                            }),
+                        })
+                    })
+                    .when(missing, |d| d.opacity(0.5))
+                    .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
+                        d.relative().child(
+                            self.drag
+                                .pulsed(theme::drop_outline().rounded(px(theme::RADIUS_ROW))),
+                        )
+                    });
+                // The row's handlers take its gap too, so a press or a drop
+                // there lands on it.
                 Some(
                     div()
                         .id(row)
@@ -3148,184 +3333,14 @@ impl Pane {
                         .aria_label(entry.name.clone())
                         .aria_selected(selected)
                         .w_full()
-                        .h(px(row_height))
-                        // The text stays on the bars' inset.
-                        .px(px(theme::PANE_INSET - theme::CARD_PADDING))
-                        // A file and its lines read as one block, and so do
-                        // selected files next to each other, as in Finder.
-                        .when(!self.selected_beside(ix, -1), |d| {
-                            // design: the row radius, on the block's top corners.
-                            d.rounded_t(px(theme::RADIUS_ROW))
-                        })
-                        .when(!has_lines && !self.selected_beside(ix, 1), |d| {
-                            // design: the row radius, on the block's bottom corners.
-                            d.rounded_b(px(theme::RADIUS_ROW))
-                        })
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .text_size(px(text_size))
-                        .map(|d| self.row_fill(d, ix, selected, active))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .when(tree, |d| d.child(self.disclosure(ix, depth, open, cx)))
-                                // As in Finder, the rest of a row that isn't
-                                // selected starts a rectangle. The name gives
-                                // way only once its note or parent has none
-                                // left, since those two have no width of their own.
-                                .child(
-                                    div()
-                                        .id(("grab", ix))
-                                        .min_w_0()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .when(grabs && !selected, |d| Self::grab(d, ix, cx))
-                                        .child(if archived.is_some() {
-                                            file_icons::kind_icon(
-                                                entry.kind,
-                                                &entry.path,
-                                                icon_size,
-                                                window,
-                                                cx,
-                                            )
-                                        } else {
-                                            file_icons::icon(entry, icon_size, window, cx)
-                                        })
-                                        // The badge sits closer to the name than the
-                                        // name to its icon.
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(match rename {
-                                                    // The name stays put; its outline grows around it.
-                                                    Some(field) => {
-                                                        field.ml(px(-7.)).into_any_element()
-                                                    }
-                                                    None => {
-                                                        let name = new
-                                                            .as_ref()
-                                                            .map_or(&entry.name, |new| &new.name);
-                                                        div()
-                                                            .min_w_0()
-                                                            .max_w(px(360.))
-                                                            .overflow_hidden()
-                                                            .whitespace_nowrap()
-                                                            .text_overflow(name_overflow(name))
-                                                            .map(|d| match &new {
-                                                                Some(new) if new.problem => {
-                                                                    d.text_color(danger())
-                                                                }
-                                                                Some(new) if new.renamed => d
-                                                                    .font_weight(
-                                                                        FontWeight::MEDIUM,
-                                                                    ),
-                                                                _ => d,
-                                                            })
-                                                            .child(name.clone())
-                                                            .map(|d| {
-                                                                match selected && new.is_some() {
-                                                                    true => self.suggested_name(
-                                                                        d,
-                                                                        &entry.path,
-                                                                        name,
-                                                                        cx,
-                                                                    ),
-                                                                    false => d,
-                                                                }
-                                                            })
-                                                            .into_any_element()
-                                                    }
-                                                })
-                                                .children(self.cloud_badge(
-                                                    entry,
-                                                    ix,
-                                                    LIST_BADGE,
-                                                    if selected {
-                                                        selected_ink
-                                                    } else {
-                                                        content(0.55)
-                                                    },
-                                                    cx,
-                                                )),
-                                        ),
-                                )
-                                .children(new.and_then(|new| {
-                                    let ink = if new.problem { danger() } else { content(0.65) };
-                                    let note = new.note?;
-                                    Some(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_color(ink)
-                                            .child(note),
-                                    )
-                                }))
-                                .children(parent.map(|parent| {
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(muted)
-                                        .child(parent)
-                                })),
-                        )
-                        .when(chevron_here, |d| {
-                            d.child(chevron(if selected {
-                                selected_ink
-                            } else {
-                                content(0.55)
-                            }))
-                        })
-                        .when(date, |d| {
-                            d.child(column(180., false).text_color(muted).child(if missing {
-                                "--".to_string()
-                            } else {
-                                format_date(entry.modified, today)
-                            }))
-                        })
-                        .when(size, |d| {
-                            d.child(
-                                column(80., true)
-                                    .text_color(muted)
-                                    .child(format_size(entry)),
-                            )
-                        })
-                        .when(kind, |d| {
-                            d.child(match problem {
-                                // Selecting it shows why in the archive's bar.
-                                Some(_) => column(110., false)
-                                    .text_color(if selected { selected_ink } else { danger() })
-                                    .child("Can't extract"),
-                                None => column(110., false).text_color(muted).child(if missing {
-                                    "Missing".to_string()
-                                } else {
-                                    entry.kind_label()
-                                }),
-                            })
-                        })
-                        .when(missing, |d| d.opacity(0.5))
+                        .when(in_columns, |d| d.pb(px(theme::ROW_GAP)))
+                        .child(fill)
                         .when(grabs && selected, |d| Self::grab(d, ix, cx))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_entry(ix, event, window, cx)
                         }))
                         .map(|d| Self::context_target(d, ix, cx))
                         .when(drops, |d| Self::takes_drops(d, ix, cx))
-                        .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
-                            d.relative().child(
-                                self.drag
-                                    .pulsed(theme::drop_outline().rounded(px(theme::RADIUS_ROW))),
-                            )
-                        })
                         .into_any_element(),
                 )
             })

@@ -266,7 +266,7 @@ impl Pane {
                         .track_scroll(&self.scroll)
                         .flex_1()
                         // Rows' corners run parallel to the pane's.
-                        .p(px(theme::CARD_PADDING)),
+                        .map(theme::inset_rows),
                 )
                 .child(
                     canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
@@ -476,7 +476,7 @@ impl Pane {
                 )
                 .track_scroll(&scroll)
                 .flex_1()
-                .p(px(theme::CARD_PADDING)),
+                .map(theme::inset_rows),
             )
             .into_any_element()
     }
@@ -502,11 +502,7 @@ impl Pane {
                 let (dir, path) = (dir.to_path_buf(), entry.path.clone());
                 let ink = content(if here { 1. } else { 0.55 });
                 let badge = self.cloud_badge(&entry, ix, LIST_BADGE, ink, cx);
-                div()
-                    .id(ix)
-                    .role(gpui::Role::ListItem)
-                    .aria_label(entry.name.clone())
-                    .aria_selected(here)
+                let row = div()
                     .w_full()
                     .h(px(row_height))
                     .px(px(theme::PANE_INSET - theme::CARD_PADDING))
@@ -535,7 +531,16 @@ impl Pane {
                             .child(div().min_w_0().truncate().child(entry.name.clone()))
                             .children(badge),
                     )
-                    .when(folder, |d| d.child(chevron(ink)))
+                    .when(folder, |d| d.child(chevron(ink)));
+                // The gap is the row's, so a click there lands on it.
+                div()
+                    .id(ix)
+                    .role(gpui::Role::ListItem)
+                    .aria_label(entry.name.clone())
+                    .aria_selected(here)
+                    .w_full()
+                    .pb(px(theme::ROW_GAP))
+                    .child(row)
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.click_column(dir.clone(), path.clone(), folder, event, window, cx)
                     }))
