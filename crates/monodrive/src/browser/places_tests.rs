@@ -919,6 +919,24 @@ fn recents_list_what_was_opened_mark_what_went_and_clear(cx: &mut TestAppContext
     assert_eq!(said.0, "\"gone.txt\" is no longer there.");
     assert_eq!(world.fake.opened.lock().unwrap().len(), 1);
 
+    // Show in Enclosing Folder opens the folder holding a recent file with it
+    // selected, and Back returns to Recents.
+    let inner = project.join("docs/inner.md");
+    world.store.opened(&inner).unwrap();
+    world.lists_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    press(cx, "alt-up cmd-r");
+    assert_eq!(
+        in_pane(&browser, cx, |b, _| b.folder().to_path_buf()),
+        project.join("docs")
+    );
+    assert_eq!(
+        shown(&browser, cx),
+        (vec!["inner.md".into()], vec!["inner.md".into()])
+    );
+    press(cx, "cmd-[");
+    assert!(in_pane(&browser, cx, |b, _| b.showing_recents()));
+
     // What opened elsewhere shows when the watch speaks.
     world.store.opened(&project.join("zeta")).unwrap();
     world.lists_changed.try_send(()).unwrap();

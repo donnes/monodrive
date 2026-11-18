@@ -161,6 +161,7 @@ actions!(
         EmptyTrash,
         MoveHere,
         ShowPackageContents,
+        ShowInEnclosingFolder,
         RevealInFinder,
         OpenInTerminal,
         QuickLook,

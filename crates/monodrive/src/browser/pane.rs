@@ -22,9 +22,9 @@ use super::{
     OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places, PutBack, QuickLook,
     Redo, RemoveDownload, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
     SearchContents, SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-    ShowContextMenu, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
-    SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash,
-    with_owner,
+    ShowContextMenu, ShowInEnclosingFolder, ShowPackageContents, SortByKind, SortByModified,
+    SortByName, SortBySize, SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, home,
+    short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -2239,6 +2239,21 @@ impl Pane {
         self.focus_list(window, cx);
     }
 
+    /// Search results and Recents come from anywhere: shows the folder holding
+    /// the first selected, with what's selected in it still selected.
+    fn show_in_enclosing_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = self.chosen();
+        let Some(folder) = chosen.first().and_then(|path| path.parent()) else {
+            return;
+        };
+        let folder = folder.to_path_buf();
+        let select = chosen
+            .into_iter()
+            .filter(|path| path.parent() == Some(folder.as_path()))
+            .collect();
+        self.go_to(folder, select, window, cx);
+    }
+
     /// Selects `paths` once the listing that has them lands, the first with
     /// the cursor on it. Nothing asked keeps the selection the listing picks.
     fn select_when_listed(&mut self, mut paths: Vec<PathBuf>) {
@@ -4069,6 +4084,7 @@ impl Pane {
         let can_make_here = self.takes_files(cx);
         let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
         let selected = !self.selection.is_empty();
+        let scattered = self.showing_recents() || !self.query.is_empty();
         let renaming = self.changing_names();
         let can_extract = self.can_extract(cx);
         let can_compress = self.can_compress(cx);
@@ -4151,6 +4167,11 @@ impl Pane {
                 .when(selected && on_disk, |d| {
                     d.on_action(cx.listener(|this, _: &RevealInFinder, _, _| {
                         workspace::reveal(&this.chosen())
+                    }))
+                })
+                .when(selected && on_disk && scattered, |d| {
+                    d.on_action(cx.listener(|this, _: &ShowInEnclosingFolder, window, cx| {
+                        this.show_in_enclosing_folder(window, cx)
                     }))
                 })
                 .when(package, |d| {
