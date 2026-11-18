@@ -1207,6 +1207,7 @@ impl SettingsView {
                                 ix => format!("show-drive-{}", ix - 1),
                             };
                             window.focus(&this.handle(above, cx), cx);
+                            this.reveal(window);
                         }
                         preferences::update(cx, |p| p.hidden_drives.retain(|h| h.drive != drive))
                     }));
