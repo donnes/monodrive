@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# One entry point for verifying Monodrive the way a user or an agent uses it.
+# Wraps scripts/agent-app for the window and runs `monodrive mcp` in its
+# throwaway home, so what an agent changes over MCP shows up in that window.
+#
+#   verify up [folder]          fixture (unless a folder is given), build, start the window, print its name
+#   verify doctor               read-only: is the running instance worth driving?
+#   verify name                 the window's app name, for agent-desktop --app
+#   verify capture <run> <label>  snapshot + screenshot into the evidence folder
+#   verify mcp [--profile all] <tool> [json-args]   one MCP tool call in the window's home, reply as JSON
+#   verify mcp --confirm <tool> [json-args]         dry run, then confirm its token in the same session
+#   verify mcp --list [--profile all]               the tools the server offers
+#   verify down                 stop the window, remove the fixture, keep evidence
+set -euo pipefail
+self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cd "$(git -C "$(dirname "$self")" rev-parse --show-toplevel)"
+root=$PWD
+
+name="Monodrive Agent $(basename "$root")"
+agent=$root/target/agent
+exe="$agent/$name.app/Contents/MacOS/monodrive"
+bin=$root/target/debug/monodrive
+fixture=$root/.scratch/verify/fixture
+evidence=$root/.scratch/verify/evidence
+# scripts/agent-app's short HOME: the owner's socket path has a 104-byte limit.
+hash=$(printf '%s' "$root" | shasum | cut -c1-10)
+app_home=/tmp/mda-$hash
+
+app_running() {
+  [[ -f "$agent/pid" ]] && [[ "$(ps -o command= -p "$(cat "$agent/pid")" 2>/dev/null || true)" == "$exe"* ]]
+}
+
+make_fixture() {
+  rm -rf "$fixture"
+  mkdir -p "$fixture/Projects/Monodrive" "$fixture/Empty folder" "$fixture/Photos"
+  printf 'alpha\n' >"$fixture/Alpha.txt"
+  printf 'needle\n' >"$fixture/mdverify-needle.txt"
+  printf 'beta beta\n' >"$fixture/beta.md"
+  printf 'two\n' >"$fixture/file2.txt"
+  printf 'ten\n' >"$fixture/file10.txt"
+  printf 'hidden\n' >"$fixture/.hidden-note"
+  printf '# Notes\nverify-needle-7f3a\n' >"$fixture/Projects/Monodrive/notes.md"
+  printf 'fn main() {}\n' >"$fixture/Projects/Monodrive/main.rs"
+  sips -s format png -z 64 64 /System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericDocumentIcon.icns \
+    --out "$fixture/Photos/icon.png" >/dev/null
+  ditto -c -k --sequesterRsrc "$fixture/Projects" "$fixture/Projects.zip"
+  echo "$fixture"
+}
+
+rpc() { jq -cn --arg t "$1" --argjson a "$2" --argjson id "$3" '{jsonrpc:"2.0",id:$id,method:"tools/call",params:{name:$t,arguments:$a}}'; }
+
+INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"verify-monodrive","version":"1"}}}'
+INITIALIZED='{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+mcp() {
+  local profile=() list=0 confirm=0 tool="" args="{}"
+  while (($#)); do
+    case $1 in
+      --profile) profile=(--profile "$2"); shift 2 ;;
+      --list) list=1; shift ;;
+      --confirm) confirm=1; shift ;;
+      *) if [[ -z $tool ]]; then tool=$1; else args=$1; fi; shift ;;
+    esac
+  done
+  jq -e -s 'length == 1 and (.[0] | type == "object")' <<<"$args" >/dev/null 2>&1 || { echo "Arguments must be one JSON object: $args" >&2; exit 2; }
+  # The window's home has the index clone and passed agent-app's Full Disk
+  # Access check; any other home could crawl the disk or prompt.
+  app_running || { echo "No window running; verify up first." >&2; exit 1; }
+  if ((confirm)); then
+    mcp_confirm "$tool" "$args" ${profile[@]+"${profile[@]}"}
+    return
+  fi
+  local request
+  if ((list)); then
+    request='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  else
+    [[ -n $tool ]] || { echo "usage: verify mcp [--profile all] [--confirm] <tool> [json-args]" >&2; exit 2; }
+    request=$(rpc "$tool" "$args" 2)
+  fi
+  printf '%s\n' "$INIT" "$INITIALIZED" "$request" |
+    HOME=$app_home "$bin" mcp ${profile[@]+"${profile[@]}"} | jq -c 'select(.id == 2)'
+}
+
+# A dry run's token only confirms in the session that made it, so the plan and
+# its confirm share one server: prints the plan's reply, then the run's.
+mcp_confirm() {
+  local tool=$1 args=$2 reply token pipes=$agent/mcp-session
+  shift 2
+  rm -rf "$pipes"
+  mkdir -p "$pipes"
+  mkfifo "$pipes/in" "$pipes/out"
+  HOME=$app_home "$bin" mcp "$@" <"$pipes/in" >"$pipes/out" &
+  local server=$!
+  exec 7>"$pipes/in" 8<"$pipes/out"
+  printf '%s\n' "$INIT" "$INITIALIZED" >&7
+  read -r reply <&8
+  rpc "$tool" "$(jq -c '. + {dry_run: true}' <<<"$args")" 2 >&7
+  read -r reply <&8
+  echo "$reply"
+  token=$(jq -r '.result.structuredContent.token // empty' <<<"$reply")
+  if [[ -n $token ]]; then
+    rpc "$tool" "$(jq -c --arg t "$token" 'del(.dry_run) + {confirm: $t}' <<<"$args")" 3 >&7
+    read -r reply <&8
+    echo "$reply"
+  fi
+  exec 7>&- 8<&-
+  wait "$server" || true
+  rm -rf "$pipes"
+  [[ -n $token ]]
+}
+
+doctor() {
+  local fail=0
+  ok() { echo "ok    $*"; }
+  bad() { echo "FAIL  $*"; fail=1; }
+  if [[ -r "/Library/Application Support/com.apple.TCC/TCC.db" ]]; then ok "Full Disk Access"; else bad "no Full Disk Access for the app running you"; fi
+  local perms
+  perms=$(agent-desktop status | jq -r '[.data.permissions.accessibility.state, .data.permissions.screen_recording.state] | join(" ")')
+  if [[ $perms == "granted granted" ]]; then ok "agent-desktop: accessibility and screen recording"; else bad "agent-desktop permissions: $perms (run agent-desktop permissions --guide)"; fi
+  if app_running; then ok "window process $(cat "$agent/pid") is $name"; else bad "no window started by this worktree (verify up)"; fi
+  if ioreg -n Root -d1 -a | grep -A1 IOConsoleLocked | grep -q '<true/>'; then
+    bad "the screen is locked: windows hide from accessibility until the user unlocks it"
+  else
+    ok "screen unlocked"
+  fi
+  if app_running; then
+    local windows
+    windows=$(agent-desktop list-windows --app "$name" | jq '[.data[]? | select(.accessible)] | length')
+    if ((windows > 0)); then ok "$windows window(s) readable by agent-desktop"; else bad "no readable window for $name (off screen, other Space, or locked)"; fi
+    local newest built
+    newest=$(git ls-files -z crates vendor Cargo.toml Cargo.lock | xargs -0 stat -f %m 2>/dev/null | sort -n | tail -1)
+    built=$(stat -f %m "$exe")
+    if ((built >= newest)); then ok "build is newer than every source file"; else bad "source changed after this build: verify down, then verify up"; fi
+    if grep -q -i 'panicked' "$agent/app.log"; then bad "panic in target/agent/app.log"; else ok "no panic in target/agent/app.log"; fi
+  fi
+  echo "name  $name"
+  return $fail
+}
+
+capture() {
+  local run=${1:?run id} label=${2:?label} out
+  out=$evidence/$run
+  mkdir -p "$out"
+  agent-desktop snapshot --app "$name" --compact >"$out/$label.json"
+  agent-desktop screenshot --app "$name" "$out/$label.png" >/dev/null
+  echo "$out/$label.json"
+  echo "$out/$label.png"
+}
+
+down() {
+  scripts/agent-app stop
+  rm -rf "$fixture" "$agent/mcp-session"
+  echo "evidence kept in $evidence"
+}
+
+case "${1:-}" in
+  up)
+    if app_running; then
+      echo "A window is already running; verify down first." >&2
+      exit 1
+    fi
+    folder=${2:-}
+    [[ -n $folder ]] || folder=$(make_fixture)
+    scripts/agent-app start "$folder"
+    ;;
+  fixture) make_fixture ;;
+  doctor) doctor ;;
+  name) echo "$name" ;;
+  capture) shift; capture "$@" ;;
+  mcp) shift; mcp "$@" ;;
+  down) down ;;
+  *) sed -n '6,13p' "$self" >&2; exit 2 ;;
+esac
