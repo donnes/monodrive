@@ -228,19 +228,6 @@ impl Sidebar {
             ..Self::default()
         }
     }
-
-    /// Lists in Locations what `hidden` leaves of every drive and cloud folder.
-    pub(super) fn show_drives(&mut self, hidden: &[HiddenDrive]) {
-        let shown = |drive: Drive| !hidden.iter().any(|h| h.drive == drive);
-        self.volumes = (self.all_volumes.iter())
-            .filter(|v| shown(Drive::of(v)))
-            .cloned()
-            .collect();
-        self.cloud = (self.all_cloud.iter())
-            .filter(|c| shown(Drive::Path(c.path.clone())))
-            .cloned()
-            .collect();
-    }
 }
 
 /// A cloud folder's sidebar name being typed in place of it.
@@ -470,10 +457,7 @@ impl Browser {
                 }
                 this.sidebar.all_volumes = volumes;
                 this.sidebar.all_cloud = cloud;
-                let hidden = cx
-                    .try_global::<Preferences>()
-                    .map(|p| p.hidden_drives.clone());
-                this.sidebar.show_drives(&hidden.unwrap_or_default());
+                this.show_drives(cx);
                 this.load_lists(cx);
                 this.save_session(cx);
                 // A drive that's back may be what a restored pane waits for.
@@ -656,6 +640,26 @@ impl Browser {
             self.sidebar.cloud.len()
         };
         self.first_location() + cloud + vol
+    }
+
+    /// Lists in Locations every drive and cloud folder Settings doesn't hide.
+    /// The sidebar's keys stay on a row when the last one goes.
+    pub(super) fn show_drives(&mut self, cx: &App) {
+        let hidden = cx
+            .try_global::<Preferences>()
+            .map_or(&[][..], |p| &p.hidden_drives);
+        let shown = |drive: Drive| !hidden.iter().any(|h| h.drive == drive);
+        let sidebar = &mut self.sidebar;
+        sidebar.volumes = (sidebar.all_volumes.iter())
+            .filter(|v| shown(Drive::of(v)))
+            .cloned()
+            .collect();
+        sidebar.cloud = (sidebar.all_cloud.iter())
+            .filter(|c| shown(Drive::Path(c.path.clone())))
+            .cloned()
+            .collect();
+        let last = self.server_ix(self.sidebar.remotes.len()).saturating_sub(1);
+        self.sidebar_cursor = self.sidebar_cursor.min(last);
     }
 
     /// The row of saved server `at`, after every drive.

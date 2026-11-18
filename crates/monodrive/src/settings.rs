@@ -1190,16 +1190,26 @@ impl SettingsView {
     }
 
     /// A row for each drive Hide from Sidebar took out of Locations, with
-    /// the button that puts it back.
-    fn hidden_drives(&self, p: &Preferences, cx: &App) -> Vec<AnyElement> {
+    /// the button that puts it back. Focus stays on the row that takes a
+    /// shown one's place, or the control above when the last one goes.
+    fn hidden_drives(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let last = p.hidden_drives.len().saturating_sub(1);
         (p.hidden_drives.iter().enumerate())
             .map(|(ix, hidden)| {
                 let drive = hidden.drive.clone();
                 let button = text_button(("show-drive", ix), "Show", ButtonLook::Secondary)
                     .debug_selector(move || format!("show-drive-{ix}"))
-                    .on_click(move |_, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let id = format!("show-drive-{ix}");
+                        if ix == last && this.handle(id, cx).is_focused(window) {
+                            let above = match ix {
+                                0 => "show-worktrees".into(),
+                                ix => format!("show-drive-{}", ix - 1),
+                            };
+                            window.focus(&this.handle(above, cx), cx);
+                        }
                         preferences::update(cx, |p| p.hidden_drives.retain(|h| h.drive != drive))
-                    });
+                    }));
                 row_with(
                     hidden.name.clone(),
                     Some("Hidden from Locations".into()),

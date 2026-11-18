@@ -475,6 +475,9 @@ fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_
         ))
     );
     assert_eq!(shown(cx), ["Macintosh HD", "iCloud Drive"]);
+    // Backup was the last row, so the keys move up onto the one now last.
+    let cursor = browser.read_with(cx, |b, _| b.row_at(b.sidebar_cursor));
+    assert_eq!(cursor, Some(Row::Cloud(0)));
     assert!(hide(first + 1, cx));
     assert_eq!(shown(cx), ["Macintosh HD"]);
     // Still mounted: the drive's own folder opens and says how full it is.
