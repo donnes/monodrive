@@ -61,6 +61,10 @@ A name that can't be used turns the rename field's outline red and shows one sho
 
 ⌃⌘S or the icon button closes the sidebar, and it stays closed from then on. The button sits right after the traffic lights, open or closed, so it holds still under the pointer. Back and Forward sit at the sidebar's edge and follow it, stopping short of the button. The sidebar slides on a critically damped spring, as Monocode's does: it looks done in about 130 ms, settles by 280 ms and never overshoots. Pressing again partway reverses it from where it is, at its speed. The sidebar keeps its width while its edge moves over it, its contents fade with it, and the panes lay out to the edge each frame. With Reduce Motion, read at launch, it opens and closes at once. The search field lives in the sidebar, so while it's closed the field shows at the right of the top bar, only while it has the keys or a search is on screen.
 
+### Sidebar sections
+
+Favorites and Locations each fold under their heading. The heading's name and a 12 pt chevron after it, pointing down while open and right while folded, are one button. Each section folds on its own, and the app remembers which are folded across windows and restarts. A folded section's rows are gone for the keys too, and folding moves the keys to the place that's open. Favorites' Edit hides while it's folded, and folding ends an Edit session. Folders still pin on a drop on its heading, and ⌘1 to ⌘0 still open favorites.
+
 ### Favorites' keys
 
 ⌘1 to ⌘9 and ⌘0 open the first ten favorites, in the order the sidebar lists them. Recents sits above the Favorites section and isn't one. While ⌘ alone is held, each of those rows shows its shortcut at the end in a `key_cap`, at once and with no fade, and no row moves. An Edit session, a sheet or a menu hides them. A favorite that's unavailable says why in a toast, as a click does.

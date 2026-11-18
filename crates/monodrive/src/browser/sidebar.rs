@@ -18,13 +18,11 @@ use crate::assets::NIGHT_SKY;
 use crate::commands::{self, Scope};
 use crate::feedback::{self, Haptic};
 use crate::motion::Slide;
-use crate::preferences::{self, Drive, HiddenDrive, Preferences, SIDEBAR_WIDTHS};
+use crate::preferences::{self, Collapsed, Drive, HiddenDrive, Preferences, SIDEBAR_WIDTHS};
 use crate::session::RemoteAt;
 use crate::session::Shows;
 use crate::text_field::TextField;
-use crate::theme::{
-    self, ButtonLook, accent, content, icon, icon_button, row_icon_button, section_label,
-};
+use crate::theme::{self, ButtonLook, accent, content, icon, icon_button, row_icon_button};
 use crate::traffic_lights;
 use gpui::{
     Action, App, Context, CursorStyle, ElementId, Entity, Focusable, FontWeight, Global,
@@ -215,16 +213,19 @@ pub(super) struct Sidebar {
     pub(super) worktrees: bool,
     /// The cloud folder whose name is being typed in its row.
     pub(super) renaming: Option<CloudRenaming>,
+    /// The sections folded under their headings, whose rows the keys skip.
+    pub(super) collapsed: Collapsed,
     load_volumes: Option<Task<()>>,
     load_lists: Option<Task<()>>,
     _heard: Vec<Task<()>>,
 }
 
 impl Sidebar {
-    /// Nothing read yet, with the Worktrees row as Settings says.
-    pub(super) fn new(worktrees: bool) -> Self {
+    /// Nothing read yet, with the Worktrees row and the sections as saved.
+    pub(super) fn new(worktrees: bool, collapsed: Collapsed) -> Self {
         Self {
             worktrees,
+            collapsed,
             ..Self::default()
         }
     }
@@ -610,6 +611,19 @@ impl Browser {
         cx.notify();
     }
 
+    /// Folds the sections as saved, in every window. Folding Favorites ends
+    /// an Edit session. The rows under the keys may have gone or moved, so
+    /// the keys go to the open place.
+    pub(super) fn fold_sections(&mut self, collapsed: Collapsed, cx: &mut Context<Self>) {
+        if self.sidebar.collapsed == collapsed {
+            return;
+        }
+        self.sidebar.collapsed = collapsed;
+        self.sidebar.editing &= !collapsed.favorites;
+        self.sidebar_cursor = self.cursor_on_folder(cx).unwrap_or(0);
+        cx.notify();
+    }
+
     /// The first favorite's row: after the Overview, Recents and, when
     /// Settings shows it, Worktrees.
     fn first_favorite(&self) -> usize {
@@ -628,7 +642,21 @@ impl Browser {
 
     /// The row of Locations' first: the startup disk.
     fn first_location(&self) -> usize {
-        self.first_favorite() + self.sidebar.places.len()
+        let favorites = if self.sidebar.collapsed.favorites {
+            0
+        } else {
+            self.sidebar.places.len()
+        };
+        self.first_favorite() + favorites
+    }
+
+    /// The sidebar's last row the keys reach.
+    fn last_row(&self) -> usize {
+        if self.sidebar.collapsed.locations {
+            self.first_location() - 1
+        } else {
+            self.server_ix(self.sidebar.remotes.len()) - 1
+        }
     }
 
     /// The row of volume `vol`: the startup disk before the cloud folders,
@@ -658,8 +686,7 @@ impl Browser {
             .filter(|c| shown(Drive::Path(c.path.clone())))
             .cloned()
             .collect();
-        let last = self.server_ix(self.sidebar.remotes.len()).saturating_sub(1);
-        self.sidebar_cursor = self.sidebar_cursor.min(last);
+        self.sidebar_cursor = self.sidebar_cursor.min(self.last_row());
     }
 
     /// The row of saved server `at`, after every drive.
@@ -678,6 +705,7 @@ impl Browser {
             1 => Some(Row::Recents),
             2 if self.sidebar.worktrees => Some(Row::Worktrees),
             ix if ix < locations => Some(Row::Favorite(ix - first)),
+            _ if self.sidebar.collapsed.locations => None,
             ix if ix < locations + startup => Some(Row::Volume(ix - locations)),
             ix if ix < locations + startup + cloud => Some(Row::Cloud(ix - locations - startup)),
             ix => {
@@ -913,9 +941,13 @@ impl Browser {
         if pane.showing_worktrees() {
             return self.sidebar.worktrees.then_some(2);
         }
+        let Collapsed {
+            favorites: no_favorites,
+            locations: no_locations,
+        } = self.sidebar.collapsed;
         if let Some(id) = pane.remote_source() {
             let ix = self.sidebar.remotes.iter().position(|s| s.id == id)?;
-            return Some(self.server_ix(ix));
+            return (!no_locations).then(|| self.server_ix(ix));
         }
         let folder = pane.folder();
         let favorite = self
@@ -923,7 +955,11 @@ impl Browser {
             .places
             .iter()
             .position(|place| place.at() == Some(folder))
+            .filter(|_| !no_favorites)
             .map(|ix| ix + self.first_favorite());
+        if no_locations {
+            return favorite;
+        }
         let cloud = || {
             let ix = self.sidebar.cloud.iter().position(|c| c.path == folder)?;
             Some(self.first_location() + self.startup_disks() + ix)
@@ -1482,12 +1518,50 @@ impl Browser {
             .child(row)
     }
 
+    /// A section's name and its disclosure chevron, which fold its rows
+    /// away or bring them back, as Finder's headings do.
+    fn section_toggle(
+        label: &'static str,
+        folded: bool,
+        fold: fn(&mut Collapsed),
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .id(label)
+            .debug_selector(move || format!("{}-toggle", label.to_lowercase()))
+            .role(Role::Button)
+            .aria_label(label)
+            .aria_expanded(!folded)
+            .h_full()
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|s| s.text_color(content(1.)))
+            .child(label)
+            .child(
+                icon(
+                    if folded {
+                        "chevron-right"
+                    } else {
+                        "chevron-down-hi"
+                    },
+                    12.,
+                )
+                .text_color(content(0.55)),
+            )
+            .on_click(cx.listener(move |_, _, _, cx| {
+                preferences::update(cx, |prefs| fold(&mut prefs.collapsed))
+            }))
+    }
+
     fn favorites_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let editing = self.sidebar.editing;
+        let folded = self.sidebar.collapsed.favorites;
         let label = if editing { "Done" } else { "Edit" };
         let drag = self.drag.clone();
         // Pins first, so folders can land even with no favorite to drop beside.
-        section_label("Favorites")
+        theme::section_line()
             .debug_selector(|| "favorites-header".into())
             .relative()
             .flex_shrink_0()
@@ -1498,14 +1572,22 @@ impl Browser {
             .when(self.drag.pins_at() == Some(0), |d| {
                 d.child(theme::insertion_line())
             })
-            .child(
-                theme::text_button("favorites-edit", label, ButtonLook::Ghost)
-                    .debug_selector(|| "favorites-edit".into())
-                    // Its text, not its pill, ends on the rows' 8 pt line.
-                    .mr(px(-8.))
-                    .when(editing, |d| d.text_color(accent()))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_editing(cx))),
-            )
+            .child(Self::section_toggle(
+                "Favorites",
+                folded,
+                |c| c.favorites = !c.favorites,
+                cx,
+            ))
+            .when(!folded, |d| {
+                d.child(
+                    theme::text_button("favorites-edit", label, ButtonLook::Ghost)
+                        .debug_selector(|| "favorites-edit".into())
+                        // Its text, not its pill, ends on the rows' 8 pt line.
+                        .mr(px(-8.))
+                        .when(editing, |d| d.text_color(accent()))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_editing(cx))),
+                )
+            })
     }
 
     /// The Trash and Settings at the sidebar's foot.
@@ -1685,7 +1767,8 @@ impl Browser {
         };
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
-        let last_row = self.server_ix(self.sidebar.remotes.len()) - 1;
+        let last_row = self.last_row();
+        let collapsed = self.sidebar.collapsed;
         div()
             .relative()
             .w(px(width))
@@ -1884,32 +1967,45 @@ impl Browser {
                             .text_color(theme::danger())
                             .child(why)
                     }))
-                    .children(
-                        (0..self.sidebar.places.len())
-                            .map(|fav| self.favorite_row(fav, &here, cursor, cx))
-                            .collect::<Vec<_>>(),
+                    .when(!collapsed.favorites, |d| {
+                        d.children(
+                            (0..self.sidebar.places.len())
+                                .map(|fav| self.favorite_row(fav, &here, cursor, cx))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .child(
+                        theme::section_line()
+                            .flex_shrink_0()
+                            .child(Self::section_toggle(
+                                "Locations",
+                                collapsed.locations,
+                                |c| c.locations = !c.locations,
+                                cx,
+                            )),
                     )
-                    .child(section_label("Locations").flex_shrink_0())
-                    .children(
-                        (0..self.startup_disks())
-                            .map(|vol| self.volume_row(vol, &here, cursor, cx))
-                            .collect::<Vec<_>>(),
-                    )
-                    .children(
-                        (0..self.sidebar.cloud.len())
-                            .map(|ix| self.cloud_row(ix, &here, cursor, cx))
-                            .collect::<Vec<_>>(),
-                    )
-                    .children(
-                        (self.startup_disks()..self.sidebar.volumes.len())
-                            .map(|vol| self.volume_row(vol, &here, cursor, cx))
-                            .collect::<Vec<_>>(),
-                    )
-                    .children(
-                        (0..self.sidebar.remotes.len())
-                            .map(|at| self.server_row(at, &here, cursor, cx))
-                            .collect::<Vec<_>>(),
-                    ),
+                    .when(!collapsed.locations, |d| {
+                        d.children(
+                            (0..self.startup_disks())
+                                .map(|vol| self.volume_row(vol, &here, cursor, cx))
+                                .collect::<Vec<_>>(),
+                        )
+                        .children(
+                            (0..self.sidebar.cloud.len())
+                                .map(|ix| self.cloud_row(ix, &here, cursor, cx))
+                                .collect::<Vec<_>>(),
+                        )
+                        .children(
+                            (self.startup_disks()..self.sidebar.volumes.len())
+                                .map(|vol| self.volume_row(vol, &here, cursor, cx))
+                                .collect::<Vec<_>>(),
+                        )
+                        .children(
+                            (0..self.sidebar.remotes.len())
+                                .map(|at| self.server_row(at, &here, cursor, cx))
+                                .collect::<Vec<_>>(),
+                        )
+                    }),
             )
             .child(self.foot(&here, cx))
             .child(
