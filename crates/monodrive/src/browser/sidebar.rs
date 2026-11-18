@@ -29,7 +29,7 @@ use gpui::{
     ImageSource, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point,
     Render, Resource, Role, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
 };
-use monodrive_core::cloud::{self, CloudFolder};
+use monodrive_core::cloud::{self, CloudFolder, Quota};
 use monodrive_core::entries::Entry;
 use monodrive_core::index::{Caps, Found, Index};
 use monodrive_core::ops::{self, Origin};
@@ -71,7 +71,7 @@ pub trait Drives: Send + Sync {
     fn cloud(&self) -> Vec<CloudFolder>;
     /// What's left in `folder`'s cloud account, if its provider says. Can
     /// wait on the provider, so call it off the UI thread.
-    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64>;
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<Quota>;
     /// What the index finds for `query`, once it has started. Nothing starts
     /// it here. Call it off the UI thread.
     fn find_files(
@@ -118,7 +118,7 @@ impl Drives for System {
         cloud::folders(&home())
     }
 
-    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64> {
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<Quota> {
         cloud::free_space(folder)
     }
 
@@ -192,10 +192,8 @@ pub(super) struct Sidebar {
     /// together, which is also when the window comes forward.
     pub(super) all_volumes: Vec<Volume>,
     pub(super) all_cloud: Vec<CloudFolder>,
-    /// What's left in each cloud folder's account, `None` where its provider
-    /// doesn't say. Asked after the folders are listed, since iCloud Drive
-    /// can take a moment; a folder not answered yet isn't here.
-    cloud_free: HashMap<PathBuf, Option<u64>>,
+    /// Results of supported quota lookups, read after the folders are listed.
+    cloud_free: HashMap<PathBuf, Quota>,
     /// What Locations lists: those Settings doesn't hide.
     pub(super) volumes: Vec<Volume>,
     pub(super) cloud: Vec<CloudFolder>,
@@ -339,6 +337,16 @@ fn fullness(volume: &Volume) -> Option<f32> {
         .then(|| (volume.total.saturating_sub(volume.free) as f64 / volume.total as f64) as f32)
 }
 
+fn storage_row_detail(detail: gpui::Div) -> gpui::Div {
+    div()
+        .h(px(12.))
+        .ml(px(24.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .child(detail)
+}
+
 /// Whether ⌘ alone is held here. GPUI rereads the keys and redraws when the
 /// window activates, so a ⌘ let go in another app leaves nothing behind.
 pub(super) fn command_held(window: &Window) -> bool {
@@ -476,7 +484,10 @@ impl Browser {
                 .spawn(async move {
                     folders
                         .iter()
-                        .map(|folder| (folder.path.clone(), places.drives.cloud_free(folder)))
+                        .filter_map(|folder| {
+                            let free = places.drives.cloud_free(folder)?;
+                            Some((folder.path.clone(), free))
+                        })
                         .collect()
                 })
                 .await;
@@ -1227,17 +1238,17 @@ impl Browser {
             .renaming
             .as_ref()
             .filter(|renaming| renaming.path == folder.path);
-        let space = self
-            .sidebar
-            .cloud_free
-            .get(&folder.path)
-            .map(|free| match free {
-                Some(free) => ("free", format!("{} free", format_bytes(*free))),
-                None => ("unknown", "Storage info unavailable".into()),
-            });
-        let described = space.as_ref().map(|(_, text)| text.clone());
+        let quota = self.sidebar.cloud_free.get(&folder.path);
+        let space = match quota {
+            Some(Quota::Free(bytes)) => Some(format!("{} free", format_bytes(*bytes))),
+            _ => None,
+        };
         let row = Self::row(ix, selected, true, cursor)
-            .h(px(DRIVE_HEIGHT))
+            .h(px(if space.is_some() {
+                DRIVE_HEIGHT
+            } else {
+                ROW_HEIGHT
+            }))
             .flex()
             .flex_col()
             .justify_center()
@@ -1253,28 +1264,26 @@ impl Browser {
                         None => d.child(div().flex_1().min_w_0().truncate().child(name.clone())),
                     }),
             )
-            // The line keeps its room until the provider answers.
-            .child(
-                div()
-                    .h(px(12.))
-                    .ml(px(24.))
-                    .flex()
-                    .items_center()
-                    .text_size(px(theme::TEXT_CAPTION))
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(content(0.65))
-                    .children(space.map(|(said, text)| {
-                        div()
-                            .debug_selector(move || format!("cloud-{said}-{at}"))
-                            .min_w_0()
-                            .truncate()
-                            .child(text)
-                    })),
-            );
+            .children(space.clone().map(|text| {
+                storage_row_detail(
+                    div()
+                        .debug_selector(move || format!("cloud-free-{at}"))
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(theme::TEXT_CAPTION))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(content(0.65))
+                        .child(text),
+                )
+            }));
         let target = (folder.path.clone(), name.clone());
         Self::slot(ix, selected, true, cx)
             .aria_label(name)
-            .when_some(described, |d, text| d.aria_description(text))
+            .when_some(space, |d, text| d.aria_description(text))
+            .when(quota == Some(&Quota::Failed), |d| {
+                let message = "Couldn’t read available storage";
+                theme::tip(d.aria_description(message), message)
+            })
             .child(row)
             .map(|d| self.drop_row(d, ix, Some(target)))
     }
@@ -1427,15 +1436,16 @@ impl Browser {
                     }),
             )
             .children(fullness(volume).map(|fullness| {
-                theme::progress_track()
-                    .debug_selector(move || format!("volume-bar-{vol}"))
-                    .ml(px(24.))
-                    .flex_shrink_0()
-                    .child(
-                        theme::progress_fill(fullness)
-                            .debug_selector(move || format!("volume-used-{vol}"))
-                            .bg(content(0.55)),
-                    )
+                storage_row_detail(
+                    theme::progress_track()
+                        .debug_selector(move || format!("volume-bar-{vol}"))
+                        .flex_1()
+                        .child(
+                            theme::progress_fill(fullness)
+                                .debug_selector(move || format!("volume-used-{vol}"))
+                                .bg(content(0.55)),
+                        ),
+                )
             }));
         // A drive that can't be written to takes nothing.
         let folder = (!volume.read_only).then(|| (volume.mount.clone(), volume.name.clone()));
