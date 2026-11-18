@@ -1068,7 +1068,7 @@ impl Browser {
                     ButtonLook::Secondary,
                     Some(("Download", true)),
                 ),
-                _ if self.sidebar.cloud.iter().any(|c| c.path == path) => return None,
+                _ if self.sidebar.all_cloud.iter().any(|c| c.path == path) => return None,
                 _ => (
                     "cloud",
                     "Downloaded",

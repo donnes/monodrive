@@ -3,6 +3,7 @@
 
 use crate::background::{Effect, Scope};
 use gpui::{App, Global, Task};
+use monodrive_core::volumes::{Volume, VolumeId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -114,6 +115,35 @@ impl Terminal {
     }
 }
 
+/// A drive or cloud folder taken out of the sidebar's Locations. It stays
+/// mounted and opens by its path as before.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenDrive {
+    /// What it was called, for Settings to list it while it isn't connected.
+    pub name: String,
+    pub drive: Drive,
+}
+
+/// Which drive or cloud folder is hidden, wherever it mounts next.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Drive {
+    /// A volume, by its UUID or a share's address.
+    Volume(VolumeId),
+    /// The startup disk, whose UUID a reinstall changes, a volume macOS
+    /// gives no id, or a cloud folder: by where it is.
+    Path(PathBuf),
+}
+
+impl Drive {
+    pub fn of(volume: &Volume) -> Self {
+        match &volume.id {
+            Some(id) if !volume.startup => Drive::Volume(id.clone()),
+            _ => Drive::Path(volume.mount.clone()),
+        }
+    }
+}
+
 /// Monocode's interface scale steps.
 pub const UI_SCALE_PERCENTS: [u32; 16] = [
     50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
@@ -127,6 +157,8 @@ pub struct Preferences {
     pub show_path_bar: bool,
     /// The Worktrees page has a row in the sidebar. ⌥⌘G opens it either way.
     pub show_worktrees: bool,
+    /// What Locations leaves out, in the order it was hidden.
+    pub hidden_drives: Vec<HiddenDrive>,
     pub theme: Theme,
     /// A preset from `palettes::PALETTES`.
     pub palette: String,
@@ -199,6 +231,7 @@ impl Default for Preferences {
             show_hidden: false,
             show_path_bar: true,
             show_worktrees: false,
+            hidden_drives: Vec::new(),
             theme: Theme::Dark,
             palette: "default".into(),
             accent: None,
@@ -248,6 +281,7 @@ impl Preferences {
         self.row_size = defaults.row_size;
         self.show_path_bar = defaults.show_path_bar;
         self.show_worktrees = defaults.show_worktrees;
+        self.hidden_drives = defaults.hidden_drives;
         self.view = defaults.view;
         self.grid_icon = defaults.grid_icon;
         self.grid_label = defaults.grid_label;
@@ -280,6 +314,7 @@ impl Preferences {
             row_size: self.row_size,
             show_path_bar: self.show_path_bar,
             show_worktrees: self.show_worktrees,
+            hidden_drives: std::mem::take(&mut self.hidden_drives),
             view: self.view,
             grid_icon: self.grid_icon,
             grid_label: self.grid_label,
