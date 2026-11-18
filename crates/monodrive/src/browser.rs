@@ -1237,7 +1237,8 @@ impl Browser {
 
     /// ⌃⌘S and its button. The keys don't stay in a sidebar that's gone.
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_focus.is_focused(window) || self.settings_focus.is_focused(window) {
+        if self.sidebar_focus.contains_focused(window, cx) || self.settings_focus.is_focused(window)
+        {
             self.pane()
                 .update(cx, |pane, cx| pane.focus_list(window, cx));
         }

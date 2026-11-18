@@ -388,6 +388,15 @@ fn a_cloud_folder_takes_a_name_of_its_own_and_gives_it_back(cx: &mut TestAppCont
     cx.dispatch_action(RenameLocation);
     press(cx, "backspace enter");
     assert!(names(cx).is_empty());
+    // Closing the sidebar keeps what was typed, and the keys go to the list.
+    cx.dispatch_action(RenameLocation);
+    cx.simulate_input("Work");
+    cx.dispatch_action(ToggleSidebar);
+    cx.run_until_parked();
+    assert!(!renaming(cx));
+    assert_eq!(names(cx), [(drive.clone(), "Work".to_string())].into());
+    let list = in_pane(&browser, cx, |pane, _| pane.list_focus.clone());
+    assert!(cx.update(|window, _| list.is_focused(window)));
 }
 
 #[gpui::test]
