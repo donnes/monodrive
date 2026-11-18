@@ -1221,7 +1221,7 @@ fn glyph_for(command: &Command) -> &'static str {
         "Settings…" => "settings",
         "Undo" | "Redo" => "rotate-ccw",
         "Macintosh HD" => "hard-drive",
-        "Downloads" | "Copies and Moves" => "arrow-down-circle",
+        "Downloads" | "Activity" => "arrow-down-circle",
         "Applications" => "app-window",
         "Open in Terminal" => "terminal",
         "New File" => "file",

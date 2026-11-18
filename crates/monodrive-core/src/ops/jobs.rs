@@ -1,12 +1,13 @@
-//! Copy, move, compress, extract and remote copy jobs. The owner queues them and runs at
+//! Copy, move, compress, extract, remote copy and Empty Trash jobs. The owner queues them and runs at
 //! most `RUNNING` at once, each on its own thread, one item at a time, so its
 //! socket keeps answering while they work. Every change an item makes is a
 //! `Step`, written to the journal before and after it happens, so undo
 //! reverses a job and a crash leaves it settled from the disk rather than
-//! repeated.
+//! repeated. An erased item has no step: nothing brings it back.
 
 use super::{
-    Engine, FileId, Origin, Outcome, Record, Request, Spot, Stamp, Step, Submission, disk, existing,
+    Engine, FileId, Origin, Outcome, Record, Request, Spot, Stamp, Step, Submission, TrashItem,
+    disk, existing,
 };
 use crate::archives::{self, Archive};
 use crate::cloud;
@@ -20,6 +21,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// At most this many jobs copy at once; the rest wait their turn.
 const RUNNING: usize = 2;
+/// Why a second Empty Trash, new or continued, is refused.
+const ALREADY_EMPTYING: &str = "The Trash is already being emptied.";
 /// How many finished jobs clients are shown.
 const SHOWN: usize = 50;
 
@@ -85,14 +88,17 @@ pub enum Transfer {
     Upload,
 }
 
-/// A copy, move, compression or extraction, as clients see it.
+/// A copy, move, compression, extraction or emptying of the Trash, as
+/// clients see it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: u64,
-    /// "Copy", "Move", "Compress", "Extract", "Download" or "Upload".
+    /// "Copy", "Move", "Compress", "Extract", "Download", "Upload" or
+    /// "Empty Trash".
     pub title: String,
     pub origin: Origin,
-    /// Where its items go: the archive's folder for Compress.
+    /// Where its items go: the archive's folder for Compress, and the Trash
+    /// its items leave for Empty Trash.
     pub into: PathBuf,
     pub state: State,
     pub tasks: Vec<Task>,
@@ -141,6 +147,8 @@ pub struct Task {
 pub enum Done {
     /// Where it is now.
     To(PathBuf),
+    /// Erased for good, by Empty Trash.
+    Erased,
     Skipped(String),
     Failed(String),
 }
@@ -154,13 +162,15 @@ pub(super) enum Kind {
     Extract,
     Download,
     Upload,
+    /// Empty Trash: each source is erased for good, and nothing is made.
+    Erase,
 }
 
 impl Kind {
     /// What an item is made as, before it's put in place.
     fn made(self) -> &'static str {
         match self {
-            Kind::Copy | Kind::Move | Kind::Download | Kind::Upload => "copy",
+            Kind::Copy | Kind::Move | Kind::Download | Kind::Upload | Kind::Erase => "copy",
             Kind::Compress => "archive",
             Kind::Extract => "extraction",
         }
@@ -319,6 +329,20 @@ impl Spec {
         }
     }
 
+    /// An Empty Trash of `items`, each erased only while it's still the item
+    /// counted in `trash`.
+    fn erase(items: &[TrashItem], trash: &Path) -> Self {
+        Self {
+            kind: Kind::Erase,
+            into: trash.to_path_buf(),
+            conflict: Conflict::Stop,
+            sources: items.iter().map(|item| item.path.clone()).collect(),
+            ids: items.iter().map(|item| item.id).collect(),
+            archive: None,
+            remote: Vec::new(),
+        }
+    }
+
     /// The entry name an extraction's source stands for.
     fn entry<'a>(&self, source: &'a Path) -> Option<&'a str> {
         source.strip_prefix(self.archive.as_ref()?).ok()?.to_str()
@@ -375,7 +399,8 @@ impl Work {
 
     /// Not done, and nothing on disk changed for it.
     fn untouched(&self) -> bool {
-        !matches!(self.done, Some(Done::To(_))) && self.steps.iter().all(|step| !step.applied)
+        !matches!(self.done, Some(Done::To(_) | Done::Erased))
+            && self.steps.iter().all(|step| !step.applied)
     }
 }
 
@@ -383,7 +408,9 @@ impl Work {
 pub(super) struct Entry {
     pub(super) id: u64,
     origin: Origin,
-    spec: Spec,
+    /// Shared with each item on its way, so an Empty Trash of thousands of
+    /// items doesn't copy its list for every one.
+    spec: Arc<Spec>,
     pub(super) work: Vec<Work>,
     pub(super) state: State,
     /// The operation this run's changes join the history as: the job's id,
@@ -424,7 +451,7 @@ impl Entry {
         Self {
             id,
             origin,
-            spec,
+            spec: Arc::new(spec),
             fresh: vec![true; work.len()],
             work,
             state: State::Queued,
@@ -441,7 +468,7 @@ impl Entry {
     pub(super) fn resume(&mut self, run: u64, conflict: Conflict, started: u64) {
         self.run = run;
         self.started = started;
-        self.spec.conflict = conflict;
+        Arc::make_mut(&mut self.spec).conflict = conflict;
         self.state = State::Queued;
         self.cancel = Arc::default();
         self.archive = None;
@@ -480,7 +507,14 @@ impl Entry {
             Kind::Extract => "Extract",
             Kind::Download => "Download",
             Kind::Upload => "Upload",
+            Kind::Erase => "Empty Trash",
         }
+    }
+
+    /// Whether this is an Empty Trash, which only a person starts or
+    /// continues.
+    pub(super) fn erases(&self) -> bool {
+        self.spec.kind == Kind::Erase
     }
 
     fn public(&self) -> Job {
@@ -571,6 +605,23 @@ impl Shared {
         Ok(())
     }
 
+    /// Journals an erased item without waiting for the disk, which would
+    /// take longer than erasing it. A crash may lose it: continuing the job
+    /// then finds it gone from the Trash and skips it.
+    fn note_erased(&self, op: u64, index: usize, work: &Work) -> Result<(), String> {
+        let record = Record::Work {
+            op,
+            index,
+            work: work.clone(),
+        };
+        // Kept in memory even if the journal can't take it, or the job
+        // would come back to an item that's gone.
+        let mut engine = self.lock();
+        let appended = engine.append(&record);
+        engine.fold(&record);
+        appended
+    }
+
     fn finish(&self, op: u64, state: State) {
         let record = Record::Finish { op, state };
         let mut engine = self.lock();
@@ -635,7 +686,8 @@ pub(super) fn run(shared: &Shared, op: u64) {
             let bytes = match spec.kind {
                 Kind::Copy | Kind::Move | Kind::Upload => tally(&source),
                 // Only the server can say, so the item asks when it starts.
-                Kind::Download => 0,
+                // Weighing a Trash would walk every file an erase walks.
+                Kind::Download | Kind::Erase => 0,
                 Kind::Compress => spec.sources.iter().map(|source| tally(source)).sum(),
                 Kind::Extract => archive
                     .as_ref()
@@ -706,7 +758,10 @@ pub(super) fn next(shared: &Shared, op: u64) -> bool {
         Next::Done(done) => done,
         Next::Stop(why) | Next::Interrupt(why) => Done::Failed(why),
     });
-    let _ = shared.record(op, index, &item.work);
+    let _ = match spec.kind {
+        Kind::Erase => shared.note_erased(op, index, &item.work),
+        _ => shared.record(op, index, &item.work),
+    };
     if let Some(state) = stop {
         shared.finish(op, state);
         return false;
@@ -781,7 +836,35 @@ impl Item<'_> {
             Kind::Extract => self.extract(cancel, copied),
             Kind::Download => self.download(cancel, copied),
             Kind::Upload => self.upload(cancel, copied),
+            Kind::Erase => self.erase(),
         }
+    }
+
+    /// Erases the item for good, once it's claimed under a hidden name, so
+    /// nothing that arrives under its own name meanwhile is erased for it.
+    /// One that can't be erased goes back under its name.
+    fn erase(&self) -> Next {
+        let path = self.work.source.clone();
+        let Some(id) = self.work.id else {
+            return Next::Done(Done::Failed(replaced(&path)));
+        };
+        let item = TrashItem { path, id };
+        let claimed = self.shared.lock().claim(&item, self.op, self.index);
+        Next::Done(match claimed {
+            Err(kept) => kept,
+            Ok(hidden) => match super::erase(&hidden) {
+                Ok(()) => Done::Erased,
+                // Back under its name, the reason names it there. If the name
+                // was taken meanwhile, it names the hidden one it's still at.
+                Err(why) => match disk::rename_new(&hidden, &item.path) {
+                    Ok(()) => {
+                        let (hidden, named) = (hidden.display(), item.path.display());
+                        Done::Failed(why.replace(&hidden.to_string(), &named.to_string()))
+                    }
+                    Err(_) => Done::Failed(why),
+                },
+            },
+        })
     }
 
     fn copy_or_move(&mut self, cancel: &AtomicBool, copied: &AtomicU64) -> Next {
@@ -1221,11 +1304,15 @@ impl Engine {
     /// queues a stopped one again.
     pub(super) fn queue(&mut self, submission: Submission) -> Result<Outcome, String> {
         let op = self.next;
+        let emptying = self.emptying();
         let record = match &submission.request {
             Request::Retry { job, conflict } => {
                 let old = self.job_mut(*job).ok_or_else(|| format!("No job {job}."))?;
                 if old.state.active() {
                     return Err(format!("Job {job} is still going."));
+                }
+                if old.erases() && emptying {
+                    return Err(ALREADY_EMPTYING.into());
                 }
                 if !old.work.iter().any(Work::untouched) {
                     return Err(format!("Job {job} has nothing left to do."));
@@ -1241,13 +1328,45 @@ impl Engine {
             request => Record::Job {
                 op,
                 submission: submission.clone(),
-                spec: Spec::new(request)?,
+                spec: match request {
+                    Request::EmptyTrash { items } => self.erase_spec(items)?,
+                    request => Spec::new(request)?,
+                },
                 at: now(),
             },
         };
         self.write(&record)?;
         self.fold(&record);
         Ok(self.finished[&submission.id].1.clone())
+    }
+
+    /// An Empty Trash as a job. Refused while another empties the Trash, and
+    /// when nothing it names can be erased.
+    fn erase_spec(&self, items: &[TrashItem]) -> Result<Spec, String> {
+        if self.emptying() {
+            return Err(ALREADY_EMPTYING.into());
+        }
+        if items.is_empty() {
+            return Err("The Trash is empty.".into());
+        }
+        // The job checks each item again; this only needs one it could take.
+        let mut kept = Vec::new();
+        for item in items {
+            match self.erasable(item) {
+                Ok(()) => return Ok(Spec::erase(items, &self.paths.trash)),
+                Err(Done::Skipped(why) | Done::Failed(why)) => kept.push(why),
+                Err(_) => {}
+            }
+        }
+        kept.dedup();
+        Err(kept.join("\n"))
+    }
+
+    /// Whether an Empty Trash is queued or running.
+    fn emptying(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.erases() && job.state.active())
     }
 
     pub(super) fn cancel(&mut self, job: u64) -> Result<Outcome, String> {

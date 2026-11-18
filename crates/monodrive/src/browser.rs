@@ -38,6 +38,7 @@ mod search_tests;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use duplicates::grouped;
 pub(crate) use overview::measure_overview;
 pub use pane::format_bytes;
 pub use sidebar::{Drives, Places, System};
@@ -47,6 +48,7 @@ pub(crate) use trash::recent_entries;
 use crate::commands::{self, OpenPalette, Scope};
 use crate::connect::ConnectView;
 use crate::empty_trash::{self, EmptyTrashView};
+use crate::feedback::{self, Sound};
 use crate::goto::{GotoEvent, GotoView};
 use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
@@ -71,7 +73,7 @@ use gpui::{
     WindowControlArea, actions, canvas, div, prelude::*, px,
 };
 use monodrive_core::index::{Index, Progress, Status};
-use monodrive_core::ops::{self, Done, Job, Request};
+use monodrive_core::ops::{self, Done, Job, Origin, Request};
 use monodrive_core::places::Favorite;
 use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
 use searches::{SearchMenu, SearchMenuEvent};
@@ -366,13 +368,10 @@ pub struct Browser {
     updates_focus: FocusHandle,
     /// The pointer rests on the sidebar's update control or its card, which
     /// shows what's new.
-    updates_peek: bool,
-    /// Where the pointer is, kept apart because one move from the control
-    /// onto the card reports the card's arrival before the control's exit.
-    over_update_control: bool,
-    over_update_card: bool,
-    /// The wait before `updates_peek` follows the pointer.
-    updates_peek_wait: Option<Task<()>>,
+    updates_peek: Peek,
+    /// The pointer rests on the jobs ring or its card, which shows how the
+    /// jobs are going.
+    jobs_peek: Peek,
     /// A job of the window's needs an answer: the popover opens once the
     /// next frame has drawn.
     jobs_wanted: bool,
@@ -623,10 +622,8 @@ impl Browser {
             jobs,
             jobs_focus: cx.focus_handle(),
             updates_focus: cx.focus_handle(),
-            updates_peek: false,
-            over_update_control: false,
-            over_update_card: false,
-            updates_peek_wait: None,
+            updates_peek: Peek::default(),
+            jobs_peek: Peek::default(),
             jobs_wanted: false,
             sheet: None,
             glass: None,
@@ -776,7 +773,6 @@ impl Browser {
             } => self.toast(text.clone(), *failed, offer.clone(), cx),
             PaneEvent::ClearToast => self.toast = None,
             PaneEvent::Follow(job) => self.jobs.update(cx, |jobs, cx| jobs.follow(*job, cx)),
-            PaneEvent::VolumesChanged => self.load_volumes(cx),
             PaneEvent::Menu { scopes, at } => {
                 let origin = pane.read(cx).list_focus.clone();
                 self.request_menu(scopes.clone(), *at, origin, cx);
@@ -1305,12 +1301,11 @@ impl Browser {
     /// it's open.
     fn set_sheet(&mut self, sheet: Option<Sheet>, cx: &mut Context<Self>) {
         let jobs = matches!(sheet, Some(Sheet::Jobs));
-        // A sheet closes the update card, which then never hears the pointer
+        // A sheet closes a peeked card, which then never hears the pointer
         // leave.
         if sheet.is_some() {
-            self.updates_peek = false;
-            self.over_update_card = false;
-            self.updates_peek_wait = None;
+            self.updates_peek.close();
+            self.jobs_peek.close();
         }
         self.sheet = sheet;
         self.jobs.update(cx, |list, cx| list.set_open(jobs, cx));
@@ -1407,7 +1402,7 @@ impl Browser {
         .detach();
     }
 
-    /// ⌥⌘J and the ring: the copies and moves popover, under the ring.
+    /// ⌥⌘J and the ring: the Activity popover, under the ring.
     fn toggle_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.sheet, Some(Sheet::Jobs)) {
             return self.close_sheet(window, cx);
@@ -1435,32 +1430,40 @@ impl Browser {
     /// way to Settings doesn't flash it, and the gap between the two doesn't
     /// close it.
     pub(super) fn peek_updates(&mut self, card: bool, over: bool, cx: &mut Context<Self>) {
-        if card {
-            self.over_update_card = over;
-        } else {
-            self.over_update_control = over;
-        }
-        let over = self.over_update_control || self.over_update_card;
-        if self.updates_peek == over {
-            self.updates_peek_wait = None;
-            return;
-        }
-        let wait = cx.background_executor().timer(PEEK_DELAY);
-        self.updates_peek_wait = Some(cx.spawn(async move |this, cx| {
-            wait.await;
-            let _ = this.update(cx, |this, cx| {
-                this.updates_peek = over;
-                this.updates_peek_wait = None;
-                cx.notify();
-            });
-        }));
+        self.updates_peek
+            .hover(card, over, |this| &mut this.updates_peek, cx);
+    }
+
+    /// The pointer came onto or left the jobs ring or its card, which waits
+    /// a moment either way, as the update card does.
+    pub(super) fn peek_jobs(&mut self, card: bool, over: bool, cx: &mut Context<Self>) {
+        self.jobs_peek
+            .hover(card, over, |this| &mut this.jobs_peek, cx);
+    }
+
+    /// The card the jobs ring shows while the pointer rests on it, where the
+    /// popover opens. It takes presses, so Cancel and Show Items are a move
+    /// away, but no keys.
+    fn jobs_peek_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let shown = self.jobs_peek.shown && self.sheet.is_none() && self.jobs.read(cx).has_ring();
+        shown.then(|| {
+            div()
+                .id("jobs-peek")
+                .debug_selector(|| "jobs-peek".into())
+                .absolute()
+                .top(px(theme::TITLE_BAR_HEIGHT - 4.))
+                .right(px(8.))
+                .occlude()
+                .on_hover(cx.listener(|this, over: &bool, _, cx| this.peek_jobs(true, *over, cx)))
+                .child(self.jobs.clone())
+        })
     }
 
     /// The card the update control shows while the pointer rests on it,
     /// where the popover opens, but without taking keys or presses.
     fn updates_peek_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let updates = cx.try_global::<updates::Shared>()?.0.clone();
-        let shown = self.updates_peek
+        let shown = self.updates_peek.shown
             && self.sheet.is_none()
             && self.sidebar_open
             && updates.read(cx).has_update();
@@ -1711,11 +1714,14 @@ impl Browser {
         }
     }
 
-    /// A paste or Move Here finished: what it made is selected, if it's
-    /// here, and a toast offers Undo.
+    /// A paste, Move Here or Empty Trash finished: what it made is selected,
+    /// if it's here, and a toast offers Undo of what can be undone.
     fn job_finished(&mut self, job: Job, cx: &mut Context<Self>) {
         let undo = job.undoable.then_some(Offer::Undo(job.run));
         self.toast(jobs::report(&job), false, undo, cx);
+        if job.tasks.iter().any(|task| task.done == Some(Done::Erased)) {
+            feedback::sound(Sound::EmptyTrash, cx);
+        }
         // A job's bytes may have moved between volumes.
         self.load_volumes(cx);
         let made: Vec<PathBuf> = job
@@ -1784,9 +1790,17 @@ impl Browser {
                 };
                 this.close_sheet(window, cx);
                 if let Some(items) = items {
-                    this.pane().update(cx, |pane, cx| {
-                        pane.submit(Request::EmptyTrash { items }, window, cx)
-                    });
+                    with_owner(
+                        window,
+                        cx,
+                        move |owner| owner.submit(Origin::Window, Request::EmptyTrash { items }),
+                        |this, queued, _, cx| match queued {
+                            Ok(queued) => {
+                                this.jobs.update(cx, |jobs, cx| jobs.follow(queued.op, cx))
+                            }
+                            Err(e) => this.toast(e, true, None, cx),
+                        },
+                    );
                 }
             },
         )
@@ -2069,6 +2083,10 @@ impl Render for Browser {
                 AfterSheet::Run(action) => this.run_from_palette(action, window, cx),
                 AfterSheet::OpenPalette => this.open_palette(window, cx),
             });
+        }
+        // The ring went with its last job, and never said the pointer left.
+        if !self.jobs.read(cx).has_ring() {
+            self.jobs_peek.close();
         }
         // A sheet the person opened meanwhile stays; the ring shows the job.
         if std::mem::take(&mut self.jobs_wanted) && !self.sheet_open() {
@@ -2382,6 +2400,7 @@ impl Render for Browser {
                 }
             }))
             .children(self.updates_peek_card(cx))
+            .children(self.jobs_peek_card(cx))
             .children(self.menu.as_ref().map(|menu| menu.view.clone()))
             .children(self.drag_pill(window))
             // Last, so its window listeners run before any element's.
@@ -2449,6 +2468,56 @@ fn with_owner<V: 'static, T: Send + 'static>(
     true
 }
 
+/// A card that shows while the pointer rests on its control or on the card
+/// itself, a moment after it arrives and until a moment after it leaves, so
+/// passing over the control doesn't flash it and the gap between the two
+/// doesn't close it.
+#[derive(Default)]
+struct Peek {
+    shown: bool,
+    /// Where the pointer is, kept apart because one move from the control
+    /// onto the card reports the card's arrival before the control's exit.
+    over_control: bool,
+    over_card: bool,
+    /// The wait before `shown` follows the pointer.
+    wait: Option<Task<()>>,
+}
+
+impl Peek {
+    fn hover(
+        &mut self,
+        card: bool,
+        over: bool,
+        of: fn(&mut Browser) -> &mut Peek,
+        cx: &mut Context<Browser>,
+    ) {
+        if card {
+            self.over_card = over;
+        } else {
+            self.over_control = over;
+        }
+        let over = self.over_control || self.over_card;
+        if self.shown == over {
+            self.wait = None;
+            return;
+        }
+        let wait = cx.background_executor().timer(PEEK_DELAY);
+        self.wait = Some(cx.spawn(async move |this, cx| {
+            wait.await;
+            let _ = this.update(cx, |this, cx| {
+                let peek = of(this);
+                peek.shown = over;
+                peek.wait = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn close(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// The context menu, and what had the keys before it, where its commands
 /// run.
 struct OpenMenu {
@@ -2508,7 +2577,7 @@ enum Sheet {
     Settings(Entity<SettingsView>),
     Palette(Entity<PaletteView>),
     Goto(Entity<GotoView>),
-    /// The copies and moves popover; `jobs` draws it.
+    /// The Activity popover; `jobs` draws it.
     Jobs,
     /// The updates popover; `updates` draws it.
     Updates,

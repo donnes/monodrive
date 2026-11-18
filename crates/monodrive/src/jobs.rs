@@ -1,20 +1,22 @@
-//! Copies and moves in the title bar: a ring of how far they've got, shown
-//! while one is queued, running, waiting for an answer or failed, and a
-//! popover under it listing those (⌥⌘J). Agents' jobs show too. A job
+//! Activity: copies, moves and emptying the Trash in the title bar. A ring of
+//! how far they've got, shown while one is queued, running, waiting for an
+//! answer or failed, and a popover under it listing those (⌥⌘J), which also shows while
+//! the pointer rests on the ring. Agents' jobs show too. A job with several
+//! items names the one it's on, and Show Items lists them all. A job
 //! waiting at a name that's taken is answered here, which continues the same
 //! job. The window asks the owner about once a second, only while a job is
 //! going or the popover is open.
 
-use crate::browser::{Operations, format_bytes, lock, short_reason};
+use crate::browser::{Operations, format_bytes, grouped, lock, short_reason};
 use crate::downloads::{self, State as DownloadState};
 use crate::menu;
 use crate::theme::{
-    self, ButtonLook, accent, circle_button, content, danger, progress_fill, progress_track,
+    self, ButtonLook, accent, circle_button, content, danger, icon, progress_fill, progress_track,
     row_icon_button, text_button,
 };
 use gpui::{
-    App, Context, ElementId, EventEmitter, Hsla, KeyBinding, Role, Subscription, Task, actions,
-    div, prelude::*, px,
+    AnyElement, App, Context, ElementId, EventEmitter, Hsla, KeyBinding, Role, ScrollStrategy,
+    Subscription, Task, UniformListScrollHandle, actions, div, prelude::*, px, uniform_list,
 };
 use monodrive_core::cloud;
 use monodrive_core::ops::{self, Conflict, Done, Job, Origin, Request, State, Transfer};
@@ -34,10 +36,12 @@ pub const CHECK: Duration = Duration::from_secs(1);
 /// How long a finished job stays in the list.
 pub const LINGER: Duration = Duration::from_secs(3);
 const WIDTH: f32 = 320.;
+/// How many of a job's items its list shows before it scrolls.
+const ITEMS_SHOWN: usize = 6;
 
 pub enum JobsEvent {
     /// One of the window's own copies or moves finished, or its own
-    /// extraction or compression was cancelled.
+    /// extraction, compression or emptying of the Trash was cancelled.
     Finished(Job),
     /// One of the window's own jobs stopped at a name that's taken, or failed.
     NeedsYou,
@@ -45,8 +49,11 @@ pub enum JobsEvent {
 
 #[derive(Default)]
 pub struct Jobs {
-    /// The owner's jobs, newest first, as it last said.
-    jobs: Vec<Job>,
+    /// The owner's jobs, newest first, as it last said. Shared with the
+    /// rows drawing them, since an Empty Trash can hold thousands of items.
+    jobs: Vec<Rc<Job>>,
+    /// The jobs whose items are listed, by id.
+    listed: HashMap<u64, Listed>,
     error: Option<String>,
     /// When the window opened, in seconds since 1970. A failed or finished
     /// job shows only if its latest run started since, so last week's
@@ -68,6 +75,13 @@ pub struct Jobs {
     watch: Option<Task<()>>,
     /// Repaints a Download button as its download starts and ends.
     _downloads: Option<Subscription>,
+}
+
+/// A job's list of items, while it shows.
+struct Listed {
+    scroll: UniformListScrollHandle,
+    /// Keeps the item in progress in view, until a person scrolls the list.
+    follows: bool,
 }
 
 impl EventEmitter<JobsEvent> for Jobs {}
@@ -158,8 +172,11 @@ impl Jobs {
                 match job.state {
                     State::Completed => cx.emit(JobsEvent::Finished(job.clone())),
                     // Cancelling an extraction or compression says what it
-                    // kept, and Undo can take that back.
-                    State::Cancelled if matches!(job.title.as_str(), "Extract" | "Compress") => {
+                    // kept, and Undo can take that back. Cancelling an Empty
+                    // Trash says how much it had erased.
+                    State::Cancelled
+                        if matches!(job.title.as_str(), "Extract" | "Compress" | EMPTY_TRASH) =>
+                    {
                         cx.emit(JobsEvent::Finished(job.clone()))
                     }
                     State::Waiting | State::Failed | State::Interrupted => {
@@ -186,11 +203,48 @@ impl Jobs {
                 self.leaving.insert(run, leave);
             }
         }
-        if (&jobs, &error) != (&self.jobs, &self.error) {
-            self.jobs = jobs;
+        if error != self.error || !self.jobs.iter().map(|job| &**job).eq(&jobs) {
+            self.jobs = jobs.into_iter().map(Rc::new).collect();
             self.error = error;
+            let jobs = &self.jobs;
+            self.listed
+                .retain(|id, _| jobs.iter().any(|job| job.id == *id));
+            self.follow_items();
             cx.notify();
         }
+    }
+
+    /// Show Items and Hide Items: a job's items, under it.
+    fn toggle_items(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.listed.remove(&id).is_none() {
+            let listed = Listed {
+                scroll: UniformListScrollHandle::new(),
+                follows: true,
+            };
+            self.listed.insert(id, listed);
+            self.follow_items();
+        }
+        cx.notify();
+    }
+
+    /// Scrolls each list that follows its job to the item in progress.
+    fn follow_items(&self) {
+        for job in &self.jobs {
+            let Some(listed) = self.listed.get(&job.id).filter(|listed| listed.follows) else {
+                continue;
+            };
+            // Whole rows, with the last two it finished above it.
+            if let Some(ix) = current(job) {
+                listed
+                    .scroll
+                    .scroll_to_item(ix.saturating_sub(2), ScrollStrategy::Top);
+            }
+        }
+    }
+
+    /// Whether the title bar shows the ring.
+    pub fn has_ring(&self) -> bool {
+        self.shown().next().is_some()
     }
 
     /// Whether the job's latest run started while the window was open,
@@ -200,7 +254,7 @@ impl Jobs {
     }
 
     /// The jobs the ring and the popover show, newest first.
-    fn shown(&self) -> impl Iterator<Item = &Job> {
+    fn shown(&self) -> impl Iterator<Item = &Rc<Job>> {
         self.jobs.iter().filter(|job| {
             let run = job.run;
             match job.state {
@@ -216,7 +270,7 @@ impl Jobs {
     /// The title bar's ring: how far the jobs shown have got, with a dot
     /// when one waits for an answer or failed. `None` with nothing to show.
     pub fn ring(&self) -> Option<gpui::Stateful<gpui::Div>> {
-        let shown: Vec<&Job> = self.shown().collect();
+        let shown: Vec<&Job> = self.shown().map(|job| &**job).collect();
         if shown.is_empty() {
             return None;
         }
@@ -226,23 +280,21 @@ impl Jobs {
         let waiting = shown.iter().any(|job| job.state == State::Waiting);
         let badge = (failed || waiting).then(|| if failed { danger() } else { accent() });
         Some(
-            theme::tip_below(
-                circle_button("jobs-ring", "Copies and Moves", theme::BUTTON_HEIGHT),
-                "Copies and Moves",
-            )
-            .relative()
-            .cursor_pointer()
-            .hover(|s| s.bg(content(0.08)))
-            .child(theme::ring(progress(&shown), 14.))
-            .children(badge.map(|color| {
-                div()
-                    .absolute()
-                    .top(px(2.))
-                    .right(px(2.))
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(color)
-            })),
+            // design: hovering shows the jobs' card, which says what they are.
+            circle_button("jobs-ring", "Activity", theme::BUTTON_HEIGHT)
+                .relative()
+                .cursor_pointer()
+                .hover(|s| s.bg(content(0.08)))
+                .child(theme::ring(progress(&shown), 14.))
+                .children(badge.map(|color| {
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .right(px(2.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(color)
+                })),
         )
     }
 
@@ -294,7 +346,7 @@ impl Jobs {
         downloads::get(cx).update(cx, |downloads, cx| downloads.download(vec![path], then, cx));
     }
 
-    fn row(&mut self, job: &Job, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn row(&mut self, job: &Rc<Job>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (id, run) = (job.id, job.run);
         let ours = job.origin == Origin::Window;
         let answer = |conflict| Request::Retry { job: id, conflict };
@@ -369,93 +421,116 @@ impl Jobs {
                 format_bytes(job.total_bytes)
             ));
         }
+        if job.state.active() && job.title == EMPTY_TRASH {
+            let gone = grouped(erased(job) as u64);
+            caption.push(format!("{gone} of {}", items(job.tasks.len())));
+        }
         if let Origin::Agent { client } = &job.origin {
             caption.push(client.clone().unwrap_or_else(|| "An agent".into()));
         }
+        // A job of several items names the one it's on, and can list them.
+        let many = job.tasks.len() > 1;
+        let now = current(job)
+            .filter(|_| many)
+            .map(|ix| plain_name(&job.tasks[ix]));
+        let listed = self.listed.get(&id).map(|listed| listed.scroll.clone());
         let bar = matches!(job.state, State::Queued | State::Running | State::Completed);
-        div()
-            .px_2()
-            .py_2()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(theme::TEXT_BODY))
-                    .child(div().flex_1().min_w_0().truncate().child(title(job)))
-                    .children(close.map(|label| {
-                        theme::tip(
-                            row_icon_button(
-                                ElementId::NamedInteger("job-close".into(), id),
-                                label,
-                                "cancel-01",
-                                content(0.55),
-                            ),
-                            label,
-                        )
-                        // Its glyph, not its circle, ends on the bar's edge.
-                        .mr(px(-4.))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if label == "Cancel" {
-                                this.ask(Request::Cancel { job: id }, false, cx);
-                            } else {
-                                this.dismissed.insert(run);
-                                cx.notify();
-                            }
-                        }))
-                    })),
-            )
-            .when(!caption.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_size(px(theme::TEXT_CAPTION))
-                        .text_color(content(0.65))
-                        .truncate()
-                        .child(caption.join(" · ")),
-                )
-            })
-            .when(bar, |d| {
-                let fraction = progress(&[job]);
-                d.child(progress_track().child(progress_fill(fraction)))
-            })
-            .children(detail.map(|(text, color)| {
-                div()
-                    .text_size(px(theme::TEXT_SMALL))
-                    .text_color(color)
-                    .truncate()
-                    .child(text)
-            }))
-            .when(!buttons.is_empty(), |d| {
-                let download = refused.map(|path| {
-                    let look = match downloading {
-                        true => ButtonLook::Disabled,
-                        false => ButtonLook::Secondary,
-                    };
-                    let label = match downloading {
-                        true => "Downloading…",
-                        false => "Download",
-                    };
-                    text_button(
-                        ElementId::NamedInteger("job-download".into(), id),
-                        label,
-                        look,
-                    )
-                    .debug_selector(|| "job-download".into())
-                    .when(!downloading, |d| {
-                        d.on_click(cx.listener(move |this, _, _, cx| {
-                            this.download_then_retry(path.clone(), id, ours, cx)
-                        }))
-                    })
-                });
-                d.child(
+        let about =
+            div()
+                .px_2()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
                     div()
                         .flex()
-                        .gap_1()
-                        .children(download)
-                        .children(buttons.into_iter().map(|(label, request)| {
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(theme::TEXT_BODY))
+                        .child(div().flex_1().min_w_0().truncate().child(title(job)))
+                        .children(close.map(|label| {
+                            theme::tip(
+                                row_icon_button(
+                                    ElementId::NamedInteger("job-close".into(), id),
+                                    label,
+                                    "cancel-01",
+                                    content(0.55),
+                                ),
+                                label,
+                            )
+                            // Its glyph, not its circle, ends on the bar's edge.
+                            .mr(px(-4.))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if label == "Cancel" {
+                                        this.ask(Request::Cancel { job: id }, false, cx);
+                                    } else {
+                                        this.dismissed.insert(run);
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                        })),
+                )
+                .when(!caption.is_empty() || now.is_some(), |d| {
+                    let mut said = caption.join(" · ");
+                    if now.is_some() && !said.is_empty() {
+                        said.push_str(" ·");
+                    }
+                    d.child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .text_size(px(theme::TEXT_CAPTION))
+                            .text_color(content(0.65))
+                            .when(!said.is_empty(), |d| {
+                                d.child(div().flex_shrink_0().child(said))
+                            })
+                            .children(now.map(|name| {
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(content(1.))
+                                    .child(name)
+                            })),
+                    )
+                })
+                .when(bar, |d| {
+                    let fraction = progress(&[job]);
+                    d.child(progress_track().child(progress_fill(fraction)))
+                })
+                .children(detail.map(|(text, color)| {
+                    div()
+                        .text_size(px(theme::TEXT_SMALL))
+                        .text_color(color)
+                        .truncate()
+                        .child(text)
+                }))
+                .when(!buttons.is_empty(), |d| {
+                    let download = refused.map(|path| {
+                        let look = match downloading {
+                            true => ButtonLook::Disabled,
+                            false => ButtonLook::Secondary,
+                        };
+                        let label = match downloading {
+                            true => "Downloading…",
+                            false => "Download",
+                        };
+                        text_button(
+                            ElementId::NamedInteger("job-download".into(), id),
+                            label,
+                            look,
+                        )
+                        .debug_selector(|| "job-download".into())
+                        .when(!downloading, |d| {
+                            d.on_click(cx.listener(move |this, _, _, cx| {
+                                this.download_then_retry(path.clone(), id, ours, cx)
+                            }))
+                        })
+                    });
+                    d.child(div().flex().gap_1().children(download).children(
+                        buttons.into_iter().map(|(label, request)| {
                             text_button(
                                 ElementId::NamedInteger(label.into(), id),
                                 label,
@@ -465,19 +540,208 @@ impl Jobs {
                             .on_click(cx.listener(
                                 move |this, _, _, cx| this.ask(request.clone(), ours, cx),
                             ))
-                        })),
+                        }),
+                    ))
+                });
+        let open = listed.is_some();
+        let label = if open { "Hide Items" } else { "Show Items" };
+        div()
+            .flex()
+            .flex_col()
+            .child(about)
+            .when(many, |d| {
+                d.child(
+                    theme::row_slot(ElementId::NamedInteger("job-items".into(), id))
+                        .role(Role::Button)
+                        .aria_label(label)
+                        .debug_selector(|| "job-items".into())
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_items(id, cx)))
+                        .child(
+                            theme::row(false).justify_between().child(label).child(
+                                icon(
+                                    if open {
+                                        "chevron-down-hi"
+                                    } else {
+                                        "chevron-right"
+                                    },
+                                    12.,
+                                )
+                                .text_color(content(0.55)),
+                            ),
+                        ),
                 )
             })
+            .children(listed.map(|scroll| self.items(job, &scroll, cx)))
     }
+
+    /// A job's items, each with how it's going. Only the rows on screen are
+    /// built, however many there are.
+    fn items(
+        &self,
+        job: &Rc<Job>,
+        scroll: &UniformListScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let (id, count) = (job.id, job.tasks.len());
+        let job = job.clone();
+        uniform_list(
+            ElementId::NamedInteger("job-item-rows".into(), id),
+            count,
+            move |range, _, _| {
+                let now = current(&job);
+                range.map(|ix| item_row(&job, ix, now)).collect()
+            },
+        )
+        .track_scroll(scroll)
+        .h(px(count.min(ITEMS_SHOWN) as f32 * theme::ROW_HEIGHT))
+        .mb(px(theme::ROW_GAP))
+        .on_scroll_wheel(cx.listener(move |this, _, _, _| {
+            if let Some(listed) = this.listed.get_mut(&id) {
+                listed.follows = false;
+            }
+        }))
+    }
+}
+
+/// How one of a job's items is going.
+#[derive(Debug, PartialEq)]
+enum Step<'a> {
+    Done,
+    /// The job is on it.
+    Now,
+    Waiting,
+    /// The job stopped before it.
+    Left,
+    Skipped(&'a str),
+    Failed(&'a str),
+}
+
+/// The item a running job is on.
+fn current(job: &Job) -> Option<usize> {
+    let pending = || job.tasks.iter().position(|task| task.done.is_none());
+    (job.state == State::Running).then(pending).flatten()
+}
+
+/// How item `ix` of `job` is going, with `now` the item the job is on.
+fn step(job: &Job, ix: usize, now: Option<usize>) -> Step<'_> {
+    match &job.tasks[ix].done {
+        Some(Done::To(_) | Done::Erased) => Step::Done,
+        Some(Done::Skipped(why)) => Step::Skipped(why),
+        Some(Done::Failed(why)) => Step::Failed(why),
+        None if now == Some(ix) => Step::Now,
+        // Stopped at a name that's taken, the rest wait for the answer.
+        None if job.state.active() || job.state == State::Waiting => Step::Waiting,
+        None => Step::Left,
+    }
+}
+
+/// One item's row: a mark for done, in progress or failed, its name, and how
+/// it's going, or why it was skipped or failed.
+fn item_row(job: &Job, ix: usize, now: Option<usize>) -> AnyElement {
+    let task = &job.tasks[ix];
+    let name = plain_name(task);
+    let (doing, done, _) = verbs(job);
+    let step = step(job, ix, now);
+    let mark = match step {
+        Step::Done => Some(
+            icon("check-hi", 12.)
+                .text_color(content(0.55))
+                .into_any_element(),
+        ),
+        Step::Now => Some(
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .bg(accent())
+                .into_any_element(),
+        ),
+        Step::Failed(_) => Some(
+            icon("cancel-01", 12.)
+                .text_color(danger())
+                .into_any_element(),
+        ),
+        Step::Waiting | Step::Left | Step::Skipped(_) => None,
+    };
+    // The owner's reasons start with the path, which the row already names.
+    let why = |why: &str| {
+        let folders = task.source.parent().into_iter().chain([job.into.as_path()]);
+        let why = short_reason(why, folders);
+        match why.strip_prefix(&format!("{name}: ")) {
+            Some(rest) => rest.to_string(),
+            None => why,
+        }
+    };
+    let (said, reason) = match step {
+        Step::Done => (done.to_string(), false),
+        Step::Now => (doing.to_string(), false),
+        Step::Waiting => ("Waiting".to_string(), false),
+        Step::Left => ("Not done".to_string(), false),
+        Step::Skipped(reason) | Step::Failed(reason) => (why(reason), true),
+    };
+    let ink = match step {
+        Step::Done => content(0.65),
+        _ => content(1.),
+    };
+    div()
+        .id(ix)
+        .role(Role::ListItem)
+        .aria_label(format!("{name}, {said}"))
+        .w_full()
+        .h(px(theme::ROW_HEIGHT))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(theme::TEXT_BODY))
+        .child(
+            div()
+                .w(px(12.))
+                .flex_shrink_0()
+                .flex()
+                .justify_center()
+                .children(mark),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(ink)
+                .when(step == Step::Now, |d| {
+                    d.font_weight(gpui::FontWeight::MEDIUM)
+                })
+                // A reason takes the room a name doesn't need.
+                .map(|d| {
+                    if reason {
+                        d.flex_shrink_0().max_w(gpui::relative(0.5))
+                    } else {
+                        d.flex_1()
+                    }
+                })
+                .child(name),
+        )
+        .child(
+            div()
+                .text_size(px(theme::TEXT_CAPTION))
+                .text_color(content(0.65))
+                .map(|d| {
+                    if reason {
+                        d.flex_1().min_w_0().truncate()
+                    } else {
+                        d.flex_shrink_0()
+                    }
+                })
+                .child(said),
+        )
+        .into_any_element()
 }
 
 impl Render for Jobs {
     /// The popover's card; the browser places it under the ring and closes it.
     fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let shown: Vec<Job> = self.shown().cloned().collect();
+        let shown: Vec<Rc<Job>> = self.shown().cloned().collect();
         let note = match (&self.error, shown.is_empty()) {
             (Some(error), _) => Some((error.clone(), danger())),
-            (None, true) => Some(("No copies or moves right now.".to_string(), content(0.65))),
+            (None, true) => Some(("Nothing is running right now.".to_string(), content(0.65))),
             (None, false) => None,
         };
         let rows: Vec<_> = shown.iter().map(|job| self.row(job, cx)).collect();
@@ -501,19 +765,22 @@ impl Render for Jobs {
         )
         .id("jobs")
         .role(Role::Dialog)
-        .aria_label("Copies and Moves")
+        .aria_label("Activity")
     }
 }
 
 /// "Copying 3 items to Inbox", or "Copied" once it's done: what it does,
 /// to what, and where.
 pub fn title(job: &Job) -> String {
-    let (doing, done, stopped) = match job.title.as_str() {
-        "Move" => ("Moving", "Moved", "Stopped moving"),
-        "Compress" => ("Compressing", "Compressed", "Stopped compressing"),
-        "Extract" => ("Extracting", "Extracted", "Stopped extracting"),
-        _ => ("Copying", "Copied", "Stopped copying"),
-    };
+    if job.title == EMPTY_TRASH {
+        return match job.state {
+            State::Completed => "Emptied the Trash",
+            State::Cancelled => "Stopped emptying the Trash",
+            _ => "Emptying the Trash",
+        }
+        .to_string();
+    }
+    let (doing, done, stopped) = verbs(job);
     let verb = match job.state {
         State::Completed => done,
         State::Cancelled => stopped,
@@ -558,9 +825,59 @@ pub fn title(job: &Job) -> String {
     }
 }
 
+/// What a job does to an item, has done to it, and stopped doing.
+fn verbs(job: &Job) -> (&'static str, &'static str, &'static str) {
+    match job.title.as_str() {
+        "Move" => ("Moving", "Moved", "Stopped moving"),
+        "Compress" => ("Compressing", "Compressed", "Stopped compressing"),
+        "Extract" => ("Extracting", "Extracted", "Stopped extracting"),
+        EMPTY_TRASH => ("Erasing", "Erased", "Stopped erasing"),
+        _ => ("Copying", "Copied", "Stopped copying"),
+    }
+}
+
+/// The owner's title for an Empty Trash.
+const EMPTY_TRASH: &str = "Empty Trash";
+
+/// How many of an Empty Trash's items are erased so far.
+fn erased(job: &Job) -> usize {
+    let erased = |task: &&ops::Task| task.done == Some(Done::Erased);
+    job.tasks.iter().filter(erased).count()
+}
+
+fn items(count: usize) -> String {
+    match count {
+        1 => "1 item".to_string(),
+        n => format!("{} items", grouped(n as u64)),
+    }
+}
+
+/// What an Empty Trash's toast says once it ends: how many items it erased,
+/// and how many it left.
+fn emptied(job: &Job) -> String {
+    let (gone, all) = (erased(job), job.tasks.len());
+    match job.state {
+        State::Cancelled => format!(
+            "Stopped emptying the Trash. {gone} of {} erased for good.",
+            items(all)
+        ),
+        _ if gone == all => format!("Erased {} for good", items(gone)),
+        _ if gone == 0 => "Nothing in the Trash was erased.".to_string(),
+        _ if all - gone == 1 => format!("Erased {} for good. 1 wasn't erased.", items(gone)),
+        _ => format!(
+            "Erased {} for good. {} weren't erased.",
+            items(gone),
+            grouped((all - gone) as u64)
+        ),
+    }
+}
+
 /// What a job's toast says once it ends: its title, and for a stopped one
 /// what it left in the Trash.
 pub fn report(job: &Job) -> String {
+    if job.title == EMPTY_TRASH {
+        return emptied(job);
+    }
     let said = title(job);
     // Core's words for an unfinished item it trashed, the only way a task
     // says so.
@@ -576,9 +893,17 @@ pub fn report(job: &Job) -> String {
 
 /// The name an item takes where it goes, quoted.
 fn item_name(task: &ops::Task) -> String {
+    format!("\"{}\"", plain_name(task))
+}
+
+/// The name an item takes where it goes.
+fn plain_name(task: &ops::Task) -> String {
     match &task.name {
-        Some(name) => format!("\"{name}\""),
-        None => quoted(&task.source),
+        Some(name) => name.clone(),
+        None => task.source.file_name().map_or_else(
+            || task.source.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        ),
     }
 }
 
@@ -648,6 +973,74 @@ mod tests {
             run,
             undoable: false,
         }
+    }
+
+    /// An Empty Trash of items that ended, or haven't, as `done` says.
+    fn emptying(state: State, done: Vec<Option<Done>>) -> Job {
+        let tasks = done.into_iter().enumerate().map(|(ix, done)| Item {
+            source: format!("/Users/me/.Trash/item {ix}").into(),
+            done,
+            name: None,
+        });
+        Job {
+            title: EMPTY_TRASH.into(),
+            tasks: tasks.collect(),
+            ..job(7, state, 150)
+        }
+    }
+
+    #[test]
+    fn each_item_says_how_it_is_going_and_only_a_running_job_is_on_one() {
+        let skipped = || Some(Done::Skipped("swapped".into()));
+        let ended = vec![Some(Done::Erased), skipped(), None, None];
+        let running = emptying(State::Running, ended.clone());
+        let now = current(&running);
+        assert_eq!(now, Some(2));
+        let steps: Vec<Step> = (0..4).map(|ix| step(&running, ix, now)).collect();
+        assert_eq!(
+            steps,
+            [
+                Step::Done,
+                Step::Skipped("swapped"),
+                Step::Now,
+                Step::Waiting
+            ]
+        );
+        // Queued, nothing is in progress yet; cancelled, what's left isn't
+        // waiting for anything.
+        let queued = emptying(State::Queued, ended.clone());
+        assert_eq!(current(&queued), None);
+        assert_eq!(step(&queued, 2, None), Step::Waiting);
+        let cancelled = emptying(State::Cancelled, ended);
+        assert_eq!(current(&cancelled), None);
+        assert_eq!(step(&cancelled, 2, None), Step::Left);
+        let failed = emptying(State::Failed, vec![Some(Done::Failed("locked".into()))]);
+        assert_eq!(step(&failed, 0, None), Step::Failed("locked"));
+    }
+
+    #[gpui::test]
+    fn show_items_lists_a_job_until_it_is_hidden_or_the_job_has_gone(cx: &mut TestAppContext) {
+        let jobs = cx.new(|_| Jobs {
+            since: 100,
+            ..Jobs::default()
+        });
+        let listed = |cx: &mut TestAppContext| jobs.read_with(cx, |jobs, _| jobs.listed.len());
+        let running = emptying(State::Running, vec![Some(Done::Erased), None, None]);
+        jobs.update(cx, |jobs, cx| {
+            jobs.take(Ok(vec![running.clone()]), cx);
+            jobs.toggle_items(7, cx);
+        });
+        assert_eq!(listed(cx), 1);
+        // The next check keeps the list open; the job leaving closes it.
+        jobs.update(cx, |jobs, cx| jobs.take(Ok(vec![running]), cx));
+        assert_eq!(listed(cx), 1);
+        jobs.update(cx, |jobs, cx| jobs.toggle_items(7, cx));
+        assert_eq!(listed(cx), 0);
+        jobs.update(cx, |jobs, cx| {
+            jobs.toggle_items(7, cx);
+            jobs.take(Ok(Vec::new()), cx);
+        });
+        assert_eq!(listed(cx), 0);
     }
 
     #[gpui::test]

@@ -1107,7 +1107,7 @@ fn counted(n: u64, what: &str) -> String {
 }
 
 /// `n` with thousands separated, as Finder writes counts.
-fn grouped(n: u64) -> String {
+pub(crate) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, digit) in digits.chars().enumerate() {

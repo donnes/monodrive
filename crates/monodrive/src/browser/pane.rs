@@ -90,8 +90,6 @@ pub(super) enum PaneEvent {
     ClearToast,
     /// Follow this job of the pane's until it ends.
     Follow(u64),
-    /// A change may have moved bytes between volumes.
-    VolumesChanged,
     /// The context menu on the listing, at this point in the window.
     Menu {
         scopes: Vec<Scope>,
@@ -2306,22 +2304,17 @@ impl Pane {
                 self.toast(why, true, download, cx);
             }
         } else if let Some(said) = said(&request, &outcome) {
-            // Undo from the toast undoes this change or nothing. Erasing
-            // can't be undone, and an undo or redo leaves the rest to ⌘Z and ⌘⇧Z.
+            // Undo from the toast undoes this change or nothing. An undo or
+            // redo leaves the rest to ⌘Z and ⌘⇧Z.
             let changed = !outcome.items.is_empty();
             let undoable = !matches!(
                 request,
-                Request::EmptyTrash { .. } | Request::Undo | Request::UndoOf { .. } | Request::Redo
+                Request::Undo | Request::UndoOf { .. } | Request::Redo
             );
             let undo = (changed && undoable).then_some(Offer::Undo(outcome.op));
             self.toast(said, false, undo, cx);
-            match &request {
-                Request::Trash { .. } if changed => feedback::sound(Sound::MoveToTrash, cx),
-                Request::EmptyTrash { .. } if changed => feedback::sound(Sound::EmptyTrash, cx),
-                _ => {}
-            }
-            if matches!(request, Request::EmptyTrash { .. }) {
-                cx.emit(PaneEvent::VolumesChanged);
+            if changed && matches!(request, Request::Trash { .. }) {
+                feedback::sound(Sound::MoveToTrash, cx);
             }
         } else {
             // Whatever the last toast offered may be stale now.
@@ -3489,7 +3482,6 @@ pub(super) fn said(request: &Request, outcome: &Outcome) -> Option<String> {
                 if files == 1 { "file" } else { "files" }
             )
         }
-        Request::EmptyTrash { .. } => format!("Erased {what} for good"),
         Request::PutBack { .. } => format!("Put back {what}"),
         // Its folder first, unless only Git's registration of it was left.
         Request::RemoveWorktree { path, .. } if asked.first() == Some(&path.as_path()) => {

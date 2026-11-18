@@ -689,7 +689,7 @@ impl Render for ContextMenu {
 
 /// The card around the rows, `max_height` at most, scrolling past that,
 /// with them `CARD_INSET` from its edge. `slots` says they're `row_slot`s,
-/// whose last gap counts toward that. The copies and moves popover is one
+/// whose last gap counts toward that. The Activity popover is one
 /// too.
 pub(crate) fn card(
     width: f32,

@@ -866,11 +866,19 @@ impl Engine {
 
     /// Appends a record and waits for it to reach the disk.
     fn write(&mut self, record: &Record) -> Result<(), String> {
+        self.append(record)?;
+        self.journal
+            .sync_data()
+            .map_err(|e| format!("Monodrive's journal: {e}"))
+    }
+
+    /// Appends a record without waiting for the disk: the next `write`
+    /// takes it there. Only for a record a crash may lose.
+    fn append(&mut self, record: &Record) -> Result<(), String> {
         let mut line = serde_json::to_string(record).map_err(|e| e.to_string())?;
         line.push('\n');
         self.journal
             .write_all(line.as_bytes())
-            .and_then(|()| self.journal.sync_data())
             .map_err(|e| format!("Monodrive's journal: {e}"))
     }
 
@@ -896,9 +904,12 @@ impl Engine {
                     .into(),
             );
         }
-        if matches!(submission.request, Request::EmptyTrash { .. })
-            && matches!(submission.origin, Origin::Agent { .. })
-        {
+        let erases = match &submission.request {
+            Request::EmptyTrash { .. } => true,
+            Request::Retry { job, .. } => self.jobs.iter().any(|j| j.id == *job && j.erases()),
+            _ => false,
+        };
+        if erases && matches!(submission.origin, Origin::Agent { .. }) {
             return Err("Only a person can empty the Trash, from Monodrive's window.".into());
         }
         match submission.request {
@@ -911,6 +922,7 @@ impl Engine {
             | Request::Extract { .. }
             | Request::Download { .. }
             | Request::Upload { .. }
+            | Request::EmptyTrash { .. }
             | Request::Retry { .. } => self.queue(submission),
             Request::Cancel { job } => self.cancel(job),
             Request::RenameMany { .. } => self.rename_many(submission),
@@ -943,7 +955,7 @@ impl Engine {
             match plan {
                 Ok(Plan::Move(step)) => steps.push(step.clone()),
                 Ok(Plan::Create(_)) => creates.push(path.clone()),
-                Ok(Plan::Erase(_)) | Err(_) => {}
+                Err(_) => {}
             }
         }
         let op = self.begin(&submission, None, steps, creates, Vec::new())?;
@@ -984,15 +996,6 @@ impl Engine {
                     });
                     Ok(made)
                 }
-                // Checked again just before: erasing an earlier, larger item
-                // gives Finder time to change the Trash.
-                Plan::Erase(id) => self
-                    .plan_erase(&TrashItem {
-                        path: path.clone(),
-                        id,
-                    })
-                    .and_then(|_| erase(&path))
-                    .map(|()| path.clone()),
             });
             stopped |= in_order && result.is_err();
             items.push(Item { path, result });
@@ -1041,10 +1044,6 @@ impl Engine {
             Request::Duplicate { paths } => each(paths, &|path| {
                 existing(path).map(|_| Plan::Create(Make::Copy))
             }),
-            Request::EmptyTrash { items } => items
-                .iter()
-                .map(|item| (item.path.clone(), self.plan_erase(item)))
-                .collect(),
             Request::RemoveWorktree {
                 repo,
                 path,
@@ -1099,27 +1098,63 @@ impl Engine {
         })
     }
 
-    /// Only the counted item, directly in a Trash that's a real folder:
-    /// one that became a link would lead the erase somewhere else.
-    fn plan_erase(&self, item: &TrashItem) -> Result<Plan, String> {
+    /// Whether Empty Trash may erase `item` now: only the counted item,
+    /// directly in a Trash that's a real folder, since one that became a link
+    /// would lead the erase somewhere else. Otherwise how it ends instead.
+    fn erasable(&self, item: &TrashItem) -> Result<(), Done> {
         let (trash, path) = (&self.paths.trash, &item.path);
         if !std::fs::symlink_metadata(trash).is_ok_and(|meta| meta.is_dir()) {
-            return Err(format!(
+            return Err(Done::Failed(format!(
                 "{}: isn't the Trash folder it was, so nothing was erased.",
                 trash.display()
-            ));
+            )));
         }
         if path.parent() != Some(trash.as_path()) {
-            return Err(format!("{}: not in the Trash.", path.display()));
+            return Err(Done::Failed(format!(
+                "{}: not in the Trash.",
+                path.display()
+            )));
         }
         match disk::id(path) {
-            Some(id) if id == item.id => Ok(Plan::Erase(id)),
-            Some(_) => Err(format!(
+            Some(id) if id == item.id => Ok(()),
+            Some(_) => Err(Done::Skipped(format!(
                 "{}: skipped, since it isn't the item that was counted.",
                 path.display()
-            )),
-            None => Err(format!("{}: no longer in the Trash.", path.display())),
+            ))),
+            None => Err(Done::Skipped(format!(
+                "{}: no longer in the Trash.",
+                path.display()
+            ))),
         }
+    }
+
+    /// Claims `item` for job `op`'s Empty Trash: checks it and moves it to a
+    /// hidden name in the Trash. The caller holds the engine meanwhile, so no
+    /// Put Back or Move to Trash of the owner's comes between the two.
+    /// Something outside the owner still could, so the item under the hidden
+    /// name is checked again, and goes back if it isn't the one counted.
+    fn claim(&self, item: &TrashItem, op: u64, index: usize) -> Result<PathBuf, Done> {
+        let hidden = self.paths.trash.join(format!(".monodrive-{op}-{index}"));
+        match self.erasable(item) {
+            Ok(()) => {}
+            // Claimed by a run that stopped partway through erasing it.
+            Err(Done::Skipped(_)) if disk::id(&hidden) == Some(item.id) => return Ok(hidden),
+            Err(kept) => return Err(kept),
+        }
+        disk::rename_new(&item.path, &hidden)
+            .map_err(|e| Done::Failed(format!("{}: {e}", item.path.display())))?;
+        if disk::id(&hidden) == Some(item.id) {
+            return Ok(hidden);
+        }
+        // Back under its name, or named where it still is if that was taken.
+        let at = match disk::rename_new(&hidden, &item.path) {
+            Ok(()) => &item.path,
+            Err(_) => &hidden,
+        };
+        Err(Done::Skipped(format!(
+            "{}: skipped, since it isn't the item that was counted.",
+            at.display()
+        )))
     }
 
     /// Undoes or redoes the next operation in line, which must be
@@ -1256,8 +1291,6 @@ enum Plan {
     Move(Step),
     /// Creates or copies the item's path.
     Create(Make),
-    /// Erases the item's path for good, if it's still this item: Empty Trash.
-    Erase(FileId),
 }
 
 fn absolute(path: &Path) -> Result<(), String> {
