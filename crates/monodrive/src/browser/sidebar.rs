@@ -729,14 +729,14 @@ impl Browser {
     }
 
     /// The drive or cloud folder the sidebar's keys are on, to hide.
-    fn hideable_at_cursor(&self) -> Option<HiddenDrive> {
+    fn hideable_at_cursor(&self, cx: &App) -> Option<HiddenDrive> {
         match self.row_at(self.sidebar_cursor)? {
             Row::Volume(ix) => self.sidebar.volumes.get(ix).map(|volume| HiddenDrive {
                 name: volume.name.clone(),
                 drive: Drive::of(volume),
             }),
             Row::Cloud(ix) => self.sidebar.cloud.get(ix).map(|folder| HiddenDrive {
-                name: folder.name.clone(),
+                name: cloud_name(folder, cx).to_owned(),
                 drive: Drive::Path(folder.path.clone()),
             }),
             _ => None,
@@ -1815,7 +1815,7 @@ impl Browser {
                             ))
                         },
                     )
-                    .when_some(self.hideable_at_cursor(), |d, hidden| {
+                    .when_some(self.hideable_at_cursor(cx), |d, hidden| {
                         d.on_action(cx.listener(move |this, _: &super::HideFromSidebar, _, cx| {
                             this.hide_drive(hidden.clone(), cx)
                         }))

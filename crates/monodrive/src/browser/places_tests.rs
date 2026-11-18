@@ -478,6 +478,13 @@ fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_
     // Backup was the last row, so the keys move up onto the one now last.
     let cursor = browser.read_with(cx, |b, _| b.row_at(b.sidebar_cursor));
     assert_eq!(cursor, Some(Row::Cloud(0)));
+    // A renamed cloud folder is listed in Settings by the name it was given.
+    let docs = project.join("docs");
+    cx.update(|_, cx| {
+        crate::preferences::update(cx, |p| {
+            p.cloud_names.insert(docs, "Personal".into());
+        })
+    });
     assert!(hide(first + 1, cx));
     assert_eq!(shown(cx), ["Macintosh HD"]);
     // Still mounted: the drive's own folder opens and says how full it is.
@@ -502,7 +509,7 @@ fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_
     let hidden = cx.update(|_, cx| cx.global::<Preferences>().hidden_drives.clone());
     assert_eq!(
         hidden.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
-        ["iCloud Drive"]
+        ["Personal"]
     );
 }
 
