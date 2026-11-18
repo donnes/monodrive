@@ -14,7 +14,7 @@ use crate::browser::{
     GetInfo, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1,
     GoFavorite2, GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8,
     GoFavorite9, GoFavorite10, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees,
-    HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
+    HideFromSidebar, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
     NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal,
     OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo,
     RemoveDownload, RemoveFromSidebar, Rename, RenameLocation, ResetZoom, RevealInFinder,
@@ -347,6 +347,13 @@ pub fn all() -> Vec<Command> {
                 Some("Sidebar"),
                 || Box::new(RemoveFromSidebar),
             )),
+        ),
+        // A drive or cloud folder in Locations; Settings shows it again.
+        on(
+            &[Scope::Sidebar],
+            command("Hide from Sidebar", File, &[], Some("Sidebar"), || {
+                Box::new(HideFromSidebar)
+            }),
         ),
         on(
             &[Scope::Sidebar],
@@ -1180,6 +1187,7 @@ mod tests {
                 "Open in New Tab ⌃⌘O",
                 "| Rename Location",
                 "| Remove from Sidebar ⌘⌫",
+                "Hide from Sidebar",
                 "Eject ⌘E",
                 "Clear Recents"
             ]

@@ -240,9 +240,9 @@ pub struct SettingsView {
     recorder: Option<Subscription>,
     preview: Entity<Backdrop>,
     /// Each control's focus, by id, so Tab and focus survive re-renders.
-    handles: RefCell<HashMap<&'static str, FocusHandle>>,
+    handles: RefCell<HashMap<SharedString, FocusHandle>>,
     /// Where each control was last laid out, to scroll the focused one into view.
-    probes: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
+    probes: Rc<RefCell<HashMap<SharedString, Bounds<Pixels>>>>,
     page_scroll: ScrollHandle,
 }
 
@@ -341,10 +341,10 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn handle(&self, id: &'static str, cx: &App) -> FocusHandle {
+    fn handle(&self, id: impl Into<SharedString>, cx: &App) -> FocusHandle {
         self.handles
             .borrow_mut()
-            .entry(id)
+            .entry(id.into())
             .or_insert_with(|| cx.focus_handle())
             .clone()
     }
@@ -354,12 +354,13 @@ impl SettingsView {
     /// `on_click`, as GPUI does for any focused element.
     fn focusable(
         &self,
-        id: &'static str,
+        id: impl Into<SharedString>,
         enabled: bool,
         control: Stateful<Div>,
         cx: &App,
     ) -> Stateful<Div> {
-        let handle = self.handle(id, cx).tab_stop(enabled);
+        let id = id.into();
+        let handle = self.handle(id.clone(), cx).tab_stop(enabled);
         let probes = self.probes.clone();
         control
             .relative()
@@ -368,7 +369,7 @@ impl SettingsView {
             .child(
                 canvas(
                     move |bounds, _, _| {
-                        probes.borrow_mut().insert(id, bounds);
+                        probes.borrow_mut().insert(id.clone(), bounds);
                     },
                     |_, _, _, _| {},
                 )
@@ -383,9 +384,11 @@ impl SettingsView {
             .handles
             .borrow()
             .iter()
-            .find(|(id, handle)| !FIXED_CONTROLS.contains(id) && handle.is_focused(window))
-            .map(|(id, _)| *id);
-        let Some(bounds) = focused.and_then(|id| self.probes.borrow().get(id).copied()) else {
+            .find(|(id, handle)| {
+                !FIXED_CONTROLS.contains(&id.as_ref()) && handle.is_focused(window)
+            })
+            .map(|(id, _)| id.clone());
+        let Some(bounds) = focused.and_then(|id| self.probes.borrow().get(&id).copied()) else {
             return;
         };
         let view = self.page_scroll.bounds();
@@ -730,6 +733,7 @@ impl SettingsView {
                 let active = page == self.page;
                 let item = div()
                     .id(page.label())
+                    .debug_selector(move || page.nav_id().into())
                     .role(Role::Tab)
                     .aria_label(page.label())
                     .aria_selected(active)
@@ -1082,7 +1086,7 @@ impl SettingsView {
             group(
                 "Sidebar",
                 None,
-                vec![row(
+                std::iter::once(row(
                     "Show Worktrees",
                     Some("Every Git worktree on the disk, in one place. ⌥⌘G opens it either way."),
                     self.focusable(
@@ -1096,7 +1100,9 @@ impl SettingsView {
                         ),
                         cx,
                     ),
-                )],
+                ))
+                .chain(self.hidden_drives(p, cx))
+                .collect(),
             ),
             group(
                 "Grid",
@@ -1181,6 +1187,26 @@ impl SettingsView {
                 )],
             ),
         ]
+    }
+
+    /// A row for each drive Hide from Sidebar took out of Locations, with
+    /// the button that puts it back.
+    fn hidden_drives(&self, p: &Preferences, cx: &App) -> Vec<AnyElement> {
+        (p.hidden_drives.iter().enumerate())
+            .map(|(ix, hidden)| {
+                let drive = hidden.drive.clone();
+                let button = text_button(("show-drive", ix), "Show", ButtonLook::Secondary)
+                    .debug_selector(move || format!("show-drive-{ix}"))
+                    .on_click(move |_, _, cx| {
+                        preferences::update(cx, |p| p.hidden_drives.retain(|h| h.drive != drive))
+                    });
+                row_with(
+                    hidden.name.clone(),
+                    Some("Hidden from Locations".into()),
+                    self.focusable(format!("show-drive-{ix}"), true, button, cx),
+                )
+            })
+            .collect()
     }
 
     fn agents(&self, p: &Preferences, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -2451,7 +2477,7 @@ fn row(
 
 /// A row whose description changes.
 fn row_with(
-    label: &'static str,
+    label: impl Into<SharedString>,
     description: Option<SharedString>,
     control: impl IntoElement,
 ) -> AnyElement {
@@ -2468,7 +2494,7 @@ fn row_with(
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .child(div().text_size(px(theme::TEXT_BODY)).child(label))
+                .child(div().text_size(px(theme::TEXT_BODY)).child(label.into()))
                 .children(description.map(|text| {
                     div()
                         .text_size(px(theme::TEXT_CAPTION))

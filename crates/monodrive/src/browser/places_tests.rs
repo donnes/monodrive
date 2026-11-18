@@ -416,6 +416,94 @@ fn a_cloud_folder_takes_a_name_of_its_own_and_gives_it_back(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_it(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, project) = folder();
+    let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mount, remount) = (
+        one.path().canonicalize().unwrap(),
+        two.path().canonicalize().unwrap(),
+    );
+    let world = world(
+        vec![startup(), volume("Backup", &mount, "B", 1000, 250)],
+        cx,
+    );
+    *world.fake.cloud.lock().unwrap() = vec![CloudFolder {
+        name: "iCloud Drive".into(),
+        path: project.join("docs"),
+    }];
+    let (browser, cx) = open(&world, &project, cx);
+    let shown = |cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, _| {
+            let volumes = b.sidebar.volumes.iter().map(|v| v.name.clone());
+            let cloud = b.sidebar.cloud.iter().map(|c| c.name.clone());
+            volumes.chain(cloud).collect::<Vec<_>>()
+        })
+    };
+    // Rows: the startup disk, the cloud folder, then Backup.
+    let first = favorites(&browser, cx).len() + 2;
+    let hide = |row: usize, cx: &mut VisualTestContext| {
+        let focus = browser.update_in(cx, |b, window, cx| {
+            b.sidebar_cursor = row;
+            window.focus(&b.sidebar_focus, cx);
+            cx.notify();
+            b.sidebar_focus.clone()
+        });
+        cx.run_until_parked();
+        let offered = cx.update(|window, cx| {
+            commands::context_menu(&[Scope::Sidebar], cx.global::<Preferences>(), |action| {
+                window.is_action_available_in(action, &focus)
+            })
+            .iter()
+            .any(|row| row.title == "Hide from Sidebar")
+        });
+        if offered {
+            cx.dispatch_action(HideFromSidebar);
+            cx.run_until_parked();
+        }
+        offered
+    };
+    assert!(!hide(first - 1, cx), "a favorite is removed, not hidden");
+    assert!(hide(first + 2, cx));
+    assert_eq!(
+        toast(&browser, cx),
+        Some((
+            "Hid Backup from the sidebar. Settings shows it again.".into(),
+            false,
+            false
+        ))
+    );
+    assert_eq!(shown(cx), ["Macintosh HD", "iCloud Drive"]);
+    assert!(hide(first + 1, cx));
+    assert_eq!(shown(cx), ["Macintosh HD"]);
+    // Still mounted: the drive's own folder opens and says how full it is.
+    browser.update_in(cx, |b, window, cx| {
+        b.pane()
+            .update(cx, |pane, cx| pane.go(mount.clone(), window, cx))
+    });
+    cx.run_until_parked();
+    let space = in_pane(&browser, cx, |pane, _| pane.chrome.space.clone());
+    assert_eq!(space, Some(format!("{} free", format_bytes(250))));
+
+    // Mounted somewhere else, it's the same drive, so it stays hidden.
+    world.fake.volumes.lock().unwrap()[1].mount = remount;
+    world.volumes_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(shown(cx), ["Macintosh HD"]);
+
+    press(cx, "cmd-,");
+    press_on(cx, "nav-Window");
+    press_on(cx, "show-drive-0");
+    assert_eq!(shown(cx), ["Macintosh HD", "Backup"]);
+    let hidden = cx.update(|_, cx| cx.global::<Preferences>().hidden_drives.clone());
+    assert_eq!(
+        hidden.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+        ["iCloud Drive"]
+    );
+}
+
+#[gpui::test]
 fn eject_shows_macos_refusal_and_leaves_a_drive_that_went(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mount = dir.path().canonicalize().unwrap();
@@ -620,7 +708,10 @@ fn add_to_sidebar_takes_a_folder_and_remove_forgets_it(cx: &mut TestAppContext) 
     );
     assert_eq!(menu_on(1, cx), ["Open", "Open in New Tab", "Clear Recents"]);
     assert_eq!(menu_on(0, cx), ["Open", "Open in New Tab"]);
-    assert_eq!(menu_on(rows + 2, cx), ["Open", "Open in New Tab"]);
+    assert_eq!(
+        menu_on(rows + 2, cx),
+        ["Open", "Open in New Tab", "Hide from Sidebar"]
+    );
 
     // The gap under a row answers as the row does.
     let row = cx.debug_bounds("place-1").unwrap();

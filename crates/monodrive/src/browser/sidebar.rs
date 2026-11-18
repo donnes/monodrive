@@ -18,7 +18,7 @@ use crate::assets::NIGHT_SKY;
 use crate::commands::{self, Scope};
 use crate::feedback::{self, Haptic};
 use crate::motion::Slide;
-use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS};
+use crate::preferences::{self, Drive, HiddenDrive, Preferences, SIDEBAR_WIDTHS};
 use crate::session::RemoteAt;
 use crate::session::Shows;
 use crate::text_field::TextField;
@@ -190,13 +190,17 @@ pub(super) fn lists_hidden(dir: &Path, wanted: bool, tidy: &[PathBuf]) -> bool {
 #[derive(Default)]
 pub(super) struct Sidebar {
     pub(super) places: Vec<Place>,
-    /// Read with the volumes, which is also when the window comes forward.
-    pub(super) cloud: Vec<CloudFolder>,
+    /// Every mounted volume and cloud folder, hidden ones too. Read
+    /// together, which is also when the window comes forward.
+    pub(super) all_volumes: Vec<Volume>,
+    pub(super) all_cloud: Vec<CloudFolder>,
     /// What's left in each cloud folder's account, `None` where its provider
     /// doesn't say. Asked after the folders are listed, since iCloud Drive
     /// can take a moment; a folder not answered yet isn't here.
     cloud_free: HashMap<PathBuf, Option<u64>>,
+    /// What Locations lists: those Settings doesn't hide.
     pub(super) volumes: Vec<Volume>,
+    pub(super) cloud: Vec<CloudFolder>,
     pub(super) servers: Vec<String>,
     /// The saved SFTP servers, listed after the drives.
     pub(super) remotes: Vec<Source>,
@@ -223,6 +227,19 @@ impl Sidebar {
             worktrees,
             ..Self::default()
         }
+    }
+
+    /// Lists in Locations what `hidden` leaves of every drive and cloud folder.
+    pub(super) fn show_drives(&mut self, hidden: &[HiddenDrive]) {
+        let shown = |drive: Drive| !hidden.iter().any(|h| h.drive == drive);
+        self.volumes = (self.all_volumes.iter())
+            .filter(|v| shown(Drive::of(v)))
+            .cloned()
+            .collect();
+        self.cloud = (self.all_cloud.iter())
+            .filter(|c| shown(Drive::Path(c.path.clone())))
+            .cloned()
+            .collect();
     }
 }
 
@@ -425,7 +442,7 @@ impl Browser {
             let _ = this.update(cx, |this, cx| {
                 let gone: Vec<_> = this
                     .sidebar
-                    .volumes
+                    .all_volumes
                     .iter()
                     .filter(|old| !old.startup && !volumes.iter().any(|new| new.mount == old.mount))
                     .cloned()
@@ -451,8 +468,12 @@ impl Browser {
                     }
                     pane.update(cx, |pane, cx| pane.navigate(home(), cx));
                 }
-                this.sidebar.volumes = volumes;
-                this.sidebar.cloud = cloud;
+                this.sidebar.all_volumes = volumes;
+                this.sidebar.all_cloud = cloud;
+                let hidden = cx
+                    .try_global::<Preferences>()
+                    .map(|p| p.hidden_drives.clone());
+                this.sidebar.show_drives(&hidden.unwrap_or_default());
                 this.load_lists(cx);
                 this.save_session(cx);
                 // A drive that's back may be what a restored pane waits for.
@@ -487,7 +508,7 @@ impl Browser {
         let Some(places) = cx.try_global::<Places>().cloned() else {
             return;
         };
-        let volumes = self.sidebar.volumes.clone();
+        let volumes = self.sidebar.all_volumes.clone();
         let read = cx.background_executor().spawn(async move {
             let favorites = places.store.places(&volumes);
             (favorites, places.store.servers(), places.store.remotes())
@@ -527,7 +548,7 @@ impl Browser {
         let Some(store) = cx.try_global::<Places>().map(|places| places.store.clone()) else {
             return;
         };
-        let volumes = self.sidebar.volumes.clone();
+        let volumes = self.sidebar.all_volumes.clone();
         let changed = cx
             .background_executor()
             .spawn(async move { change(&store, &volumes) });
@@ -701,6 +722,36 @@ impl Browser {
             }
             _ => None,
         }
+    }
+
+    /// The drive or cloud folder the sidebar's keys are on, to hide.
+    fn hideable_at_cursor(&self) -> Option<HiddenDrive> {
+        match self.row_at(self.sidebar_cursor)? {
+            Row::Volume(ix) => self.sidebar.volumes.get(ix).map(|volume| HiddenDrive {
+                name: volume.name.clone(),
+                drive: Drive::of(volume),
+            }),
+            Row::Cloud(ix) => self.sidebar.cloud.get(ix).map(|folder| HiddenDrive {
+                name: folder.name.clone(),
+                drive: Drive::Path(folder.path.clone()),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Hide from Sidebar: Locations leaves the drive out until Settings shows
+    /// it again. Nothing is ejected, and its path opens as before.
+    fn hide_drive(&mut self, hidden: HiddenDrive, cx: &mut Context<Self>) {
+        let said = format!(
+            "Hid {} from the sidebar. Settings shows it again.",
+            hidden.name
+        );
+        preferences::update(cx, |p| {
+            if !p.hidden_drives.iter().any(|h| h.drive == hidden.drive) {
+                p.hidden_drives.push(hidden);
+            }
+        });
+        self.toast(said, false, None, cx);
     }
 
     /// Ejects off the UI thread; a refusal comes back with macOS's reason.
@@ -1760,6 +1811,11 @@ impl Browser {
                             ))
                         },
                     )
+                    .when_some(self.hideable_at_cursor(), |d, hidden| {
+                        d.on_action(cx.listener(move |this, _: &super::HideFromSidebar, _, cx| {
+                            this.hide_drive(hidden.clone(), cx)
+                        }))
+                    })
                     .when_some(self.ejectable_at_cursor(), |d, mount| {
                         d.on_action(cx.listener(move |this, _: &super::Eject, _, cx| {
                             this.eject(mount.clone(), cx)

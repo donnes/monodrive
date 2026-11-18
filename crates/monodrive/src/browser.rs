@@ -168,6 +168,7 @@ actions!(
         AddToSidebar,
         RenameLocation,
         RemoveFromSidebar,
+        HideFromSidebar,
         Eject,
         ClearRecents,
         PutBack,
@@ -482,7 +483,7 @@ impl Browser {
             .iter()
             .flat_map(|pane| pane.read(cx).unplaced())
             .collect();
-        let volumes = self.sidebar.volumes.clone();
+        let volumes = self.sidebar.all_volumes.clone();
         let placed = cx.background_executor().spawn(async move {
             folders
                 .into_iter()
@@ -516,7 +517,7 @@ impl Browser {
     /// wouldn't remember which drive it was on.
     pub(super) fn save_session(&mut self, cx: &mut Context<Self>) {
         let Some(key) = self.session_key else { return };
-        if self.sidebar.volumes.is_empty() {
+        if self.sidebar.all_volumes.is_empty() {
             return;
         }
         self.session_save = self.capture_state(cx, move |state, cx| {
@@ -549,7 +550,10 @@ impl Browser {
         // it's shown. Settings' own changes to the view and the sort go to
         // the pane the commands act on, and nothing else changes those.
         cx.observe_global::<Preferences>(|this, cx| {
-            this.sidebar.worktrees = cx.global::<Preferences>().show_worktrees;
+            let prefs = cx.global::<Preferences>();
+            this.sidebar.worktrees = prefs.show_worktrees;
+            let hidden = prefs.hidden_drives.clone();
+            this.sidebar.show_drives(&hidden);
             let adopt = matches!(this.sheet, Some(Sheet::Settings(_)));
             let focused = this.pane().clone();
             for pane in this.shown_panes() {
@@ -706,7 +710,7 @@ impl Browser {
             .map(|other| other.folder().to_path_buf());
         let pane = pane.read(cx);
         let volume = (pane.showing_folder() && pane.unavailable.is_none())
-            .then(|| monodrive_core::volumes::holding(&self.sidebar.volumes, pane.folder()))
+            .then(|| monodrive_core::volumes::holding(&self.sidebar.all_volumes, pane.folder()))
             .flatten();
         Chrome {
             width,
@@ -1592,7 +1596,7 @@ impl Browser {
             available,
             scopes: self.pane().update(cx, |pane, _| pane.scopes()),
             favorites: self.sidebar.places.clone(),
-            volumes: self.sidebar.volumes.clone(),
+            volumes: self.sidebar.all_volumes.clone(),
             servers: self.sidebar.servers.clone(),
             files: self.pane().read(cx).chosen(),
             index: self.index.clone(),
@@ -2095,7 +2099,7 @@ impl Render for Browser {
             }
         }));
         // What acts on a pane goes to the one the commands are for.
-        let cloud = self.sidebar.cloud.clone();
+        let cloud = self.sidebar.all_cloud.clone();
         let root = self
             .pane()
             .update(cx, |pane, cx| pane.commands(root, sheet, &cloud, cx));
