@@ -218,6 +218,40 @@ impl Global for Operations {}
 pub struct SharedIndex(pub Arc<OnceLock<Result<Index, String>>>);
 impl Global for SharedIndex {}
 
+/// The folders one batch of disk changes touched; see `Index::on_change`.
+type Changed = Arc<[(PathBuf, bool)]>;
+
+/// The index's disk changes, told to each window still open through the one
+/// hook the app leaves on the index. `run` sets it; without it a window
+/// leaves a hook of its own.
+#[derive(Clone, Default)]
+pub struct DiskChanges {
+    hooked: Arc<OnceLock<()>>,
+    windows: Arc<Mutex<Vec<async_channel::Sender<Changed>>>>,
+}
+impl Global for DiskChanges {}
+
+impl DiskChanges {
+    fn listen(&self, index: &Index) -> async_channel::Receiver<Changed> {
+        let (send, receive) = async_channel::unbounded();
+        self.windows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(send);
+        let windows = self.windows.clone();
+        self.hooked.get_or_init(|| {
+            index.on_change(move |batch| {
+                let batch: Changed = batch.into();
+                windows
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|window| window.try_send(batch.clone()).is_ok());
+            });
+        });
+        receive
+    }
+}
+
 /// Whether a browser window is open.
 pub(crate) fn any_window(cx: &App) -> bool {
     cx.windows()
@@ -841,6 +875,7 @@ impl Browser {
     pub fn start_index(&mut self, cx: &mut Context<Self>) {
         let index = self.index.clone();
         let gate = cx.global::<IndexGate>().clone();
+        let changes = cx.try_global::<DiskChanges>().cloned().unwrap_or_default();
         self._index_watch = cx.spawn(async move |this, cx| {
             let waited = gate.held();
             gate.wait().await;
@@ -856,24 +891,24 @@ impl Browser {
             if waited {
                 let _ = this.update(cx, |this, cx| this.search_again(cx));
             }
-            let changes = index
+            let changed = index
                 .get()
                 .and_then(|index| index.as_ref().ok())
-                .map(|index| {
-                    let (send, receive) = async_channel::unbounded();
-                    index.on_change(move |batch| {
-                        let _ = send.try_send(batch);
-                    });
-                    receive
-                });
-            if let Some(receive) = changes {
+                .map(|index| changes.listen(index));
+            if let Some(changed) = changed {
                 let _ = this.update(cx, |this, cx| {
                     this._changes = cx.spawn(async move |this, cx| {
-                        while let Ok(batch) = receive.recv().await {
-                            if this
-                                .update(cx, |this, cx| this.disk_changed(&batch, cx))
-                                .is_err()
-                            {
+                        while let Ok(first) = changed.recv().await {
+                            let mut burst = vec![first];
+                            while let Ok(more) = changed.try_recv() {
+                                burst.push(more);
+                            }
+                            let told = this.update(cx, |this, cx| {
+                                for batch in &burst {
+                                    this.disk_changed(batch, cx);
+                                }
+                            });
+                            if told.is_err() {
                                 return;
                             }
                         }

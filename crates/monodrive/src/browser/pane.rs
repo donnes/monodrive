@@ -66,6 +66,9 @@ use std::time::Duration;
 const SEARCH_LIMIT: usize = 200;
 /// How long the disk must settle before a changed folder lists again.
 pub(super) const REFRESH_DELAY: Duration = Duration::from_millis(150);
+/// How long after a change beside one of its results a search runs again: a
+/// result in a folder that never stops changing mustn't search all the time.
+pub(super) const SEARCH_REFRESH_DELAY: Duration = Duration::from_secs(1);
 /// What stands for the path levels that don't fit.
 const COLLAPSED: &str = "…";
 /// A crumb's side padding.
@@ -783,7 +786,9 @@ impl Pane {
         if !self.shown {
             return;
         }
-        self.remember = Task::ready(());
+        if !quiet {
+            self.remember = Task::ready(());
+        }
         self.asking.clear();
         if self.showing_remote() {
             // Nothing local is on screen, so nothing local can be chosen.
@@ -1080,7 +1085,9 @@ impl Pane {
                     None => this.scroll.scroll_to_item(0, ScrollStrategy::Top),
                 }
                 this.refresh_trash(cx);
-                this.remember_search(cx);
+                if !quiet {
+                    this.remember_search(cx);
+                }
                 cx.notify();
             });
         });
@@ -1165,9 +1172,10 @@ impl Pane {
     }
 
     /// Refreshes the listing shortly after the disk changes under a folder on
-    /// screen.
+    /// screen, and runs a search again after a change beside one of its
+    /// results.
     pub(super) fn disk_changed(&mut self, batch: &[(PathBuf, bool)], cx: &mut Context<Self>) {
-        if !self.showing_folder() && !self.wants_archive() {
+        if !self.follows_disk() {
             return;
         }
         // What a pending listing will watch isn't known until it lands, and
@@ -1179,12 +1187,33 @@ impl Pane {
         if self.listing {
             return;
         }
-        if batch
-            .iter()
-            .any(|(changed, below)| self.watch.touches(changed, *below))
-        {
+        if self.refresh.is_none() && self.touched(batch) {
             self.schedule_refresh(cx);
         }
+    }
+
+    /// Whether the rows on screen are read from the disk or the index, and
+    /// so go stale when the disk changes.
+    fn follows_disk(&self) -> bool {
+        self.showing_folder() || self.wants_archive() || !self.query.is_empty()
+    }
+
+    /// Whether any of `batch` changed a folder on screen, or the folder of
+    /// one of a search's results.
+    fn touched(&self, batch: &[(PathBuf, bool)]) -> bool {
+        let beside_results: HashSet<&Path> = if self.query.is_empty() {
+            HashSet::new()
+        } else {
+            self.root
+                .iter()
+                .filter_map(|result| result.path.parent())
+                .collect()
+        };
+        batch.iter().any(|(changed, below)| {
+            self.watch.touches(changed, *below)
+                || beside_results.contains(changed.as_path())
+                || (*below && beside_results.iter().any(|dir| dir.starts_with(changed)))
+        })
     }
 
     /// Checks the changes held during a listing against what it watches.
@@ -1193,28 +1222,33 @@ impl Pane {
             return;
         }
         let held = std::mem::take(&mut self.held);
-        if held
-            .iter()
-            .any(|(changed, below)| self.watch.touches(changed, *below))
-        {
+        if self.touched(&held) {
             self.schedule_refresh(cx);
         }
     }
 
-    /// One refresh `REFRESH_DELAY` after the first change of a burst; changes
-    /// meanwhile fold into it.
+    /// One refresh `REFRESH_DELAY` after the first change of a burst, or
+    /// `SEARCH_REFRESH_DELAY` for a search; changes meanwhile fold into it.
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh.is_some() {
             return;
         }
-        let wait = cx.background_executor().timer(REFRESH_DELAY);
+        let delay = if self.query.is_empty() {
+            REFRESH_DELAY
+        } else {
+            SEARCH_REFRESH_DELAY
+        };
+        let wait = cx.background_executor().timer(delay);
         self.refresh = Some(cx.spawn(async move |this, cx| {
             wait.await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh = None;
                 // A listing that started since reads the disk after the
                 // change; it rechecks what it holds when it lands.
-                if (this.showing_folder() || this.wants_archive()) && !this.listing {
+                if this.follows_disk() && !this.listing {
+                    if !this.query.is_empty() {
+                        this.keep_selection = true;
+                    }
                     this.list(true, cx);
                 }
             });

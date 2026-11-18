@@ -206,18 +206,28 @@ impl Pane {
         if chosen == self.trash_header.asked {
             return;
         }
-        self.trash_header.asked.clone_from(&chosen);
         self.trash_header.origins = None;
+        if self.trash_header.asking.is_some() {
+            return;
+        }
+        self.trash_header.asked.clone_from(&chosen);
         let Some(owner) = cx.try_global::<Operations>().map(|ops| ops.0.clone()) else {
             return;
         };
+        let question = chosen.clone();
         let answer = cx
             .background_executor()
             .spawn(async move { lock(&owner).origins(&chosen) });
         self.trash_header.asking = Some(cx.spawn(async move |this, cx| {
             let answer = answer.await;
             let _ = this.update(cx, |this, cx| {
-                this.trash_header.origins = Some(answer);
+                this.trash_header.asking = None;
+                if this.trash_header.asked == question && this.chosen() == question {
+                    this.trash_header.origins = Some(answer);
+                } else {
+                    this.trash_header.asked.clear();
+                    this.follow_trash_selection(cx);
+                }
                 cx.notify();
             });
         }));
