@@ -1155,7 +1155,7 @@ const SFTP: &str = "SFTP servers";
 const SMB: &str = "SMB servers";
 
 /// The commands on a selection, in the order worth offering them.
-const SELECTION_ORDER: [&str; 19] = [
+const SELECTION_ORDER: [&str; 20] = [
     "Open",
     "Open With",
     "Quick Look",
@@ -1171,6 +1171,7 @@ const SELECTION_ORDER: [&str; 19] = [
     "Show Package Contents",
     "New Folder with Selection",
     "Add to Sidebar",
+    "Show in Enclosing Folder",
     "Reveal in Finder",
     "Open in Terminal",
     "Put Back",
@@ -1215,9 +1216,11 @@ fn glyph_for(command: &Command) -> &'static str {
         "Rename" | "Rename Location" | "Suggest Names" | "Organize Folder…" => "pencil",
         "Duplicate" | "Copy" => "copy",
         "Copy Path" => "link",
-        "New Folder" | "New Folder with Selection" | "Add to Sidebar" | "Go to Folder…" => {
-            "folder-01"
-        }
+        "New Folder"
+        | "New Folder with Selection"
+        | "Add to Sidebar"
+        | "Go to Folder…"
+        | "Show in Enclosing Folder" => "folder-01",
         "Settings…" => "settings",
         "Undo" | "Redo" => "rotate-ccw",
         "Macintosh HD" => "hard-drive",

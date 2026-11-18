@@ -19,9 +19,9 @@ use crate::browser::{
     OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo,
     RemoveDownload, RemoveFromSidebar, Rename, RenameLocation, ResetZoom, RevealInFinder,
     ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
-    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
-    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo,
-    ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    ShowInEnclosingFolder, ShowPackageContents, ShowSearches, SortByKind, SortByModified,
+    SortByName, SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar,
+    ToggleSplit, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -284,6 +284,18 @@ pub fn all() -> Vec<Command> {
             command("Show Package Contents", File, &[], BROWSER, || {
                 Box::new(ShowPackageContents)
             }),
+        ),
+        // Where rows come from many folders: search results and Recents. ⌘R,
+        // as Finder's.
+        on(
+            SELECTION,
+            command(
+                "Show in Enclosing Folder",
+                File,
+                &["cmd-r"],
+                BROWSER,
+                || Box::new(ShowInEnclosingFolder),
+            ),
         ),
         on(
             SELECTION,
@@ -1136,6 +1148,7 @@ mod tests {
                 "Remove Download",
                 "Open in New Tab ⌃⌘O",
                 "Show Package Contents",
+                "Show in Enclosing Folder ⌘R",
                 "Reveal in Finder",
                 "Open in Terminal",
                 "| Add to Sidebar ⌃⌘T",
@@ -1191,7 +1204,7 @@ mod tests {
         // New Folder with Selection is for several, after the ways to open.
         let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
         assert_eq!(
-            several[9..12],
+            several[10..13],
             [
                 "| New Folder with Selection ⌃⌘N",
                 "Rename ↩",
