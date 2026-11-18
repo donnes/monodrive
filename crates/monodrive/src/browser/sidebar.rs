@@ -18,17 +18,18 @@ use crate::assets::NIGHT_SKY;
 use crate::commands::{self, Scope};
 use crate::feedback::{self, Haptic};
 use crate::motion::Slide;
-use crate::preferences::{Preferences, SIDEBAR_WIDTHS};
+use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS};
 use crate::session::RemoteAt;
 use crate::session::Shows;
+use crate::text_field::TextField;
 use crate::theme::{
     self, ButtonLook, accent, content, icon, icon_button, row_icon_button, section_label,
 };
 use crate::traffic_lights;
 use gpui::{
-    Action, App, Context, CursorStyle, ElementId, Focusable, FontWeight, Global, ImageSource,
-    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point, Render,
-    Resource, Role, Stateful, Task, Window, div, img, prelude::*, px,
+    Action, App, Context, CursorStyle, ElementId, Entity, Focusable, FontWeight, Global,
+    ImageSource, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point,
+    Render, Resource, Role, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::Entry;
@@ -196,6 +197,8 @@ pub(super) struct Sidebar {
     pub(super) command_held: bool,
     /// Worktrees has a row, after Recents, as Settings says.
     pub(super) worktrees: bool,
+    /// The cloud folder whose name is being typed in its row.
+    pub(super) renaming: Option<CloudRenaming>,
     load_volumes: Option<Task<()>>,
     load_lists: Option<Task<()>>,
     _heard: Vec<Task<()>>,
@@ -209,6 +212,21 @@ impl Sidebar {
             ..Self::default()
         }
     }
+}
+
+/// A cloud folder's sidebar name being typed in place of it.
+pub(super) struct CloudRenaming {
+    path: PathBuf,
+    field: Entity<TextField>,
+    _blur: Subscription,
+}
+
+/// What the sidebar calls `folder`: the name given to it, else its own.
+fn cloud_name<'a>(folder: &'a CloudFolder, cx: &'a App) -> &'a str {
+    cx.global::<Preferences>()
+        .cloud_names
+        .get(&folder.path)
+        .map_or(&folder.name, |name| name)
 }
 
 /// A row the sidebar's keys can land on, in order on screen.
@@ -1085,18 +1103,111 @@ impl Browser {
         let folder = &self.sidebar.cloud[at];
         let ix = self.first_location() + self.startup_disks() + at;
         let selected = here.showing_folder() && here.folder == folder.path;
+        let name = cloud_name(folder, cx).to_owned();
+        let renaming = self
+            .sidebar
+            .renaming
+            .as_ref()
+            .filter(|renaming| renaming.path == folder.path);
         let row = Self::row(ix, selected, true, cursor)
             .h(px(ROW_HEIGHT))
             .flex()
             .items_center()
             .gap_2()
             .child(icon("cloud", 16.).text_color(content(if selected { 1. } else { 0.55 })))
-            .child(div().flex_1().truncate().child(folder.name.clone()));
-        let target = (folder.path.clone(), folder.name.clone());
+            .map(|d| match renaming {
+                Some(renaming) => d.child(Self::cloud_name_field(renaming, cx)),
+                None => d.child(div().flex_1().truncate().child(name.clone())),
+            });
+        let target = (folder.path.clone(), name.clone());
         Self::slot(ix, selected, true, cx)
-            .aria_label(folder.name.clone())
+            .aria_label(name)
             .child(row)
             .map(|d| self.drop_row(d, ix, Some(target)))
+    }
+
+    /// The cloud row's name as a field, fitting inside the row.
+    fn cloud_name_field(renaming: &CloudRenaming, cx: &mut Context<Self>) -> gpui::Div {
+        let mut fill = theme::pane_fill();
+        fill.a = 1.;
+        theme::field(accent())
+            .debug_selector(|| "cloud-name-field".into())
+            .key_context("Rename")
+            .on_action(cx.listener(|this, _: &super::CommitRename, window, cx| {
+                this.commit_cloud_name(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &super::CancelRename, window, cx| {
+                this.end_cloud_name(window, cx)
+            }))
+            // A click in the name places the caret; it doesn't open the row.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .flex_1()
+            .min_w_0()
+            .px(px(6.))
+            .bg(fill)
+            .text_color(content(1.))
+            .child(renaming.field.clone())
+    }
+
+    /// Rename Location: the cloud row the keys are on takes a field with its
+    /// name, and an empty field goes back to the folder's own.
+    fn rename_cloud(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder) = self.sidebar.cloud.get(at) else {
+            return;
+        };
+        let path = folder.path.clone();
+        let own = folder.name.clone();
+        let name = cloud_name(folder, cx).to_owned();
+        let field = cx.new(|cx| {
+            let mut field = TextField::new("Name", own, cx).with_font_size(theme::TEXT_TITLE);
+            field.set_text(&name, 0..name.len(), cx);
+            field
+        });
+        let focus = field.focus_handle(cx);
+        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            this.commit_cloud_name(window, cx)
+        });
+        window.focus(&focus, cx);
+        self.sidebar.renaming = Some(CloudRenaming {
+            path,
+            field,
+            _blur: blur,
+        });
+        cx.notify();
+    }
+
+    /// ↩ or clicking away keeps the name; an empty one, or the folder's own,
+    /// forgets it.
+    fn commit_cloud_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = &self.sidebar.renaming else {
+            return;
+        };
+        let name = renaming.field.read(cx).text().trim().to_owned();
+        let path = renaming.path.clone();
+        let own = self
+            .sidebar
+            .cloud
+            .iter()
+            .find(|folder| folder.path == path)
+            .map(|folder| folder.name.clone());
+        preferences::update(cx, |prefs| {
+            if name.is_empty() || own.as_ref() == Some(&name) {
+                prefs.cloud_names.remove(&path);
+            } else {
+                prefs.cloud_names.insert(path, name);
+            }
+        });
+        self.end_cloud_name(window, cx);
+    }
+
+    fn end_cloud_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(renaming) = self.sidebar.renaming.take()
+            && renaming.field.focus_handle(cx).is_focused(window)
+        {
+            window.focus(&self.sidebar_focus, cx);
+        }
+        cx.notify();
     }
 
     fn volume_row(
@@ -1572,6 +1683,19 @@ impl Browser {
                                     },
                                 ))
                             })
+                        },
+                    )
+                    .when_some(
+                        match at_cursor {
+                            Some(Row::Cloud(at)) if self.sidebar.renaming.is_none() => Some(at),
+                            _ => None,
+                        },
+                        |d, at| {
+                            d.on_action(cx.listener(
+                                move |this, _: &super::RenameLocation, window, cx| {
+                                    this.rename_cloud(at, window, cx)
+                                },
+                            ))
                         },
                     )
                     .when_some(self.ejectable_at_cursor(), |d, mount| {

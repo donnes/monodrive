@@ -777,6 +777,9 @@ impl Element for FieldElement {
         } else {
             field.scroll_x
         };
+        // Text that shrank, as when typing over a long selected name, comes
+        // back into view instead of staying scrolled past its start.
+        let scroll_x = scroll_x.min((line.width + px(2.) - bounds.size.width).max(px(0.)));
         Prepaint { line, scroll_x }
     }
 

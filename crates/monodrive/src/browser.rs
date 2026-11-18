@@ -166,6 +166,7 @@ actions!(
         EditPreview,
         ShowContextMenu,
         AddToSidebar,
+        RenameLocation,
         RemoveFromSidebar,
         Eject,
         ClearRecents,
@@ -1250,6 +1251,10 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A cloud folder's name being typed takes its own typing.
+        if self.sidebar.renaming.is_some() {
+            return;
+        }
         self.pane()
             .update(cx, |pane, cx| pane.type_to_search(event, window, cx));
     }

@@ -4,6 +4,7 @@
 use crate::background::{Effect, Scope};
 use gpui::{App, Global, Task};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -184,6 +185,8 @@ pub struct Preferences {
     pub update_channel: monodrive_core::updates::Channel,
     /// The onboarding last finished; a later version can show itself again.
     pub onboarding_version: u32,
+    /// Names the sidebar gives cloud folders instead of their own, by path.
+    pub cloud_names: BTreeMap<PathBuf, String>,
 }
 
 /// How narrow and wide the sidebar can be dragged.
@@ -230,6 +233,7 @@ impl Default for Preferences {
             agents_all_tools: false,
             update_channel: Default::default(),
             onboarding_version: 0,
+            cloud_names: BTreeMap::new(),
         }
     }
 }
@@ -286,6 +290,7 @@ impl Preferences {
             agents_all_tools: self.agents_all_tools,
             update_channel: self.update_channel,
             onboarding_version: self.onboarding_version,
+            cloud_names: std::mem::take(&mut self.cloud_names),
             ..Self::default()
         };
     }
