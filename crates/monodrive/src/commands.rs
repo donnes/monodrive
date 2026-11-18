@@ -17,11 +17,11 @@ use crate::browser::{
     HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
     NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal,
     OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo,
-    RemoveDownload, RemoveFromSidebar, Rename, ResetZoom, RevealInFinder, ReverseSort, SaveSearch,
-    SearchContents, SearchThisFolder, ShowCopiesAndMoves, ShowPackageContents, ShowSearches,
-    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles,
-    TogglePathBar, ToggleSidebar, ToggleSplit, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn,
-    ZoomOut,
+    RemoveDownload, RemoveFromSidebar, Rename, RenameLocation, ResetZoom, RevealInFinder,
+    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
+    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
+    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo,
+    ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -326,6 +326,17 @@ pub fn all() -> Vec<Command> {
         on(
             &[Scope::Selection, Scope::Folder],
             command("Get Info", File, &["cmd-i"], BROWSER, || Box::new(GetInfo)),
+        ),
+        // A cloud folder's name in the sidebar alone; Return opens there.
+        on(
+            &[Scope::Sidebar],
+            separated(command(
+                "Rename Location",
+                File,
+                &[],
+                Some("Sidebar"),
+                || Box::new(RenameLocation),
+            )),
         ),
         on(
             &[Scope::Sidebar],
@@ -1167,6 +1178,7 @@ mod tests {
             [
                 "Open ⌘↓",
                 "Open in New Tab ⌃⌘O",
+                "| Rename Location",
                 "| Remove from Sidebar ⌘⌫",
                 "Eject ⌘E",
                 "Clear Recents"

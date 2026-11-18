@@ -345,6 +345,61 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
 }
 
 #[gpui::test]
+fn a_cloud_folder_takes_a_name_of_its_own_and_gives_it_back(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let drive = project.join("docs");
+    *world.fake.cloud.lock().unwrap() = vec![CloudFolder {
+        name: "GoogleDrive-me@acme.com".into(),
+        path: drive.clone(),
+    }];
+    let (browser, cx) = open(&world, &project, cx);
+    let names = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| cx.global::<Preferences>().cloud_names.clone())
+    };
+    let renaming =
+        |cx: &mut VisualTestContext| browser.read_with(cx, |b, _| b.sidebar.renaming.is_some());
+    let first = favorites(&browser, cx).len() + 2;
+    // A favorite's menu has no Rename Location; the cloud folder's does.
+    let row = center(cx, &format!("place-{}", first - 1));
+    right_click(cx, row);
+    assert!(!menu(&browser, cx).unwrap().0.contains(&"Rename Location"));
+    press(cx, "escape");
+    let row = center(cx, &format!("place-{}", first + 1));
+    right_click(cx, row);
+    assert!(menu(&browser, cx).unwrap().0.contains(&"Rename Location"));
+    press(cx, "escape");
+    // Typing goes into the name, not a search, and Return keeps it.
+    cx.dispatch_action(RenameLocation);
+    assert!(renaming(cx));
+    press(cx, "a");
+    cx.simulate_input("cme");
+    press(cx, "enter");
+    assert!(!renaming(cx));
+    assert!(in_pane(&browser, cx, |pane, _| pane.query.is_empty()));
+    assert_eq!(names(cx), [(drive.clone(), "acme".to_string())].into());
+    // Esc leaves it as it was.
+    cx.dispatch_action(RenameLocation);
+    cx.simulate_input("Other");
+    press(cx, "escape");
+    assert!(!renaming(cx));
+    assert_eq!(names(cx), [(drive.clone(), "acme".to_string())].into());
+    // An empty name goes back to the folder's own.
+    cx.dispatch_action(RenameLocation);
+    press(cx, "backspace enter");
+    assert!(names(cx).is_empty());
+    // Closing the sidebar keeps what was typed, and the keys go to the list.
+    cx.dispatch_action(RenameLocation);
+    cx.simulate_input("Work");
+    cx.dispatch_action(ToggleSidebar);
+    cx.run_until_parked();
+    assert!(!renaming(cx));
+    assert_eq!(names(cx), [(drive.clone(), "Work".to_string())].into());
+    let list = in_pane(&browser, cx, |pane, _| pane.list_focus.clone());
+    assert!(cx.update(|window, _| list.is_focused(window)));
+}
+
+#[gpui::test]
 fn eject_shows_macos_refusal_and_leaves_a_drive_that_went(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mount = dir.path().canonicalize().unwrap();

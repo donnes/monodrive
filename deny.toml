@@ -26,3 +26,8 @@ allow-git = ["https://github.com/noahdunnagan/fsearch"]
 # Vulnerabilities fail; an unmaintained crate deep in GPUI's graph doesn't,
 # unless we depend on it directly.
 unmaintained = "workspace"
+ignore = [
+    # GPUI needs chrono too, so it stays in the graph whatever we use, and
+    # no release fixes it. Moving our dates to jiff is its own change.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; GPUI depends on it and no upgrade exists" },
+]
