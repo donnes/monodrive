@@ -124,6 +124,44 @@ fn matching_lines_are_rows_under_each_file_and_the_keys_go_by_files(cx: &mut Tes
     });
 }
 
+/// Protects results from going stale: a change in a folder holding a result
+/// runs the search again and keeps the selection, and a change elsewhere runs
+/// nothing.
+#[gpui::test]
+fn a_change_beside_a_result_runs_the_search_again(cx: &mut TestAppContext) {
+    let world = world(Vec::new(), cx);
+    let hits = |names: &[&str]| names.iter().map(|name| hit(name, &[])).collect();
+    answer(&world.fake, "todo", hits(&["a.rs", "b.rs", "c.rs"]));
+    let folder = world.dir.path().join("here");
+    std::fs::create_dir(&folder).unwrap();
+    let (browser, cx) = browse(&folder, cx);
+    let names = Search {
+        text: "todo".into(),
+        looks: Looks::Names,
+        scope: Where::Everywhere,
+    };
+    run(&browser, names, cx);
+    land(cx);
+    press(cx, "down");
+    assert_eq!(shown(&browser, cx).1, ["b.rs"]);
+
+    let changed = |folder: &str, cx: &mut VisualTestContext| {
+        let batch = vec![(PathBuf::from(folder), false)];
+        browser.update(cx, |b, cx| b.disk_changed(&batch, cx));
+        cx.executor().advance_clock(pane::SEARCH_REFRESH_DELAY);
+        cx.run_until_parked();
+    };
+    changed("/elsewhere", cx);
+    assert_eq!(searched(&world).len(), 1);
+
+    answer(&world.fake, "todo", hits(&["b.rs", "c.rs"]));
+    changed("/made/up", cx);
+    assert_eq!(searched(&world).len(), 2);
+    let (rows, selected) = shown(&browser, cx);
+    assert_eq!(rows, ["b.rs", "c.rs"]);
+    assert_eq!(selected, ["b.rs"]);
+}
+
 /// Protects stale handling: a search replaced before it answers never lands,
 /// by another search or by leaving for a folder.
 #[gpui::test]

@@ -249,6 +249,11 @@ impl Index {
     /// with its progress.
     pub fn start() -> Result<Self, String> {
         let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+        // fsearch holds changes in the Trash, /tmp, caches and node_modules
+        // until they've been quiet for seconds, and `on_change` waits with
+        // them. The window refreshes from `on_change`, so nothing is held.
+        let eager = fsearch::walk::LazyDirs::build(home.as_bytes(), true);
+        let _ = fsearch::walk::LAZY.set(eager);
         let engine = fsearch::Engine::start(fsearch::Options {
             dir: dir(&home),
             home,
@@ -338,14 +343,7 @@ impl Index {
         let (pattern, filters) = search.parts()?;
         let Some(pattern) = pattern else {
             return Ok(Found {
-                hits: self
-                    .search(&filters, &search.scope, limit)?
-                    .into_iter()
-                    .map(|entry| Hit {
-                        entry,
-                        lines: Vec::new(),
-                    })
-                    .collect(),
+                hits: still_there(self.search(&filters, &search.scope, limit)?),
                 complete: true,
             });
         };
@@ -462,6 +460,19 @@ pub(crate) fn now() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+/// The names found that are still on the disk. The index hears of a change a
+/// moment after it's made, so what was just moved or trashed has no row.
+fn still_there(entries: Vec<Entry>) -> Vec<Hit> {
+    entries
+        .into_iter()
+        .filter(|entry| std::fs::symlink_metadata(&entry.path).is_ok())
+        .map(|entry| Hit {
+            entry,
+            lines: Vec::new(),
+        })
+        .collect()
 }
 
 /// Each file with its entry for the window's columns, read from the disk. A
@@ -588,6 +599,16 @@ mod tests {
         assert_eq!(found.hits[0].entry.size, 4);
         assert_eq!(found.hits[0].lines.len(), 1);
         assert!(!found.complete);
+
+        // A name the index still holds is checked against the disk too.
+        let kept = entries::entry_at(&there).unwrap();
+        let gone = Entry {
+            path: dir.path().join("gone.txt"),
+            ..kept.clone()
+        };
+        let names = still_there(vec![gone, kept]);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].entry.path, there);
     }
 
     #[test]

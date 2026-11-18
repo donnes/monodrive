@@ -24,7 +24,7 @@ Filters translate onto fsearch's own query fields in `index.rs`, so fsearch does
 
 `Index::grep` takes a pattern and a filter `Query` with the same meaning as above. fsearch keeps each line's first 400 bytes. `Caps` bounds files, lines per file and lines in all, and `complete` is false when fsearch's 250 ms budget ran out or a cap left matches out.
 
-The window runs a `search::Search`: the text typed, whether it looks at names or contents, and its scope. Looking at contents, the plain words are one literal phrase and the filters pick the files. With only filters there's nothing to look for, so it's a name search. It waits 120 ms for the typing to stop, since it reads files, and a newer search or leaving drops it.
+The window runs a `search::Search`: the text typed, whether it looks at names or contents, and its scope. Looking at contents, the plain words are one literal phrase and the filters pick the files. With only filters there's nothing to look for, so it's a name search. It waits 120 ms for the typing to stop, since it reads files, and a newer search or leaving drops it. Results follow the disk. The index hears of a change a moment after it's made, so a name it still holds that the disk doesn't has no row, and a change in a folder holding a result runs the search again a second later, keeping the selection. A change elsewhere runs nothing, so a new match shows on the next search.
 
 ## Kept searches
 
