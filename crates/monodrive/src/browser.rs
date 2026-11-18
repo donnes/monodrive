@@ -552,6 +552,7 @@ impl Browser {
         cx.observe_global::<Preferences>(|this, cx| {
             this.sidebar.worktrees = cx.global::<Preferences>().show_worktrees;
             this.show_drives(cx);
+            this.fold_sections(cx.global::<Preferences>().collapsed, cx);
             let adopt = matches!(this.sheet, Some(Sheet::Settings(_)));
             let focused = this.pane().clone();
             for pane in this.shown_panes() {
@@ -612,10 +613,13 @@ impl Browser {
             previewing: None,
             look_at: None,
             fetching: None,
-            sidebar: sidebar::Sidebar::new(
-                cx.try_global::<Preferences>()
-                    .is_some_and(|p| p.show_worktrees),
-            ),
+            sidebar: {
+                let prefs = cx.try_global::<Preferences>();
+                sidebar::Sidebar::new(
+                    prefs.is_some_and(|p| p.show_worktrees),
+                    prefs.map(|p| p.collapsed).unwrap_or_default(),
+                )
+            },
             frame: None,
             session_key: None,
             session_save: Task::ready(()),
@@ -2117,9 +2121,12 @@ impl Render for Browser {
                     .on_action(cx.listener(|this, _: &ConnectToServer, window, cx| {
                         this.open_connect(window, cx)
                     }))
-                    .on_action(
-                        cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)),
-                    )
+                    // Folded favorites have nothing to edit.
+                    .when(!self.sidebar.collapsed.favorites, |d| {
+                        d.on_action(
+                            cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)),
+                        )
+                    })
                     .on_action(cx.listener(|this, _: &ShowSearches, window, cx| {
                         this.toggle_searches(window, cx)
                     }))

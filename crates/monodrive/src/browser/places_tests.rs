@@ -309,6 +309,63 @@ fn drives_show_how_full_each_is_with_marks_and_follow_the_watch(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn favorites_and_locations_fold_on_their_own_and_the_keys_skip_what_is_folded(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, project) = folder();
+    let world = world(
+        vec![
+            startup(),
+            volume("Backup", "/Volumes/Backup".as_ref(), "B", 1000, 250),
+        ],
+        cx,
+    );
+    let (browser, cx) = open(&world, &project, cx);
+    let favorites = favorites(&browser, cx).len();
+    assert!(favorites > 0);
+    let row = |cx: &mut VisualTestContext, ix| browser.read_with(cx, |b, _| b.row_at(ix));
+    let folded =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Preferences>().collapsed);
+
+    // Folded, Favorites' rows and Edit go, with the Edit session, and
+    // Locations follow Recents.
+    let editing = |cx: &mut VisualTestContext| browser.read_with(cx, |b, _| b.sidebar.editing);
+    cx.dispatch_action(EditFavorites);
+    assert!(editing(cx));
+    press_on(cx, "favorites-toggle");
+    assert!(folded(cx).favorites && !folded(cx).locations);
+    assert!(!editing(cx));
+    assert!(!on_screen(cx, "favorites-edit"));
+    // Edit Favorites can't start a session nobody sees.
+    cx.dispatch_action(EditFavorites);
+    assert!(!editing(cx));
+    assert_eq!(row(cx, 2), Some(Row::Volume(0)));
+    assert_eq!(row(cx, 3), Some(Row::Volume(1)));
+    assert!(on_screen(cx, "place-3"));
+    assert!(!on_screen(cx, "place-4"));
+
+    // With both folded, the keys stop at Recents.
+    press_on(cx, "locations-toggle");
+    assert!(folded(cx).favorites && folded(cx).locations);
+    assert!(!on_screen(cx, "place-2"));
+    browser.update_in(cx, |b, window, cx| {
+        b.sidebar_cursor = 1;
+        window.focus(&b.sidebar_focus, cx);
+    });
+    press(cx, "down");
+    assert_eq!(browser.read_with(cx, |b, _| b.sidebar_cursor), 1);
+
+    // Favorites come back on their own, with Locations still folded.
+    press_on(cx, "favorites-toggle");
+    assert!(!folded(cx).favorites && folded(cx).locations);
+    assert_eq!(row(cx, 2), Some(Row::Favorite(0)));
+    assert_eq!(row(cx, favorites + 2), None);
+    assert!(on_screen(cx, &format!("place-{}", favorites + 1)));
+    assert!(!on_screen(cx, &format!("place-{}", favorites + 2)));
+    assert!(!editing(cx));
+}
+
+#[gpui::test]
 fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
     cx: &mut TestAppContext,
 ) {

@@ -19,7 +19,8 @@
 //!
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
-//! `sidebar-keys.png`, `sidebar-edit.png`, `connect.png`, `connect-failed.png`, `trash.png`,
+//! `sidebar-keys.png`, `sidebar-edit.png`, `sidebar-folded.png`, with Favorites folded,
+//! `connect.png`, `connect-failed.png`, `trash.png`,
 //! `recents.png` and `recents-grid.png`, then `updates.png`. The Overview's are last: see `shoot_overview`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
 //! `palette-favorites.png`), `server.png` and `server-failed.png`, a saved
@@ -90,7 +91,7 @@ use monodrive::downloads;
 use monodrive::finder;
 use monodrive::native::{self, Native, SizeDone};
 use monodrive::onboarding::{Onboarding, Setup, Step};
-use monodrive::preferences::{Preferences, Theme, View, WorkspaceStyle};
+use monodrive::preferences::{Collapsed, Preferences, Theme, View, WorkspaceStyle};
 use monodrive::session::{PaneState, Shows, StopState, TabState, WindowState};
 use monodrive::updates::{self, Updates};
 use monodrive_core::apps::App as MacApp;
@@ -352,6 +353,17 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     dispatch(&mut cx, window, &EditFavorites)?;
     save(&mut cx, window, out, "sidebar-edit")?;
     dispatch(&mut cx, window, &EditFavorites)?;
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            collapsed: Collapsed {
+                favorites: true,
+                locations: false,
+            },
+            ..base.clone()
+        })
+    });
+    save(&mut cx, window, out, "sidebar-folded")?;
+    cx.update(|cx| cx.set_global(base.clone()));
     dispatch(&mut cx, window, &ConnectToServer)?;
     save(&mut cx, window, out, "connect")?;
     type_text(&mut cx, window, "smb://studio.local/projects")?;

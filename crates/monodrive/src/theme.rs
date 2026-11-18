@@ -355,6 +355,12 @@ pub fn key_cap(key: impl Into<SharedString>) -> Div {
 }
 
 pub fn section_label(label: impl Into<SharedString>) -> Div {
+    section_line().child(label.into())
+}
+
+/// A section label's line and type, for a heading that holds more than its
+/// text.
+pub fn section_line() -> Div {
     div()
         .h(px(28.))
         .px_2()
@@ -364,7 +370,6 @@ pub fn section_label(label: impl Into<SharedString>) -> Div {
         .text_size(px(TEXT_SMALL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(content(0.65))
-        .child(label.into())
 }
 
 pub fn icon(path: &'static str, side: f32) -> Svg {

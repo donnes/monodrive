@@ -184,6 +184,8 @@ pub struct Preferences {
     pub sidebar_width: f32,
     /// Whether the sidebar is open.
     pub show_sidebar: bool,
+    /// The sidebar's sections folded under their headings.
+    pub collapsed: Collapsed,
     /// Whether the inspector is open, to the right of the panes.
     pub show_inspector: bool,
     pub terminal: Terminal,
@@ -221,6 +223,14 @@ pub struct Preferences {
     pub cloud_names: BTreeMap<PathBuf, String>,
 }
 
+/// Which of the sidebar's sections are folded, each on its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Collapsed {
+    pub favorites: bool,
+    pub locations: bool,
+}
+
 /// How narrow and wide the sidebar can be dragged.
 pub const SIDEBAR_WIDTHS: std::ops::RangeInclusive<f32> = 160.0..=400.0;
 
@@ -249,6 +259,7 @@ impl Default for Preferences {
             ui_scale: 100,
             sidebar_width: 240.,
             show_sidebar: true,
+            collapsed: Collapsed::default(),
             show_inspector: false,
             terminal: Terminal::Terminal,
             shortcuts: Default::default(),
@@ -305,6 +316,7 @@ impl Preferences {
             show_hidden: self.show_hidden,
             sidebar_width: self.sidebar_width,
             show_sidebar: self.show_sidebar,
+            collapsed: self.collapsed,
             show_inspector: self.show_inspector,
             terminal: self.terminal,
             shortcuts: std::mem::take(&mut self.shortcuts),
@@ -444,19 +456,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_sidebar_and_inspector_are_kept_and_older_files_show_only_the_sidebar() {
+    fn the_sidebar_its_sections_and_the_inspector_are_kept_and_older_files_show_only_the_sidebar() {
         let closed = Preferences {
             show_sidebar: false,
             show_inspector: true,
+            collapsed: Collapsed {
+                favorites: false,
+                locations: true,
+            },
             ..Default::default()
         };
         let saved = serde_json::to_vec(&closed).unwrap();
         let read: Preferences = serde_json::from_slice(&saved).unwrap();
         assert!(!read.show_sidebar);
         assert!(read.show_inspector);
+        assert_eq!(read.collapsed, closed.collapsed);
         let older: Preferences = serde_json::from_slice(b"{}").unwrap();
         assert!(older.show_sidebar);
         assert!(!older.show_inspector);
+        assert_eq!(older.collapsed, Collapsed::default());
         assert_eq!(older.terminal, Terminal::Terminal);
     }
 
