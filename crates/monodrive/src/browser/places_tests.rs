@@ -327,10 +327,18 @@ fn favorites_and_locations_fold_on_their_own_and_the_keys_skip_what_is_folded(
     let folded =
         |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Preferences>().collapsed);
 
-    // Folded, Favorites' rows and Edit go, and Locations follow Recents.
+    // Folded, Favorites' rows and Edit go, with the Edit session, and
+    // Locations follow Recents.
+    let editing = |cx: &mut VisualTestContext| browser.read_with(cx, |b, _| b.sidebar.editing);
+    cx.dispatch_action(EditFavorites);
+    assert!(editing(cx));
     press_on(cx, "favorites-toggle");
     assert!(folded(cx).favorites && !folded(cx).locations);
+    assert!(!editing(cx));
     assert!(!on_screen(cx, "favorites-edit"));
+    // Edit Favorites can't start a session nobody sees.
+    cx.dispatch_action(EditFavorites);
+    assert!(!editing(cx));
     assert_eq!(row(cx, 2), Some(Row::Volume(0)));
     assert_eq!(row(cx, 3), Some(Row::Volume(1)));
     assert!(on_screen(cx, "place-3"));
@@ -354,6 +362,7 @@ fn favorites_and_locations_fold_on_their_own_and_the_keys_skip_what_is_folded(
     assert_eq!(row(cx, favorites + 2), None);
     assert!(on_screen(cx, &format!("place-{}", favorites + 1)));
     assert!(!on_screen(cx, &format!("place-{}", favorites + 2)));
+    assert!(!editing(cx));
 }
 
 #[gpui::test]

@@ -2121,9 +2121,12 @@ impl Render for Browser {
                     .on_action(cx.listener(|this, _: &ConnectToServer, window, cx| {
                         this.open_connect(window, cx)
                     }))
-                    .on_action(
-                        cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)),
-                    )
+                    // Folded favorites have nothing to edit.
+                    .when(!self.sidebar.collapsed.favorites, |d| {
+                        d.on_action(
+                            cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)),
+                        )
+                    })
                     .on_action(cx.listener(|this, _: &ShowSearches, window, cx| {
                         this.toggle_searches(window, cx)
                     }))
