@@ -506,9 +506,9 @@ pub const TOOLS: [Tool; 54] = [
         "list_places",
         All,
         Hints::READ,
-        "The sidebar's favorite folders, the mounted volumes with free space, the cloud folders, \
-        and the saved servers: smb:// addresses and SSH servers by id. Reads no contents and \
-        connects to nothing.",
+        "The sidebar's favorite folders, the mounted volumes with free space, the cloud folders \
+        with iCloud Drive's free space, and the saved servers: smb:// addresses and SSH servers by \
+        id. Reads no contents and connects to no server.",
     ),
     tool::<places::Pin>(
         "pin",

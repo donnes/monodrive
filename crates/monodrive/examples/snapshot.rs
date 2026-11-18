@@ -1244,6 +1244,10 @@ impl Drives for Disks {
         Vec::new()
     }
 
+    fn cloud_free(&self, _: &CloudFolder) -> Option<u64> {
+        None
+    }
+
     fn find_files(
         &self,
         _: &OnceLock<Result<Index, String>>,
@@ -1883,6 +1887,11 @@ impl Drives for MadeUp {
                 path: root.join("CloudStorage/GoogleDrive-you@example.com"),
             },
         ]
+    }
+
+    /// iCloud Drive says what's left; the File Provider apps don't.
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64> {
+        (folder.name == "iCloud Drive").then_some(38_400_000_000)
     }
 
     fn find_files(

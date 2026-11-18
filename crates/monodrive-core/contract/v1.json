@@ -5194,6 +5194,11 @@
           "cloud": {
             "items": {
               "properties": {
+                "free": {
+                  "description": "Bytes left in the account, when its provider says. Only iCloud Drive does, and never the account's total.",
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "name": {
                   "type": "string"
                 },

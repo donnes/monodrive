@@ -6,6 +6,10 @@ iCloud Drive and File Provider apps such as Dropbox, Google Drive and OneDrive k
 
 `cloud::folders` lists iCloud Drive and each folder in `~/Library/CloudStorage`, for the sidebar's Locations, the palette's Cloud storage page and `list_places`. It uses one `stat` of `Mobile Documents/com~apple~CloudDocs` and one listing of `CloudStorage`, with the type from the directory entry. It never goes inside a provider's folder, since that can ask for permission or wake the provider. Each folder goes by the name Finder gives it, such as "Proton Drive". No public API says what that name is, so it comes from the private `FPProviderDomain`, which asks fileproviderd and takes about 3 ms a folder. Without that answer, it falls back to macOS's `Provider-account` folder name, so `GoogleDrive-me@example.com` goes by `GoogleDrive`. Two folders that end up with the same name each go by their whole folder name. What it can't see isn't listed.
 
+## Free space
+
+The sidebar's cloud folders and `list_places` say what's left in each account. No File Provider API gives a quota, so only iCloud Drive answers. `cloud::free_space` asks iCloud Drive's daemon through the private `BRFetchQuotaOperation`, as `brctl quota` does, about 250 ms, so the sidebar asks after its folders are listed and the rows don't wait. It gives only what's left, never the total: the account's total comes from `iCloudQuota`, which needs the user's Apple Account and an entitlement Monodrive can't have. A macOS without the class, or a daemon that doesn't answer within 10 seconds, says nothing, and the row says Storage info unavailable.
+
 ## Availability
 
 `cloud::Availability` comes from the `st_flags` of the `lstat` a listing already makes, so it adds no system call. A listing says `Local` or `Placeholder`. Only `info` asks Foundation whether a placeholder is `Downloading`, whether the item is in the cloud at all, and why its last download failed. Those questions go to the provider's daemon, which takes about a millisecond an item. A search result from the index is `Unknown`, because fsearch keeps no flags.

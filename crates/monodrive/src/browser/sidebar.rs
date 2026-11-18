@@ -5,7 +5,7 @@
 //! hears a change, so nothing here polls.
 
 use super::drag::{Spot, Target, offers};
-use super::pane::Stop;
+use super::pane::{Stop, format_bytes};
 use super::remote;
 use super::searches;
 use super::{
@@ -41,6 +41,7 @@ use monodrive_core::search::{Looks, Search};
 use monodrive_core::servers::{self, Cancel, Prompt};
 use monodrive_core::updates::Channel;
 use monodrive_core::volumes::{self, Volume};
+use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -70,6 +71,9 @@ pub trait Drives: Send + Sync {
     }
     /// The cloud folders on this Mac.
     fn cloud(&self) -> Vec<CloudFolder>;
+    /// What's left in `folder`'s cloud account, if its provider says. Can
+    /// wait on the provider, so call it off the UI thread.
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64>;
     /// What the index finds for `query`, once it has started. Nothing starts
     /// it here. Call it off the UI thread.
     fn find_files(
@@ -114,6 +118,10 @@ impl Drives for System {
 
     fn cloud(&self) -> Vec<CloudFolder> {
         cloud::folders(&home())
+    }
+
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64> {
+        cloud::free_space(folder)
     }
 
     fn find_files(
@@ -184,6 +192,10 @@ pub(super) struct Sidebar {
     pub(super) places: Vec<Place>,
     /// Read with the volumes, which is also when the window comes forward.
     pub(super) cloud: Vec<CloudFolder>,
+    /// What's left in each cloud folder's account, `None` where its provider
+    /// doesn't say. Asked after the folders are listed, since iCloud Drive
+    /// can take a moment; a folder not answered yet isn't here.
+    cloud_free: HashMap<PathBuf, Option<u64>>,
     pub(super) volumes: Vec<Volume>,
     pub(super) servers: Vec<String>,
     /// The saved SFTP servers, listed after the drives.
@@ -403,11 +415,13 @@ impl Browser {
         let Some(places) = cx.try_global::<Places>().cloned() else {
             return;
         };
+        let drives = places.drives.clone();
         let listed = cx
             .background_executor()
-            .spawn(async move { (places.drives.list(), places.drives.cloud()) });
+            .spawn(async move { (drives.list(), drives.cloud()) });
         self.sidebar.load_volumes = Some(cx.spawn(async move |this, cx| {
             let (volumes, cloud) = listed.await;
+            let folders = cloud.clone();
             let _ = this.update(cx, |this, cx| {
                 let gone: Vec<_> = this
                     .sidebar
@@ -449,6 +463,19 @@ impl Browser {
                         }
                     });
                 }
+                cx.notify();
+            });
+            let free = cx
+                .background_executor()
+                .spawn(async move {
+                    folders
+                        .iter()
+                        .map(|folder| (folder.path.clone(), places.drives.cloud_free(folder)))
+                        .collect()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.sidebar.cloud_free = free;
                 cx.notify();
             });
         }));
@@ -1109,19 +1136,54 @@ impl Browser {
             .renaming
             .as_ref()
             .filter(|renaming| renaming.path == folder.path);
-        let row = Self::row(ix, selected, true, cursor)
-            .h(px(ROW_HEIGHT))
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(icon("cloud", 16.).text_color(content(if selected { 1. } else { 0.55 })))
-            .map(|d| match renaming {
-                Some(renaming) => d.child(Self::cloud_name_field(renaming, cx)),
-                None => d.child(div().flex_1().truncate().child(name.clone())),
+        let space = self
+            .sidebar
+            .cloud_free
+            .get(&folder.path)
+            .map(|free| match free {
+                Some(free) => ("free", format!("{} free", format_bytes(*free))),
+                None => ("unknown", "Storage info unavailable".into()),
             });
+        let described = space.as_ref().map(|(_, text)| text.clone());
+        let row = Self::row(ix, selected, true, cursor)
+            .h(px(DRIVE_HEIGHT))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(24.))
+                    .child(icon("cloud", 16.).text_color(content(if selected { 1. } else { 0.55 })))
+                    .map(|d| match renaming {
+                        Some(renaming) => d.child(Self::cloud_name_field(renaming, cx)),
+                        None => d.child(div().flex_1().min_w_0().truncate().child(name.clone())),
+                    }),
+            )
+            // The line keeps its room until the provider answers.
+            .child(
+                div()
+                    .h(px(12.))
+                    .ml(px(24.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(theme::TEXT_CAPTION))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(content(0.65))
+                    .children(space.map(|(said, text)| {
+                        div()
+                            .debug_selector(move || format!("cloud-{said}-{at}"))
+                            .min_w_0()
+                            .truncate()
+                            .child(text)
+                    })),
+            );
         let target = (folder.path.clone(), name.clone());
         Self::slot(ix, selected, true, cx)
             .aria_label(name)
+            .when_some(described, |d, text| d.aria_description(text))
             .child(row)
             .map(|d| self.drop_row(d, ix, Some(target)))
     }
