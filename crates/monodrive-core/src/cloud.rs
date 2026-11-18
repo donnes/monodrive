@@ -6,6 +6,7 @@
 //! macOS through NSFileManager. docs/cloud.md records what reads what.
 
 use crate::entries::{Entry, Kind};
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{msg_send, sel};
@@ -40,7 +41,7 @@ pub struct CloudFolder {
 /// the provider. One it can't see isn't listed.
 pub fn folders(home: &Path) -> Vec<CloudFolder> {
     let library = home.join("Library");
-    let icloud = library.join("Mobile Documents/com~apple~CloudDocs");
+    let icloud = home.join(ICLOUD_DRIVE);
     let mut providers: Vec<CloudFolder> = std::fs::read_dir(library.join("CloudStorage"))
         .into_iter()
         .flatten()
@@ -104,6 +105,56 @@ fn provider_name(path: &Path) -> Option<String> {
         Some(name?.to_string()).filter(|name| !name.is_empty())
     })
 }
+
+/// How much is left in the cloud account behind `folder`, in bytes, if its
+/// provider says. Only iCloud Drive does: no File Provider API gives a
+/// quota. It comes from the private `BRFetchQuotaOperation`, as `brctl quota`
+/// reads it, since no public API says, and never gives the account's total.
+/// iCloud Drive's daemon may ask Apple, which takes about 250 ms, so call it
+/// off the UI thread.
+pub fn free_space(folder: &CloudFolder) -> Option<u64> {
+    if !folder.path.ends_with(ICLOUD_DRIVE) {
+        return None;
+    }
+    // SAFETY: a system framework, which stays loaded.
+    let loaded = unsafe {
+        libc::dlopen(
+            c"/System/Library/PrivateFrameworks/CloudDocs.framework/CloudDocs".as_ptr(),
+            libc::RTLD_LAZY,
+        )
+    };
+    if loaded.is_null() {
+        return None;
+    }
+    let class = AnyClass::get(c"BRFetchQuotaOperation")?;
+    let (sent, answer) = std::sync::mpsc::channel();
+    let finished = RcBlock::new(move |free: *mut NSNumber, _: *mut NSError| {
+        // SAFETY: the daemon passes a valid number or null.
+        let _ = sent.send(unsafe { free.as_ref() }.map(|free| free.unsignedLongLongValue()));
+    });
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: an NSOperation subclass, which `new` makes.
+        let operation: Retained<AnyObject> = unsafe { msg_send![class, new] };
+        let setter = sel!(setFetchQuotaCompletionBlock:);
+        if !responds(&operation, setter) || !responds(&operation, sel!(start)) {
+            return None;
+        }
+        // SAFETY: checked above; it takes a block of a number and an error,
+        // keeps it, and calls it once on its own queue.
+        unsafe {
+            let _: () = msg_send![&operation, setFetchQuotaCompletionBlock: &*finished];
+            let _: () = msg_send![&operation, start];
+        }
+        // The daemon may never answer, as when iCloud is signed out.
+        answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .ok()
+            .flatten()
+    })
+}
+
+/// Where iCloud Drive keeps its files under the home folder.
+const ICLOUD_DRIVE: &str = "Library/Mobile Documents/com~apple~CloudDocs";
 
 fn responds(object: &AnyObject, selector: Sel) -> bool {
     // SAFETY: NSObject's own method, on an NSObject.

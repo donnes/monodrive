@@ -47,6 +47,10 @@ pub struct Volume {
 pub struct CloudFolder {
     pub path: String,
     pub name: String,
+    /// Bytes left in the account, when its provider says. Only iCloud Drive
+    /// does, and never the account's total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free: Option<u64>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -115,6 +119,7 @@ impl Call for ListPlaces {
             .map(|folder| CloudFolder {
                 path: shown(&folder.path),
                 name: folder.name.clone(),
+                free: cloud::free_space(folder),
             })
             .collect();
         let mut servers: Vec<Saved> = server
@@ -210,7 +215,16 @@ fn places_text(
     }
     out.push_str("Cloud\n");
     for folder in cloud {
-        let _ = writeln!(out, "{} ({})", folder.path, folder.name);
+        let _ = match folder.free {
+            Some(free) => writeln!(
+                out,
+                "{} ({}, {} free)",
+                folder.path,
+                folder.name,
+                bytes(free)
+            ),
+            None => writeln!(out, "{} ({})", folder.path, folder.name),
+        };
     }
     out.push_str("Servers\n");
     for server in servers {

@@ -20,7 +20,7 @@ use monodrive_core::search::Search;
 use monodrive_core::servers::Cancel;
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Default)]
@@ -35,6 +35,8 @@ pub(super) struct Fake {
     mounted: Mutex<Option<Result<PathBuf, String>>>,
     pub(super) opened: Mutex<Vec<PathBuf>>,
     pub(super) cloud: Mutex<Vec<CloudFolder>>,
+    /// What's left in each cloud folder's account, where its provider says.
+    cloud_free: Mutex<HashMap<PathBuf, u64>>,
     /// What the index finds, whatever's asked.
     files: Mutex<Vec<Entry>>,
     /// The paths whose device was asked for, in order.
@@ -83,6 +85,10 @@ impl Drives for Fake {
 
     fn cloud(&self) -> Vec<CloudFolder> {
         self.cloud.lock().unwrap().clone()
+    }
+
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64> {
+        self.cloud_free.lock().unwrap().get(&folder.path).copied()
     }
 
     fn find_files(
@@ -320,8 +326,18 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
             path: project.join("zeta"),
         },
     ];
+    world
+        .fake
+        .cloud_free
+        .lock()
+        .unwrap()
+        .insert(project.join("docs"), 5_000_000_000);
     let owned = own(cx);
     let (browser, cx) = open(&world, &project, cx);
+    // iCloud Drive says what's left; the other provider says nothing.
+    assert!(on_screen(cx, "cloud-free-0"));
+    assert!(on_screen(cx, "cloud-unknown-1"));
+    assert!(!on_screen(cx, "cloud-free-1"));
     let first = favorites(&browser, cx).len() + 2;
     let rows: Vec<_> = (first..first + 4)
         .map(|ix| browser.read_with(cx, |b, _| b.row_at(ix)))
