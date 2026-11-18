@@ -808,7 +808,7 @@ fn add_to_sidebar_takes_a_folder_and_remove_forgets_it(cx: &mut TestAppContext) 
 fn the_trash_opens_with_its_bar_and_back_returns(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let world = world(vec![startup()], cx);
-    let owned = own(cx);
+    let mut owned = own(cx);
     // Empty Trash erases the owner's Trash, as it's the app's one in `run`.
     let trash = owned.paths.trash.clone();
     cx.update(|cx| cx.global_mut::<Places>().trash = trash.clone());
@@ -844,6 +844,9 @@ fn the_trash_opens_with_its_bar_and_back_returns(cx: &mut TestAppContext) {
     click(cx, "empty-trash");
     assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::EmptyTrash(_)))));
     press(cx, "enter");
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(crate::jobs::CHECK);
+    cx.run_until_parked();
     assert_eq!(in_pane(&browser, cx, |b, _| b.trash_header.count), Some(0));
     click(cx, "empty-trash");
     assert!(browser.read_with(cx, |b, _| b.sheet.is_none()));

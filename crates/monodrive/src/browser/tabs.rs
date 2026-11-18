@@ -621,7 +621,10 @@ impl Browser {
                 d.child(self.search_field(window, cx).w(px(SEARCH_WIDTH)))
             })
             .children(self.jobs.read(cx).ring().map(|ring| {
-                ring.on_click(cx.listener(|this, _, window, cx| this.toggle_jobs(window, cx)))
+                ring.on_hover(
+                    cx.listener(|this, over: &bool, _, cx| this.peek_jobs(false, *over, cx)),
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_jobs(window, cx)))
             }))
     }
 

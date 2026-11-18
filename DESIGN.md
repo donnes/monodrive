@@ -89,6 +89,10 @@ Each selected row shows its new name, medium, with the old one after it at 0.65.
 
 A signed release checks GitHub 15 seconds after launch, every 4 minutes after that, and when Settings' update track changes. While a newer release is out, a download icon with an accent dot sits left of Settings at the sidebar's foot and opens a 360 pt `Popover` above it. The popover lists what's new, newest first, with Download at the end. Download closes the popover, and the icon becomes a ring that fills as the download arrives. Once the update is in place, a pill reads "Restart in 5s" and counts down to the restart, with Later to put it off. After Later, a restart icon with the dot stays, and its popover has Restart. Check for Updates… reaches the same popover while the sidebar is closed. A debug or ad hoc build says it can't update itself and never reaches the network.
 
+### Activity
+
+The jobs ring opens a 320 pt `Popover` under it on a press or ⌥⌘J, and shows the same card while the pointer rests on the ring or the card, after the wait the update card takes. Each job is its title with Cancel or Dismiss, a caption, a bar while it runs, a failure in `danger()`, and its buttons. A job of several items ends its caption with the name of the one it's on, in primary ink, and has a Show Items row under it, with a chevron, that turns to Hide Items. The list is six 28 pt rows at most and scrolls past that: a 12 pt column for a check once an item is done, an accent dot on the one in progress and a ✕ in `danger()` on one that failed, then the name, medium for the one in progress and 0.65 once done, then how it's going at the right in `TEXT_CAPTION`. A skipped or failed item says why in that place, after its name. The rows don't highlight, since they do nothing.
+
 ### Inspector
 
 ⌘I, or Get Info in a menu, opens a 260 pt panel to the right of the panes, under the top bar, and it stays open from then on; ⌘I again, Hide Inspector or its ✕ closes it. It takes its width from the panes and moves nothing else, and it stays out when the list would keep under 200 pt. It's a card beside the pane's in Rounded, with the 8 pt gap, and a region with a hairline in Boxy.

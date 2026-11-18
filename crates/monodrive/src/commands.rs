@@ -669,13 +669,9 @@ pub fn all() -> Vec<Command> {
             BROWSER,
             || Box::new(PreviousTab),
         ),
-        separated(command(
-            "Copies and Moves",
-            Window,
-            &["cmd-alt-j"],
-            None,
-            || Box::new(ShowCopiesAndMoves),
-        )),
+        separated(command("Activity", Window, &["cmd-alt-j"], None, || {
+            Box::new(ShowCopiesAndMoves)
+        })),
         command("Show Welcome…", Help, &[], None, || Box::new(ShowWelcome)),
     ];
     commands.extend(FAVORITES.map(|(title, keys, action)| Command {

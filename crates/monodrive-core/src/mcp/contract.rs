@@ -439,6 +439,9 @@ pub enum JobKind {
     Download,
     Upload,
     Command,
+    /// A person emptying the Trash from Monodrive's window. Agents can
+    /// cancel one, and never start or continue one.
+    EmptyTrash,
 }
 
 /// A job's state. New states may come; treat one you don't know as still
@@ -466,6 +469,9 @@ pub struct JobItem {
     pub skipped: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// An Empty Trash erased it for good.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub erased: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<Method>,
     /// A command's invocation: how it ended, and its arguments.
@@ -532,6 +538,7 @@ impl JobView {
             "Extract" => JobKind::Extract,
             "Download" => JobKind::Download,
             "Upload" => JobKind::Upload,
+            "Empty Trash" => JobKind::EmptyTrash,
             _ => JobKind::Copy,
         };
         let state = match job.state {
@@ -552,6 +559,7 @@ impl JobView {
                     to: None,
                     skipped: None,
                     error: None,
+                    erased: false,
                     method: None,
                     ended: None,
                 };
@@ -560,6 +568,7 @@ impl JobView {
                         item.method = method(&task.source);
                         item.to = Some(shown(to));
                     }
+                    Some(Done::Erased) => item.erased = true,
                     Some(Done::Skipped(why)) => item.skipped = Some(why.clone()),
                     Some(Done::Failed(why)) => item.error = Some(why.clone()),
                     None => {}
@@ -612,6 +621,7 @@ impl JobView {
                     to: None,
                     skipped: None,
                     error: None,
+                    erased: false,
                     method: None,
                     ended: Some(ended.unwrap_or_else(|| "not run".into())),
                 }

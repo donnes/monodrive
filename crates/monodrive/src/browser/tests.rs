@@ -1953,10 +1953,69 @@ fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut Test
     release(owned, cx);
 }
 
+/// Protects the ring's card: it waits a moment before showing and before
+/// going, stays while the pointer is on the card, and goes with the ring.
+#[gpui::test]
+fn the_jobs_card_shows_while_the_pointer_rests_on_the_ring_or_the_card(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let running = ops::Job {
+        id: 1,
+        title: "Copy".into(),
+        origin: ops::Origin::Window,
+        into: project.join("docs"),
+        state: ops::State::Running,
+        tasks: vec![ops::Task {
+            source: project.join("zeta"),
+            done: None,
+            name: None,
+        }],
+        bytes: 0,
+        total_bytes: 0,
+        started: 0,
+        run: 1,
+        undoable: false,
+    };
+    let take = |list: Vec<ops::Job>, cx: &mut VisualTestContext| {
+        browser.update(cx, |b, cx| {
+            b.jobs.update(cx, |jobs, cx| jobs.take(Ok(list), cx))
+        });
+    };
+    let card = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.debug_bounds("jobs-peek").is_some()
+    };
+    let hover = |card: bool, over: bool, cx: &mut VisualTestContext| {
+        browser.update(cx, |b, cx| b.peek_jobs(card, over, cx));
+    };
+    take(vec![running], cx);
+    hover(false, true, cx);
+    assert!(!card(cx));
+    cx.executor().advance_clock(PEEK_DELAY);
+    assert!(card(cx));
+    // Onto the card: it says the pointer arrived before the ring says it left.
+    hover(true, true, cx);
+    hover(false, false, cx);
+    cx.executor().advance_clock(PEEK_DELAY);
+    assert!(card(cx));
+    hover(true, false, cx);
+    assert!(card(cx));
+    cx.executor().advance_clock(PEEK_DELAY);
+    assert!(!card(cx));
+    // The ring goes with its job and never says the pointer left.
+    hover(false, true, cx);
+    cx.executor().advance_clock(PEEK_DELAY);
+    assert!(card(cx));
+    take(Vec::new(), cx);
+    assert!(!card(cx));
+    assert!(!browser.read_with(cx, |b, _| b.jobs_peek.shown));
+}
+
 #[gpui::test]
 fn empty_trash_says_how_many_and_erases_only_once_confirmed(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
-    let owned = own(cx);
+    let mut owned = own(cx);
     let trash = owned.state.path().join("Trash");
     std::fs::create_dir(&trash).unwrap();
     // .DS_Store is the Finder's own and isn't counted; other hidden items are.
@@ -1984,10 +2043,18 @@ fn empty_trash_says_how_many_and_erases_only_once_confirmed(cx: &mut TestAppCont
     click(cx, "empty-trash-cancel");
     assert!(!asking(cx));
     assert_eq!(ops::trash_items(&trash).unwrap().len(), 3);
-    // ↩ empties, as Finder's default button does.
+    // ↩ empties, as Finder's default button does. It's a job the window
+    // follows, so the toast comes once the owner has erased everything.
     press(cx, "cmd-shift-backspace enter");
     assert!(!asking(cx));
+    restart(&mut owned, cx);
+    cx.executor().advance_clock(jobs::CHECK);
+    cx.run_until_parked();
     assert!(ops::trash_items(&trash).unwrap().is_empty());
+    assert_eq!(
+        toast(&browser, cx),
+        Some(("Erased 3 items for good".into(), false, false))
+    );
     press(cx, "cmd-shift-backspace");
     assert!(!asking(cx));
     assert_eq!(

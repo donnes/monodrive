@@ -560,9 +560,9 @@ fn empty_trash_erases_only_what_was_listed_in_the_trash_and_only_for_the_window(
     // Something that arrives after the count isn't erased with it.
     std::fs::write(trash.join("new.txt"), "new").unwrap();
     let empty = |items: Vec<TrashItem>| Request::EmptyTrash { items };
-    let agent = Origin::Agent { client: None };
+    let agent = || Origin::Agent { client: None };
     let refused = engine
-        .submit(submission(agent, empty(listed.clone())))
+        .submit(submission(agent(), empty(listed.clone())))
         .unwrap_err();
     assert!(refused.starts_with("Only a person"), "{refused}");
     let outside = TrashItem {
@@ -570,17 +570,45 @@ fn empty_trash_erases_only_what_was_listed_in_the_trash_and_only_for_the_window(
         id: disk::id(&files.join("kept.txt")).unwrap(),
     };
     assert!(run(&mut engine, empty(vec![outside])).is_err());
+    assert!(run(&mut engine, empty(Vec::new())).is_err());
+
+    // It's a job: accepted at once, and nothing is erased until it runs.
+    let shared = jobs::Shared::new(engine, None);
+    let op = run(&mut shared.lock(), empty(listed.clone())).unwrap().op;
+    assert!(trash.join("old.txt").exists());
+    // One at a time, and an agent can't continue what only a person starts.
+    let again = run(&mut shared.lock(), empty(listed.clone())).unwrap_err();
+    assert_eq!(again, "The Trash is already being emptied.");
+    let retry = Request::Retry {
+        job: op,
+        conflict: None,
+    };
+    let refused = shared
+        .lock()
+        .submit(submission(agent(), retry))
+        .unwrap_err();
+    assert!(refused.starts_with("Only a person"), "{refused}");
+    jobs::run(&shared, op);
+    let emptied = status(&shared, op);
     assert_eq!(
-        moved(run(&mut engine, empty(listed.clone()))),
-        paths(&listed)
+        (emptied.title.as_str(), emptied.state),
+        ("Empty Trash", State::Completed)
     );
+    assert_eq!(emptied.into, trash);
+    assert!(
+        emptied
+            .tasks
+            .iter()
+            .all(|task| task.done == Some(Done::Erased))
+    );
+    assert!(!emptied.undoable);
     assert_eq!(
         paths(&trash_items(&trash).unwrap()),
         [trash.join("new.txt")]
     );
     assert!(trash.join(".DS_Store").exists() && files.join("kept.txt").exists());
     // It joins no history: undo still reaches the rename before it.
-    assert!(run(&mut engine, Request::Undo).is_ok());
+    assert!(run(&mut shared.lock(), Request::Undo).is_ok());
     assert!(keep.exists());
 }
 
@@ -596,33 +624,99 @@ fn counted_trash(dir: &Path) -> (PathBuf, Vec<TrashItem>) {
 
 #[test]
 fn empty_trash_leaves_an_item_swapped_in_under_a_counted_name() {
-    let (dir, files, mut engine) = engine();
+    let (dir, files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
     let (trash, listed) = counted_trash(dir.path());
     // While the person reads the count, old.txt is put back and another
     // file is trashed under its name.
     std::fs::rename(trash.join("old.txt"), files.join("old.txt")).unwrap();
     std::fs::write(trash.join("old.txt"), "newer").unwrap();
-    let outcome = run(&mut engine, Request::EmptyTrash { items: listed }).unwrap();
+    let emptied = job(&shared, Request::EmptyTrash { items: listed });
     assert_eq!(read(&trash.join("old.txt")), "newer");
     assert!(!trash.join("old folder").exists());
-    let skipped: Vec<&str> = outcome.failures().collect();
+    assert_eq!(emptied.state, State::Completed);
+    assert_eq!(emptied.tasks[0].done, Some(Done::Erased));
     assert!(
-        skipped.len() == 1 && skipped[0].contains("old.txt"),
-        "{skipped:?}"
+        matches!(&emptied.tasks[1].done, Some(Done::Skipped(why)) if why.contains("old.txt")),
+        "{:?}",
+        emptied.tasks[1].done
     );
 }
 
 #[test]
 fn empty_trash_refuses_a_trash_that_became_a_link() {
-    let (dir, _files, mut engine) = engine();
+    let (dir, _files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
     let (trash, listed) = counted_trash(dir.path());
-    // The same items, but the Trash now points somewhere else.
+    let empty = Request::EmptyTrash {
+        items: listed.clone(),
+    };
+    let op = run(&mut shared.lock(), empty.clone()).unwrap().op;
+    // The same items, but the Trash now points somewhere else: the job
+    // queued before that erases nothing, and another isn't accepted.
     let elsewhere = dir.path().join("elsewhere");
     std::fs::rename(&trash, &elsewhere).unwrap();
     std::os::unix::fs::symlink(&elsewhere, &trash).unwrap();
-    let refused = run(&mut engine, Request::EmptyTrash { items: listed }).unwrap_err();
+    jobs::run(&shared, op);
+    let stopped = status(&shared, op);
+    assert_eq!(stopped.state, State::Failed);
+    assert!(
+        matches!(&stopped.tasks[0].done, Some(Done::Failed(why)) if why.contains("isn't the Trash folder")),
+        "{:?}",
+        stopped.tasks[0].done
+    );
+    let refused = run(&mut shared.lock(), empty).unwrap_err();
     assert!(refused.contains("isn't the Trash folder"), "{refused}");
     assert!(elsewhere.join("old.txt").exists() && elsewhere.join("old folder/x.txt").exists());
+}
+
+#[test]
+fn a_cancelled_or_interrupted_empty_trash_keeps_the_rest_until_a_person_continues_it() {
+    let (dir, _files, engine) = engine();
+    let shared = jobs::Shared::new(engine, None);
+    let (trash, listed) = counted_trash(dir.path());
+    let op = run(&mut shared.lock(), Request::EmptyTrash { items: listed })
+        .unwrap()
+        .op;
+    assert!(jobs::next(&shared, op));
+    run(&mut shared.lock(), Request::Cancel { job: op }).unwrap();
+    assert!(!jobs::next(&shared, op));
+    let cancelled = status(&shared, op);
+    assert_eq!(cancelled.state, State::Cancelled);
+    assert_eq!(cancelled.tasks[0].done, Some(Done::Erased));
+    assert_eq!(cancelled.tasks[1].done, None);
+    assert!(!trash.join("old folder").exists() && trash.join("old.txt").exists());
+
+    // One Empty Trash at a time, continued ones included.
+    let retry = Request::Retry {
+        job: op,
+        conflict: None,
+    };
+    let rest = trash_items(&trash).unwrap();
+    let other = run(&mut shared.lock(), Request::EmptyTrash { items: rest })
+        .unwrap()
+        .op;
+    let refused = run(&mut shared.lock(), retry.clone()).unwrap_err();
+    assert_eq!(refused, "The Trash is already being emptied.");
+    run(&mut shared.lock(), Request::Cancel { job: other }).unwrap();
+
+    // Continued, it's cut short again: the owner goes once the item is
+    // claimed under its hidden name, before it's erased.
+    run(&mut shared.lock(), retry).unwrap();
+    let claimed = trash.join(format!(".monodrive-{op}-1"));
+    std::fs::rename(trash.join("old.txt"), &claimed).unwrap();
+    drop(shared);
+    let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
+    let interrupted = status(&shared, op);
+    assert_eq!(interrupted.state, State::Interrupted);
+    assert_eq!(interrupted.tasks[0].done, Some(Done::Erased));
+    assert!(claimed.exists());
+
+    let emptied = continued(&shared, op, None);
+    assert_eq!(emptied.state, State::Completed);
+    assert_eq!(emptied.tasks[1].done, Some(Done::Erased));
+    assert!(trash_items(&trash).unwrap().is_empty());
+    assert!(run(&mut shared.lock(), Request::Undo).is_err());
 }
 
 #[test]
