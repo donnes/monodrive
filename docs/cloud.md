@@ -8,7 +8,7 @@ iCloud Drive and File Provider apps such as Dropbox, Google Drive and OneDrive k
 
 ## Free space
 
-The sidebar's cloud folders and `list_places` say what's left in each account. No File Provider API gives a quota, so only iCloud Drive answers. `cloud::free_space` asks iCloud Drive's daemon through the private `BRFetchQuotaOperation`, as `brctl quota` does, about 250 ms, so the sidebar asks after its folders are listed and the rows don't wait. It gives only what's left, never the total: the account's total comes from `iCloudQuota`, which needs the user's Apple Account and an entitlement Monodrive can't have. A macOS without the class, or a daemon that doesn't answer within 10 seconds, says nothing, and the row says Storage info unavailable.
+The sidebar's cloud folders and `list_places` say what's left in each account. No File Provider API gives a quota, so only iCloud Drive answers. `cloud::free_space` asks iCloud Drive's daemon through the private `BRFetchQuotaOperation`, as `brctl quota` does, about 250 ms, so the sidebar asks after its folders are listed and the rows don't wait. It gives only what's left, never the total: the account's total comes from `iCloudQuota`, which needs the user's Apple Account and an entitlement Monodrive can't have. Without a supported lookup, the sidebar shows the folder on a single line. If a lookup starts and fails or times out, the row explains the failure on hover and through VoiceOver.
 
 ## Availability
 

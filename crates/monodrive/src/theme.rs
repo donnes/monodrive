@@ -713,6 +713,7 @@ impl Render for Tip {
             .snap_to_window_with_margin(px(8.))
             .child(
                 floating(Elevation::Popover)
+                    .debug_selector(|| "tooltip".to_owned())
                     .px_2()
                     .py_1()
                     .whitespace_nowrap()

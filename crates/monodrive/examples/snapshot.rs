@@ -95,7 +95,7 @@ use monodrive::preferences::{Collapsed, Preferences, Theme, View, WorkspaceStyle
 use monodrive::session::{PaneState, Shows, StopState, TabState, WindowState};
 use monodrive::updates::{self, Updates};
 use monodrive_core::apps::App as MacApp;
-use monodrive_core::cloud::{Asked, Availability, CloudFolder, Progress};
+use monodrive_core::cloud::{Asked, Availability, CloudFolder, Progress, Quota};
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::index::{Found, Hit, Index, LineMatch};
 use monodrive_core::info::{self, Info};
@@ -1256,7 +1256,7 @@ impl Drives for Disks {
         Vec::new()
     }
 
-    fn cloud_free(&self, _: &CloudFolder) -> Option<u64> {
+    fn cloud_free(&self, _: &CloudFolder) -> Option<Quota> {
         None
     }
 
@@ -1902,8 +1902,8 @@ impl Drives for MadeUp {
     }
 
     /// iCloud Drive says what's left; the File Provider apps don't.
-    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64> {
-        (folder.name == "iCloud Drive").then_some(38_400_000_000)
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<Quota> {
+        (folder.name == "iCloud Drive").then_some(Quota::Free(38_400_000_000))
     }
 
     fn find_files(

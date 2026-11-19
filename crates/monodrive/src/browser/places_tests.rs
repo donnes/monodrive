@@ -10,7 +10,7 @@ use crate::palette::{Page, PaletteView};
 use crate::preferences::View;
 use crate::session::{self, PaneState, Session, Shows, StopState};
 use gpui::{Action, Keystroke, Modifiers, Pixels, TestAppContext, VisualTestContext, point};
-use monodrive_core::cloud::CloudFolder;
+use monodrive_core::cloud::{CloudFolder, Quota};
 use monodrive_core::entries::Sort;
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::index::Found;
@@ -35,8 +35,7 @@ pub(super) struct Fake {
     mounted: Mutex<Option<Result<PathBuf, String>>>,
     pub(super) opened: Mutex<Vec<PathBuf>>,
     pub(super) cloud: Mutex<Vec<CloudFolder>>,
-    /// What's left in each cloud folder's account, where its provider says.
-    cloud_free: Mutex<HashMap<PathBuf, u64>>,
+    cloud_free: Mutex<HashMap<PathBuf, Quota>>,
     /// What the index finds, whatever's asked.
     files: Mutex<Vec<Entry>>,
     /// The paths whose device was asked for, in order.
@@ -87,7 +86,7 @@ impl Drives for Fake {
         self.cloud.lock().unwrap().clone()
     }
 
-    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64> {
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<Quota> {
         self.cloud_free.lock().unwrap().get(&folder.path).copied()
     }
 
@@ -388,12 +387,12 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
         .cloud_free
         .lock()
         .unwrap()
-        .insert(project.join("docs"), 5_000_000_000);
+        .insert(project.join("docs"), Quota::Free(5_000_000_000));
     let owned = own(cx);
     let (browser, cx) = open(&world, &project, cx);
     // iCloud Drive says what's left; the other provider says nothing.
     assert!(on_screen(cx, "cloud-free-0"));
-    assert!(on_screen(cx, "cloud-unknown-1"));
+    assert!(!on_screen(cx, "cloud-unknown-1"));
     assert!(!on_screen(cx, "cloud-free-1"));
     let first = favorites(&browser, cx).len() + 2;
     let rows: Vec<_> = (first..first + 4)
@@ -414,6 +413,27 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
     focus_sidebar(cx);
     press(cx, "down down cmd-e");
     assert_eq!(*world.fake.ejected.lock().unwrap(), vec![drive]);
+
+    world
+        .fake
+        .cloud_free
+        .lock()
+        .unwrap()
+        .insert(project.join("docs"), Quota::Failed);
+    browser.update(cx, |b, cx| b.load_volumes(cx));
+    cx.run_until_parked();
+    assert!(!on_screen(cx, "cloud-free-0"));
+    assert!(!on_screen(cx, "cloud-unknown-0"));
+    let hover = |cx: &mut VisualTestContext, row| {
+        let at = center(cx, &format!("place-{row}"));
+        cx.simulate_mouse_move(at, None, with(""));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        on_screen(cx, "tooltip")
+    };
+    assert!(!hover(cx, first + 2));
+    assert!(hover(cx, first + 1));
     release(owned, cx);
 }
 
