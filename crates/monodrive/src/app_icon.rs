@@ -1,17 +1,18 @@
 //! The icon the Dock, the app switcher and Finder show for Monodrive, picked
 //! in Settings from `assets/app-icons`.
 
-use gpui::App;
+use crate::file_icons;
+use gpui::{App, Asset, RenderImage};
 use monodrive_core::updates::Channel;
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
 use objc2_foundation::{NSBundle, NSData, NSString};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppIcon {
     Classic,
@@ -40,18 +41,7 @@ impl AppIcon {
         }
     }
 
-    /// Its picture, for `img`.
-    pub fn asset(self) -> &'static str {
-        match self {
-            AppIcon::Classic => "app-icon/classic",
-            AppIcon::Nightly => "app-icon/nightly",
-            AppIcon::Daylight => "app-icon/daylight",
-            AppIcon::Aurora => "app-icon/aurora",
-            AppIcon::Liftoff => "app-icon/liftoff",
-        }
-    }
-
-    pub fn png(self) -> &'static [u8] {
+    fn png(self) -> &'static [u8] {
         match self {
             AppIcon::Classic => include_bytes!("../../../assets/app-icons/classic.png"),
             AppIcon::Nightly => include_bytes!("../../../assets/app-icons/nightly.png"),
@@ -76,6 +66,35 @@ impl AppIcon {
     fn image(self) -> Option<Retained<NSImage>> {
         let data = NSData::with_bytes(self.png());
         NSImage::initWithData(NSImage::alloc(), &data)
+    }
+}
+
+/// An icon's picture at `pixels` square, for Settings. GPUI samples a texture
+/// without mipmaps, so the 512-pixel PNG shrunk at draw time comes out jagged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Picture {
+    pub icon: AppIcon,
+    pub pixels: u32,
+}
+
+impl Asset for Picture {
+    type Source = Picture;
+    type Output = Option<Arc<RenderImage>>;
+
+    // An `async fn` would hold the `&mut App` borrow; the asset cache needs
+    // a future that outlives it.
+    #[allow(clippy::manual_async_fn)]
+    fn load(
+        picture: Picture,
+        _: &mut App,
+    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        async move {
+            autoreleasepool(|_| {
+                let image = picture.icon.image()?;
+                file_icons::draw(&image, picture.pixels)
+            })
+            .map(Arc::new)
+        }
     }
 }
 
