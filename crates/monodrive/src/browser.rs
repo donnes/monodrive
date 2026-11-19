@@ -191,8 +191,9 @@ actions!(
         GoFavorite10,
         ConnectToServer,
         EditFavorites,
-        FavoriteUp,
-        FavoriteDown,
+        EditLocations,
+        MovePlaceUp,
+        MovePlaceDown,
         NewTab,
         CloseTab,
         NextTab,
@@ -303,8 +304,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", text_field::Home, Some("Rename")),
         KeyBinding::new("down", text_field::End, Some("Rename")),
         // In Edit mode, the keys' way to do what dragging a handle does.
-        KeyBinding::new("alt-up", FavoriteUp, Some("Sidebar")),
-        KeyBinding::new("alt-down", FavoriteDown, Some("Sidebar")),
+        KeyBinding::new("alt-up", MovePlaceUp, Some("Sidebar")),
+        KeyBinding::new("alt-down", MovePlaceDown, Some("Sidebar")),
         // → steps from the sidebar into the files, as it does into a folder.
         KeyBinding::new("right", FocusList, Some("Sidebar")),
         // The context menu on the selection, as on other desktops. GPUI's
@@ -585,8 +586,9 @@ impl Browser {
         // the pane the commands act on, and nothing else changes those.
         cx.observe_global::<Preferences>(|this, cx| {
             this.sidebar.worktrees = cx.global::<Preferences>().show_worktrees;
-            this.show_drives(cx);
+            this.arrange_locations(cx);
             this.fold_sections(cx.global::<Preferences>().collapsed, cx);
+            cx.notify();
             let adopt = matches!(this.sheet, Some(Sheet::Settings(_)));
             let focused = this.pane().clone();
             for pane in this.shown_panes() {
@@ -2175,11 +2177,16 @@ impl Render for Browser {
                     .on_action(cx.listener(|this, _: &ConnectToServer, window, cx| {
                         this.open_connect(window, cx)
                     }))
-                    // Folded favorites have nothing to edit.
+                    // A folded section has nothing to edit.
                     .when(!self.sidebar.collapsed.favorites, |d| {
-                        d.on_action(
-                            cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)),
-                        )
+                        d.on_action(cx.listener(|this, _: &EditFavorites, _, cx| {
+                            this.toggle_editing_favorites(cx)
+                        }))
+                    })
+                    .when(!self.sidebar.collapsed.locations, |d| {
+                        d.on_action(cx.listener(|this, _: &EditLocations, _, cx| {
+                            this.toggle_editing_locations(cx)
+                        }))
                     })
                     .on_action(cx.listener(|this, _: &ShowSearches, window, cx| {
                         this.toggle_searches(window, cx)
@@ -2203,8 +2210,8 @@ impl Render for Browser {
                         if this.tools_kept_it(cx) || this.close_preview(cx) {
                             return;
                         }
-                        if this.sidebar.editing {
-                            return this.toggle_editing(cx);
+                        if this.stop_editing(cx) {
+                            return;
                         }
                         this.pane()
                             .update(cx, |pane, cx| pane.clear_search(window, cx));

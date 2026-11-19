@@ -9,25 +9,27 @@ use super::pane::{Stop, format_bytes};
 use super::remote;
 use super::searches;
 use super::{
-    Browser, FavoriteDown, FavoriteUp, FocusList, FocusSearch, GoFavorite1, GoFavorite2,
-    GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9,
-    GoFavorite10, OpenInNewTab, OpenPlace, OpenSelected, Operations, PlaceNext, PlacePrevious,
+    Browser, FocusList, FocusSearch, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
+    GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, MovePlaceDown,
+    MovePlaceUp, OpenInNewTab, OpenPlace, OpenSelected, Operations, PlaceNext, PlacePrevious,
     Sheet, drag_area, home, lock, sidebar_width,
 };
 use crate::assets::NIGHT_SKY;
 use crate::commands::{self, Scope};
 use crate::feedback::{self, Haptic};
 use crate::motion::Slide;
-use crate::preferences::{self, Collapsed, Drive, HiddenDrive, Preferences, SIDEBAR_WIDTHS};
+use crate::preferences::{
+    self, Collapsed, Drive, HiddenDrive, Location, Preferences, SIDEBAR_WIDTHS,
+};
 use crate::session::RemoteAt;
 use crate::session::Shows;
 use crate::text_field::TextField;
 use crate::theme::{self, ButtonLook, accent, content, icon, icon_button, row_icon_button};
 use crate::traffic_lights;
 use gpui::{
-    Action, App, Context, CursorStyle, ElementId, Entity, Focusable, FontWeight, Global,
-    ImageSource, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point,
-    Render, Resource, Role, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
+    Action, AnyElement, App, Context, CursorStyle, ElementId, Entity, Focusable, FontWeight,
+    Global, ImageSource, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels,
+    Point, Render, Resource, Role, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::Entry;
@@ -196,17 +198,24 @@ pub(super) struct Sidebar {
     /// doesn't say. Asked after the folders are listed, since iCloud Drive
     /// can take a moment; a folder not answered yet isn't here.
     cloud_free: HashMap<PathBuf, Option<u64>>,
-    /// What Locations lists: those Settings doesn't hide.
+    /// What Locations lists: those Settings doesn't hide, or all of them
+    /// while Locations is edited.
     pub(super) volumes: Vec<Volume>,
     pub(super) cloud: Vec<CloudFolder>,
     pub(super) servers: Vec<String>,
-    /// The saved SFTP servers, listed after the drives.
+    /// The saved SFTP servers.
     pub(super) remotes: Vec<Source>,
+    /// Locations' rows in the order they're drawn, each a volume, cloud
+    /// folder or server.
+    pub(super) locations: Vec<Row>,
     /// Why the saved lists didn't read. They stay as last read, and nothing
     /// changes the file.
     error: Option<String>,
     /// Edit mode: each favorite shows a handle and a ✕.
-    pub(super) editing: bool,
+    pub(super) editing_favorites: bool,
+    /// Edit mode: each location shows a handle, the drives an eye, and the
+    /// hidden ones come back, dimmed.
+    pub(super) editing_locations: bool,
     /// ⌘ alone was held at the last draw, so the favorites show their keys.
     pub(super) command_held: bool,
     /// Worktrees has a row, after Recents, as Settings says.
@@ -295,18 +304,53 @@ struct DraggedFavorite {
 
 impl Render for DraggedFavorite {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h(px(theme::ROW_HEIGHT))
-            .px_3()
-            .rounded(px(theme::RADIUS_ROW))
-            .flex()
-            .items_center()
-            .text_size(px(theme::TEXT_BODY))
-            .text_color(content(1.))
-            .bg(content(0.14))
-            .child(self.label.clone())
+        dragged_row(self.label.clone())
     }
 }
+
+/// A location being dragged by its handle, from position `at` in Locations.
+#[derive(Clone)]
+struct DraggedLocation {
+    at: usize,
+    label: String,
+}
+
+impl Render for DraggedLocation {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        dragged_row(self.label.clone())
+    }
+}
+
+fn dragged_row(label: String) -> gpui::Div {
+    div()
+        .h(px(theme::ROW_HEIGHT))
+        .px_3()
+        .rounded(px(theme::RADIUS_ROW))
+        .flex()
+        .items_center()
+        .text_size(px(theme::TEXT_BODY))
+        .text_color(content(1.))
+        .bg(content(0.14))
+        .child(label)
+}
+
+/// The handle an edited row is dragged by.
+fn drag_handle(id: impl Into<ElementId>, selector: String) -> Stateful<gpui::Div> {
+    theme::tip(
+        div()
+            .id(id)
+            .debug_selector(move || selector.clone())
+            .role(Role::Button)
+            .aria_label("Drag to reorder")
+            .flex_shrink_0()
+            .cursor(CursorStyle::OpenHand)
+            .child(icon("grip-vertical", 14.).text_color(content(0.55))),
+        "Drag to reorder",
+    )
+}
+
+/// How far a drag handle and its gap push an edited row's contents.
+const HANDLE_WIDTH: f32 = 14. + 8.;
 
 const ROW_HEIGHT: f32 = theme::SIDEBAR_ROW_HEIGHT;
 const DRIVE_HEIGHT: f32 = 40.;
@@ -331,6 +375,17 @@ pub(crate) fn glyph_of(path: &Path) -> &'static str {
     } else {
         "folder-01"
     }
+}
+
+/// A location's icon ink: dimmed while it's hidden.
+fn glyph_ink(selected: bool, hidden: bool) -> gpui::Hsla {
+    content(if hidden {
+        0.3
+    } else if selected {
+        1.
+    } else {
+        0.55
+    })
 }
 
 /// How full a volume is, from 0 to 1, if it says.
@@ -458,7 +513,7 @@ impl Browser {
                 }
                 this.sidebar.all_volumes = volumes;
                 this.sidebar.all_cloud = cloud;
-                this.show_drives(cx);
+                this.arrange_locations(cx);
                 this.load_lists(cx);
                 this.save_session(cx);
                 // A drive that's back may be what a restored pane waits for.
@@ -501,6 +556,7 @@ impl Browser {
         self.sidebar.load_lists = Some(cx.spawn(async move |this, cx| {
             let (favorites, saved, remotes) = read.await;
             let _ = this.update(cx, |this, cx| {
+                let kept = this.cursor_location();
                 let sidebar = &mut this.sidebar;
                 sidebar.error = favorites
                     .as_ref()
@@ -517,6 +573,7 @@ impl Browser {
                 if let Ok(remotes) = remotes {
                     sidebar.remotes = remotes;
                 }
+                this.arrange_locations_keeping(kept, cx);
                 cx.notify();
             });
         }));
@@ -606,20 +663,44 @@ impl Browser {
         });
     }
 
-    pub(super) fn toggle_editing(&mut self, cx: &mut Context<Self>) {
-        self.sidebar.editing = !self.sidebar.editing;
+    pub(super) fn toggle_editing_favorites(&mut self, cx: &mut Context<Self>) {
+        self.sidebar.editing_favorites = !self.sidebar.editing_favorites;
         cx.notify();
     }
 
-    /// Folds the sections as saved, in every window. Folding Favorites ends
-    /// an Edit session. The rows under the keys may have gone or moved, so
+    /// Editing Locations brings back the hidden drives, so they can be shown.
+    pub(super) fn toggle_editing_locations(&mut self, cx: &mut Context<Self>) {
+        self.sidebar.editing_locations = !self.sidebar.editing_locations;
+        self.arrange_locations(cx);
+        cx.notify();
+    }
+
+    /// Ends both sections' Edit sessions, saying whether one was on.
+    pub(super) fn stop_editing(&mut self, cx: &mut Context<Self>) -> bool {
+        let sidebar = &mut self.sidebar;
+        let editing = sidebar.editing_favorites || sidebar.editing_locations;
+        if sidebar.editing_locations {
+            sidebar.editing_locations = false;
+            self.arrange_locations(cx);
+        }
+        self.sidebar.editing_favorites = false;
+        cx.notify();
+        editing
+    }
+
+    /// Folds the sections as saved, in every window. Folding a section ends
+    /// its Edit session. The rows under the keys may have gone or moved, so
     /// the keys go to the open place.
     pub(super) fn fold_sections(&mut self, collapsed: Collapsed, cx: &mut Context<Self>) {
         if self.sidebar.collapsed == collapsed {
             return;
         }
         self.sidebar.collapsed = collapsed;
-        self.sidebar.editing &= !collapsed.favorites;
+        self.sidebar.editing_favorites &= !collapsed.favorites;
+        if collapsed.locations && self.sidebar.editing_locations {
+            self.sidebar.editing_locations = false;
+            self.arrange_locations(cx);
+        }
         self.sidebar_cursor = self.cursor_on_folder(cx).unwrap_or(0);
         cx.notify();
     }
@@ -628,16 +709,6 @@ impl Browser {
     /// Settings shows it, Worktrees.
     fn first_favorite(&self) -> usize {
         if self.sidebar.worktrees { 3 } else { 2 }
-    }
-
-    /// How many volumes lead Locations, ahead of the cloud folders: the
-    /// startup disk, which `volumes::list` puts first.
-    fn startup_disks(&self) -> usize {
-        self.sidebar
-            .volumes
-            .iter()
-            .take_while(|v| v.startup)
-            .count()
     }
 
     /// The row of Locations' first: the startup disk.
@@ -655,28 +726,42 @@ impl Browser {
         if self.sidebar.collapsed.locations {
             self.first_location() - 1
         } else {
-            self.server_ix(self.sidebar.remotes.len()) - 1
+            self.first_location() + self.sidebar.locations.len() - 1
         }
     }
 
-    /// The row of volume `vol`: the startup disk before the cloud folders,
-    /// the other drives after them.
-    fn volume_ix(&self, vol: usize) -> usize {
-        let cloud = if vol < self.startup_disks() {
-            0
-        } else {
-            self.sidebar.cloud.len()
-        };
-        self.first_location() + cloud + vol
+    /// The sidebar's row of `location`, if Locations lists it.
+    fn location_ix(&self, location: Row) -> Option<usize> {
+        let at = self
+            .sidebar
+            .locations
+            .iter()
+            .position(|row| *row == location)?;
+        Some(self.first_location() + at)
     }
 
-    /// Lists in Locations every drive and cloud folder Settings doesn't hide.
-    /// The sidebar's keys stay on a row when the last one goes.
-    pub(super) fn show_drives(&mut self, cx: &App) {
-        let hidden = cx
-            .try_global::<Preferences>()
-            .map_or(&[][..], |p| &p.hidden_drives);
-        let shown = |drive: Drive| !hidden.iter().any(|h| h.drive == drive);
+    /// Lists in Locations every drive and cloud folder Settings doesn't hide,
+    /// or all of them while Locations is edited, and the saved servers, in
+    /// the order Edit gave them. Otherwise the startup disk leads, then the
+    /// cloud folders, the other drives and the servers. The sidebar's keys
+    /// stay on their location wherever it lands, and on a row when the last
+    /// one goes.
+    pub(super) fn arrange_locations(&mut self, cx: &App) {
+        self.arrange_locations_keeping(self.cursor_location(), cx);
+    }
+
+    /// The location the sidebar's keys are on, read before its list changes.
+    pub(super) fn cursor_location(&self) -> Option<Location> {
+        self.location(self.row_at(self.sidebar_cursor)?)
+    }
+
+    /// Arranges Locations with the keys back on `kept`.
+    pub(super) fn arrange_locations_keeping(&mut self, kept: Option<Location>, cx: &App) {
+        let prefs = cx.try_global::<Preferences>();
+        let hidden = prefs.map_or(&[][..], |p| &p.hidden_drives);
+        let order = prefs.map_or(&[][..], |p| &p.location_order);
+        let editing = self.sidebar.editing_locations;
+        let shown = |drive: Drive| editing || !hidden.iter().any(|h| h.drive == drive);
         let sidebar = &mut self.sidebar;
         sidebar.volumes = (sidebar.all_volumes.iter())
             .filter(|v| shown(Drive::of(v)))
@@ -686,37 +771,103 @@ impl Browser {
             .filter(|c| shown(Drive::Path(c.path.clone())))
             .cloned()
             .collect();
+        let startup = sidebar.volumes.iter().take_while(|v| v.startup).count();
+        let mut rows: Vec<Row> = (0..startup)
+            .map(Row::Volume)
+            .chain((0..sidebar.cloud.len()).map(Row::Cloud))
+            .chain((startup..sidebar.volumes.len()).map(Row::Volume))
+            .chain((0..sidebar.remotes.len()).map(Row::Server))
+            .collect();
+        rows.sort_by_cached_key(|row| {
+            let location = self.location(*row);
+            order
+                .iter()
+                .position(|saved| Some(saved) == location.as_ref())
+                .unwrap_or(usize::MAX)
+        });
+        self.sidebar.locations = rows;
+        let at = kept.and_then(|kept| {
+            (self.sidebar.locations.iter())
+                .position(|row| self.location(*row) == Some(kept.clone()))
+        });
+        if let Some(at) = at {
+            self.sidebar_cursor = self.first_location() + at;
+        }
         self.sidebar_cursor = self.sidebar_cursor.min(self.last_row());
     }
 
-    /// The row of saved server `at`, after every drive.
-    fn server_ix(&self, at: usize) -> usize {
-        self.first_location() + self.sidebar.cloud.len() + self.sidebar.volumes.len() + at
+    /// What Locations' saved order calls `row`.
+    fn location(&self, row: Row) -> Option<Location> {
+        let sidebar = &self.sidebar;
+        Some(match row {
+            Row::Volume(ix) => Location::Drive(Drive::of(sidebar.volumes.get(ix)?)),
+            Row::Cloud(ix) => Location::Drive(Drive::Path(sidebar.cloud.get(ix)?.path.clone())),
+            Row::Server(ix) => Location::Server(sidebar.remotes.get(ix)?.id.clone()),
+            _ => return None,
+        })
+    }
+
+    /// Moves the location at position `from` in Locations to `to`, in every
+    /// window. A drive that isn't mounted keeps its place after the rest.
+    pub(super) fn move_location(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let len = self.sidebar.locations.len();
+        if from == to || from >= len || to >= len {
+            return;
+        }
+        let mut rows = self.sidebar.locations.clone();
+        let row = rows.remove(from);
+        rows.insert(to, row);
+        let mut order: Vec<Location> = rows
+            .into_iter()
+            .filter_map(|row| self.location(row))
+            .collect();
+        preferences::update(cx, |p| {
+            p.location_order.retain(|saved| !order.contains(saved));
+            order.append(&mut p.location_order);
+            p.location_order = order;
+        });
+    }
+
+    /// The drive or cloud folder `row` stands for, to hide or show.
+    fn hideable(&self, row: Row, cx: &App) -> Option<HiddenDrive> {
+        match row {
+            Row::Volume(ix) => self.sidebar.volumes.get(ix).map(|volume| HiddenDrive {
+                name: volume.name.clone(),
+                drive: Drive::of(volume),
+            }),
+            Row::Cloud(ix) => self.sidebar.cloud.get(ix).map(|folder| HiddenDrive {
+                name: cloud_name(folder, cx).to_owned(),
+                drive: Drive::Path(folder.path.clone()),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The eye on an edited drive's row: hides it, or shows it again.
+    fn toggle_hidden(&mut self, row: Row, cx: &mut Context<Self>) {
+        let Some(drive) = self.hideable(row, cx) else {
+            return;
+        };
+        preferences::update(cx, |p| {
+            let before = p.hidden_drives.len();
+            p.hidden_drives.retain(|h| h.drive != drive.drive);
+            if p.hidden_drives.len() == before {
+                p.hidden_drives.push(drive);
+            }
+        });
     }
 
     /// What the sidebar's keys are on.
     pub(super) fn row_at(&self, ix: usize) -> Option<Row> {
         let first = self.first_favorite();
         let locations = self.first_location();
-        let startup = self.startup_disks();
-        let cloud = self.sidebar.cloud.len();
         match ix {
             0 => Some(Row::Overview),
             1 => Some(Row::Recents),
             2 if self.sidebar.worktrees => Some(Row::Worktrees),
             ix if ix < locations => Some(Row::Favorite(ix - first)),
             _ if self.sidebar.collapsed.locations => None,
-            ix if ix < locations + startup => Some(Row::Volume(ix - locations)),
-            ix if ix < locations + startup + cloud => Some(Row::Cloud(ix - locations - startup)),
-            ix => {
-                let volume = ix - locations - cloud;
-                let volumes = self.sidebar.volumes.len();
-                if volume < volumes {
-                    return Some(Row::Volume(volume));
-                }
-                let server = volume - volumes;
-                (server < self.sidebar.remotes.len()).then_some(Row::Server(server))
-            }
+            ix => self.sidebar.locations.get(ix - locations).copied(),
         }
     }
 
@@ -756,26 +907,20 @@ impl Browser {
         }
     }
 
-    /// The drive or cloud folder the sidebar's keys are on, to hide.
+    /// The drive or cloud folder the sidebar's keys are on, to hide, unless
+    /// it's hidden already and shows only while Locations is edited.
     fn hideable_at_cursor(&self, cx: &App) -> Option<HiddenDrive> {
-        match self.row_at(self.sidebar_cursor)? {
-            Row::Volume(ix) => self.sidebar.volumes.get(ix).map(|volume| HiddenDrive {
-                name: volume.name.clone(),
-                drive: Drive::of(volume),
-            }),
-            Row::Cloud(ix) => self.sidebar.cloud.get(ix).map(|folder| HiddenDrive {
-                name: cloud_name(folder, cx).to_owned(),
-                drive: Drive::Path(folder.path.clone()),
-            }),
-            _ => None,
-        }
+        let drive = self.hideable(self.row_at(self.sidebar_cursor)?, cx)?;
+        let hidden = &cx.global::<Preferences>().hidden_drives;
+        (!hidden.iter().any(|h| h.drive == drive.drive)).then_some(drive)
     }
 
-    /// Hide from Sidebar: Locations leaves the drive out until Settings shows
-    /// it again. Nothing is ejected, and its path opens as before.
+    /// Hide from Sidebar: Locations leaves the drive out until Edit or
+    /// Settings shows it again. Nothing is ejected, and its path opens as
+    /// before.
     fn hide_drive(&mut self, hidden: HiddenDrive, cx: &mut Context<Self>) {
         let said = format!(
-            "Hid {} from the sidebar. Settings shows it again.",
+            "Hid {} from the sidebar. Edit Locations shows it again.",
             hidden.name
         );
         preferences::update(cx, |p| {
@@ -947,7 +1092,7 @@ impl Browser {
         } = self.sidebar.collapsed;
         if let Some(id) = pane.remote_source() {
             let ix = self.sidebar.remotes.iter().position(|s| s.id == id)?;
-            return (!no_locations).then(|| self.server_ix(ix));
+            return self.location_ix(Row::Server(ix)).filter(|_| !no_locations);
         }
         let folder = pane.folder();
         let favorite = self
@@ -962,7 +1107,7 @@ impl Browser {
         }
         let cloud = || {
             let ix = self.sidebar.cloud.iter().position(|c| c.path == folder)?;
-            Some(self.first_location() + self.startup_disks() + ix)
+            self.location_ix(Row::Cloud(ix))
         };
         let volume = || {
             let ix = self
@@ -970,7 +1115,7 @@ impl Browser {
                 .volumes
                 .iter()
                 .position(|v| v.mount == folder)?;
-            Some(self.volume_ix(ix))
+            self.location_ix(Row::Volume(ix))
         };
         favorite.or_else(cloud).or_else(volume)
     }
@@ -1121,7 +1266,7 @@ impl Browser {
             Availability::Unavailable(why) => Some(why.clone()),
         };
         let unavailable = reason.is_some();
-        let editing = self.sidebar.editing;
+        let editing = self.sidebar.editing_favorites;
         let key =
             (self.sidebar.command_held && !editing && !self.sheet_open() && self.menu.is_none())
                 .then(|| commands::favorite_shortcut(fav, cx))
@@ -1135,24 +1280,14 @@ impl Browser {
         let row = if editing {
             row.drag_over::<DraggedFavorite>(|s, _, _, _| s.bg(content(0.14)))
                 .child(
-                    theme::tip(
-                        div()
-                            .id(("favorite-handle", fav))
-                            .debug_selector(move || format!("favorite-handle-{fav}"))
-                            .role(Role::Button)
-                            .aria_label("Drag to reorder")
-                            .flex_shrink_0()
-                            .cursor(CursorStyle::OpenHand)
-                            .child(icon("grip-vertical", 14.).text_color(content(0.55))),
-                        "Drag to reorder",
-                    )
-                    .on_drag(
-                        DraggedFavorite {
-                            ix: fav,
-                            label: label.clone(),
-                        },
-                        |dragged, _, _, cx| cx.new(|_| dragged.clone()),
-                    ),
+                    drag_handle(("favorite-handle", fav), format!("favorite-handle-{fav}"))
+                        .on_drag(
+                            DraggedFavorite {
+                                ix: fav,
+                                label: label.clone(),
+                            },
+                            |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+                        ),
                 )
         } else {
             row
@@ -1214,12 +1349,13 @@ impl Browser {
     fn cloud_row(
         &self,
         at: usize,
+        ix: usize,
         here: &Here,
         cursor: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let folder = &self.sidebar.cloud[at];
-        let ix = self.first_location() + self.startup_disks() + at;
+        let hidden = self.hidden(Row::Cloud(at), cx);
         let selected = here.showing_folder() && here.folder == folder.path;
         let name = cloud_name(folder, cx).to_owned();
         let renaming = self
@@ -1236,7 +1372,8 @@ impl Browser {
                 None => ("unknown", "Storage info unavailable".into()),
             });
         let described = space.as_ref().map(|(_, text)| text.clone());
-        let row = Self::row(ix, selected, true, cursor)
+        let row = self
+            .location_frame(ix, selected, hidden, cursor)
             .h(px(DRIVE_HEIGHT))
             .flex()
             .flex_col()
@@ -1247,22 +1384,24 @@ impl Browser {
                     .items_center()
                     .gap_2()
                     .h(px(24.))
-                    .child(icon("cloud", 16.).text_color(content(if selected { 1. } else { 0.55 })))
+                    .children(self.location_handle(ix, &name))
+                    .child(icon("cloud", 16.).text_color(glyph_ink(selected, hidden)))
                     .map(|d| match renaming {
                         Some(renaming) => d.child(Self::cloud_name_field(renaming, cx)),
                         None => d.child(div().flex_1().min_w_0().truncate().child(name.clone())),
-                    }),
+                    })
+                    .children(self.eye_button(Row::Cloud(at), ix, hidden, cx)),
             )
             // The line keeps its room until the provider answers.
             .child(
                 div()
                     .h(px(12.))
-                    .ml(px(24.))
+                    .ml(px(self.under_name()))
                     .flex()
                     .items_center()
                     .text_size(px(theme::TEXT_CAPTION))
                     .font_weight(FontWeight::NORMAL)
-                    .text_color(content(0.65))
+                    .text_color(content(if hidden { 0.3 } else { 0.65 }))
                     .children(space.map(|(said, text)| {
                         div()
                             .debug_selector(move || format!("cloud-{said}-{at}"))
@@ -1272,7 +1411,7 @@ impl Browser {
                     })),
             );
         let target = (folder.path.clone(), name.clone());
-        Self::slot(ix, selected, true, cx)
+        self.location_slot(ix, selected, cx)
             .aria_label(name)
             .when_some(described, |d, text| d.aria_description(text))
             .child(row)
@@ -1366,12 +1505,14 @@ impl Browser {
     fn volume_row(
         &self,
         vol: usize,
+        ix: usize,
         here: &Here,
         cursor: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let volume = &self.sidebar.volumes[vol];
-        let ix = self.volume_ix(vol);
+        let editing = self.sidebar.editing_locations;
+        let hidden = self.hidden(Row::Volume(vol), cx);
         let selected = here.showing_folder() && here.folder == volume.mount;
         let mount = volume.mount.clone();
         let glyph = if volume.network {
@@ -1379,7 +1520,8 @@ impl Browser {
         } else {
             "hard-drive"
         };
-        let row = Self::row(ix, selected, true, cursor)
+        let row = self
+            .location_frame(ix, selected, hidden, cursor)
             .h(px(DRIVE_HEIGHT))
             .flex()
             .flex_col()
@@ -1390,7 +1532,8 @@ impl Browser {
                     .items_center()
                     .gap_2()
                     .h(px(24.))
-                    .child(icon(glyph, 16.).text_color(content(if selected { 1. } else { 0.55 })))
+                    .children(self.location_handle(ix, &volume.name))
+                    .child(icon(glyph, 16.).text_color(glyph_ink(selected, hidden)))
                     .child(
                         div()
                             .flex_1()
@@ -1405,11 +1548,11 @@ impl Browser {
                                 .flex_shrink_0()
                                 .text_size(px(theme::TEXT_CAPTION))
                                 .font_weight(FontWeight::NORMAL)
-                                .text_color(content(0.65))
+                                .text_color(content(if hidden { 0.3 } else { 0.65 }))
                                 .child("Read-only"),
                         )
                     })
-                    .when(!volume.startup, |d| {
+                    .when(!volume.startup && !editing, |d| {
                         d.child(
                             row_button(
                                 ("volume-eject", vol),
@@ -1424,22 +1567,23 @@ impl Browser {
                                 },
                             )),
                         )
-                    }),
+                    })
+                    .children(self.eye_button(Row::Volume(vol), ix, hidden, cx)),
             )
             .children(fullness(volume).map(|fullness| {
                 theme::progress_track()
                     .debug_selector(move || format!("volume-bar-{vol}"))
-                    .ml(px(24.))
+                    .ml(px(self.under_name()))
                     .flex_shrink_0()
                     .child(
                         theme::progress_fill(fullness)
                             .debug_selector(move || format!("volume-used-{vol}"))
-                            .bg(content(0.55)),
+                            .bg(content(if hidden { 0.3 } else { 0.55 })),
                     )
             }));
         // A drive that can't be written to takes nothing.
         let folder = (!volume.read_only).then(|| (volume.mount.clone(), volume.name.clone()));
-        Self::slot(ix, selected, true, cx)
+        self.location_slot(ix, selected, cx)
             .aria_label(volume.name.clone())
             .child(row)
             .map(|d| self.drop_row(d, ix, folder))
@@ -1450,12 +1594,13 @@ impl Browser {
     fn server_row(
         &self,
         at: usize,
+        ix: usize,
         here: &Here,
         cursor: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let source = &self.sidebar.remotes[at];
-        let ix = self.server_ix(at);
+        let editing = self.sidebar.editing_locations;
         let selected = here.server.as_deref() == Some(source.id.as_str());
         let link = remote::link(&source.id, cx).cloned();
         let failed = match &link {
@@ -1463,7 +1608,8 @@ impl Browser {
             _ => None,
         };
         let id = source.id.clone();
-        let row = Self::row(ix, selected, true, cursor)
+        let row = self
+            .location_frame(ix, selected, false, cursor)
             .h(px(if failed.is_some() {
                 DRIVE_HEIGHT
             } else {
@@ -1472,7 +1618,8 @@ impl Browser {
             .flex()
             .items_center()
             .gap_2()
-            .child(icon("server", 16.).text_color(content(if selected { 1. } else { 0.55 })))
+            .children(self.location_handle(ix, &source.id))
+            .child(icon("server", 16.).text_color(glyph_ink(selected, false)))
             .child(
                 div()
                     .flex_1()
@@ -1501,7 +1648,7 @@ impl Browser {
                         .border_color(content(0.55)),
                 )
             })
-            .when(link == Some(remote::Link::Connected), |d| {
+            .when(link == Some(remote::Link::Connected) && !editing, |d| {
                 d.child(
                     row_button(
                         ("server-disconnect", at),
@@ -1513,9 +1660,127 @@ impl Browser {
                     .on_click(cx.listener(move |this, _, _, cx| this.disconnect_server(&id, cx))),
                 )
             });
-        Self::slot(ix, selected, true, cx)
+        self.location_slot(ix, selected, cx)
             .aria_label(source.id.clone())
             .child(row)
+    }
+
+    /// Locations' rows, in the order they're drawn.
+    fn location_rows(
+        &self,
+        here: &Here,
+        cursor: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let first = self.first_location();
+        (self.sidebar.locations.iter().enumerate())
+            .filter_map(|(at, row)| {
+                let ix = first + at;
+                Some(match *row {
+                    Row::Volume(vol) => self
+                        .volume_row(vol, ix, here, cursor, cx)
+                        .into_any_element(),
+                    Row::Cloud(at) => self.cloud_row(at, ix, here, cursor, cx).into_any_element(),
+                    Row::Server(at) => self.server_row(at, ix, here, cursor, cx).into_any_element(),
+                    _ => return None,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether `row` is a drive Locations shows only while it's edited.
+    fn hidden(&self, row: Row, cx: &App) -> bool {
+        self.sidebar.editing_locations
+            && self.hideable(row, cx).is_some_and(|drive| {
+                let hidden = &cx.global::<Preferences>().hidden_drives;
+                hidden.iter().any(|h| h.drive == drive.drive)
+            })
+    }
+
+    /// A location's frame, which takes a dragged location while Locations
+    /// is edited. A hidden drive's ink is dimmed, as an unavailable
+    /// favorite's is.
+    fn location_frame(
+        &self,
+        ix: usize,
+        selected: bool,
+        hidden: bool,
+        cursor: Option<usize>,
+    ) -> gpui::Div {
+        let editing = self.sidebar.editing_locations;
+        Self::row(ix, selected, !editing, cursor)
+            .when(hidden, |d| d.text_color(content(0.3)))
+            .when(editing, |d| {
+                d.drag_over::<DraggedLocation>(|s, _, _, _| s.bg(content(0.14)))
+            })
+    }
+
+    /// A location's slot: it opens its place, or while Locations is edited,
+    /// moves the location dropped on it to its position.
+    fn location_slot(
+        &self,
+        ix: usize,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<gpui::Div> {
+        let editing = self.sidebar.editing_locations;
+        let to = ix - self.first_location();
+        Self::slot(ix, selected, !editing, cx).when(editing, |d| {
+            d.on_drop(cx.listener(move |this, dragged: &DraggedLocation, _, cx| {
+                if dragged.at != to {
+                    feedback::haptic(Haptic::Generic, cx);
+                }
+                this.move_location(dragged.at, to, cx);
+            }))
+        })
+    }
+
+    /// The handle an edited location is dragged by.
+    fn location_handle(&self, ix: usize, label: &str) -> Option<impl IntoElement + use<>> {
+        let at = ix - self.first_location();
+        let label = label.to_owned();
+        self.sidebar.editing_locations.then(|| {
+            drag_handle(("location-handle", at), format!("location-handle-{at}"))
+                .on_drag(DraggedLocation { at, label }, |dragged, _, _, cx| {
+                    cx.new(|_| dragged.clone())
+                })
+        })
+    }
+
+    /// The eye an edited drive or cloud folder ends in, which hides it or
+    /// shows it again.
+    fn eye_button(
+        &self,
+        row: Row,
+        ix: usize,
+        hidden: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let at = ix - self.first_location();
+        let (label, glyph) = if hidden {
+            ("Show in Sidebar", "eye-off")
+        } else {
+            ("Hide from Sidebar", "eye")
+        };
+        self.sidebar.editing_locations.then(|| {
+            row_button(
+                ("location-eye", at),
+                format!("location-eye-{at}"),
+                label,
+                glyph,
+            )
+            .occlude()
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_hidden(row, cx)))
+        })
+    }
+
+    /// Where a drive's second line starts: under its name.
+    fn under_name(&self) -> f32 {
+        if self.sidebar.editing_locations {
+            24. + HANDLE_WIDTH
+        } else {
+            24.
+        }
     }
 
     /// A section's name and its disclosure chevron, which fold its rows
@@ -1556,9 +1821,8 @@ impl Browser {
     }
 
     fn favorites_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let editing = self.sidebar.editing;
+        let editing = self.sidebar.editing_favorites;
         let folded = self.sidebar.collapsed.favorites;
-        let label = if editing { "Done" } else { "Edit" };
         let drag = self.drag.clone();
         // Pins first, so folders can land even with no favorite to drop beside.
         theme::section_line()
@@ -1580,14 +1844,40 @@ impl Browser {
             ))
             .when(!folded, |d| {
                 d.child(
-                    theme::text_button("favorites-edit", label, ButtonLook::Ghost)
-                        .debug_selector(|| "favorites-edit".into())
-                        // Its text, not its pill, ends on the rows' 8 pt line.
-                        .mr(px(-8.))
-                        .when(editing, |d| d.text_color(accent()))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_editing(cx))),
+                    Self::edit_button("favorites-edit", editing)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_editing_favorites(cx))),
                 )
             })
+    }
+
+    fn locations_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let folded = self.sidebar.collapsed.locations;
+        theme::section_line()
+            .debug_selector(|| "locations-header".into())
+            .flex_shrink_0()
+            .justify_between()
+            .child(Self::section_toggle(
+                "Locations",
+                folded,
+                |c| c.locations = !c.locations,
+                cx,
+            ))
+            .when(!folded, |d| {
+                d.child(
+                    Self::edit_button("locations-edit", self.sidebar.editing_locations)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_editing_locations(cx))),
+                )
+            })
+    }
+
+    /// A section's Edit, which says Done while its session lasts.
+    fn edit_button(id: &'static str, editing: bool) -> Stateful<gpui::Div> {
+        let label = if editing { "Done" } else { "Edit" };
+        theme::text_button(id, label, ButtonLook::Ghost)
+            .debug_selector(move || id.into())
+            // Its text, not its pill, ends on the rows' 8 pt line.
+            .mr(px(-8.))
+            .when(editing, |d| d.text_color(accent()))
     }
 
     /// The Trash and Settings at the sidebar's foot.
@@ -1867,22 +2157,41 @@ impl Browser {
                                     this.remove_favorite(fav, cx)
                                 },
                             ))
-                            .when(self.sidebar.editing, |d| {
-                                d.on_action(cx.listener(move |this, _: &FavoriteUp, _, cx| {
-                                    if fav > 0 {
-                                        this.move_favorite(fav, fav - 1, cx);
-                                        this.sidebar_cursor -= 1;
-                                    }
-                                }))
-                                .on_action(cx.listener(
-                                    move |this, _: &FavoriteDown, _, cx| {
-                                        if fav + 1 < this.sidebar.places.len() {
-                                            this.move_favorite(fav, fav + 1, cx);
-                                            this.sidebar_cursor += 1;
+                            .when(
+                                self.sidebar.editing_favorites,
+                                |d| {
+                                    d.on_action(cx.listener(move |this, _: &MovePlaceUp, _, cx| {
+                                        if fav > 0 {
+                                            this.move_favorite(fav, fav - 1, cx);
+                                            this.sidebar_cursor -= 1;
                                         }
-                                    },
-                                ))
-                            })
+                                    }))
+                                    .on_action(cx.listener(
+                                        move |this, _: &MovePlaceDown, _, cx| {
+                                            if fav + 1 < this.sidebar.places.len() {
+                                                this.move_favorite(fav, fav + 1, cx);
+                                                this.sidebar_cursor += 1;
+                                            }
+                                        },
+                                    ))
+                                },
+                            )
+                        },
+                    )
+                    .when_some(
+                        (self.sidebar.editing_locations)
+                            .then(|| self.sidebar_cursor.checked_sub(self.first_location()))
+                            .flatten()
+                            .filter(|at| *at < self.sidebar.locations.len()),
+                        |d, at| {
+                            d.on_action(cx.listener(move |this, _: &MovePlaceUp, _, cx| {
+                                this.move_location(at, at.saturating_sub(1), cx)
+                            }))
+                            .on_action(cx.listener(
+                                move |this, _: &MovePlaceDown, _, cx| {
+                                    this.move_location(at, at + 1, cx)
+                                },
+                            ))
                         },
                     )
                     .when_some(
@@ -1974,37 +2283,9 @@ impl Browser {
                                 .collect::<Vec<_>>(),
                         )
                     })
-                    .child(
-                        theme::section_line()
-                            .flex_shrink_0()
-                            .child(Self::section_toggle(
-                                "Locations",
-                                collapsed.locations,
-                                |c| c.locations = !c.locations,
-                                cx,
-                            )),
-                    )
+                    .child(self.locations_header(cx))
                     .when(!collapsed.locations, |d| {
-                        d.children(
-                            (0..self.startup_disks())
-                                .map(|vol| self.volume_row(vol, &here, cursor, cx))
-                                .collect::<Vec<_>>(),
-                        )
-                        .children(
-                            (0..self.sidebar.cloud.len())
-                                .map(|ix| self.cloud_row(ix, &here, cursor, cx))
-                                .collect::<Vec<_>>(),
-                        )
-                        .children(
-                            (self.startup_disks()..self.sidebar.volumes.len())
-                                .map(|vol| self.volume_row(vol, &here, cursor, cx))
-                                .collect::<Vec<_>>(),
-                        )
-                        .children(
-                            (0..self.sidebar.remotes.len())
-                                .map(|at| self.server_row(at, &here, cursor, cx))
-                                .collect::<Vec<_>>(),
-                        )
+                        d.children(self.location_rows(&here, cursor, cx))
                     }),
             )
             .child(self.foot(&here, cx))

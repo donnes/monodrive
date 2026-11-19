@@ -144,6 +144,15 @@ impl Drive {
     }
 }
 
+/// A row in the sidebar's Locations, as its saved order names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Location {
+    Drive(Drive),
+    /// A saved SFTP server, by its id.
+    Server(String),
+}
+
 /// Monocode's interface scale steps.
 pub const UI_SCALE_PERCENTS: [u32; 16] = [
     50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
@@ -159,6 +168,9 @@ pub struct Preferences {
     pub show_worktrees: bool,
     /// What Locations leaves out, in the order it was hidden.
     pub hidden_drives: Vec<HiddenDrive>,
+    /// The order Locations' Edit put its rows in. Rows it doesn't name
+    /// follow, in the order Locations lists them by default.
+    pub location_order: Vec<Location>,
     pub theme: Theme,
     /// A preset from `palettes::PALETTES`.
     pub palette: String,
@@ -244,6 +256,7 @@ impl Default for Preferences {
             show_path_bar: true,
             show_worktrees: false,
             hidden_drives: Vec::new(),
+            location_order: Vec::new(),
             theme: Theme::Dark,
             palette: "default".into(),
             accent: None,
@@ -296,6 +309,7 @@ impl Preferences {
         self.show_path_bar = defaults.show_path_bar;
         self.show_worktrees = defaults.show_worktrees;
         self.hidden_drives = defaults.hidden_drives;
+        self.location_order = defaults.location_order;
         self.view = defaults.view;
         self.grid_icon = defaults.grid_icon;
         self.grid_label = defaults.grid_label;
@@ -330,6 +344,7 @@ impl Preferences {
             show_path_bar: self.show_path_bar,
             show_worktrees: self.show_worktrees,
             hidden_drives: std::mem::take(&mut self.hidden_drives),
+            location_order: std::mem::take(&mut self.location_order),
             view: self.view,
             grid_icon: self.grid_icon,
             grid_label: self.grid_label,

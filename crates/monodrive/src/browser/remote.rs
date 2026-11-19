@@ -1680,7 +1680,9 @@ impl super::Browser {
     /// list. Nothing on the server changes.
     pub(super) fn forget_server(&mut self, id: &str, cx: &mut Context<Self>) {
         disconnect(id, cx);
+        let kept = self.cursor_location();
         self.sidebar.remotes.retain(|source| source.id != id);
+        self.arrange_locations_keeping(kept, cx);
         let id = id.to_owned();
         self.change_places(cx, None, move |store, _| store.forget_remote(&id).map(drop));
     }
