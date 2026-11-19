@@ -178,6 +178,8 @@ pub struct Preferences {
     /// Percent opacity in a folder with items.
     pub background_folder: u32,
     pub workspace_style: WorkspaceStyle,
+    /// `None` keeps the icon this build came with.
+    pub app_icon: Option<crate::app_icon::AppIcon>,
     /// Percent; one of `UI_SCALE_PERCENTS`.
     pub ui_scale: u32,
     /// Points, within `SIDEBAR_WIDTHS`.
@@ -256,6 +258,7 @@ impl Default for Preferences {
             background_empty: 24,
             background_folder: 24,
             workspace_style: WorkspaceStyle::Rounded,
+            app_icon: None,
             ui_scale: 100,
             sidebar_width: 240.,
             show_sidebar: true,

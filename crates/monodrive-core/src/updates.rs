@@ -183,7 +183,12 @@ pub fn saved_channel() -> Channel {
 pub fn installed_app() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let app = exe.ancestors().nth(3)?;
-    (app.extension() == Some(OsStr::new("app")) && signed_by_us(app).is_ok()).then(|| app.into())
+    // Not --strict: it rejects the Finder information a custom icon from
+    // Settings puts on the bundle, which the seal doesn't cover.
+    let signed = run(Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "-R", SIGNED_BY_US])
+        .arg(app));
+    (app.extension() == Some(OsStr::new("app")) && signed.is_ok()).then(|| app.into())
 }
 
 fn signed_by_us(path: &Path) -> Result<(), String> {

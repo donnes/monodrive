@@ -94,5 +94,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
+# A custom icon from Settings is Finder information codesign refuses to sign
+# over; the app writes it again at launch.
+rm -f "$app/Icon"$'\r'
+xattr -c "$app"
 codesign --force --sign - "$app"
 echo "$app"

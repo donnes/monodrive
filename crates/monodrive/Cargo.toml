@@ -12,13 +12,13 @@ gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["font-kit", "runtime_shaders"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 unicode-segmentation = "1"
-# Pins the traffic lights to Monocode's spacing, draws Finder's icons, puts
+# Pins the traffic lights to Monocode's spacing, sets the app's icon, draws Finder's icons, puts
 # files on the pasteboard, hands them to Finder and Terminal, previews
 # them with Quick Look, and taps the trackpad.
 objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "objc2-uniform-type-identifiers", "NSAccessibility", "NSApplication", "NSBitmapImageRep", "NSButton", "NSControl", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSHapticFeedback", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSBundle", "NSDictionary", "NSGeometry", "NSObject", "NSString", "NSURL", "NSUserDefaults"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSGeometry", "NSObject", "NSString", "NSURL", "NSUserDefaults"] }
 # Finder's sounds, through AudioToolbox, and NSFileViewer, which sends other
 # apps' Show in Finder here.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFPreferences", "CFString", "CFURL"] }

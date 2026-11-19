@@ -2,6 +2,7 @@
 //! views from here.
 
 pub mod agents;
+mod app_icon;
 pub mod assets;
 mod background;
 pub mod browser;
@@ -111,6 +112,16 @@ pub fn run(folder: Option<PathBuf>) {
         #[cfg(feature = "profile")]
         profile::start(cx);
         preferences::init(cx);
+        let mut icon = cx.global::<Preferences>().app_icon;
+        app_icon::apply(icon, true, cx);
+        cx.observe_global::<Preferences>(move |cx| {
+            let chosen = cx.global::<Preferences>().app_icon;
+            if chosen != icon {
+                icon = chosen;
+                app_icon::apply(chosen, false, cx);
+            }
+        })
+        .detach();
         // Read at launch. GPUI's animations and the sidebar's slide skip
         // to where they end with it.
         cx.set_reduce_motion(
