@@ -8,6 +8,7 @@ use super::batch_rename::BatchRename;
 use super::columns::{COLUMN_WIDTH, Columns, chevron};
 use super::drag::{Drag, Spot, Target, offers};
 use super::duplicates::DuplicatesPage;
+use super::localsend::LocalSendPage;
 use super::organize::Review;
 use super::overview::OverviewPage;
 use super::remote::RemotePage;
@@ -17,14 +18,15 @@ use super::{
     Back, CancelRename, ClearRecents, CommitRename, Compress, CopyPath, DeselectAll, Download,
     Duplicate, EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext,
     ExtendPrevious, ExtendRight, Extract, FindDuplicates, FocusSearch, Forward, GoAirDrop,
-    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents,
-    GoToFolder, GoTrash, GoWorktrees, MoveHere, MoveToTrash, NewFile, NewFolder,
-    NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp,
-    Places, PutBack, QuickLook, Redo, RemoveDownload, Rename, RevealInFinder, ReverseSort,
-    ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder, SelectFirst, SelectLast,
-    SelectNext, SelectPrevious, Share, ShowContextMenu, ShowInEnclosingFolder, ShowPackageContents,
-    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, Undo, ViewAsColumns,
-    ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
+    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoLocalSend,
+    GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveHere, MoveToTrash, NewFile,
+    NewFolder, NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected, OrganizeFolder,
+    PageDown, PageUp, Places, PutBack, QuickLook, Redo, RemoveDownload, Rename, RevealInFinder,
+    ReverseSort, ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder, SelectFirst,
+    SelectLast, SelectNext, SelectPrevious, SendWithLocalSend, Share, ShowContextMenu,
+    ShowInEnclosingFolder, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
+    SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash,
+    with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -320,6 +322,8 @@ pub struct Pane {
     pub(super) overview: OverviewPage,
     /// The worktrees, as last scanned.
     pub(super) worktrees: WorktreesPage,
+    /// Looking for LocalSend devices while its page is open.
+    pub(super) localsend: LocalSendPage,
     /// What Find Duplicates found, as last looked through.
     pub(super) duplicates: DuplicatesPage,
     /// The archive on screen, as last read; dropped on leaving it.
@@ -358,6 +362,9 @@ impl Pane {
         cx.on_release(|this, cx| {
             for (thumb, image) in this.thumbs.drain() {
                 thumbnails::release(&thumb, image, None, cx);
+            }
+            if this.localsend.looking() {
+                super::localsend::stop_looking(cx);
             }
         })
         .detach();
@@ -438,6 +445,7 @@ impl Pane {
             open_after_download: HashSet::new(),
             overview: OverviewPage::default(),
             worktrees: WorktreesPage::default(),
+            localsend: LocalSendPage::default(),
             duplicates: DuplicatesPage::default(),
             archived: None,
             remote: RemotePage::default(),
@@ -449,7 +457,7 @@ impl Pane {
     }
 
     /// Whether its tab is on screen.
-    pub(super) fn set_shown(&mut self, shown: bool) {
+    pub(super) fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.shown = shown;
         if !shown {
             self.opening = Task::ready(());
@@ -458,6 +466,7 @@ impl Pane {
             self.marquee = None;
             self.leave_overview();
             self.leave_duplicates();
+            self.leave_localsend(cx);
         }
     }
 
@@ -530,7 +539,9 @@ impl Pane {
                 Some(StopState {
                     place: stop.place.clone()?,
                     shows: match stop.shows {
-                        Shows::Archive | Shows::Duplicates | Shows::AirDrop => Shows::Folder,
+                        Shows::Archive | Shows::Duplicates | Shows::AirDrop | Shows::LocalSend => {
+                            Shows::Folder
+                        }
                         shows => shows,
                     },
                     remote: stop.remote.clone(),
@@ -548,6 +559,12 @@ impl Pane {
     /// Preferences changed: lists again if the hidden files did. With `adopt`,
     /// Settings chose them for this pane, so it takes their view and sort.
     pub(super) fn preferences_changed(&mut self, adopt: bool, cx: &mut Context<Self>) {
+        if self.showing_localsend() {
+            match cx.global::<Preferences>().localsend {
+                true => self.enter_localsend(cx),
+                false => self.leave_localsend(cx),
+            }
+        }
         let prefs = cx.global::<Preferences>();
         let (view, sort, show_hidden) = (prefs.view, prefs.sort, prefs.show_hidden);
         self.grid_icon = prefs.grid_icon;
@@ -630,6 +647,8 @@ impl Pane {
             "Worktrees".to_string()
         } else if self.showing_airdrop() {
             "AirDrop".to_string()
+        } else if self.showing_localsend() {
+            "LocalSend".to_string()
         } else if self.showing_duplicates() {
             format!("Duplicates in {}", level_name(self.folder()))
         } else if self.showing_remote() {
@@ -790,6 +809,11 @@ impl Pane {
             self.remember = Task::ready(());
         }
         self.asking.clear();
+        if self.showing_localsend() && cx.global::<Preferences>().localsend {
+            self.enter_localsend(cx);
+        } else {
+            self.leave_localsend(cx);
+        }
         if self.showing_remote() {
             // Nothing local is on screen, so nothing local can be chosen.
             self.leave_overview();
@@ -2360,8 +2384,25 @@ impl Pane {
     }
 
     /// macOS's share menu on the selection, under `at` in the window.
-    pub(super) fn share(&self, window: &Window, at: Point<Pixels>) {
-        crate::sharing::share(&self.chosen(), window, at);
+    /// Share…, with LocalSend among the services while it's on: picking it
+    /// opens the LocalSend page holding what was shared.
+    pub(super) fn share(&mut self, window: &mut Window, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let paths = self.chosen();
+        let localsend = cx.global::<Preferences>().localsend.then(|| {
+            let (pick, picked) = async_channel::bounded(1);
+            let held = paths.clone();
+            self.localsend.sharing = cx.spawn_in(window, async move |this, cx| {
+                if picked.recv().await.is_ok() {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.send_with_localsend(held, window, cx)
+                    });
+                }
+            });
+            Box::new(move || {
+                let _ = pick.try_send(());
+            }) as Box<dyn Fn()>
+        });
+        crate::sharing::share(&paths, window, at, localsend);
     }
 
     /// The selected paths, in the order shown.
@@ -4064,6 +4105,10 @@ impl Pane {
         if self.showing_duplicates() && self.stop_duplicates(cx) {
             return;
         }
+        if self.showing_localsend() && !self.localsend.sending.is_empty() {
+            self.localsend.sending.clear();
+            return cx.notify();
+        }
         if self.query.is_empty() {
             if self.search_mode_is_plain() {
                 self.selection.clear();
@@ -4099,6 +4144,7 @@ impl Pane {
         let can_make_here = self.takes_files(cx);
         let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
         let selected = !self.selection.is_empty();
+        let localsend = cx.global::<Preferences>().localsend;
         let scattered = self.showing_recents() || !self.query.is_empty();
         let renaming = self.changing_names();
         let can_extract = self.can_extract(cx);
@@ -4137,6 +4183,11 @@ impl Pane {
                 .on_action(cx.listener(|this, _: &GoAirDrop, window, cx| {
                     this.open_page(Shows::AirDrop, window, cx)
                 }))
+                .when(localsend, |d| {
+                    d.on_action(cx.listener(|this, _: &GoLocalSend, window, cx| {
+                        this.open_page(Shows::LocalSend, window, cx)
+                    }))
+                })
                 .when(self.showing_folder(), |d| {
                     d.on_action(cx.listener(|this, _: &FindDuplicates, window, cx| {
                         this.find_duplicates(window, cx)
@@ -4187,8 +4238,15 @@ impl Pane {
                         workspace::reveal(&this.chosen())
                     }))
                     .on_action(cx.listener(|this, _: &Share, window, cx| {
-                        this.share(window, this.menu_point(cx))
+                        let at = this.menu_point(cx);
+                        this.share(window, at, cx)
                     }))
+                    .when(localsend, |d| {
+                        d.on_action(cx.listener(|this, _: &SendWithLocalSend, window, cx| {
+                            let chosen = this.chosen();
+                            this.send_with_localsend(chosen, window, cx)
+                        }))
+                    })
                 })
                 .when(selected && on_disk && scattered, |d| {
                     d.on_action(cx.listener(|this, _: &ShowInEnclosingFolder, window, cx| {
@@ -4618,6 +4676,7 @@ impl Pane {
                     .or_else(|| self.overview_page(cx))
                     .or_else(|| self.worktrees_page(cx))
                     .or_else(|| self.airdrop_page(cx))
+                    .or_else(|| self.localsend_page(cx))
                     .or_else(|| self.duplicates_page(cx))
                     .or_else(|| {
                         // Until it has something to show, so it never

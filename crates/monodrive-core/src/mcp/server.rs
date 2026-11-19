@@ -36,12 +36,18 @@ const PREVIEW_LIFE: Duration = Duration::from_secs(600);
 pub fn serve_stdio(profile: Option<Profile>) -> std::io::Result<()> {
     let paths = ops::Paths::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
     let places = places::Store::user().ok_or_else(|| std::io::Error::other("no home folder"))?;
-    let profile = profile.unwrap_or_else(|| saved_profile(&paths.settings));
+    let profile = profile.unwrap_or(if saved(&paths.settings).agents_all_tools {
+        Profile::All
+    } else {
+        Profile::Core
+    });
+    let settings = paths.settings.clone();
     let mut server = Server::new(
         ops::Client::new(paths, std::env::current_exe().ok()),
         places,
         profile,
-    );
+    )
+    .following_settings(settings);
     let mut stdout = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let line = line?;
@@ -60,18 +66,22 @@ pub fn serve_stdio(profile: Option<Profile>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `Preferences::agents_all_tools` in the app, read from its saved file.
-fn saved_profile(settings: &Path) -> Profile {
-    #[derive(Deserialize)]
-    struct Settings {
-        #[serde(default)]
-        agents_all_tools: bool,
-    }
-    let all = std::fs::read(settings)
+/// What the app's saved settings say about a session's tools, by the
+/// names `Preferences` gives them.
+#[derive(Deserialize, Default)]
+struct Saved {
+    #[serde(default)]
+    agents_all_tools: bool,
+    /// LocalSend is on in Settings.
+    #[serde(default)]
+    localsend: bool,
+}
+
+fn saved(settings: &Path) -> Saved {
+    std::fs::read(settings)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok())
-        .is_some_and(|settings| settings.agents_all_tools);
-    if all { Profile::All } else { Profile::Core }
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 pub struct Server {
@@ -92,6 +102,15 @@ pub struct Server {
     previews: Vec<Kept>,
     /// Each opened on the first tool that needs it; each session its own.
     pub(super) remote: Connections,
+    /// This Mac's LocalSend identity, read on the first LocalSend tool.
+    localsend: Option<Arc<crate::localsend::Identity>>,
+    /// The LocalSend devices this session listed, which it may send to.
+    pub(super) nearby: Vec<crate::localsend::Device>,
+    /// Settings has LocalSend on, so its tools are offered.
+    offers_localsend: bool,
+    /// The app's saved settings, read again on each request for whether
+    /// LocalSend is on, so turning it off reaches a session under way.
+    settings: Option<std::path::PathBuf>,
 }
 
 struct Kept {
@@ -115,7 +134,36 @@ impl Server {
             root: "/".into(),
             previews: Vec::new(),
             git: None,
+            localsend: None,
+            nearby: Vec::new(),
+            offers_localsend: false,
+            settings: None,
         }
+    }
+
+    /// Follows the LocalSend switch in the app's saved `settings`.
+    pub fn following_settings(mut self, settings: std::path::PathBuf) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
+    /// Offers LocalSend's tools, as Settings does once it's on.
+    pub fn offering_localsend(mut self, on: bool) -> Self {
+        self.offers_localsend = on;
+        self
+    }
+
+    fn localsend_on(&self) -> bool {
+        match &self.settings {
+            Some(settings) => saved(settings).localsend,
+            None => self.offers_localsend,
+        }
+    }
+
+    /// Whether this session offers `tool`: its profile does, and it isn't
+    /// LocalSend's while that's off.
+    fn offers(&self, tool: &tools::Tool, localsend: bool) -> bool {
+        self.profile.offers(tool.profile) && (localsend || !tool.is_localsend())
     }
 
     /// Handles one message and returns the reply. Notifications and
@@ -149,12 +197,19 @@ impl Server {
                 )
             }
             "ping" => result(id, json!({})),
-            "tools/list" => result(id, json!({ "tools": tools::list(self.profile) })),
+            "tools/list" => {
+                let localsend = self.localsend_on();
+                result(
+                    id,
+                    json!({ "tools": tools::list(|tool| self.offers(tool, localsend)) }),
+                )
+            }
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let localsend = self.localsend_on();
                 let tool = tools::TOOLS
                     .iter()
-                    .find(|tool| tool.name == name && self.profile.offers(tool.profile));
+                    .find(|tool| tool.name == name && self.offers(tool, localsend));
                 match tool {
                     Some(tool) => {
                         // MCP lets a call without parameters leave out `arguments`.
@@ -332,6 +387,15 @@ impl Server {
                 .for_each(|kept| kept.ran = Some(id.to_owned())),
             None => self.previews.retain(|kept| kept.token != token),
         }
+    }
+
+    pub(super) fn localsend(&mut self) -> Result<Arc<crate::localsend::Identity>, ToolError> {
+        if let Some(identity) = &self.localsend {
+            return Ok(identity.clone());
+        }
+        let identity = Arc::new(crate::localsend::Identity::user().map_err(ToolError::from)?);
+        self.localsend = Some(identity.clone());
+        Ok(identity)
     }
 
     pub(super) fn git(&mut self) -> Result<Git, ToolError> {

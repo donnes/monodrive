@@ -3,15 +3,18 @@
 //! nearby and changing who can find this Mac take Apple's private AirDrop
 //! entitlements, which macOS grants only to apps Apple signs.
 
-use gpui::{Global, Pixels, Point, Window};
-use objc2::AnyThread;
+use block2::RcBlock;
+use gpui::{AssetSource, Global, Pixels, Point, Window};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSSharingService, NSSharingServiceNameSendViaAirDrop, NSSharingServicePicker, NSWorkspace,
+    NSImage, NSSharingService, NSSharingServiceNameSendViaAirDrop, NSSharingServicePicker,
+    NSSharingServicePickerDelegate, NSWorkspace,
 };
 use objc2_foundation::{
-    NSArray, NSFullUserName, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSURL, NSUserDefaults,
+    NSArray, NSData, NSFullUserName, NSObject, NSPoint, NSRect, NSRectEdge, NSSize, NSString,
+    NSURL, NSUserDefaults,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -89,14 +92,83 @@ fn items(paths: &[PathBuf]) -> Retained<NSArray<AnyObject>> {
     NSArray::from_retained_slice(&items)
 }
 
+/// The share menu on screen, and what adds Monodrive's own entries to it,
+/// which the picker doesn't keep.
+type Shown = (
+    Retained<NSSharingServicePicker>,
+    Option<Retained<MonodriveEntries>>,
+);
+
 thread_local! {
-    /// The share menu on screen, kept until the next one replaces it.
-    static PICKER: RefCell<Option<Retained<NSSharingServicePicker>>> = RefCell::default();
+    /// Kept until the next share menu replaces it.
+    static PICKER: RefCell<Option<Shown>> = RefCell::default();
+}
+
+const LOCALSEND: &str = "LocalSend";
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and `MonodriveEntries`
+    // doesn't implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "MonodriveShareEntries"]
+    #[ivars = Retained<NSSharingService>]
+    struct MonodriveEntries;
+
+    unsafe impl NSObjectProtocol for MonodriveEntries {}
+
+    unsafe impl NSSharingServicePickerDelegate for MonodriveEntries {
+        /// macOS's services, then LocalSend. The LocalSend app's own entry,
+        /// if it's installed, gives way to this one.
+        #[unsafe(method_id(sharingServicePicker:sharingServicesForItems:proposedSharingServices:))]
+        fn services(
+            &self,
+            _: &NSSharingServicePicker,
+            _: &NSArray,
+            proposed: &NSArray<NSSharingService>,
+        ) -> Retained<NSArray<NSSharingService>> {
+            let mut services: Vec<Retained<NSSharingService>> = proposed
+                .to_vec()
+                .into_iter()
+                .filter(|service| service.title().to_string() != LOCALSEND)
+                .collect();
+            services.push(self.ivars().clone());
+            NSArray::from_retained_slice(&services)
+        }
+    }
+);
+
+/// LocalSend in the share menu, running `chosen` when picked.
+fn localsend_entry(
+    chosen: Box<dyn Fn()>,
+    main: MainThreadMarker,
+) -> Option<Retained<MonodriveEntries>> {
+    let glyph = crate::assets::Assets.load("localsend").ok().flatten()?;
+    let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&glyph))?;
+    image.setSize(NSSize::new(16., 16.));
+    image.setTemplate(true);
+    let handler = RcBlock::new(chosen);
+    let service = NSSharingService::initWithTitle_image_alternateImage_handler(
+        NSSharingService::alloc(),
+        &NSString::from_str(LOCALSEND),
+        &image,
+        None,
+        &handler,
+    );
+    let entries = MonodriveEntries::alloc(main).set_ivars(service);
+    // SAFETY: NSObject's plain init.
+    Some(unsafe { msg_send![super(entries), init] })
 }
 
 /// Share…: macOS's share menu on `paths`, AirDrop, Messages, Mail and the
-/// rest, under `at` in `window`.
-pub fn share(paths: &[PathBuf], window: &Window, at: Point<Pixels>) {
+/// rest, under `at` in `window`, with LocalSend after them when `localsend`
+/// says what picking it does.
+pub fn share(
+    paths: &[PathBuf],
+    window: &Window,
+    at: Point<Pixels>,
+    localsend: Option<Box<dyn Fn()>>,
+) {
     let Some(view) = crate::traffic_lights::ns_view(window) else {
         return;
     };
@@ -122,8 +194,14 @@ pub fn share(paths: &[PathBuf], window: &Window, at: Point<Pixels>) {
     let picker = unsafe {
         NSSharingServicePicker::initWithItems(NSSharingServicePicker::alloc(), &items(paths))
     };
+    let entries = localsend
+        .zip(MainThreadMarker::new())
+        .and_then(|(chosen, main)| localsend_entry(chosen, main));
+    if let Some(entries) = &entries {
+        picker.setDelegate(Some(ProtocolObject::from_ref(&**entries)));
+    }
     picker.showRelativeToRect_ofView_preferredEdge(rect, &view, below);
-    PICKER.set(Some(picker));
+    PICKER.set(Some((picker, entries)));
 }
 
 /// Sends `paths` with AirDrop, whose own window asks who to send them to.

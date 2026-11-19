@@ -1155,7 +1155,7 @@ const SFTP: &str = "SFTP servers";
 const SMB: &str = "SMB servers";
 
 /// The commands on a selection, in the order worth offering them.
-const SELECTION_ORDER: [&str; 21] = [
+const SELECTION_ORDER: [&str; 22] = [
     "Open",
     "Open With",
     "Quick Look",
@@ -1175,6 +1175,7 @@ const SELECTION_ORDER: [&str; 21] = [
     "Reveal in Finder",
     "Open in Terminal",
     "Share…",
+    "Send with LocalSend…",
     "Put Back",
     "Move to Trash",
 ];
@@ -1230,6 +1231,7 @@ fn glyph_for(command: &Command) -> &'static str {
         "Open in Terminal" => "terminal",
         "AirDrop" => "airdrop",
         "Share…" => "share",
+        "LocalSend" | "Send with LocalSend…" => "localsend",
         "New File" => "file",
         "New Tab" => "add-01",
         _ => match command.group {

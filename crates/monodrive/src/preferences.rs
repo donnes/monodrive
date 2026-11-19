@@ -235,6 +235,16 @@ pub struct Preferences {
     pub onboarding_version: u32,
     /// Names the sidebar gives cloud folders instead of their own, by path.
     pub cloud_names: BTreeMap<PathBuf, String>,
+    /// LocalSend is in the sidebar, the menus and Share…, and agents can use
+    /// it. Off, Monodrive makes no LocalSend key and never looks for devices.
+    pub localsend: bool,
+    /// Devices nearby running LocalSend may offer this Mac files, each one
+    /// asked about in the window.
+    pub localsend_receive: bool,
+    /// Where received files go; `None` is Downloads.
+    pub localsend_folder: Option<PathBuf>,
+    /// What senders must type, if anything.
+    pub localsend_pin: Option<String>,
 }
 
 /// Which of the sidebar's sections are folded, each on its own.
@@ -294,6 +304,10 @@ impl Default for Preferences {
             update_channel: Default::default(),
             onboarding_version: 0,
             cloud_names: BTreeMap::new(),
+            localsend: false,
+            localsend_receive: false,
+            localsend_folder: None,
+            localsend_pin: None,
         }
     }
 }
@@ -324,6 +338,17 @@ impl Preferences {
         self.sort = defaults.sort;
         self.terminal = defaults.terminal;
         self.update_channel = defaults.update_channel;
+        self.localsend = defaults.localsend;
+        self.localsend_receive = defaults.localsend_receive;
+        self.localsend_folder = defaults.localsend_folder;
+        self.localsend_pin = defaults.localsend_pin;
+    }
+
+    /// Where LocalSend saves what it receives.
+    pub fn localsend_save_to(&self) -> PathBuf {
+        self.localsend_folder
+            .clone()
+            .unwrap_or_else(|| crate::browser::home().join("Downloads"))
     }
 
     /// Everything on the Appearance page. What other pages own, and the
@@ -356,6 +381,10 @@ impl Preferences {
             update_channel: self.update_channel,
             onboarding_version: self.onboarding_version,
             cloud_names: std::mem::take(&mut self.cloud_names),
+            localsend: self.localsend,
+            localsend_receive: self.localsend_receive,
+            localsend_folder: self.localsend_folder.take(),
+            localsend_pin: self.localsend_pin.take(),
             ..Self::default()
         };
     }

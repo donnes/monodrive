@@ -25,6 +25,7 @@ use gpui::{
     prelude::*, px,
 };
 use monodrive_core::entries::{Entry, Kind};
+use monodrive_core::localsend::Device;
 use monodrive_core::remote::RemotePath;
 use objc2_app_kit::{NSEvent, NSEventModifierFlags};
 use std::cell::RefCell;
@@ -69,6 +70,8 @@ pub(super) enum Spot {
     Tab(usize),
     /// A sidebar row, by the sidebar's numbering.
     Place(usize),
+    /// A device on the LocalSend page, by its place there.
+    Device(usize),
 }
 
 /// What a drop at the pointer would land on.
@@ -90,6 +93,10 @@ pub(super) enum Target {
     },
     /// Sent with AirDrop, which asks who to.
     AirDrop(Spot),
+    /// Sent to a device with LocalSend.
+    LocalSend { spot: Spot, device: Box<Device> },
+    /// Held by the LocalSend page, for the device clicked next.
+    LocalSendPage(Spot),
 }
 
 /// What a drop would do.
@@ -118,6 +125,13 @@ pub(super) enum Decision {
         name: String,
     },
     AirDrop(Vec<PathBuf>),
+    /// Sends a copy to a device; nothing here changes.
+    LocalSend {
+        paths: Vec<PathBuf>,
+        device: Box<Device>,
+    },
+    /// Opens the LocalSend page holding these.
+    ChooseDevice(Vec<PathBuf>),
     /// Nothing, for this reason.
     Nothing(String),
 }
@@ -148,6 +162,13 @@ pub(super) fn decide(
                 name: name.clone(),
             };
         }
+        Target::LocalSend { device, .. } => {
+            return Decision::LocalSend {
+                paths: sources.to_vec(),
+                device: device.clone(),
+            };
+        }
+        Target::LocalSendPage(_) => return Decision::ChooseDevice(sources.to_vec()),
     };
     if let Some(source) = sources.iter().find(|source| into.starts_with(source)) {
         let name = shown_name(source);
@@ -190,6 +211,12 @@ impl Decision {
                 format!("Copy {} to {name}", count_of(paths, "items"))
             }
             Self::AirDrop(paths) => format!("AirDrop {}", count_of(paths, "items")),
+            Self::LocalSend { paths, device } => {
+                format!("Send {} to {}", count_of(paths, "items"), device.alias)
+            }
+            Self::ChooseDevice(paths) => {
+                format!("Send {} with LocalSend", count_of(paths, "items"))
+            }
             Self::Download { paths, name, .. } => {
                 let what = match paths.as_slice() {
                     [one] => one.name().unwrap_or(one.source()).to_owned(),
@@ -233,6 +260,9 @@ pub(super) fn decide_from_server(sources: &[RemotePath], target: &Target) -> Dec
         Target::Server { .. } => Decision::Nothing("Copy between a server and this Mac.".into()),
         Target::Pin(_) => Decision::Nothing("Only folders on this Mac go in Favorites.".into()),
         Target::AirDrop(_) => Decision::Nothing("AirDrop sends files on this Mac.".into()),
+        Target::LocalSend { .. } | Target::LocalSendPage(_) => {
+            Decision::Nothing("LocalSend sends files on this Mac.".into())
+        }
     }
 }
 
@@ -515,13 +545,17 @@ impl Drag {
                     | Decision::Upload { .. }
                     | Decision::Download { .. }
                     | Decision::AirDrop(_)
+                    | Decision::LocalSend { .. }
+                    | Decision::ChooseDevice(_)
             );
             lands
                 && matches!(
                     target,
                     Target::Folder { spot: at, .. }
                         | Target::Server { spot: at, .. }
-                        | Target::AirDrop(at) if at == spot
+                        | Target::AirDrop(at)
+                        | Target::LocalSend { spot: at, .. }
+                        | Target::LocalSendPage(at) if at == spot
                 )
         })
         .unwrap_or(false)
@@ -1118,7 +1152,7 @@ impl Browser {
                 .into_iter()
                 .find(|pane| pane.entity_id() == *id),
             Spot::Place(_) => Some(self.pane().clone()),
-            Spot::Pane(_) | Spot::Crumb(..) => None,
+            Spot::Pane(_) | Spot::Crumb(..) | Spot::Device(_) => None,
         };
         let Some(pane) = opens_in.filter(|pane| pane.read(cx).folder() != path) else {
             return;
@@ -1249,6 +1283,16 @@ impl Browser {
             Some(Decision::AirDrop(paths)) => {
                 feedback::haptic(Haptic::Generic, cx);
                 self.pane().update(cx, |pane, cx| pane.airdrop(&paths, cx));
+            }
+            Some(Decision::LocalSend { paths, device }) => {
+                feedback::haptic(Haptic::Generic, cx);
+                crate::localsend::get(cx)
+                    .update(cx, |localsend, cx| localsend.send(*device, paths, None, cx));
+            }
+            Some(Decision::ChooseDevice(paths)) => {
+                feedback::haptic(Haptic::Generic, cx);
+                self.pane()
+                    .update(cx, |pane, cx| pane.send_with_localsend(paths, window, cx));
             }
             Some(Decision::Nothing(_)) | None => {}
         }
@@ -1458,6 +1502,44 @@ mod tests {
         let remote = RemotePath::new("box", "/srv/f").unwrap();
         assert!(matches!(
             decide_from_server(&[remote], &airdrop),
+            Decision::Nothing(_)
+        ));
+    }
+
+    #[test]
+    fn a_drop_on_a_localsend_device_sends_whatever_the_keys_and_moves_nothing() {
+        let device = monodrive_core::localsend::Device {
+            alias: "Pixel 8".into(),
+            fingerprint: "AB".into(),
+            kind: monodrive_core::localsend::Kind::Phone,
+            model: None,
+            host: "192.168.1.20".into(),
+            port: 53317,
+            https: true,
+        };
+        let target = Target::LocalSend {
+            spot: Spot::Device(0),
+            device: Box::new(device.clone()),
+        };
+        let sources = paths(&["/a/f", "/a/g"]);
+        for keys in [keys(false, false), keys(true, false), keys(false, true)] {
+            let decided = decide(&sources, &target, keys, true);
+            assert_eq!(
+                decided,
+                Decision::LocalSend {
+                    paths: sources.clone(),
+                    device: Box::new(device.clone())
+                }
+            );
+            assert_eq!(decided.says(), "Send 2 items to Pixel 8");
+        }
+        let page = Target::LocalSendPage(Spot::Place(9));
+        let decided = decide(&sources, &page, keys(false, true), true);
+        assert_eq!(decided, Decision::ChooseDevice(sources.clone()));
+        assert_eq!(decided.says(), "Send 2 items with LocalSend");
+        let remote = RemotePath::new("box", "/srv/f").unwrap();
+        assert!(matches!(
+            decide_from_server(&[remote], &target),
             Decision::Nothing(_)
         ));
     }

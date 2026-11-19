@@ -83,6 +83,7 @@ impl Pane {
         self.showing_overview()
             || self.showing_worktrees()
             || self.showing_airdrop()
+            || self.showing_localsend()
             || self.showing_duplicates()
     }
 

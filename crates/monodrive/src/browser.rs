@@ -9,6 +9,7 @@ mod columns;
 mod drag;
 mod duplicates;
 mod inspector;
+mod localsend;
 mod open_with;
 mod organize;
 mod overview;
@@ -166,6 +167,7 @@ actions!(
         RevealInFinder,
         OpenInTerminal,
         Share,
+        SendWithLocalSend,
         QuickLook,
         OpenInQuickLook,
         EditPreview,
@@ -181,6 +183,7 @@ actions!(
         GoRecents,
         GoWorktrees,
         GoAirDrop,
+        GoLocalSend,
         GoTrash,
         GoFavorite1,
         GoFavorite2,
@@ -438,7 +441,7 @@ impl Browser {
         };
         let pane = browser.add_pane(Opening::at(Stop::folder(folder), view, sort), cx);
         pane.update(cx, |pane, cx| {
-            pane.set_shown(true);
+            pane.set_shown(true, cx);
             pane.reload(cx);
         });
         browser.tabs.push(Tab::new(pane));
@@ -458,7 +461,7 @@ impl Browser {
                 let pane = browser.add_pane(Opening::restored(pane), cx);
                 if shown {
                     pane.update(cx, |pane, cx| {
-                        pane.set_shown(true);
+                        pane.set_shown(true, cx);
                         pane.reload(cx);
                     });
                 }
@@ -565,6 +568,7 @@ impl Browser {
 
     fn empty(cx: &mut Context<Self>) -> Self {
         Self::follow_downloads(cx);
+        Self::follow_localsend(cx);
         let sidebar_open = cx.global::<Preferences>().show_sidebar;
         let jobs = cx.new(|_| Jobs::new());
         cx.subscribe(&jobs, |this, _, event: &JobsEvent, cx| match event {
@@ -589,6 +593,7 @@ impl Browser {
         // the pane the commands act on, and nothing else changes those.
         cx.observe_global::<Preferences>(|this, cx| {
             this.sidebar.worktrees = cx.global::<Preferences>().show_worktrees;
+            this.sidebar.localsend = cx.global::<Preferences>().localsend;
             this.arrange_locations(cx);
             this.fold_sections(cx.global::<Preferences>().collapsed, cx);
             cx.notify();
@@ -654,6 +659,7 @@ impl Browser {
                 let prefs = cx.try_global::<Preferences>();
                 sidebar::Sidebar::new(
                     prefs.is_some_and(|p| p.show_worktrees),
+                    prefs.is_some_and(|p| p.localsend),
                     prefs.map(|p| p.collapsed).unwrap_or_default(),
                 )
             },
@@ -1930,6 +1936,9 @@ impl Browser {
     /// The toast at the bottom of the files, with its Undo.
     fn toast_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let toast = self.toast.as_ref().filter(|_| self.fetching.is_none())?;
+        if self.transferring(cx) {
+            return None;
+        }
         // Above the path bar, if it's showing.
         let bar = if cx.global::<Preferences>().show_path_bar {
             theme::PATH_BAR_HEIGHT
@@ -1970,6 +1979,7 @@ impl Browser {
                 let label = match &offer {
                     Offer::Undo(_) => "Undo",
                     Offer::Download(label, _) => label,
+                    Offer::Show(_) => "Show",
                 };
                 d.child(
                     theme::text_button("toast-offer", label, ButtonLook::Ghost)
@@ -1984,6 +1994,12 @@ impl Browser {
                                     pane.submit(Request::UndoOf { op: *op }, window, cx)
                                 }
                                 Offer::Download(_, paths) => pane.download(paths.clone(), cx),
+                                Offer::Show(path) => {
+                                    if let Some(folder) = path.parent() {
+                                        pane.go(folder.to_path_buf(), window, cx);
+                                        pane.select_on_listing(vec![path.clone()]);
+                                    }
+                                }
                             });
                         })),
                 )
@@ -2058,6 +2074,7 @@ impl Render for Browser {
         if let Some(path) = self.look_at.take() {
             self.quick_look_file(path, window, cx);
         }
+        self.ask_localsend(window, cx);
         self.sidebar.command_held = sidebar::command_held(window);
         let prefs = cx.global::<Preferences>().clone();
         self.step_sidebar(prefs.show_sidebar, window, cx);
@@ -2397,6 +2414,7 @@ impl Render for Browser {
                                     .flex()
                                     .child(self.split_view(boxy, window, cx))
                                     .children(self.fetching_toast(cx))
+                                    .children(self.localsend_toast(cx))
                                     .children(self.toast_view(cx)),
                             )
                             .children(self.inspector_view(boxy, split, window, cx)),
@@ -2414,6 +2432,8 @@ impl Render for Browser {
                         .map_or_else(|| div().into_any_element(), |p| p.into_any_element()),
                     Sheet::Searches(view) => view.clone().into_any_element(),
                     Sheet::EmptyTrash(view) => view.clone().into_any_element(),
+                    Sheet::LocalSendOffer(view) => view.clone().into_any_element(),
+                    Sheet::LocalSendPin(view) => view.clone().into_any_element(),
                     Sheet::RemoveWorktree(view) => view.clone().into_any_element(),
                     Sheet::ReviewDuplicates(view) => view.clone().into_any_element(),
                     Sheet::Connect(view) => view.clone().into_any_element(),
@@ -2563,6 +2583,8 @@ pub(super) enum Offer {
     Undo(u64),
     /// Downloads these, under this label: Download, or Try Again.
     Download(&'static str, Vec<PathBuf>),
+    /// Shows this in its folder, selected.
+    Show(PathBuf),
 }
 
 /// A message after a change.
@@ -2604,6 +2626,8 @@ enum Sheet {
     /// The search field's menu.
     Searches(Entity<SearchMenu>),
     EmptyTrash(Entity<EmptyTrashView>),
+    LocalSendOffer(Entity<crate::localsend_ask::OfferView>),
+    LocalSendPin(Entity<crate::localsend_ask::PinView>),
     RemoveWorktree(Entity<RemoveWorktreeView>),
     ReviewDuplicates(Entity<ReviewDuplicatesView>),
     Connect(Entity<ConnectView>),

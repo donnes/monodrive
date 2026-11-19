@@ -7,6 +7,7 @@ mod edits;
 mod files;
 mod git;
 mod jobs;
+mod localsend;
 mod places;
 mod searches;
 mod space;
@@ -55,6 +56,11 @@ impl Tool {
         (self.output)()
     }
 
+    /// LocalSend's, which Settings offers only once it's on.
+    pub fn is_localsend(&self) -> bool {
+        self.name.starts_with("localsend_")
+    }
+
     pub(super) fn run(&self, server: &mut Server, arguments: Value) -> Result<Answer, ToolError> {
         (self.call)(server, arguments)
     }
@@ -92,11 +98,11 @@ fn call<C: Call>(server: &mut Server, arguments: Value) -> Result<Answer, ToolEr
     })
 }
 
-/// `tools/list`'s entries for `profile`.
-pub(super) fn list(profile: Profile) -> Vec<Value> {
+/// `tools/list`'s entries for the tools a session `offers`.
+pub(super) fn list(offers: impl Fn(&Tool) -> bool) -> Vec<Value> {
     TOOLS
         .iter()
-        .filter(|tool| profile.offers(tool.profile))
+        .filter(|tool| offers(tool))
         .map(|tool| {
             json!({
                 "name": tool.name,
@@ -243,7 +249,7 @@ const fn short_timeout() -> u64 {
 
 use Profile::{All, Core};
 
-pub const TOOLS: [Tool; 54] = [
+pub const TOOLS: [Tool; 56] = [
     // Core: find and read.
     tool::<files::FindFiles>(
         "find_files",
@@ -647,6 +653,23 @@ pub const TOOLS: [Tool; 54] = [
         "Run a saved command on paths, never through a shell, as a job. {paths} becomes every path, \
         {path} runs once per path. dry_run: true shows each invocation's folder and arguments and a \
         token; confirm: token runs exactly that. Not undoable.",
+    ),
+    // All: LocalSend.
+    tool::<localsend::LocalsendDevices>(
+        "localsend_devices",
+        All,
+        Hints::READ.net(),
+        "Devices nearby with LocalSend open, each with the fingerprint localsend_send takes. \
+        Listens for wait_seconds and asks this Mac's Wi-Fi and Ethernet subnets; never announces \
+        this Mac.",
+    ),
+    tool::<localsend::LocalsendSend>(
+        "localsend_send",
+        All,
+        Hints::ADD.net(),
+        "Send files or folders to a LocalSend device by a fingerprint localsend_devices listed in \
+        this session, and wait until they arrive. LocalSend can take files from its favorites \
+        without asking anyone, so send only what the user asked to, to the device they named.",
     ),
     tool::<updates::CheckUpdates>(
         "check_updates",

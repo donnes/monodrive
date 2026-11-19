@@ -13,20 +13,21 @@ use crate::browser::{
     EditLocations, EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract, FindDuplicates,
     FocusSearch, Forward, GetInfo, GoAirDrop, GoApplications, GoComputer, GoDesktop, GoDocuments,
     GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6,
-    GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome, GoOverview, GoRecents, GoToFolder,
-    GoTrash, GoWorktrees, HideFromSidebar, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash,
-    NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook,
-    OpenInTerminal, OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack,
-    QuickLook, Redo, RemoveDownload, RemoveFromSidebar, Rename, RenameLocation, ResetZoom,
-    RevealInFinder, ReverseSort, SaveSearch, SearchContents, SearchThisFolder, Share,
-    ShowCopiesAndMoves, ShowInEnclosingFolder, ShowPackageContents, ShowSearches, SortByKind,
-    SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar,
-    ToggleSidebar, ToggleSplit, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome, GoLocalSend, GoOverview,
+    GoRecents, GoToFolder, GoTrash, GoWorktrees, HideFromSidebar, HideInspector, MoveHere,
+    MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab,
+    OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
+    OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo, RemoveDownload, RemoveFromSidebar,
+    Rename, RenameLocation, ResetZoom, RevealInFinder, ReverseSort, SaveSearch, SearchContents,
+    SearchThisFolder, SendWithLocalSend, Share, ShowCopiesAndMoves, ShowInEnclosingFolder,
+    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
+    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo,
+    ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
-    browser, connect, empty_trash, goto, jobs, menu, onboarding, palette, remove_worktree,
-    review_duplicates, settings, text_field, updates,
+    browser, connect, empty_trash, goto, jobs, localsend_ask, menu, onboarding, palette,
+    remove_worktree, review_duplicates, settings, text_field, updates,
 };
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
@@ -313,6 +314,12 @@ pub fn all() -> Vec<Command> {
             SELECTION,
             command("Share…", File, &[], BROWSER, || Box::new(Share)),
         ),
+        on(
+            SELECTION,
+            command("Send with LocalSend…", File, &[], BROWSER, || {
+                Box::new(SendWithLocalSend)
+            }),
+        ),
         // What's on offer depends on the row: each is there only where it
         // would run, which the views decide.
         on(
@@ -534,6 +541,9 @@ pub fn all() -> Vec<Command> {
         // ⇧⌘R, as Finder's.
         command("AirDrop", Go, &["cmd-shift-r"], BROWSER, || {
             Box::new(GoAirDrop)
+        }),
+        command("LocalSend", Go, &["cmd-shift-l"], BROWSER, || {
+            Box::new(GoLocalSend)
         }),
         command("Home", Go, &["cmd-shift-h"], BROWSER, || Box::new(GoHome)),
         command("Desktop", Go, &["cmd-shift-d"], BROWSER, || {
@@ -866,7 +876,8 @@ pub fn context_menu(
             group = Some(command.group);
         }
         let action = (command.action)();
-        if !command.scopes.iter().any(|scope| scopes.contains(scope)) || !runs(&*action) {
+        let offered = command.scopes.iter().any(|scope| scopes.contains(scope));
+        if !offered || hidden(&command, prefs) || !runs(&*action) {
             continue;
         }
         rows.push(MenuRow {
@@ -884,6 +895,11 @@ pub fn context_menu(
         last = Some(section);
     }
     rows
+}
+
+/// Whether Settings leaves `command` out: LocalSend's, until it's turned on.
+pub(crate) fn hidden(command: &Command, prefs: &Preferences) -> bool {
+    !prefs.localsend && [GoLocalSend.name(), SendWithLocalSend.name()].contains(&command.id())
 }
 
 /// The overrides the keymap was last built from.
@@ -911,6 +927,7 @@ pub fn apply(cx: &mut App) {
     jobs::bind(cx);
     updates::bind(cx);
     empty_trash::bind(cx);
+    localsend_ask::bind(cx);
     remove_worktree::bind(cx);
     review_duplicates::bind(cx);
     menu::bind(cx);
@@ -942,8 +959,9 @@ pub fn apply(cx: &mut App) {
 /// Set once the window has drawn: setting the main menu makes AppKit load
 /// Writing Tools on the main thread (about 70 ms), so launch doesn't wait.
 struct MenusReady {
-    /// The commands checked in the menus as last installed.
-    checked: Option<Vec<&'static str>>,
+    /// The commands checked in the menus as last installed, and whether
+    /// LocalSend's were there.
+    checked: Option<(Vec<&'static str>, bool)>,
 }
 impl Global for MenusReady {}
 
@@ -981,7 +999,8 @@ pub(crate) fn checked(prefs: &Preferences) -> Vec<&'static str> {
 
 /// Rebuilds the menu bar when a checkmark is out of date.
 pub fn refresh_menus(cx: &mut App) {
-    let checked = checked(cx.global::<Preferences>());
+    let prefs = cx.global::<Preferences>();
+    let checked = (checked(prefs), prefs.localsend);
     if cx
         .try_global::<MenusReady>()
         .is_some_and(|ready| ready.checked.as_ref() != Some(&checked))
@@ -994,8 +1013,12 @@ fn install_menus(cx: &mut App) {
     if !cx.has_global::<MenusReady>() {
         return;
     }
-    let ticked = checked(cx.global::<Preferences>());
-    let commands = all();
+    let prefs = cx.global::<Preferences>();
+    let ticked = checked(prefs);
+    let commands: Vec<Command> = all()
+        .into_iter()
+        .filter(|command| !hidden(command, prefs))
+        .collect();
     let items = |group: Group| {
         let mut items = Vec::new();
         for command in commands.iter().filter(|c| c.group == group && !c.keys_only) {
@@ -1026,7 +1049,8 @@ fn install_menus(cx: &mut App) {
         menu(Group::Window, items(Group::Window)),
         menu(Group::Help, items(Group::Help)),
     ]);
-    cx.global_mut::<MenusReady>().checked = Some(ticked);
+    let localsend = cx.global::<Preferences>().localsend;
+    cx.global_mut::<MenusReady>().checked = Some((ticked, localsend));
 }
 
 #[cfg(test)]

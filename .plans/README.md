@@ -35,6 +35,7 @@ Update a plan's row when its work lands on `main`.
 | 28 Built-in previews and editing | Done | |
 | 29 Video thumbnails | Done | |
 | 30 Name and organize files | Refactor; later | |
+| 31 LocalSend | Built; sending to and receiving from real devices needs a person to check | |
 
 ## UI picks
 

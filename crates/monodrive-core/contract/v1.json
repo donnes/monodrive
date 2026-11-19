@@ -7219,6 +7219,227 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "wait_seconds": {
+            "default": 3,
+            "description": "How long to look, 1 to 10 seconds.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "localsend_devices",
+      "outputSchema": {
+        "properties": {
+          "devices": {
+            "items": {
+              "description": "A device that answered, as LocalSend describes it.",
+              "properties": {
+                "alias": {
+                  "type": "string"
+                },
+                "fingerprint": {
+                  "description": "The SHA-256 of its certificate, which every request to it is pinned to.",
+                  "type": "string"
+                },
+                "host": {
+                  "description": "An IP address, `fe80::1%4` for a link-local one.",
+                  "type": "string"
+                },
+                "https": {
+                  "description": "LocalSend's encryption, on unless the device turned it off.",
+                  "type": "boolean"
+                },
+                "kind": {
+                  "enum": [
+                    "phone",
+                    "computer",
+                    "browser",
+                    "headless",
+                    "server"
+                  ],
+                  "type": "string"
+                },
+                "model": {
+                  "description": "Such as \"iPhone\", \"Samsung\" or \"Windows\", when it says.",
+                  "type": "string"
+                },
+                "port": {
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "alias",
+                "fingerprint",
+                "kind",
+                "host",
+                "port",
+                "https"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "error": {
+            "description": "A failed call, as `structuredContent.error`.",
+            "properties": {
+              "code": {
+                "description": "Why a call failed, for an agent to decide whether to retry, fix its arguments or give up.",
+                "enum": [
+                  "invalid_argument",
+                  "not_found",
+                  "permission_denied",
+                  "name_taken",
+                  "changed_since_preview",
+                  "no_trash_on_volume",
+                  "not_downloaded",
+                  "unsupported_on_source",
+                  "agents_disabled",
+                  "index_unavailable",
+                  "auth_required",
+                  "unreachable",
+                  "busy",
+                  "internal",
+                  "clone_unavailable",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "description": "What went wrong, as the service said it.",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "profile": "all"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "description": "A device's fingerprint, as localsend_devices listed it in this session.",
+            "type": "string"
+          },
+          "paths": {
+            "description": "Files or folders on this Mac.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pin": {
+            "description": "The PIN the receiver asks for, if it asks.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fingerprint",
+          "paths"
+        ],
+        "type": "object"
+      },
+      "name": "localsend_send",
+      "outputSchema": {
+        "properties": {
+          "bytes": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "declined": {
+            "description": "Files it didn't take, when it took some.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "description": "A failed call, as `structuredContent.error`.",
+            "properties": {
+              "code": {
+                "description": "Why a call failed, for an agent to decide whether to retry, fix its arguments or give up.",
+                "enum": [
+                  "invalid_argument",
+                  "not_found",
+                  "permission_denied",
+                  "name_taken",
+                  "changed_since_preview",
+                  "no_trash_on_volume",
+                  "not_downloaded",
+                  "unsupported_on_source",
+                  "agents_disabled",
+                  "index_unavailable",
+                  "auth_required",
+                  "unreachable",
+                  "busy",
+                  "internal",
+                  "clone_unavailable",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "description": "What went wrong, as the service said it.",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "type": "object"
+          },
+          "files": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "to": {
+            "description": "The device's name.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "profile": "all"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
           "channel": {
             "enum": [
               "stable",
