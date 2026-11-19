@@ -81,11 +81,11 @@ use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Back, Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives,
     EditFavorites, EditLocations, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder,
-    ExtendNext, ExtendPrevious, FindDuplicates, FocusNext, FocusSearch, GoOverview, GoRecents,
-    GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings, OpenWith,
-    Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast,
-    SelectNext, SelectPrevious, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames,
-    ToggleSplit, Undo, ViewAsGrid, ViewAsList,
+    ExtendNext, ExtendPrevious, FindDuplicates, FocusNext, FocusSearch, GoAirDrop, GoOverview,
+    GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings,
+    OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents,
+    SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowCopiesAndMoves, ShowSearches,
+    SuggestNames, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
 use monodrive::downloads;
@@ -96,6 +96,7 @@ use monodrive::preferences::{
     Collapsed, Drive, HiddenDrive, Preferences, Theme, View, WorkspaceStyle,
 };
 use monodrive::session::{PaneState, Shows, StopState, TabState, WindowState};
+use monodrive::sharing::{AirDrop, Discoverable};
 use monodrive::updates::{self, Updates};
 use monodrive_core::apps::App as MacApp;
 use monodrive_core::cloud::{Asked, Availability, CloudFolder, Progress};
@@ -567,6 +568,7 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     shoot_batch_rename(&mut cx, out, folder, &base)?;
     shoot_inspector(&mut cx, out, folder, &base)?;
     shoot_worktrees(&mut cx, out, folder, &base)?;
+    shoot_airdrop(&mut cx, out, folder)?;
     shoot_duplicates(&mut cx, out, &base)?;
     shoot_columns(&mut cx, out, made_up, &base)?;
     shoot_overview(&mut cx, out, folder, &base)?;
@@ -650,6 +652,20 @@ fn shoot_columns(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> 
 /// card that asks before one goes: `worktrees-remove-clean.png`,
 /// `-dirty`, `-unpushed`, `-detached`, `-forget` for a missing folder, and
 /// `-locked` and `-main`, which it refuses. Nothing is removed.
+/// AirDrop's page, `airdrop.png`.
+fn shoot_airdrop(cx: &mut Cx, out: &Path, folder: &Path) -> gpui::Result<()> {
+    cx.update(|cx| {
+        cx.set_global(AirDrop {
+            me: "Sam Rivera".into(),
+            discoverable: Some(Discoverable::ContactsOnly),
+            live: false,
+        })
+    });
+    let window = open(cx, folder)?;
+    dispatch(cx, window, &GoAirDrop)?;
+    save(cx, window, out, "airdrop")
+}
+
 fn shoot_worktrees(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
     // With its sidebar row, which Settings turns on.
     cx.update(|cx| {

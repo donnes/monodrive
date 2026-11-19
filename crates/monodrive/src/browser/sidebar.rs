@@ -264,6 +264,7 @@ pub(super) enum Row {
     Favorite(usize),
     Cloud(usize),
     Volume(usize),
+    AirDrop,
     Server(usize),
 }
 
@@ -276,6 +277,7 @@ pub(super) enum RowTarget {
     Favorite(PathBuf),
     Cloud(PathBuf),
     Volume(PathBuf),
+    AirDrop,
     Server(String),
 }
 
@@ -726,7 +728,7 @@ impl Browser {
         if self.sidebar.collapsed.locations {
             self.first_location() - 1
         } else {
-            self.first_location() + self.sidebar.locations.len() - 1
+            self.airdrop_ix()
         }
     }
 
@@ -857,6 +859,11 @@ impl Browser {
         });
     }
 
+    /// AirDrop's row, after every location, where Edit doesn't move it.
+    fn airdrop_ix(&self) -> usize {
+        self.first_location() + self.sidebar.locations.len()
+    }
+
     /// What the sidebar's keys are on.
     pub(super) fn row_at(&self, ix: usize) -> Option<Row> {
         let first = self.first_favorite();
@@ -867,6 +874,7 @@ impl Browser {
             2 if self.sidebar.worktrees => Some(Row::Worktrees),
             ix if ix < locations => Some(Row::Favorite(ix - first)),
             _ if self.sidebar.collapsed.locations => None,
+            ix if ix == self.airdrop_ix() => Some(Row::AirDrop),
             ix => self.sidebar.locations.get(ix - locations).copied(),
         }
     }
@@ -882,6 +890,7 @@ impl Browser {
             }
             Row::Cloud(ix) => RowTarget::Cloud(self.sidebar.cloud.get(ix)?.path.clone()),
             Row::Volume(ix) => RowTarget::Volume(self.sidebar.volumes.get(ix)?.mount.clone()),
+            Row::AirDrop => RowTarget::AirDrop,
             Row::Server(ix) => RowTarget::Server(self.sidebar.remotes.get(ix)?.id.clone()),
         })
     }
@@ -980,6 +989,9 @@ impl Browser {
                         .update(cx, |pane, cx| pane.go(mount, window, cx));
                 }
             }
+            Some(Row::AirDrop) => self
+                .pane()
+                .update(cx, |pane, cx| pane.open_page(Shows::AirDrop, window, cx)),
             Some(Row::Server(ix)) => {
                 if let Some(id) = self.sidebar.remotes.get(ix).map(|s| s.id.clone()) {
                     self.pane()
@@ -1054,6 +1066,11 @@ impl Browser {
                 let folder = self.pane().read(cx).folder().to_path_buf();
                 Stop::remote(folder, RemoteAt::Start(source.id.clone()))
             }
+            Some(Row::AirDrop) => {
+                let mut stop = Stop::folder(self.pane().read(cx).disk_folder().to_path_buf());
+                stop.shows = Shows::AirDrop;
+                stop
+            }
             None => return,
         };
         self.new_tab(stop, window, cx);
@@ -1085,6 +1102,9 @@ impl Browser {
         }
         if pane.showing_worktrees() {
             return self.sidebar.worktrees.then_some(2);
+        }
+        if pane.showing_airdrop() {
+            return (!self.sidebar.collapsed.locations).then(|| self.airdrop_ix());
         }
         let Collapsed {
             favorites: no_favorites,
@@ -1185,10 +1205,20 @@ impl Browser {
         folder: Option<(PathBuf, String)>,
     ) -> Stateful<gpui::Div> {
         let spot = Spot::Place(ix);
+        let target = folder.map(|(path, name)| Target::Folder { spot, path, name });
+        self.drop_target(slot, spot, target)
+    }
+
+    /// `slot` taking a drop on `target`, outlined while a drop would land.
+    fn drop_target(
+        &self,
+        slot: Stateful<gpui::Div>,
+        spot: Spot,
+        target: Option<Target>,
+    ) -> Stateful<gpui::Div> {
         let outlined = self.drag.outlines(&spot);
-        slot.when_some(folder.filter(|_| self.drag.active()), |d, (path, name)| {
+        slot.when_some(target.filter(|_| self.drag.active()), |d, target| {
             let drag = self.drag.clone();
-            let target = Target::Folder { spot, path, name };
             offers(d, move |_| drag.offer(target.clone()))
         })
         .when(outlined, |d| {
@@ -1587,6 +1617,29 @@ impl Browser {
             .aria_label(volume.name.clone())
             .child(row)
             .map(|d| self.drop_row(d, ix, folder))
+    }
+
+    /// AirDrop: opens its page, and sends what's dropped on it.
+    fn airdrop_row(
+        &self,
+        here: &Here,
+        cursor: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let ix = self.airdrop_ix();
+        let spot = Spot::Place(ix);
+        let selected = !here.searching && here.shows == Shows::AirDrop;
+        let row = Self::row(ix, selected, true, cursor)
+            .h(px(ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon("airdrop", 16.).text_color(content(if selected { 1. } else { 0.55 })))
+            .child(div().flex_1().truncate().child("AirDrop"));
+        let slot = Self::slot(ix, selected, true, cx)
+            .aria_label("AirDrop")
+            .child(row);
+        self.drop_target(slot, spot, Some(Target::AirDrop(spot)))
     }
 
     /// A saved SFTP server: Eject while it's connected, and why when it
@@ -2286,6 +2339,7 @@ impl Browser {
                     .child(self.locations_header(cx))
                     .when(!collapsed.locations, |d| {
                         d.children(self.location_rows(&here, cursor, cx))
+                            .child(self.airdrop_row(&here, cursor, cx))
                     }),
             )
             .child(self.foot(&here, cx))

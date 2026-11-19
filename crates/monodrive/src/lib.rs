@@ -34,6 +34,7 @@ mod review_duplicates;
 mod selection;
 pub mod session;
 mod settings;
+pub mod sharing;
 mod text_field;
 mod theme;
 mod thumbnails;

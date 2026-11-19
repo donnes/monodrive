@@ -1810,11 +1810,12 @@ pub(super) fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
     cx.simulate_mouse_up(at, MouseButton::Right, with(""));
 }
 
-const ON_A_FILE: [&str; 14] = [
+const ON_A_FILE: [&str; 15] = [
     "Open",
     "Open With",
     "Reveal in Finder",
     "Open in Terminal",
+    "Share…",
     "Get Info",
     "Rename",
     "Suggest Names",
@@ -1852,9 +1853,10 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
     assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
     let (titles, _) = menu(&browser, cx).unwrap();
     assert_eq!(
-        titles[3..7],
+        titles[3..8],
         [
             "Open in Terminal",
+            "Share…",
             "Get Info",
             "New Folder with Selection",
             "Rename"
@@ -1923,7 +1925,7 @@ fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut Test
     // ↑ and ↓ come round from the ends.
     press(cx, "up");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Copy Path"));
-    press(cx, "down down down down down down down down");
+    press(cx, "down down down down down down down down down");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Duplicate"));
     press(cx, "enter");
     assert_eq!(menu(&browser, cx), None);
@@ -2868,6 +2870,7 @@ fn a_compressed_folder_opens_read_only_and_extracts_beside_itself(cx: &mut TestA
         &Compress,
         &NewFolder,
         &RevealInFinder,
+        &Share,
         &QuickLook,
     ] {
         assert!(!offered(cx, action), "{}", action.name());
