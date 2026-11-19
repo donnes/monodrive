@@ -3,7 +3,7 @@
 //! Every control writes straight to [`Preferences`], so changes apply live.
 
 use crate::agents::{self, Action, Harness, Setup};
-use crate::app_icon::AppIcon;
+use crate::app_icon::{AppIcon, Picture};
 use crate::background::{self, Backdrop, Effect, Look, Scope};
 use crate::browser::CheckForUpdates;
 use crate::commands::{self, Group};
@@ -22,10 +22,10 @@ use crate::theme::{
 };
 use gpui::{
     Anchor, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, ImageSource, KeyBinding, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, PromptLevel, Resource,
-    Role, ScrollHandle, SharedString, Stateful, Subscription, Toggled, Window, actions, anchored,
-    canvas, deferred, div, img, point, prelude::*, px, relative,
+    EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, PromptLevel, Role, ScrollHandle,
+    SharedString, Stateful, Subscription, Toggled, Window, actions, anchored, canvas, deferred,
+    div, img, point, prelude::*, px, relative,
 };
 use monodrive_core::entries::SortBy;
 use monodrive_core::mcp::{Profile, TOOLS};
@@ -1717,7 +1717,7 @@ impl SettingsView {
     fn appearance(
         &self,
         p: &Preferences,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let light = theme::is_light();
@@ -1782,10 +1782,15 @@ impl SettingsView {
             ),
             group(
                 "App Icon",
-                Some("Shown in the Dock, the app switcher and Finder."),
+                None,
                 vec![
-                    self.focusable("app-icon", true, app_icon_picker(p.app_icon), cx)
-                        .into_any_element(),
+                    self.focusable(
+                        "app-icon",
+                        true,
+                        app_icon_picker(p.app_icon, window, cx),
+                        cx,
+                    )
+                    .into_any_element(),
                 ],
             ),
             group(
@@ -2663,7 +2668,7 @@ fn accent_picker(p: &Preferences, light: bool) -> Stateful<Div> {
 
 /// The icons on offer, as the pictures the Dock will show. With no choice,
 /// the one this build came with is selected.
-fn app_icon_picker(chosen: Option<AppIcon>) -> Stateful<Div> {
+fn app_icon_picker(chosen: Option<AppIcon>, window: &mut Window, cx: &mut App) -> Stateful<Div> {
     const SIDE: f32 = 76.;
     // The pictures keep macOS's icon margin, 100 of every 1024 points on each
     // side; the icons' own edges line up with the plate's text instead.
@@ -2693,6 +2698,11 @@ fn app_icon_picker(chosen: Option<AppIcon>) -> Stateful<Div> {
         .gap(px(8.))
         .children(AppIcon::ALL.into_iter().enumerate().map(|(ix, choice)| {
             let selected = shown == Some(choice);
+            let picture = Picture {
+                icon: choice,
+                pixels: (SIDE * window.scale_factor()).ceil() as u32,
+            };
+            let picture = window.use_asset::<Picture>(&picture, cx).flatten();
             div()
                 .id(("app-icon", ix))
                 .role(Role::RadioButton)
@@ -2702,12 +2712,10 @@ fn app_icon_picker(chosen: Option<AppIcon>) -> Stateful<Div> {
                 .flex_col()
                 .items_center()
                 .cursor_pointer()
-                .child(
-                    img(ImageSource::Resource(Resource::Embedded(
-                        choice.asset().into(),
-                    )))
-                    .size(px(SIDE)),
-                )
+                .child(match picture {
+                    Some(picture) => img(picture).size(px(SIDE)).into_any_element(),
+                    None => div().size(px(SIDE)).into_any_element(),
+                })
                 .child(
                     div()
                         .mt(px(6. - margin))
