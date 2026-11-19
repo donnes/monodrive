@@ -1,6 +1,7 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
+mod airdrop;
 mod archive;
 mod batch_rename;
 mod cloud;
@@ -164,6 +165,7 @@ actions!(
         ShowInEnclosingFolder,
         RevealInFinder,
         OpenInTerminal,
+        Share,
         QuickLook,
         OpenInQuickLook,
         EditPreview,
@@ -178,6 +180,7 @@ actions!(
         GoOverview,
         GoRecents,
         GoWorktrees,
+        GoAirDrop,
         GoTrash,
         GoFavorite1,
         GoFavorite2,
@@ -671,6 +674,15 @@ impl Browser {
     /// The menu bar's checkmarks go with the window in front.
     pub fn window_activated(&self, cx: &mut Context<Self>) {
         self.mirror_pane(cx);
+        // Who can find this Mac may have changed in System Settings.
+        for pane in self.shown_panes() {
+            pane.update(cx, |pane, cx| {
+                if pane.showing_airdrop() {
+                    pane.read_airdrop(cx);
+                    cx.notify();
+                }
+            });
+        }
     }
 
     /// The pane commands act on.

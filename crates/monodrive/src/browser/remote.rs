@@ -838,10 +838,10 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         use super::{
-            Back, CopyPath, DeselectAll, EnclosingFolder, Forward, GoApplications, GoComputer,
-            GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents, GoTrash, NewFolder,
-            OpenSelected, Rename, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-            ShowContextMenu, home,
+            Back, CopyPath, DeselectAll, EnclosingFolder, Forward, GoAirDrop, GoApplications,
+            GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents,
+            GoTrash, NewFolder, OpenSelected, Rename, SelectFirst, SelectLast, SelectNext,
+            SelectPrevious, ShowContextMenu, home,
         };
         let selected = !self.remote.selected.is_empty();
         let renaming = self.remote.renaming.is_some();
@@ -872,6 +872,9 @@ impl Pane {
                 )
                 .on_action(cx.listener(|this, _: &GoOverview, window, cx| {
                     this.open_page(Shows::Overview, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &GoAirDrop, window, cx| {
+                    this.open_page(Shows::AirDrop, window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &GoTrash, window, cx| this.open_trash(window, cx)))
                 .on_action(cx.listener(|this, _: &GoDesktop, window, cx| {
@@ -982,7 +985,7 @@ impl Pane {
                 let spot = Spot::Pane(pane.entity_id());
                 offers(d, move |_| {
                     drag.offer(Target::Server {
-                        spot: spot.clone(),
+                        spot,
                         at: at.clone(),
                         name: name.clone(),
                     })

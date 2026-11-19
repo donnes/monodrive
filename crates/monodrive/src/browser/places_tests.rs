@@ -342,8 +342,9 @@ fn favorites_and_locations_fold_on_their_own_and_the_keys_skip_what_is_folded(
     assert!(!editing(cx));
     assert_eq!(row(cx, 2), Some(Row::Volume(0)));
     assert_eq!(row(cx, 3), Some(Row::Volume(1)));
-    assert!(on_screen(cx, "place-3"));
-    assert!(!on_screen(cx, "place-4"));
+    assert_eq!(row(cx, 4), Some(Row::AirDrop));
+    assert!(on_screen(cx, "place-4"));
+    assert!(!on_screen(cx, "place-5"));
 
     // With both folded, the keys stop at Recents.
     press_on(cx, "locations-toggle");
@@ -533,9 +534,9 @@ fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_
         ))
     );
     assert_eq!(shown(cx), ["Macintosh HD", "iCloud Drive"]);
-    // Backup was the last row, so the keys move up onto the one now last.
+    // The keys stay put, on AirDrop, which follows every location.
     let cursor = browser.read_with(cx, |b, _| b.row_at(b.sidebar_cursor));
-    assert_eq!(cursor, Some(Row::Cloud(0)));
+    assert_eq!(cursor, Some(Row::AirDrop));
     // A renamed cloud folder is listed in Settings by the name it was given.
     let docs = project.join("docs");
     cx.update(|_, cx| {

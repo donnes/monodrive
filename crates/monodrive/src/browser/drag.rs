@@ -61,7 +61,7 @@ pub(super) struct ServerDrag {
 }
 
 /// A place on screen that a drop can land on.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Spot {
     Row(EntityId, usize),
     Pane(EntityId),
@@ -88,6 +88,8 @@ pub(super) enum Target {
         at: RemotePath,
         name: String,
     },
+    /// Sent with AirDrop, which asks who to.
+    AirDrop(Spot),
 }
 
 /// What a drop would do.
@@ -115,6 +117,7 @@ pub(super) enum Decision {
         into: PathBuf,
         name: String,
     },
+    AirDrop(Vec<PathBuf>),
     /// Nothing, for this reason.
     Nothing(String),
 }
@@ -136,6 +139,7 @@ pub(super) fn decide(
                 at: *at,
             };
         }
+        Target::AirDrop(_) => return Decision::AirDrop(sources.to_vec()),
         Target::Folder { path, name, .. } => (path, name),
         Target::Server { at, name, .. } => {
             return Decision::Upload {
@@ -185,6 +189,7 @@ impl Decision {
             Self::Upload { paths, name, .. } => {
                 format!("Copy {} to {name}", count_of(paths, "items"))
             }
+            Self::AirDrop(paths) => format!("AirDrop {}", count_of(paths, "items")),
             Self::Download { paths, name, .. } => {
                 let what = match paths.as_slice() {
                     [one] => one.name().unwrap_or(one.source()).to_owned(),
@@ -227,6 +232,7 @@ pub(super) fn decide_from_server(sources: &[RemotePath], target: &Target) -> Dec
         }
         Target::Server { .. } => Decision::Nothing("Copy between a server and this Mac.".into()),
         Target::Pin(_) => Decision::Nothing("Only folders on this Mac go in Favorites.".into()),
+        Target::AirDrop(_) => Decision::Nothing("AirDrop sends files on this Mac.".into()),
     }
 }
 
@@ -505,12 +511,17 @@ impl Drag {
         self.decision(|target, decision| {
             let lands = matches!(
                 decision,
-                Decision::Send { .. } | Decision::Upload { .. } | Decision::Download { .. }
+                Decision::Send { .. }
+                    | Decision::Upload { .. }
+                    | Decision::Download { .. }
+                    | Decision::AirDrop(_)
             );
             lands
                 && matches!(
                     target,
-                    Target::Folder { spot: at, .. } | Target::Server { spot: at, .. } if at == spot
+                    Target::Folder { spot: at, .. }
+                        | Target::Server { spot: at, .. }
+                        | Target::AirDrop(at) if at == spot
                 )
         })
         .unwrap_or(false)
@@ -1235,6 +1246,10 @@ impl Browser {
                     pane.download_from_server(paths, into, window, cx)
                 });
             }
+            Some(Decision::AirDrop(paths)) => {
+                feedback::haptic(Haptic::Generic, cx);
+                self.pane().update(cx, |pane, cx| pane.airdrop(&paths, cx));
+            }
             Some(Decision::Nothing(_)) | None => {}
         }
     }
@@ -1431,6 +1446,20 @@ mod tests {
             true,
         );
         assert_eq!(decided.says(), "Move g to a");
+    }
+
+    #[test]
+    fn airdrop_sends_what_is_dropped_whatever_the_keys_and_moves_nothing() {
+        let airdrop = Target::AirDrop(Spot::Place(4));
+        let sources = paths(&["/a/f", "/a/g"]);
+        let decided = decide(&sources, &airdrop, keys(false, true), true);
+        assert_eq!(decided, Decision::AirDrop(sources));
+        assert_eq!(decided.says(), "AirDrop 2 items");
+        let remote = RemotePath::new("box", "/srv/f").unwrap();
+        assert!(matches!(
+            decide_from_server(&[remote], &airdrop),
+            Decision::Nothing(_)
+        ));
     }
 
     #[test]

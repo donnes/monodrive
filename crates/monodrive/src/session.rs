@@ -83,6 +83,9 @@ pub enum Shows {
     Recents,
     Overview,
     Worktrees,
+    /// AirDrop's page. Saved as the folder, so a launch never looks for
+    /// people nearby.
+    AirDrop,
     /// The copies of each other in `folder`, which reads every file there.
     /// Saved as the folder, so a launch never starts that read.
     Duplicates,

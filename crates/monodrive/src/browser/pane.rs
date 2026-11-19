@@ -16,15 +16,15 @@ use super::worktrees::WorktreesPage;
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, Compress, CopyPath, DeselectAll, Download,
     Duplicate, EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext,
-    ExtendPrevious, ExtendRight, Extract, FindDuplicates, FocusSearch, Forward, GoApplications,
-    GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder,
-    GoTrash, GoWorktrees, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, Offer,
-    OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places, PutBack, QuickLook,
-    Redo, RemoveDownload, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
-    SearchContents, SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-    ShowContextMenu, ShowInEnclosingFolder, ShowPackageContents, SortByKind, SortByModified,
-    SortByName, SortBySize, SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, home,
-    short_reason, sidebar, trash, with_owner,
+    ExtendPrevious, ExtendRight, Extract, FindDuplicates, FocusSearch, Forward, GoAirDrop,
+    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents,
+    GoToFolder, GoTrash, GoWorktrees, MoveHere, MoveToTrash, NewFile, NewFolder,
+    NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp,
+    Places, PutBack, QuickLook, Redo, RemoveDownload, Rename, RevealInFinder, ReverseSort,
+    ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder, SelectFirst, SelectLast,
+    SelectNext, SelectPrevious, Share, ShowContextMenu, ShowInEnclosingFolder, ShowPackageContents,
+    SortByKind, SortByModified, SortByName, SortBySize, SuggestNames, Undo, ViewAsColumns,
+    ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash, with_owner,
 };
 use crate::background::{Backdrop, Look};
 use crate::commands::Scope;
@@ -530,7 +530,7 @@ impl Pane {
                 Some(StopState {
                     place: stop.place.clone()?,
                     shows: match stop.shows {
-                        Shows::Archive | Shows::Duplicates => Shows::Folder,
+                        Shows::Archive | Shows::Duplicates | Shows::AirDrop => Shows::Folder,
                         shows => shows,
                     },
                     remote: stop.remote.clone(),
@@ -628,6 +628,8 @@ impl Pane {
             "Overview".to_string()
         } else if self.showing_worktrees() {
             "Worktrees".to_string()
+        } else if self.showing_airdrop() {
+            "AirDrop".to_string()
         } else if self.showing_duplicates() {
             format!("Duplicates in {}", level_name(self.folder()))
         } else if self.showing_remote() {
@@ -818,6 +820,9 @@ impl Pane {
         }
         if self.showing_worktrees() {
             self.scan_worktrees(cx);
+        }
+        if self.showing_airdrop() {
+            self.read_airdrop(cx);
         }
         if self.showing_duplicates() {
             self.read_duplicates(cx);
@@ -2347,6 +2352,16 @@ impl Pane {
             }
         }
         self.list(!select, cx);
+    }
+
+    /// Whether the selection is on this Mac's disk for macOS to share.
+    pub(super) fn shareable(&self) -> bool {
+        !self.selection.is_empty() && !self.showing_remote() && !self.showing_archive()
+    }
+
+    /// macOS's share menu on the selection, under `at` in the window.
+    pub(super) fn share(&self, window: &Window, at: Point<Pixels>) {
+        crate::sharing::share(&self.chosen(), window, at);
     }
 
     /// The selected paths, in the order shown.
@@ -4119,6 +4134,9 @@ impl Pane {
                 .on_action(cx.listener(|this, _: &GoWorktrees, window, cx| {
                     this.open_page(Shows::Worktrees, window, cx)
                 }))
+                .on_action(cx.listener(|this, _: &GoAirDrop, window, cx| {
+                    this.open_page(Shows::AirDrop, window, cx)
+                }))
                 .when(self.showing_folder(), |d| {
                     d.on_action(cx.listener(|this, _: &FindDuplicates, window, cx| {
                         this.find_duplicates(window, cx)
@@ -4167,6 +4185,9 @@ impl Pane {
                 .when(selected && on_disk, |d| {
                     d.on_action(cx.listener(|this, _: &RevealInFinder, _, _| {
                         workspace::reveal(&this.chosen())
+                    }))
+                    .on_action(cx.listener(|this, _: &Share, window, cx| {
+                        this.share(window, this.menu_point(cx))
                     }))
                 })
                 .when(selected && on_disk && scattered, |d| {
@@ -4596,6 +4617,7 @@ impl Pane {
                 self.organize_page(cx)
                     .or_else(|| self.overview_page(cx))
                     .or_else(|| self.worktrees_page(cx))
+                    .or_else(|| self.airdrop_page(cx))
                     .or_else(|| self.duplicates_page(cx))
                     .or_else(|| {
                         // Until it has something to show, so it never

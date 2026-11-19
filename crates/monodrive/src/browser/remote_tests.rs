@@ -120,6 +120,9 @@ fn a_saved_server_opens_in_the_pane_and_back_leaves_it(cx: &mut TestAppContext) 
         toast(&browser, cx),
         Some(("Copied 2 paths".into(), false, false))
     );
+    // Go › AirDrop leaves the server for the AirDrop page.
+    press(cx, "cmd-shift-r");
+    assert!(in_pane(&browser, cx, |pane, _| pane.showing_airdrop()));
 }
 
 /// The text on the clipboard.

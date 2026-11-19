@@ -4,6 +4,7 @@
 //! updates on resize, focus and fullscreen then can't move them back.
 
 use gpui::Window;
+use objc2::Message;
 use objc2_app_kit::{NSLayoutAttribute, NSView, NSWindow, NSWindowButton};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -66,11 +67,16 @@ pub fn pin(window: &Window, title_bar_height: f32) {
 }
 
 pub fn ns_window(window: &Window) -> Option<objc2::rc::Retained<NSWindow>> {
+    ns_view(window)?.window()
+}
+
+/// The view GPUI draws the window's content in.
+pub fn ns_view(window: &Window) -> Option<objc2::rc::Retained<NSView>> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
     let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         return None;
     };
     // SAFETY: GPUI's AppKit handle points at its live content view.
     let view = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
-    view.window()
+    Some(view.retain())
 }
