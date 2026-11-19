@@ -329,7 +329,8 @@ fn favorites_and_locations_fold_on_their_own_and_the_keys_skip_what_is_folded(
 
     // Folded, Favorites' rows and Edit go, with the Edit session, and
     // Locations follow Recents.
-    let editing = |cx: &mut VisualTestContext| browser.read_with(cx, |b, _| b.sidebar.editing);
+    let editing =
+        |cx: &mut VisualTestContext| browser.read_with(cx, |b, _| b.sidebar.editing_favorites);
     cx.dispatch_action(EditFavorites);
     assert!(editing(cx));
     press_on(cx, "favorites-toggle");
@@ -526,7 +527,7 @@ fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_
     assert_eq!(
         toast(&browser, cx),
         Some((
-            "Hid Backup from the sidebar. Settings shows it again.".into(),
+            "Hid Backup from the sidebar. Edit Locations shows it again.".into(),
             false,
             false
         ))
@@ -568,6 +569,101 @@ fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_
         hidden.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
         ["Personal"]
     );
+}
+
+#[gpui::test]
+fn edit_locations_reorders_and_the_eye_hides_until_done_for_good(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let ext = tempfile::tempdir().unwrap();
+    let drive = ext.path().canonicalize().unwrap();
+    let world = world(vec![startup(), volume("Backup", &drive, "B", 100, 10)], cx);
+    *world.fake.cloud.lock().unwrap() = vec![CloudFolder {
+        name: "iCloud Drive".into(),
+        path: project.join("docs"),
+    }];
+    let (browser, cx) = open(&world, &project, cx);
+    let names = |cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, _| {
+            let sidebar = &b.sidebar;
+            (sidebar.locations.iter())
+                .map(|row| match *row {
+                    Row::Volume(ix) => sidebar.volumes[ix].name.clone(),
+                    Row::Cloud(ix) => sidebar.cloud[ix].name.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let hidden = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let prefs = cx.global::<Preferences>();
+            prefs
+                .hidden_drives
+                .iter()
+                .map(|h| h.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(names(cx), ["Macintosh HD", "iCloud Drive", "Backup"]);
+    assert!(!on_screen(cx, "location-handle-0"));
+    assert!(!on_screen(cx, "location-eye-0"));
+    assert!(on_screen(cx, "volume-eject-1"));
+
+    // In Edit mode, a click goes nowhere and the handles move rows.
+    click(cx, "locations-edit");
+    assert!(!on_screen(cx, "volume-eject-1"));
+    let first = favorites(&browser, cx).len() + 2;
+    press_on(cx, &format!("place-{}", first + 2));
+    assert_eq!(here(&browser, cx), project);
+    let from = center(cx, "location-handle-2");
+    let to = center(cx, &format!("place-{first}"));
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert_eq!(names(cx), ["Backup", "Macintosh HD", "iCloud Drive"]);
+
+    // ⌥↓ moves the row the keys are on, and the keys go with it.
+    browser.update_in(cx, |b, window, cx| {
+        b.sidebar_cursor = first;
+        window.focus(&b.sidebar_focus, cx);
+    });
+    press(cx, "alt-down");
+    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+    assert_eq!(browser.read_with(cx, |b, _| b.sidebar_cursor), first + 1);
+
+    // The eye hides a row, which stays, dimmed, until Done. The keys stay
+    // on Backup as the row above it goes and comes back.
+    let on_backup = |cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, _| match b.row_at(b.sidebar_cursor) {
+            Some(Row::Volume(ix)) => b.sidebar.volumes[ix].name == "Backup",
+            _ => false,
+        })
+    };
+    press_on(cx, "location-eye-0");
+    assert_eq!(hidden(cx), ["Macintosh HD"]);
+    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+    click(cx, "locations-edit");
+    assert_eq!(names(cx), ["Backup", "iCloud Drive"]);
+    assert!(on_backup(cx));
+    assert!(!on_screen(cx, "location-eye-0"));
+
+    // Edit brings it back in its place, and its eye shows it again.
+    click(cx, "locations-edit");
+    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+    assert!(on_backup(cx));
+    press_on(cx, "location-eye-0");
+    assert!(hidden(cx).is_empty());
+    press(cx, "escape");
+    assert!(!browser.read_with(cx, |b, _| b.sidebar.editing_locations));
+    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+
+    // The order is kept, so the drives come back in it however they mount.
+    world.fake.volumes.lock().unwrap().reverse();
+    world.volumes_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
 }
 
 #[gpui::test]
@@ -1455,8 +1551,9 @@ fn a_drive_going_under_the_palette_stops_eject_reaching_the_next_one(cx: &mut Te
         assert_eq!(under_keys(&view, cx).as_deref(), Some("Eject"));
         press(cx, "enter");
     };
+    // B itself goes, so the keys fall to C, the next one.
     press(cx, "cmd-k");
-    world.fake.volumes.lock().unwrap().remove(1);
+    world.fake.volumes.lock().unwrap().remove(2);
     world.volumes_changed.try_send(()).unwrap();
     cx.run_until_parked();
     eject_from_palette(cx);

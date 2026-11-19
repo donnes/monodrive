@@ -20,6 +20,7 @@
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
 //! `sidebar-keys.png`, `sidebar-edit.png`, `sidebar-folded.png`, with Favorites folded,
+//! `sidebar-edit-locations.png`, with Installer hidden,
 //! `connect.png`, `connect-failed.png`, `trash.png`,
 //! `recents.png` and `recents-grid.png`, then `updates.png`. The Overview's are last: see `shoot_overview`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
@@ -79,19 +80,21 @@ use gpui::{
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Back, Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives,
-    EditFavorites, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder, ExtendNext,
-    ExtendPrevious, FindDuplicates, FocusNext, FocusSearch, GoOverview, GoRecents, GoToFolder,
-    GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations,
-    OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast, SelectNext,
-    SelectPrevious, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit,
-    Undo, ViewAsGrid, ViewAsList,
+    EditFavorites, EditLocations, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder,
+    ExtendNext, ExtendPrevious, FindDuplicates, FocusNext, FocusSearch, GoOverview, GoRecents,
+    GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings, OpenWith,
+    Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast,
+    SelectNext, SelectPrevious, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames,
+    ToggleSplit, Undo, ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
 use monodrive::downloads;
 use monodrive::finder;
 use monodrive::native::{self, Native, SizeDone};
 use monodrive::onboarding::{Onboarding, Setup, Step};
-use monodrive::preferences::{Collapsed, Preferences, Theme, View, WorkspaceStyle};
+use monodrive::preferences::{
+    Collapsed, Drive, HiddenDrive, Preferences, Theme, View, WorkspaceStyle,
+};
 use monodrive::session::{PaneState, Shows, StopState, TabState, WindowState};
 use monodrive::updates::{self, Updates};
 use monodrive_core::apps::App as MacApp;
@@ -363,6 +366,22 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
         })
     });
     save(&mut cx, window, out, "sidebar-folded")?;
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            collapsed: Collapsed {
+                favorites: true,
+                locations: false,
+            },
+            hidden_drives: vec![HiddenDrive {
+                name: "Installer".into(),
+                drive: Drive::Volume(VolumeId::Uuid("Installer".into())),
+            }],
+            ..base.clone()
+        })
+    });
+    dispatch(&mut cx, window, &EditLocations)?;
+    save(&mut cx, window, out, "sidebar-edit-locations")?;
+    dispatch(&mut cx, window, &EditLocations)?;
     cx.update(|cx| cx.set_global(base.clone()));
     dispatch(&mut cx, window, &ConnectToServer)?;
     save(&mut cx, window, out, "connect")?;

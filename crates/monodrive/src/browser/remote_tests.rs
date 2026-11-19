@@ -194,6 +194,29 @@ fn disconnecting_waits_to_be_asked_and_forgetting_leaves_the_server_alone(cx: &m
 }
 
 #[gpui::test]
+fn forgetting_a_server_above_the_keys_leaves_them_on_theirs(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    for id in ["one", "two", "three"] {
+        let host = format!("{id}.example");
+        world.store.add_remote(&host, Some(id), None).unwrap();
+    }
+    let (browser, cx) = open(&world, &project, cx);
+    let row = server_row(&browser, 1, cx);
+    let ix: usize = row.trim_start_matches("place-").parse().unwrap();
+    browser.update(cx, |b, cx| {
+        b.sidebar_cursor = ix;
+        b.forget_server("one", cx);
+    });
+    cx.run_until_parked();
+    let on = browser.read_with(cx, |b, _| match b.row_at(b.sidebar_cursor) {
+        Some(Row::Server(at)) => Some(b.sidebar.remotes[at].id.clone()),
+        _ => None,
+    });
+    assert_eq!(on.as_deref(), Some("two"));
+}
+
+#[gpui::test]
 fn the_palette_opens_a_server_and_disconnects_a_connected_one(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let project = project.canonicalize().unwrap();

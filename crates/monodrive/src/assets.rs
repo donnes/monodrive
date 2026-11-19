@@ -41,6 +41,7 @@ icons!(
     "eject",
     "external-link",
     "eye",
+    "eye-off",
     "file",
     "folder-01",
     "git-branch",
