@@ -45,7 +45,21 @@ blake3 = "1.8"
 semver = "1"
 # Generates the MCP tools' schemas from the types that decode their arguments.
 schemars = "1"
+# LocalSend's own protocol core, which its app and CLI use: discovery, the
+# pinned HTTPS client and the receiving server. Not on crates.io (the
+# `localsend` crate there is another project), so it's pinned to a commit.
+# Bump deliberately. Its `webrtc` feature stays off: it brings a license
+# deny.toml doesn't allow.
+localsend = { git = "https://github.com/localsend/localsend", rev = "e05d12a9c0fd4d8c0245d2ec5c3c177e7e0f759b", default-features = false, features = ["discovery"] }
+# The core runs on tokio; GPUI's executor doesn't, so it gets a thread of its own.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+tokio-util = { version = "0.7", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Which subnets to ask for devices; the core uses the same.
+if-addrs = "0.15"
 
 [dev-dependencies]
 tempfile = "3"
+# A loopback LocalSend receiver for the send tests.
+tokio = { version = "1", features = ["io-util", "net"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

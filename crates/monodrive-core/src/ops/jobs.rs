@@ -1291,7 +1291,7 @@ pub(super) fn numbered(path: &Path) -> Option<PathBuf> {
 }
 
 /// `name` as "name 2.ext".
-pub(super) fn numbered_name(name: &str, n: u32) -> String {
+pub(crate) fn numbered_name(name: &str, n: u32) -> String {
     let (stem, ext) = match name.rfind('.') {
         Some(dot) if dot > 0 => name.split_at(dot),
         _ => (name, ""),

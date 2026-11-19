@@ -4,7 +4,7 @@
 
 ## Profiles
 
-`tools/list` offers one of two profiles. **core** is the default: finding, reading and changing files, the jobs that do it, and what takes up space, 29 tools. **all** adds places, servers, saved searches, Git, saved commands, edits and organize, 54 tools. `monodrive mcp --profile all` picks it on the command line; without the flag, the server reads Settings' Agents page ("Management tools") when the session starts. A tool outside the profile answers like a tool that doesn't exist.
+`tools/list` offers one of two profiles. **core** is the default: finding, reading and changing files, the jobs that do it, and what takes up space, 29 tools. **all** adds places, servers, saved searches, Git, saved commands, edits and organize, and LocalSend's two tools once Settings turns LocalSend on: 56 tools in all. `monodrive mcp --profile all` picks it on the command line; without the flag, the server reads Settings' Agents page ("Management tools") when the session starts. A tool outside the profile answers like a tool that doesn't exist.
 
 Profiles exist because every listed tool costs each agent session tokens before it does anything. A test keeps what core gives a model (names, descriptions and input schemas) under 16 KB.
 

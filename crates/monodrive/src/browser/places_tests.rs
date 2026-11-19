@@ -345,6 +345,15 @@ fn favorites_and_locations_fold_on_their_own_and_the_keys_skip_what_is_folded(
     assert_eq!(row(cx, 4), Some(Row::AirDrop));
     assert!(on_screen(cx, "place-4"));
     assert!(!on_screen(cx, "place-5"));
+    // LocalSend follows AirDrop once Settings turns it on.
+    assert_eq!(row(cx, 5), None);
+    cx.update(|_, cx| crate::preferences::update(cx, |p| p.localsend = true));
+    cx.run_until_parked();
+    assert_eq!(row(cx, 5), Some(Row::LocalSend));
+    assert!(on_screen(cx, "place-5"));
+    cx.update(|_, cx| crate::preferences::update(cx, |p| p.localsend = false));
+    cx.run_until_parked();
+    assert!(!on_screen(cx, "place-5"));
 
     // With both folded, the keys stop at Recents.
     press_on(cx, "locations-toggle");

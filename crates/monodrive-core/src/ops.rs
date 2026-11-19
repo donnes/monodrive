@@ -13,6 +13,7 @@ pub mod rename;
 mod transfers;
 
 pub use disk::{FileId, Stamp};
+pub(crate) use jobs::numbered_name;
 pub use jobs::{Conflict, Done, Job, State, Task, Transfer};
 pub(crate) use owner::lock;
 pub use owner::{Client, Owner, Watch, run_owner};

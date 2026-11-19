@@ -912,8 +912,128 @@ impl SettingsView {
                 ],
             ),
             group("Finder", None, vec![self.show_in_finder(cx)]),
+            self.localsend_group(p, cx),
             self.updates_group(p, cx),
         ]
+    }
+
+    /// Receiving with LocalSend: whether, where to, and with what PIN. The
+    /// LocalSend page's footer has the same switch.
+    fn localsend_group(&self, p: &Preferences, cx: &mut Context<Self>) -> AnyElement {
+        let folder = monodrive_core::paths::abbreviate(&p.localsend_save_to());
+        let pin = p.localsend_pin.clone();
+        let pin_said = match &pin {
+            Some(pin) => format!("Senders type {pin}."),
+            None => "Anyone nearby can offer you files.".to_string(),
+        };
+        let use_localsend = row(
+            "Use LocalSend",
+            Some(
+                "Send files to phones and computers nearby running LocalSend. The LocalSend app isn't needed.",
+            ),
+            self.focusable(
+                "localsend",
+                true,
+                toggle("localsend", "Use LocalSend", p.localsend, |p, on| {
+                    p.localsend = on
+                }),
+                cx,
+            ),
+        );
+        if !p.localsend {
+            return group("LocalSend", None, vec![use_localsend]).into_any_element();
+        }
+        group(
+            "LocalSend",
+            None,
+            vec![
+                use_localsend,
+                row(
+                    "Receive files",
+                    Some("Devices nearby can offer you files, and you accept each one. They see this Mac by its name in Sharing settings."),
+                    self.focusable(
+                        "localsend-receive",
+                        true,
+                        toggle(
+                            "localsend-receive",
+                            "Receive files",
+                            p.localsend_receive,
+                            |p, on| p.localsend_receive = on,
+                        ),
+                        cx,
+                    ),
+                ),
+                row_with(
+                    "Save to",
+                    Some(folder.into()),
+                    self.focusable(
+                        "localsend-folder",
+                        true,
+                        text_button("localsend-folder", "Choose…", ButtonLook::Secondary).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.choose_localsend_folder(window, cx)
+                            }),
+                        ),
+                        cx,
+                    ),
+                ),
+                row_with(
+                    "Require a PIN",
+                    Some(pin_said.into()),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .when(pin.is_some(), |d| {
+                            d.child(
+                                self.focusable(
+                                    "localsend-new-pin",
+                                    true,
+                                    text_button(
+                                        "localsend-new-pin",
+                                        "New PIN",
+                                        ButtonLook::Secondary,
+                                    )
+                                    .on_click(|_, _, cx| {
+                                        preferences::update(cx, |p| {
+                                            p.localsend_pin = Some(new_pin())
+                                        })
+                                    }),
+                                    cx,
+                                ),
+                            )
+                        })
+                        .child(self.focusable(
+                            "localsend-pin",
+                            true,
+                            toggle("localsend-pin", "Require a PIN", pin.is_some(), |p, on| {
+                                p.localsend_pin = on.then(new_pin)
+                            }),
+                            cx,
+                        )),
+                ),
+            ],
+        )
+        .into_any_element()
+    }
+
+    fn choose_localsend_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            if let Some(folder) = paths.into_iter().next() {
+                let _ = cx
+                    .update(|_, cx| preferences::update(cx, |p| p.localsend_folder = Some(folder)));
+            }
+        })
+        .detach();
     }
 
     /// The switch that sends other apps' Show in Finder here. It shows what
@@ -1433,7 +1553,7 @@ impl SettingsView {
         };
         let tools = TOOLS
             .iter()
-            .filter(|tool| profile.offers(tool.profile))
+            .filter(|tool| profile.offers(tool.profile) && (p.localsend || !tool.is_localsend()))
             .map(|tool| {
                 div()
                     .py(px(8.))
@@ -1516,7 +1636,10 @@ impl SettingsView {
 
     /// Every command and its shortcut, grouped as in the menu bar.
     fn keyboard(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let all = commands::all();
+        let all: Vec<_> = commands::all()
+            .into_iter()
+            .filter(|command| !commands::hidden(command, p))
+            .collect();
         let mut page = Vec::new();
         if let Some(error) = &self.recording_error {
             page.push(
@@ -2433,6 +2556,14 @@ impl Render for SettingsView {
                 scrim.bg(theme::scrim(t))
             })
     }
+}
+
+/// Six digits, as LocalSend's PINs usually are.
+fn new_pin() -> String {
+    use std::hash::BuildHasher;
+    let random =
+        std::collections::hash_map::RandomState::new().hash_one(std::time::SystemTime::now());
+    format!("{:06}", random % 1_000_000)
 }
 
 /// The value at `offset` points along a track `width` wide. The knob's

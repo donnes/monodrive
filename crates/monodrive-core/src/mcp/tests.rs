@@ -172,7 +172,8 @@ fn the_core_profile_lists_file_tools_only_and_stays_cheap() {
     for name in ["pin", "rm_rf"] {
         assert_eq!(rpc(&mut core, name, json!({}))["error"]["code"], -32602);
     }
-    assert_eq!(listed(&mut server()).len(), TOOLS.len());
+    let all = &mut server().offering_localsend(true);
+    assert_eq!(listed(all).len(), TOOLS.len());
 }
 
 #[test]
@@ -1719,4 +1720,50 @@ fn remove_worktree_trashes_a_clean_worktree_and_shows_work_at_risk_before_a_toke
     let result = call(&mut server, "remove_worktree", json!({"path": main}));
     assert!(text(&result).contains("own checkout"), "{result}");
     stop(serving, server);
+}
+
+#[test]
+fn localsend_is_offered_once_settings_turns_it_on_and_sends_only_to_a_listed_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "a").unwrap();
+    let send = json!({"fingerprint": "AB12", "paths": [shown(&file)]});
+    let named = |tools: Vec<Value>| -> Vec<String> {
+        tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| name.starts_with("localsend_"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let saved = dir.path().join("settings.json");
+    let mut server = server().following_settings(saved.clone());
+    assert!(named(listed(&mut server)).is_empty());
+    assert_eq!(
+        rpc(&mut server, "localsend_send", send.clone())["error"]["code"],
+        -32602
+    );
+
+    // Settings' switch reaches a session already running, both ways.
+    std::fs::write(&saved, r#"{"localsend": true}"#).unwrap();
+    assert_eq!(
+        named(listed(&mut server)),
+        ["localsend_devices", "localsend_send"]
+    );
+    let result = call(
+        &mut server,
+        "localsend_send",
+        json!({"fingerprint": "AB12", "paths": [shown(&file)]}),
+    );
+    assert_eq!(code(&result), "not_found");
+    assert!(
+        text(&result).contains("localsend_devices"),
+        "{}",
+        text(&result)
+    );
+    std::fs::write(&saved, r#"{"localsend": false}"#).unwrap();
+    assert_eq!(
+        rpc(&mut server, "localsend_send", send)["error"]["code"],
+        -32602
+    );
 }

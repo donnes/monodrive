@@ -16,6 +16,8 @@ pub mod finder;
 mod frame;
 mod goto;
 mod jobs;
+mod localsend;
+mod localsend_ask;
 mod menu;
 mod motion;
 pub mod native;
@@ -198,6 +200,7 @@ pub fn run(folder: Option<PathBuf>) {
         window_commands(cx);
         finder::serve(requests, arrived, cx);
         updates::start(cx);
+        localsend::start(cx);
         // Once the first listings are done, so it doesn't compete with them.
         cx.spawn(async |cx| {
             cx.background_executor().timer(MEASURE_AFTER).await;

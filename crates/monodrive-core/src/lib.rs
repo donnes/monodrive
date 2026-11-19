@@ -8,6 +8,7 @@ pub mod edits;
 pub mod entries;
 pub mod index;
 pub mod info;
+pub mod localsend;
 pub mod mcp;
 pub mod naming;
 pub mod ops;

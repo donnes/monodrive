@@ -6,8 +6,16 @@ all-features = true
 
 [licenses]
 # MPL-2.0's copyleft covers only its own files, which we don't change.
-allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "Zlib", "Unicode-3.0", "MPL-2.0"]
+# ISC is ring's, untrusted's and rustls-webpki's, under LocalSend's TLS.
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "Zlib", "Unicode-3.0", "MPL-2.0", "ISC"]
 confidence-threshold = 0.9
+
+# LocalSend's core names no license in its manifest; its repository is
+# Apache-2.0 throughout.
+[[licenses.clarify]]
+crate = "localsend"
+expression = "Apache-2.0"
+license-files = [{ path = "../../LICENSE", hash = 0x15344b35 }]
 
 [bans]
 multiple-versions = "allow"
@@ -20,7 +28,7 @@ deny = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = ["https://github.com/noahdunnagan/fsearch"]
+allow-git = ["https://github.com/noahdunnagan/fsearch", "https://github.com/localsend/localsend"]
 
 [advisories]
 # Vulnerabilities fail; an unmaintained crate deep in GPUI's graph doesn't,
@@ -30,4 +38,8 @@ ignore = [
     # GPUI needs chrono too, so it stays in the graph whatever we use, and
     # no release fixes it. Moving our dates to jiff is its own change.
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; GPUI depends on it and no upgrade exists" },
+    # LocalSend's core makes its certificate's key with rsa 0.9, which has no
+    # fixed release. The attack times RSA decryption; that key only signs,
+    # through ring, in TLS handshakes, and nothing decrypts with it.
+    { id = "RUSTSEC-2023-0071", reason = "rsa only generates LocalSend's signing key; nothing decrypts with it" },
 ]
