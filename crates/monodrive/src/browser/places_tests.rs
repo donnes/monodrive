@@ -2675,6 +2675,14 @@ fn the_overview_is_a_place_in_the_history_and_the_session(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn airdrop_is_in_locations_before_the_drives_are_listed(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let locations = browser.read_with(cx, |b, _| b.sidebar.locations.clone());
+    assert_eq!(locations, [Row::AirDrop]);
+}
+
+#[gpui::test]
 fn the_sidebars_keys_reach_the_overview_above_recents(cx: &mut TestAppContext) {
     let world = world(vec![disk(900_000)], cx);
     let (_dir, project) = folder();

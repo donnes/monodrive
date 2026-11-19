@@ -1724,7 +1724,6 @@ impl Browser {
             .filter_map(|(at, row)| {
                 let ix = first + at;
                 let spot = Spot::Place(ix);
-                let selected = self.is_open(*row, here);
                 Some(match *row {
                     Row::Volume(vol) => self
                         .volume_row(vol, ix, here, cursor, cx)
@@ -1732,11 +1731,13 @@ impl Browser {
                     Row::Cloud(at) => self.cloud_row(at, ix, here, cursor, cx).into_any_element(),
                     Row::Server(at) => self.server_row(at, ix, here, cursor, cx).into_any_element(),
                     Row::AirDrop => {
+                        let selected = self.is_open(*row, here);
                         let row = self.share_row(ix, "AirDrop", "airdrop", selected, cursor, cx);
                         self.drop_target(row, spot, Some(Target::AirDrop(spot)))
                             .into_any_element()
                     }
                     Row::LocalSend => {
+                        let selected = self.is_open(*row, here);
                         let row =
                             self.share_row(ix, "LocalSend", "localsend", selected, cursor, cx);
                         self.drop_target(row, spot, Some(Target::LocalSendPage(spot)))
