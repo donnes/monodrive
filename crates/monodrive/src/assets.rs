@@ -1,3 +1,4 @@
+use crate::app_icon::AppIcon;
 use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
 
@@ -98,6 +99,9 @@ impl AssetSource for Assets {
             return Ok(Some(Cow::Borrowed(include_bytes!(
                 "../../../assets/nightly/sidebar-sky.svg"
             ))));
+        }
+        if let Some(icon) = AppIcon::ALL.into_iter().find(|icon| icon.asset() == path) {
+            return Ok(Some(Cow::Borrowed(icon.png())));
         }
         Ok(ICONS
             .iter()

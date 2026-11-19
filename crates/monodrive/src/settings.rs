@@ -3,6 +3,7 @@
 //! Every control writes straight to [`Preferences`], so changes apply live.
 
 use crate::agents::{self, Action, Harness, Setup};
+use crate::app_icon::AppIcon;
 use crate::background::{self, Backdrop, Effect, Look, Scope};
 use crate::browser::CheckForUpdates;
 use crate::commands::{self, Group};
@@ -21,10 +22,10 @@ use crate::theme::{
 };
 use gpui::{
     Anchor, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, PromptLevel, Role, ScrollHandle,
-    SharedString, Stateful, Subscription, Toggled, Window, actions, anchored, canvas, deferred,
-    div, point, prelude::*, px, relative,
+    EventEmitter, FocusHandle, Focusable, FontWeight, ImageSource, KeyBinding, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, PromptLevel, Resource,
+    Role, ScrollHandle, SharedString, Stateful, Subscription, Toggled, Window, actions, anchored,
+    canvas, deferred, div, img, point, prelude::*, px, relative,
 };
 use monodrive_core::entries::SortBy;
 use monodrive_core::mcp::{Profile, TOOLS};
@@ -1780,6 +1781,14 @@ impl SettingsView {
                 ],
             ),
             group(
+                "App Icon",
+                Some("Shown in the Dock, the app switcher and Finder."),
+                vec![
+                    self.focusable("app-icon", true, app_icon_picker(p.app_icon), cx)
+                        .into_any_element(),
+                ],
+            ),
+            group(
                 "Color",
                 None,
                 vec![
@@ -2650,6 +2659,71 @@ fn accent_picker(p: &Preferences, light: bool) -> Stateful<Div> {
                         .on_click(move |_, _, cx| preferences::update(cx, |p| p.accent = value))
                 }),
         )
+}
+
+/// The icons on offer, as the pictures the Dock will show. With no choice,
+/// the one this build came with is selected.
+fn app_icon_picker(chosen: Option<AppIcon>) -> Stateful<Div> {
+    const SIDE: f32 = 76.;
+    // The pictures keep macOS's icon margin, 100 of every 1024 points on each
+    // side; the icons' own edges line up with the plate's text instead.
+    let margin = SIDE * 100. / 1024.;
+    let shown = chosen.or(AppIcon::bundled());
+    let at = shown.and_then(|shown| AppIcon::ALL.iter().position(|icon| *icon == shown));
+    div()
+        .id("app-icon")
+        .role(Role::RadioGroup)
+        .aria_label("App icon")
+        .on_key_down(move |event: &KeyDownEvent, _, cx| {
+            if let Some(step) = arrow(&event.keystroke.key) {
+                let next = at.map_or(0, |at| {
+                    at.saturating_add_signed(step).min(AppIcon::ALL.len() - 1)
+                });
+                preferences::update(cx, |p| p.app_icon = Some(AppIcon::ALL[next]));
+                cx.stop_propagation();
+            }
+        })
+        .mx(px(-margin))
+        .pt(px(12. - margin))
+        .pb(px(10.))
+        .rounded(px(theme::RADIUS_CARD))
+        .flex()
+        .flex_wrap()
+        .justify_between()
+        .gap(px(8.))
+        .children(AppIcon::ALL.into_iter().enumerate().map(|(ix, choice)| {
+            let selected = shown == Some(choice);
+            div()
+                .id(("app-icon", ix))
+                .role(Role::RadioButton)
+                .aria_label(choice.label())
+                .aria_selected(selected)
+                .flex()
+                .flex_col()
+                .items_center()
+                .cursor_pointer()
+                .child(
+                    img(ImageSource::Resource(Resource::Embedded(
+                        choice.asset().into(),
+                    )))
+                    .size(px(SIDE)),
+                )
+                .child(
+                    div()
+                        .mt(px(6. - margin))
+                        .text_size(px(theme::TEXT_SMALL))
+                        .map(|d| {
+                            if selected {
+                                d.font_weight(FontWeight::MEDIUM).text_color(accent())
+                            } else {
+                                d.text_color(content(0.65))
+                            }
+                        })
+                        .child(choice.label()),
+                )
+                .when(!selected, |d| d.hover(|s| s.text_color(content(1.))))
+                .on_click(move |_, _, cx| preferences::update(cx, |p| p.app_icon = Some(choice)))
+        }))
 }
 
 /// The step an arrow key takes through a group: back for ← and ↑.

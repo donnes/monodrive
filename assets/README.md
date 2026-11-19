@@ -14,6 +14,12 @@ Don't edit the PNGs by hand.
 
 `dev/app-icon.icon` is the same folder drawn in outline on a blueprint grid. `scripts/bundle` uses it and the name "Monodrive (Dev)" for any build `scripts/release` didn't start. The Dock titles an app by its bundle's file name, so that bundle is `Monodrive (Dev).app`.
 
+## Choices
+
+Settings › Appearance offers other icons: Classic and Nightly are the two above, and `app-icons/` holds the rest as Icon Composer projects, the same folder over different art. `scripts/icons` exports each to `app-icons/<name>.png`, 512 px framed as the Dock frames an app icon by `scripts/app-icon-frame.swift`, and the app embeds those PNGs. To add one, add its project, list it in `scripts/icons` and in `AppIcon`, and run `scripts/icons`.
+
+The app shows the chosen icon in the Dock while it runs and writes it onto its bundle through `NSWorkspace`, so the Dock and Finder keep it after it quits. That Finder information fails `codesign --strict`, so the updater checks the running app without `--strict`, and `scripts/bundle` clears it before signing.
+
 ## The macOS icon
 
 The app needs no exported image: `scripts/bundle` compiles `prod/app-icon.icon` with `actool` into the bundle's `Assets.car`, which macOS 26 draws as Liquid Glass, and an `.icns` for older releases.

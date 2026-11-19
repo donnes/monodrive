@@ -71,7 +71,7 @@ Favorites and Locations each fold under their heading. The heading's name and a 
 
 ### Nightly builds
 
-A nightly has a night sky behind the top of its sidebar in a dark theme, `assets/nightly/sidebar-sky.svg`, one still picture whose right and bottom edges fade through a soft rounded corner, pinned to the sidebar's right edge. Its name and icon change in the Dock. Stable and debug builds have none of this.
+A nightly has a night sky behind the top of its sidebar in a dark theme, `assets/nightly/sidebar-sky.svg`, one still picture whose right and bottom edges fade through a soft rounded corner, pinned to the sidebar's right edge. Its name and icon change in the Dock, unless Settings › Appearance picks another icon. Stable and debug builds have none of this.
 
 ### Search
 

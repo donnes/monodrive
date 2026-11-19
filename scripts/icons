@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
-# Exports the app icon's PNGs from its Icon Composer project. `--check`
-# verifies they match the project without writing. See assets/README.md.
+# Exports the app icon's PNGs from their Icon Composer projects. `--check`
+# verifies they match the projects without writing. See assets/README.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROJECT=assets/prod/app-icon.icon
 UNIVERSAL=assets/prod/monodrive-universal-1024.png
 DESIGN_GENERATION=26
+# The icons Settings offers, as <name>=<project>. Each exports to
+# assets/app-icons/<name>.png, framed as the Dock frames an app icon.
+CHOICES=(
+  classic=assets/prod/app-icon.icon
+  nightly=assets/nightly/app-icon.icon
+  daylight=assets/app-icons/daylight.icon
+  aurora=assets/app-icons/aurora.icon
+  liftoff=assets/app-icons/liftoff.icon
+)
+CHOICE_SIZE=512
 
 check=false
 case "${1:-}" in
@@ -71,14 +81,37 @@ if [[ "$size" != "1024 1024 " ]]; then
   exit 1
 fi
 
+# 824 of 1024 points: the frame leaves the rest for the margin and shadow.
+for choice in "${CHOICES[@]}"; do
+  name=${choice%%=*}
+  "$tool" "${choice#*=}" --export-image --output-file "$scratch/$name-body.png" \
+    --platform macOS --rendition Default --width $((CHOICE_SIZE * 824 / 1024)) \
+    --height $((CHOICE_SIZE * 824 / 1024)) --scale 1 \
+    --design-generation "$DESIGN_GENERATION" >/dev/null
+  scripts/app-icon-frame.swift "$scratch/$name-body.png" "$scratch/$name.png" "$CHOICE_SIZE"
+done
+
 if $check; then
+  stale=0
   if ! cmp -s "$scratch/universal.png" "$UNIVERSAL"; then
     echo "$UNIVERSAL is stale. Run scripts/icons." >&2
-    exit 1
+    stale=1
   fi
-  echo "$UNIVERSAL matches $PROJECT."
+  for choice in "${CHOICES[@]}"; do
+    name=${choice%%=*}
+    if ! cmp -s "$scratch/$name.png" "assets/app-icons/$name.png"; then
+      echo "assets/app-icons/$name.png is stale. Run scripts/icons." >&2
+      stale=1
+    fi
+  done
+  (( stale == 0 )) || exit 1
+  echo "The exported icons match their projects."
   exit 0
 fi
 
 mv "$scratch/universal.png" "$UNIVERSAL"
-echo "Wrote $UNIVERSAL with $tool."
+for choice in "${CHOICES[@]}"; do
+  name=${choice%%=*}
+  mv "$scratch/$name.png" "assets/app-icons/$name.png"
+done
+echo "Wrote $UNIVERSAL and assets/app-icons with $tool."
