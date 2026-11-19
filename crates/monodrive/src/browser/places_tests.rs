@@ -614,7 +614,10 @@ fn edit_locations_reorders_and_the_eye_hides_until_done_for_good(cx: &mut TestAp
                 .collect::<Vec<_>>()
         })
     };
-    assert_eq!(names(cx), ["Macintosh HD", "iCloud Drive", "Backup"]);
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "iCloud Drive", "Backup", "AirDrop"]
+    );
     assert!(!on_screen(cx, "location-handle-0"));
     assert!(!on_screen(cx, "location-eye-0"));
     assert!(on_screen(cx, "volume-eject-1"));
@@ -632,7 +635,10 @@ fn edit_locations_reorders_and_the_eye_hides_until_done_for_good(cx: &mut TestAp
     cx.run_until_parked();
     cx.simulate_mouse_up(to, MouseButton::Left, with(""));
     cx.run_until_parked();
-    assert_eq!(names(cx), ["Backup", "Macintosh HD", "iCloud Drive"]);
+    assert_eq!(
+        names(cx),
+        ["Backup", "Macintosh HD", "iCloud Drive", "AirDrop"]
+    );
 
     // ⌥↓ moves the row the keys are on, and the keys go with it.
     browser.update_in(cx, |b, window, cx| {
@@ -640,7 +646,10 @@ fn edit_locations_reorders_and_the_eye_hides_until_done_for_good(cx: &mut TestAp
         window.focus(&b.sidebar_focus, cx);
     });
     press(cx, "alt-down");
-    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
     assert_eq!(browser.read_with(cx, |b, _| b.sidebar_cursor), first + 1);
 
     // The eye hides a row, which stays, dimmed, until Done. The keys stay
@@ -653,27 +662,56 @@ fn edit_locations_reorders_and_the_eye_hides_until_done_for_good(cx: &mut TestAp
     };
     press_on(cx, "location-eye-0");
     assert_eq!(hidden(cx), ["Macintosh HD"]);
-    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
     click(cx, "locations-edit");
-    assert_eq!(names(cx), ["Backup", "iCloud Drive"]);
+    assert_eq!(names(cx), ["Backup", "iCloud Drive", "AirDrop"]);
     assert!(on_backup(cx));
     assert!(!on_screen(cx, "location-eye-0"));
 
     // Edit brings it back in its place, and its eye shows it again.
     click(cx, "locations-edit");
-    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
     assert!(on_backup(cx));
     press_on(cx, "location-eye-0");
     assert!(hidden(cx).is_empty());
     press(cx, "escape");
     assert!(!browser.read_with(cx, |b, _| b.sidebar.editing_locations));
-    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
 
     // The order is kept, so the drives come back in it however they mount.
     world.fake.volumes.lock().unwrap().reverse();
     world.volumes_changed.try_send(()).unwrap();
     cx.run_until_parked();
-    assert_eq!(names(cx), ["Macintosh HD", "Backup", "iCloud Drive"]);
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
+
+    // AirDrop moves like any location, and keeps its place.
+    click(cx, "locations-edit");
+    let from = center(cx, "location-handle-3");
+    let to = center(cx, &format!("place-{first}"));
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    press(cx, "escape");
+    assert_eq!(
+        names(cx),
+        ["AirDrop", "Macintosh HD", "Backup", "iCloud Drive"]
+    );
+    let order = cx.update(|_, cx| cx.global::<Preferences>().location_order.clone());
+    assert_eq!(order.first(), Some(&crate::preferences::Location::AirDrop));
 }
 
 #[gpui::test]

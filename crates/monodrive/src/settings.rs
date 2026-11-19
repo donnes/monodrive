@@ -928,9 +928,7 @@ impl SettingsView {
         };
         let use_localsend = row(
             "Use LocalSend",
-            Some(
-                "Send files to phones and computers nearby running LocalSend. The LocalSend app isn't needed.",
-            ),
+            Some("Send files to phones and computers nearby running LocalSend."),
             self.focusable(
                 "localsend",
                 true,
