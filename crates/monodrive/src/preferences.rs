@@ -151,6 +151,8 @@ pub enum Location {
     Drive(Drive),
     /// A saved SFTP server, by its id.
     Server(String),
+    AirDrop,
+    LocalSend,
 }
 
 /// Monocode's interface scale steps.

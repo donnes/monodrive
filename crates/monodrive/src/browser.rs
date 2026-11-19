@@ -610,7 +610,7 @@ impl Browser {
         let index = cx
             .try_global::<SharedIndex>()
             .map_or_else(Arc::default, |shared| shared.0.clone());
-        Self {
+        let mut browser = Self {
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle().tab_stop(true),
             settings_focus: cx.focus_handle().tab_stop(true),
@@ -666,7 +666,10 @@ impl Browser {
             frame: None,
             session_key: None,
             session_save: Task::ready(()),
-        }
+        };
+        // AirDrop and LocalSend don't wait for the drives to be listed.
+        browser.arrange_locations(cx);
+        browser
     }
 
     /// The disk changed: every pane on screen checks what it's showing.

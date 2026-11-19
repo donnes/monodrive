@@ -206,7 +206,7 @@ pub(super) struct Sidebar {
     /// The saved SFTP servers.
     pub(super) remotes: Vec<Source>,
     /// Locations' rows in the order they're drawn, each a volume, cloud
-    /// folder or server.
+    /// folder, server, AirDrop or LocalSend.
     pub(super) locations: Vec<Row>,
     /// Why the saved lists didn't read. They stay as last read, and nothing
     /// changes the file.
@@ -220,7 +220,7 @@ pub(super) struct Sidebar {
     pub(super) command_held: bool,
     /// Worktrees has a row, after Recents, as Settings says.
     pub(super) worktrees: bool,
-    /// LocalSend has a row, after AirDrop, once Settings turns it on.
+    /// LocalSend has a row in Locations once Settings turns it on.
     pub(super) localsend: bool,
     /// The cloud folder whose name is being typed in its row.
     pub(super) renaming: Option<CloudRenaming>,
@@ -279,11 +279,7 @@ pub(super) enum RowTarget {
     Recents,
     Worktrees,
     Favorite(PathBuf),
-    Cloud(PathBuf),
-    Volume(PathBuf),
-    AirDrop,
-    LocalSend,
-    Server(String),
+    Location(Location),
 }
 
 /// Where the pane that commands act on is, for marking its row.
@@ -732,27 +728,16 @@ impl Browser {
     fn last_row(&self) -> usize {
         if self.sidebar.collapsed.locations {
             self.first_location() - 1
-        } else if self.sidebar.localsend {
-            self.localsend_ix()
         } else {
-            self.airdrop_ix()
+            self.first_location() + self.sidebar.locations.len().saturating_sub(1)
         }
     }
 
-    /// The sidebar's row of `location`, if Locations lists it.
-    fn location_ix(&self, location: Row) -> Option<usize> {
-        let at = self
-            .sidebar
-            .locations
-            .iter()
-            .position(|row| *row == location)?;
-        Some(self.first_location() + at)
-    }
-
     /// Lists in Locations every drive and cloud folder Settings doesn't hide,
-    /// or all of them while Locations is edited, and the saved servers, in
-    /// the order Edit gave them. Otherwise the startup disk leads, then the
-    /// cloud folders, the other drives and the servers. The sidebar's keys
+    /// or all of them while Locations is edited, the saved servers, AirDrop
+    /// and LocalSend, in the order Edit gave them. Otherwise the startup disk
+    /// leads, then the cloud folders, the other drives, the servers, AirDrop
+    /// and LocalSend. The sidebar's keys
     /// stay on their location wherever it lands, and on a row when the last
     /// one goes.
     pub(super) fn arrange_locations(&mut self, cx: &App) {
@@ -786,6 +771,8 @@ impl Browser {
             .chain((0..sidebar.cloud.len()).map(Row::Cloud))
             .chain((startup..sidebar.volumes.len()).map(Row::Volume))
             .chain((0..sidebar.remotes.len()).map(Row::Server))
+            .chain([Row::AirDrop])
+            .chain(sidebar.localsend.then_some(Row::LocalSend))
             .collect();
         rows.sort_by_cached_key(|row| {
             let location = self.location(*row);
@@ -812,7 +799,9 @@ impl Browser {
             Row::Volume(ix) => Location::Drive(Drive::of(sidebar.volumes.get(ix)?)),
             Row::Cloud(ix) => Location::Drive(Drive::Path(sidebar.cloud.get(ix)?.path.clone())),
             Row::Server(ix) => Location::Server(sidebar.remotes.get(ix)?.id.clone()),
-            _ => return None,
+            Row::AirDrop => Location::AirDrop,
+            Row::LocalSend => Location::LocalSend,
+            Row::Overview | Row::Recents | Row::Worktrees | Row::Favorite(_) => return None,
         })
     }
 
@@ -848,7 +837,8 @@ impl Browser {
                 name: cloud_name(folder, cx).to_owned(),
                 drive: Drive::Path(folder.path.clone()),
             }),
-            _ => None,
+            Row::Server(_) | Row::AirDrop | Row::LocalSend => None,
+            Row::Overview | Row::Recents | Row::Worktrees | Row::Favorite(_) => None,
         }
     }
 
@@ -866,16 +856,6 @@ impl Browser {
         });
     }
 
-    /// AirDrop's row, after every location, where Edit doesn't move it.
-    fn airdrop_ix(&self) -> usize {
-        self.first_location() + self.sidebar.locations.len()
-    }
-
-    /// LocalSend's row, after AirDrop's, where Edit doesn't move it either.
-    fn localsend_ix(&self) -> usize {
-        self.airdrop_ix() + 1
-    }
-
     /// What the sidebar's keys are on.
     pub(super) fn row_at(&self, ix: usize) -> Option<Row> {
         let first = self.first_favorite();
@@ -886,8 +866,6 @@ impl Browser {
             2 if self.sidebar.worktrees => Some(Row::Worktrees),
             ix if ix < locations => Some(Row::Favorite(ix - first)),
             _ if self.sidebar.collapsed.locations => None,
-            ix if ix == self.airdrop_ix() => Some(Row::AirDrop),
-            ix if self.sidebar.localsend && ix == self.localsend_ix() => Some(Row::LocalSend),
             ix => self.sidebar.locations.get(ix - locations).copied(),
         }
     }
@@ -901,11 +879,11 @@ impl Browser {
             Row::Favorite(ix) => {
                 RowTarget::Favorite(self.sidebar.places.get(ix)?.favorite.path.clone())
             }
-            Row::Cloud(ix) => RowTarget::Cloud(self.sidebar.cloud.get(ix)?.path.clone()),
-            Row::Volume(ix) => RowTarget::Volume(self.sidebar.volumes.get(ix)?.mount.clone()),
-            Row::AirDrop => RowTarget::AirDrop,
-            Row::LocalSend => RowTarget::LocalSend,
-            Row::Server(ix) => RowTarget::Server(self.sidebar.remotes.get(ix)?.id.clone()),
+            row @ (Row::Cloud(_)
+            | Row::Volume(_)
+            | Row::Server(_)
+            | Row::AirDrop
+            | Row::LocalSend) => RowTarget::Location(self.location(row)?),
         })
     }
 
@@ -1115,55 +1093,43 @@ impl Browser {
 
     /// Tabbing into the sidebar starts on the place that's open, if any.
     pub(super) fn cursor_on_folder(&self, cx: &App) -> Option<usize> {
+        let here = self.here(cx);
+        (0..=self.last_row())
+            .find(|ix| self.row_at(*ix).is_some_and(|row| self.is_open(row, &here)))
+    }
+
+    /// Where the pane that commands act on is.
+    fn here(&self, cx: &App) -> Here {
         let pane = self.pane().read(cx);
-        if pane.showing_overview() {
-            return Some(0);
+        Here {
+            folder: pane.folder().to_path_buf(),
+            shows: pane.stop().shows,
+            server: pane.remote_source().map(str::to_owned),
+            searching: !pane.query.is_empty(),
+            in_trash: pane.in_trash(cx),
         }
-        if pane.showing_recents() {
-            return Some(1);
+    }
+
+    /// Whether `row` is what the pane shows, which marks it and is where
+    /// the keys start.
+    fn is_open(&self, row: Row, here: &Here) -> bool {
+        let sidebar = &self.sidebar;
+        let page = |shows| !here.searching && here.shows == shows;
+        let folder = |path: Option<&Path>| here.showing_folder() && path == Some(&here.folder);
+        match row {
+            Row::Overview => page(Shows::Overview),
+            Row::Recents => page(Shows::Recents),
+            Row::Worktrees => page(Shows::Worktrees),
+            Row::AirDrop => page(Shows::AirDrop),
+            Row::LocalSend => page(Shows::LocalSend),
+            Row::Favorite(ix) => folder(sidebar.places.get(ix).and_then(|place| place.at())),
+            Row::Cloud(ix) => folder(sidebar.cloud.get(ix).map(|c| c.path.as_path())),
+            Row::Volume(ix) => folder(sidebar.volumes.get(ix).map(|v| v.mount.as_path())),
+            Row::Server(ix) => {
+                let id = sidebar.remotes.get(ix).map(|source| source.id.as_str());
+                id.is_some() && here.server.as_deref() == id
+            }
         }
-        if pane.showing_worktrees() {
-            return self.sidebar.worktrees.then_some(2);
-        }
-        if pane.showing_airdrop() {
-            return (!self.sidebar.collapsed.locations).then(|| self.airdrop_ix());
-        }
-        if pane.showing_localsend() {
-            let shown = self.sidebar.localsend && !self.sidebar.collapsed.locations;
-            return shown.then(|| self.localsend_ix());
-        }
-        let Collapsed {
-            favorites: no_favorites,
-            locations: no_locations,
-        } = self.sidebar.collapsed;
-        if let Some(id) = pane.remote_source() {
-            let ix = self.sidebar.remotes.iter().position(|s| s.id == id)?;
-            return self.location_ix(Row::Server(ix)).filter(|_| !no_locations);
-        }
-        let folder = pane.folder();
-        let favorite = self
-            .sidebar
-            .places
-            .iter()
-            .position(|place| place.at() == Some(folder))
-            .filter(|_| !no_favorites)
-            .map(|ix| ix + self.first_favorite());
-        if no_locations {
-            return favorite;
-        }
-        let cloud = || {
-            let ix = self.sidebar.cloud.iter().position(|c| c.path == folder)?;
-            self.location_ix(Row::Cloud(ix))
-        };
-        let volume = || {
-            let ix = self
-                .sidebar
-                .volumes
-                .iter()
-                .position(|v| v.mount == folder)?;
-            self.location_ix(Row::Volume(ix))
-        };
-        favorite.or_else(cloud).or_else(volume)
     }
 
     /// Where a row's presses land, the gap under it included. An edited
@@ -1305,21 +1271,6 @@ impl Browser {
         )
     }
 
-    /// LocalSend: opens its page, and a drop opens it holding what was
-    /// dropped, for the device clicked next.
-    fn localsend_row(
-        &self,
-        here: &Here,
-        cursor: Option<usize>,
-        cx: &mut Context<Self>,
-    ) -> Stateful<gpui::Div> {
-        let ix = self.localsend_ix();
-        let spot = Spot::Place(ix);
-        let selected = !here.searching && here.shows == Shows::LocalSend;
-        let row = Self::page_row(ix, "LocalSend", "localsend", selected, cursor, cx);
-        self.drop_target(row, spot, Some(Target::LocalSendPage(spot)))
-    }
-
     fn favorite_row(
         &self,
         fav: usize,
@@ -1331,7 +1282,7 @@ impl Browser {
         let ix = fav + self.first_favorite();
         let label = label_of(&place.favorite.path);
         let glyph = glyph_of(&place.favorite.path);
-        let selected = here.showing_folder() && place.at() == Some(here.folder.as_path());
+        let selected = self.is_open(Row::Favorite(fav), here);
         let reason = match &place.availability {
             Availability::Available(_) => None,
             Availability::Unavailable(why) => Some(why.clone()),
@@ -1427,7 +1378,7 @@ impl Browser {
     ) -> impl IntoElement + use<> {
         let folder = &self.sidebar.cloud[at];
         let hidden = self.hidden(Row::Cloud(at), cx);
-        let selected = here.showing_folder() && here.folder == folder.path;
+        let selected = self.is_open(Row::Cloud(at), here);
         let name = cloud_name(folder, cx).to_owned();
         let renaming = self
             .sidebar
@@ -1584,7 +1535,7 @@ impl Browser {
         let volume = &self.sidebar.volumes[vol];
         let editing = self.sidebar.editing_locations;
         let hidden = self.hidden(Row::Volume(vol), cx);
-        let selected = here.showing_folder() && here.folder == volume.mount;
+        let selected = self.is_open(Row::Volume(vol), here);
         let mount = volume.mount.clone();
         let glyph = if volume.network {
             "server"
@@ -1660,27 +1611,29 @@ impl Browser {
             .map(|d| self.drop_row(d, ix, folder))
     }
 
-    /// AirDrop: opens its page, and sends what's dropped on it.
-    fn airdrop_row(
+    /// AirDrop or LocalSend: a page that opens on a click and takes what's
+    /// dropped on it.
+    fn share_row(
         &self,
-        here: &Here,
+        ix: usize,
+        name: &'static str,
+        glyph: &'static str,
+        selected: bool,
         cursor: Option<usize>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let ix = self.airdrop_ix();
-        let spot = Spot::Place(ix);
-        let selected = !here.searching && here.shows == Shows::AirDrop;
-        let row = Self::row(ix, selected, true, cursor)
+    ) -> Stateful<gpui::Div> {
+        let frame = self
+            .location_frame(ix, selected, false, cursor)
             .h(px(ROW_HEIGHT))
             .flex()
             .items_center()
             .gap_2()
-            .child(icon("airdrop", 16.).text_color(content(if selected { 1. } else { 0.55 })))
-            .child(div().flex_1().truncate().child("AirDrop"));
-        let slot = Self::slot(ix, selected, true, cx)
-            .aria_label("AirDrop")
-            .child(row);
-        self.drop_target(slot, spot, Some(Target::AirDrop(spot)))
+            .children(self.location_handle(ix, name))
+            .child(icon(glyph, 16.).text_color(glyph_ink(selected, false)))
+            .child(div().flex_1().truncate().child(name));
+        self.location_slot(ix, selected, cx)
+            .aria_label(name)
+            .child(frame)
     }
 
     /// A saved SFTP server: Eject while it's connected, and why when it
@@ -1695,7 +1648,7 @@ impl Browser {
     ) -> impl IntoElement + use<> {
         let source = &self.sidebar.remotes[at];
         let editing = self.sidebar.editing_locations;
-        let selected = here.server.as_deref() == Some(source.id.as_str());
+        let selected = self.is_open(Row::Server(at), here);
         let link = remote::link(&source.id, cx).cloned();
         let failed = match &link {
             Some(remote::Link::Failed(error)) => Some(remote::short_reason(error)),
@@ -1770,13 +1723,29 @@ impl Browser {
         (self.sidebar.locations.iter().enumerate())
             .filter_map(|(at, row)| {
                 let ix = first + at;
+                let spot = Spot::Place(ix);
                 Some(match *row {
                     Row::Volume(vol) => self
                         .volume_row(vol, ix, here, cursor, cx)
                         .into_any_element(),
                     Row::Cloud(at) => self.cloud_row(at, ix, here, cursor, cx).into_any_element(),
                     Row::Server(at) => self.server_row(at, ix, here, cursor, cx).into_any_element(),
-                    _ => return None,
+                    Row::AirDrop => {
+                        let selected = self.is_open(*row, here);
+                        let row = self.share_row(ix, "AirDrop", "airdrop", selected, cursor, cx);
+                        self.drop_target(row, spot, Some(Target::AirDrop(spot)))
+                            .into_any_element()
+                    }
+                    Row::LocalSend => {
+                        let selected = self.is_open(*row, here);
+                        let row =
+                            self.share_row(ix, "LocalSend", "localsend", selected, cursor, cx);
+                        self.drop_target(row, spot, Some(Target::LocalSendPage(spot)))
+                            .into_any_element()
+                    }
+                    Row::Overview | Row::Recents | Row::Worktrees | Row::Favorite(_) => {
+                        return None;
+                    }
                 })
             })
             .collect()
@@ -2141,14 +2110,7 @@ impl Browser {
         // only they show it.
         let cursor = (self.sidebar_focus.is_focused(window) && window.last_input_was_keyboard())
             .then_some(self.sidebar_cursor);
-        let pane = self.pane().read(cx);
-        let here = Here {
-            folder: pane.folder().to_path_buf(),
-            shows: pane.stop().shows,
-            server: pane.remote_source().map(str::to_owned),
-            searching: !pane.query.is_empty(),
-            in_trash: pane.in_trash(cx),
-        };
+        let here = self.here(cx);
         let width = sidebar_width(cx.global::<Preferences>().sidebar_width, window);
         let at_cursor = self.row_at(self.sidebar_cursor);
         let last_row = self.last_row();
@@ -2340,7 +2302,7 @@ impl Browser {
                         0,
                         "Overview",
                         "hard-drive",
-                        !here.searching && here.shows == Shows::Overview,
+                        self.is_open(Row::Overview, &here),
                         cursor,
                         cx,
                     ))
@@ -2348,7 +2310,7 @@ impl Browser {
                         1,
                         "Recents",
                         "clock",
-                        !here.searching && here.shows == Shows::Recents,
+                        self.is_open(Row::Recents, &here),
                         cursor,
                         cx,
                     ))
@@ -2357,7 +2319,7 @@ impl Browser {
                             2,
                             "Worktrees",
                             "git-branch",
-                            !here.searching && here.shows == Shows::Worktrees,
+                            self.is_open(Row::Worktrees, &here),
                             cursor,
                             cx,
                         ))
@@ -2380,10 +2342,6 @@ impl Browser {
                     .child(self.locations_header(cx))
                     .when(!collapsed.locations, |d| {
                         d.children(self.location_rows(&here, cursor, cx))
-                            .child(self.airdrop_row(&here, cursor, cx))
-                            .when(self.sidebar.localsend, |d| {
-                                d.child(self.localsend_row(&here, cursor, cx))
-                            })
                     }),
             )
             .child(self.foot(&here, cx))
