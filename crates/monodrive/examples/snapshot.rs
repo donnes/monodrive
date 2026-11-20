@@ -109,7 +109,7 @@ use monodrive_core::remote::{Connections, RemoteError, Source, Transport};
 use monodrive_core::search::{Looks, Scope, Search};
 use monodrive_core::servers::Cancel;
 use monodrive_core::sizes::FolderSize;
-use monodrive_core::updates::{Channel, Notes, Release};
+use monodrive_core::updates::{Change, Channel, Notes, Release};
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -407,8 +407,19 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
         version: "0.2.0".parse()?,
         published: "2026-10-30T12:00:00Z".into(),
         notes: Notes {
-            highlights: Some("Search inside archives. Check for updates from the sidebar.".into()),
-            changes: vec!["Eject works on network drives again".into()],
+            highlights: None,
+            changes: vec![
+                Change {
+                    title: Some("Archive search.".into()),
+                    text: "Search finds files inside zip and tar archives without opening them."
+                        .into(),
+                },
+                Change {
+                    title: Some("Network drives.".into()),
+                    text: "Eject works on network drives again.".into(),
+                },
+            ],
+            more: Some("Plus 4 more bug fixes and improvements.".into()),
             stats: Some("12 changes from 2 contributors".into()),
         },
         page: "https://github.com/donnes/monodrive/releases".into(),
