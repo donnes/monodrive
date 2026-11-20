@@ -2117,6 +2117,9 @@ impl Pane {
 
     /// ↑ and ↓: a row of the list, or of the grid.
     pub(super) fn select_vertically(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+        if self.showing_overview() {
+            return self.step_overview(down, cx);
+        }
         if self.showing_worktrees() {
             return self.step_worktree(down, cx);
         }
