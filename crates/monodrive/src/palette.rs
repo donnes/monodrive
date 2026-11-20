@@ -1155,7 +1155,7 @@ const SFTP: &str = "SFTP servers";
 const SMB: &str = "SMB servers";
 
 /// The commands on a selection, in the order worth offering them.
-const SELECTION_ORDER: [&str; 22] = [
+const SELECTION_ORDER: [&str; 21] = [
     "Open",
     "Open With",
     "Quick Look",
@@ -1175,7 +1175,6 @@ const SELECTION_ORDER: [&str; 22] = [
     "Reveal in Finder",
     "Open in Terminal",
     "Share…",
-    "Send with LocalSend…",
     "Put Back",
     "Move to Trash",
 ];
