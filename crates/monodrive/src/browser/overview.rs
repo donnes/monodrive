@@ -8,7 +8,8 @@
 
 use super::pane::Pane;
 use super::sidebar::Places;
-use super::{ConnectToServer, EmptyTrash, Offer, Operations, lock, with_owner};
+use super::{ConnectToServer, EmptyTrash, Offer, Operations, SharedIndex, lock, with_owner};
+use crate::notify;
 use crate::theme::{self, ButtonLook, content, icon, row_icon_button, section_label, text_button};
 use gpui::{
     AnyElement, App, Context, FontWeight, Global, Hsla, MouseButton, Role, ScrollHandle, Task,
@@ -28,9 +29,12 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 /// Folders measured at once.
 const MEASURING: usize = 2;
+/// How often the storage notifications look again.
+const WATCH_EVERY: Duration = Duration::from_secs(3 * 60 * 60);
 /// How many of a group's folders it lists when opened, largest first.
 const SPOTS_SHOWN: usize = 12;
 /// How far back the page says what agents changed, and how many.
@@ -295,6 +299,79 @@ pub(crate) fn measure_overview(cx: &mut App) {
             }
         })
         .detach();
+}
+
+/// Looks at the startup disk and the clean worktrees now and every few hours,
+/// for the notifications Settings wants. Asks Git and measures only what a
+/// switch that's on needs.
+pub(crate) fn watch_storage(cx: &mut App) {
+    cx.spawn(async |cx| {
+        loop {
+            let wanted = cx.update(|cx| {
+                let places = cx.try_global::<Places>().cloned()?;
+                let index = cx.try_global::<SharedIndex>()?.0.clone();
+                let low = notify::wanted(notify::Kind::LowDisk, cx);
+                let worktrees = notify::wanted(notify::Kind::Worktrees, cx);
+                (low || worktrees).then_some((places, index, low, worktrees))
+            });
+            if let Some((places, index, low, worktrees)) = wanted {
+                let found = cx
+                    .background_spawn(
+                        async move { look_at_storage(&places, &index, low, worktrees) },
+                    )
+                    .await;
+                if let Some(said) = cx.update(|cx| notify::storage(found, overview::now(), cx)) {
+                    cx.background_spawn(async move { said.save() }).await;
+                }
+            }
+            cx.background_executor().timer(WATCH_EVERY).await;
+        }
+    })
+    .detach();
+}
+
+/// What the storage notifications would say about: the startup disk if it's
+/// low, and the clean worktrees, asked about and measured again first.
+fn look_at_storage(
+    places: &Places,
+    index: &std::sync::OnceLock<Result<monodrive_core::index::Index, String>>,
+    low: bool,
+    worktrees: bool,
+) -> notify::Storage {
+    let reader = Reader::new(places);
+    let clean = worktrees
+        .then(|| {
+            let git = Git::find().ok()?;
+            let search = |name: &str, limit| places.drives.find_files(index, name, limit);
+            let _ = overview::check_worktrees(&reader.env, &git, search);
+            let (_, due) = overview::clean_worktrees(&reader.env, &reader.volumes, overview::now());
+            let progress = storage::Progress::default();
+            for folder in due {
+                overview::measure(&reader.env, &folder, &progress, None, overview::now());
+            }
+            overview::clean_worktrees(&reader.env, &reader.volumes, overview::now()).0
+        })
+        .flatten();
+    let disk = low
+        .then(|| {
+            let about = reader.read();
+            let headline = about.headline.filter(|disk| disk.low)?;
+            let trash = headline.trash.map_or(0, |trash| trash.unshared);
+            let freeable = about
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.size.unshared)
+                .sum::<u64>()
+                + trash;
+            Some((headline, freeable))
+        })
+        .flatten();
+    notify::Storage {
+        low: disk,
+        worktrees: clean,
+        said: notify::Said::read(),
+        allowed: notify::allowed(),
+    }
 }
 
 impl Pane {

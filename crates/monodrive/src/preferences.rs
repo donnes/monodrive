@@ -247,7 +247,23 @@ pub struct Preferences {
     pub localsend_folder: Option<PathBuf>,
     /// What senders must type, if anything.
     pub localsend_pin: Option<String>,
+    /// Monodrive posts notifications, each kind while its own switch is on,
+    /// and only while another app is in front.
+    pub notifications: bool,
+    /// A LocalSend device offers this Mac something.
+    pub notify_localsend_offers: bool,
+    /// A LocalSend send or receive ended.
+    pub notify_localsend_ended: bool,
+    /// The startup disk went under the Overview's low line.
+    pub notify_low_disk: bool,
+    /// Clean worktrees together passed `notify_worktrees_over`.
+    pub notify_worktrees: bool,
+    /// In GB.
+    pub notify_worktrees_over: u32,
 }
+
+/// The amounts, in GB, clean worktrees may pass before Monodrive says so.
+pub const WORKTREE_LIMITS: [u32; 5] = [5, 10, 20, 50, 100];
 
 /// Which of the sidebar's sections are folded, each on its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +326,12 @@ impl Default for Preferences {
             localsend_receive: false,
             localsend_folder: None,
             localsend_pin: None,
+            notifications: true,
+            notify_localsend_offers: true,
+            notify_localsend_ended: true,
+            notify_low_disk: true,
+            notify_worktrees: true,
+            notify_worktrees_over: 20,
         }
     }
 }
@@ -344,6 +366,16 @@ impl Preferences {
         self.localsend_receive = defaults.localsend_receive;
         self.localsend_folder = defaults.localsend_folder;
         self.localsend_pin = defaults.localsend_pin;
+    }
+
+    pub fn restore_notifications(&mut self) {
+        let defaults = Self::default();
+        self.notifications = defaults.notifications;
+        self.notify_localsend_offers = defaults.notify_localsend_offers;
+        self.notify_localsend_ended = defaults.notify_localsend_ended;
+        self.notify_low_disk = defaults.notify_low_disk;
+        self.notify_worktrees = defaults.notify_worktrees;
+        self.notify_worktrees_over = defaults.notify_worktrees_over;
     }
 
     /// Where LocalSend saves what it receives.
@@ -387,6 +419,12 @@ impl Preferences {
             localsend_receive: self.localsend_receive,
             localsend_folder: self.localsend_folder.take(),
             localsend_pin: self.localsend_pin.take(),
+            notifications: self.notifications,
+            notify_localsend_offers: self.notify_localsend_offers,
+            notify_localsend_ended: self.notify_localsend_ended,
+            notify_low_disk: self.notify_low_disk,
+            notify_worktrees: self.notify_worktrees,
+            notify_worktrees_over: self.notify_worktrees_over,
             ..Self::default()
         };
     }

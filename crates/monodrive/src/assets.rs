@@ -26,6 +26,7 @@ icons!(
     "airdrop",
     "app-window",
     "arrow-down-circle",
+    "bell",
     "bot",
     "cancel-01",
     "check-hi",

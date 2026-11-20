@@ -14,7 +14,7 @@ use crate::native::native;
 use crate::palettes::{self, PALETTES};
 use crate::preferences::{
     self, GRID_ICON_SIZES, Preferences, RowSize, Terminal, Theme, UI_SCALE_PERCENTS, View,
-    WindowSize, WorkspaceStyle,
+    WORKTREE_LIMITS, WindowSize, WorkspaceStyle,
 };
 use crate::theme::{
     self, ButtonLook, Elevation, accent, content, focus_ring, icon, icon_button, knob, knob_shadow,
@@ -79,15 +79,17 @@ enum Page {
     Appearance,
     Keyboard,
     Agents,
+    Notifications,
 }
 
 impl Page {
-    const ALL: [Page; 5] = [
+    const ALL: [Page; 6] = [
         Page::General,
         Page::Window,
         Page::Appearance,
         Page::Keyboard,
         Page::Agents,
+        Page::Notifications,
     ];
 
     fn label(self) -> &'static str {
@@ -95,6 +97,7 @@ impl Page {
             Page::General => "General",
             Page::Window => "Window",
             Page::Appearance => "Appearance",
+            Page::Notifications => "Notifications",
             Page::Keyboard => "Keyboard",
             Page::Agents => "Agents",
         }
@@ -105,6 +108,7 @@ impl Page {
             Page::General => "sliders",
             Page::Window => "app-window",
             Page::Appearance => "palette",
+            Page::Notifications => "bell",
             Page::Keyboard => "keyboard",
             Page::Agents => "bot",
         }
@@ -115,6 +119,7 @@ impl Page {
             Page::General => "nav-General",
             Page::Window => "nav-Window",
             Page::Appearance => "nav-Appearance",
+            Page::Notifications => "nav-Notifications",
             Page::Keyboard => "nav-Keyboard",
             Page::Agents => "nav-Agents",
         }
@@ -126,6 +131,7 @@ impl Page {
             Page::General => Some(Preferences::restore_general),
             Page::Window => Some(Preferences::restore_window),
             Page::Appearance => Some(Preferences::restore_appearance),
+            Page::Notifications => Some(Preferences::restore_notifications),
             Page::Keyboard => Some(|p| p.shortcuts.clear()),
             Page::Agents => Some(|p| {
                 p.agents_change_files = true;
@@ -1110,6 +1116,175 @@ impl SettingsView {
             ],
         )
         .into_any_element()
+    }
+
+    /// A notification's switch, dimmed and out of reach while notifications
+    /// are off.
+    fn notify_toggle(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        on: bool,
+        p: &Preferences,
+        set: fn(&mut Preferences, bool),
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let enabled = p.notifications;
+        let switch = if enabled {
+            toggle(id, label, on, set)
+        } else {
+            theme::switch(on)
+                .id(id)
+                .role(Role::Switch)
+                .aria_label(label)
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
+                .opacity(0.4)
+        };
+        self.focusable(id, enabled, switch, cx)
+    }
+
+    fn allow_notifications(&self, p: &Preferences, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.focusable(
+            "notifications",
+            true,
+            toggle(
+                "notifications",
+                "Allow notifications",
+                p.notifications,
+                |p, on| p.notifications = on,
+            ),
+            cx,
+        )
+    }
+
+    fn system_notifications(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.focusable(
+            "notifications-system",
+            true,
+            text_button(
+                "notifications-system",
+                "Open System Settings",
+                ButtonLook::Secondary,
+            )
+            .on_click(|_, _, cx| {
+                cx.open_url("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+            }),
+            cx,
+        )
+    }
+
+    fn worktree_limit(
+        &self,
+        p: &Preferences,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let limits = WORKTREE_LIMITS
+            .into_iter()
+            .map(|gb| MenuItem {
+                label: format!("{gb} GB").into(),
+                icon: None,
+                selected: gb == p.notify_worktrees_over,
+                choose: Rc::new(move |cx| {
+                    preferences::update(cx, |p| p.notify_worktrees_over = gb)
+                }),
+            })
+            .collect();
+        div()
+            .when(!(p.notifications && p.notify_worktrees), |d| d.opacity(0.4))
+            .child(self.popup(
+                "notify-worktrees-over",
+                "Clean worktrees over",
+                80.,
+                limits,
+                window,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// A master switch, then a group per feature.
+    fn notifications(
+        &self,
+        p: &Preferences,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        vec![
+            group(
+                "Notifications",
+                None,
+                vec![
+                    row("Allow notifications", None, self.allow_notifications(p, cx)),
+                    row("Banners and sounds", None, self.system_notifications(cx)),
+                ],
+            ),
+            group(
+                "LocalSend",
+                None,
+                vec![
+                    row(
+                        "Offers from devices",
+                        Some("Accept or decline from the notification. Plays AirDrop's chime."),
+                        self.notify_toggle(
+                            "notify-localsend-offers",
+                            "Offers from devices",
+                            p.notify_localsend_offers,
+                            p,
+                            |p, on| p.notify_localsend_offers = on,
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Sends and receives that end",
+                        Some("Whether everything arrived, or why not."),
+                        self.notify_toggle(
+                            "notify-localsend-ended",
+                            "Sends and receives that end",
+                            p.notify_localsend_ended,
+                            p,
+                            |p, on| p.notify_localsend_ended = on,
+                            cx,
+                        ),
+                    ),
+                ],
+            ),
+            group(
+                "Storage",
+                Some("Each says so once, then waits a week before saying it again."),
+                vec![
+                    row(
+                        "Startup disk running low",
+                        Some("Under 20% free, with what could free space."),
+                        self.notify_toggle(
+                            "notify-low-disk",
+                            "Startup disk running low",
+                            p.notify_low_disk,
+                            p,
+                            |p, on| p.notify_low_disk = on,
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Clean worktrees take more than",
+                        Some("Worktrees holding nothing their repositories don't."),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(self.worktree_limit(p, window, cx))
+                            .child(self.notify_toggle(
+                                "notify-worktrees",
+                                "Clean worktrees",
+                                p.notify_worktrees,
+                                p,
+                                |p, on| p.notify_worktrees = on,
+                                cx,
+                            )),
+                    ),
+                ],
+            ),
+        ]
     }
 
     fn window_page(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -2455,6 +2630,7 @@ impl Render for SettingsView {
             Page::General => self.general(&prefs, cx),
             Page::Window => self.window_page(&prefs, cx),
             Page::Appearance => self.appearance(&prefs, window, cx),
+            Page::Notifications => self.notifications(&prefs, window, cx),
             Page::Keyboard => self.keyboard(&prefs, cx),
             Page::Agents => self.agents(&prefs, window, cx),
         };

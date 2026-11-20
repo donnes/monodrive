@@ -24,6 +24,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFPreferences", "CFString", "CFURL"] }
 objc2-quick-look-ui = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "QLPreviewItem", "QLPreviewPanel", "QLPreviewView"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes", "UTType"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotificationSettings", "UNUserNotificationCenter"] }
 raw-window-handle = "0.6"
 serde.workspace = true
 # preserve_order: adding an agent rewrites its config without reordering it.

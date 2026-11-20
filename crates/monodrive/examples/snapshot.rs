@@ -509,7 +509,13 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     // Tab onto the page list, whose arrows change pages.
     let next = named(&mut cx, "settings::FocusNext")?;
     dispatch(&mut cx, window, &*next)?;
-    for page in ["window", "appearance", "keyboard", "agents"] {
+    for page in [
+        "window",
+        "appearance",
+        "keyboard",
+        "agents",
+        "notifications",
+    ] {
         press(&mut cx, window, "down")?;
         save(&mut cx, window, out, &format!("settings-{page}"))?;
     }

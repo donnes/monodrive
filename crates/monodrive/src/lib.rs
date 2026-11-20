@@ -22,6 +22,7 @@ mod menu;
 mod motion;
 pub mod native;
 mod native_view;
+mod notify;
 pub mod onboarding;
 mod palette;
 mod palettes;
@@ -201,10 +202,12 @@ pub fn run(folder: Option<PathBuf>) {
         finder::serve(requests, arrived, cx);
         updates::start(cx);
         localsend::start(cx);
+        notify::start(cx);
         // Once the first listings are done, so it doesn't compete with them.
         cx.spawn(async |cx| {
             cx.background_executor().timer(MEASURE_AFTER).await;
             cx.update(browser::measure_overview);
+            cx.update(browser::watch_storage);
         })
         .detach();
         let explicit = folder.is_some();
