@@ -275,6 +275,54 @@ fn a_declined_offer_takes_nothing_and_a_failed_file_says_why() {
 }
 
 #[test]
+fn an_accepted_message_is_its_text_and_writes_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (inbox, told) = inbox(dir.path().to_path_buf());
+    let message = FileDto {
+        file_type: "text/plain".into(),
+        preview: Some("the wifi password".into()),
+        ..dto("1", "6d1c.txt", 17)
+    };
+    let decision = offer(&inbox, &[message]);
+    let Event::Offer(offered) = next(&told) else {
+        panic!("a person is asked first");
+    };
+    assert_eq!(offered.text.as_deref(), Some("the wifi password"));
+
+    inbox.answer(&offered.id, true);
+    let Ok(PrepareUploadDecisionV2::Accept(ids)) = decision.blocking_recv() else {
+        panic!("accepting a message answers it");
+    };
+    assert!(ids.is_empty(), "nothing is uploaded");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn messages_are_kept_newest_first_privately_until_forgotten() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("localsend/messages.json");
+    let messages = Messages::at(path.clone());
+    assert_eq!(messages.list().unwrap(), []);
+    messages.add("Pixel".into(), "one".into(), 10).unwrap();
+    // A clock that went back still lists the newest first.
+    let kept = messages.add("iPad".into(), "two".into(), 5).unwrap();
+    assert_eq!(
+        kept.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        ["two", "one"]
+    );
+    assert_eq!(messages.list().unwrap(), kept);
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    let kept = messages.forget(kept[1].at).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].from, "iPad");
+    assert_eq!(messages.clear().unwrap(), []);
+    assert_eq!(messages.list().unwrap(), []);
+}
+
+#[test]
 fn a_save_folder_that_is_gone_is_made_again() {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("Downloads");

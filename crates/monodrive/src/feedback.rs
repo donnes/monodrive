@@ -1,4 +1,4 @@
-//! Taps on the trackpad and Finder's sounds. A Force Touch trackpad taps only
+//! Taps on the trackpad, and Finder's and AirDrop's sounds. A Force Touch trackpad taps only
 //! under a finger, so haptics go with what the pointer does: a drag that opens
 //! a folder, flips between move and copy, finds a slot, or lands. Sounds play
 //! as macOS's own interface sounds, at the alert volume and only while "Play
@@ -30,10 +30,12 @@ pub enum Haptic {
 pub enum Sound {
     MoveToTrash,
     EmptyTrash,
+    /// A device offers this Mac something, as AirDrop chimes.
+    Invite,
 }
 
 impl Sound {
-    /// Finder's own files.
+    /// Finder's and AirDrop's own files.
     fn path(self) -> &'static str {
         match self {
             Self::MoveToTrash => {
@@ -41,6 +43,9 @@ impl Sound {
             }
             Self::EmptyTrash => {
                 "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/finder/empty trash.aif"
+            }
+            Self::Invite => {
+                "/System/Library/PrivateFrameworks/Sharing.framework/Versions/A/Resources/airdrop_invite.caf"
             }
         }
     }
@@ -52,6 +57,7 @@ impl Sound {
 pub struct Feedback {
     move_to_trash: OnceCell<Option<u32>>,
     empty_trash: OnceCell<Option<u32>>,
+    invite: OnceCell<Option<u32>>,
 }
 
 impl Global for Feedback {}
@@ -76,6 +82,7 @@ pub fn sound(sound: Sound, cx: &App) {
     let cell = match sound {
         Sound::MoveToTrash => &feedback.move_to_trash,
         Sound::EmptyTrash => &feedback.empty_trash,
+        Sound::Invite => &feedback.invite,
     };
     let id = cell.get_or_init(|| {
         let url = CFURL::from_file_path(sound.path())?;

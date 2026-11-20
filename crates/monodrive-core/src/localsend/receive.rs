@@ -35,6 +35,8 @@ pub struct Offer {
     /// their sizes, by name.
     pub files: Vec<(String, u64)>,
     pub bytes: u64,
+    /// What a message says. Accepting one writes no file.
+    pub text: Option<String>,
 }
 
 /// How a transfer ended.
@@ -251,6 +253,7 @@ impl Inbox {
             model: info.device_model.as_deref().map(tidy),
             bytes: files.values().map(|file| file.size).sum(),
             files: listed,
+            text: message(&files),
         };
         let peer = Peer {
             host,
@@ -286,6 +289,13 @@ impl Inbox {
         };
         if !accept {
             let _ = pending.decision.send(PrepareUploadDecisionV2::Decline);
+            return;
+        }
+        if message(&pending.files).is_some() {
+            // Taking none answers 204, as the LocalSend app does for one.
+            let _ = pending
+                .decision
+                .send(PrepareUploadDecisionV2::Accept(HashSet::new()));
             return;
         }
         let folder = self.save_to.lock().map(|f| f.clone()).unwrap_or_default();
@@ -506,6 +516,18 @@ impl Inbox {
                 cancelled: transfer.ended == Some(true),
             },
         });
+    }
+}
+
+/// The text of a message: LocalSend sends one as a single text file whose
+/// preview holds all of it.
+fn message(files: &HashMap<String, FileDto>) -> Option<String> {
+    let mut files = files.values();
+    match (files.next(), files.next()) {
+        (Some(file), None) if file.file_type.split('/').next() == Some("text") => {
+            file.preview.clone()
+        }
+        _ => None,
     }
 }
 

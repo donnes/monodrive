@@ -46,6 +46,12 @@ pub fn bring_forward(cx: &App) {
     }
 }
 
+/// Whether the app is the one in front, so a person sees its windows.
+pub fn in_front() -> bool {
+    objc2::MainThreadMarker::new()
+        .is_some_and(|main| objc2_app_kit::NSApplication::sharedApplication(main).isActive())
+}
+
 /// The binary that starts the operation owner. An agent's run names one outside
 /// the bundle, or the owner shares the app's name and agent-desktop can't tell
 /// the two apart. A release build ignores this.
