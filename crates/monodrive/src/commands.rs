@@ -314,12 +314,9 @@ pub fn all() -> Vec<Command> {
             SELECTION,
             command("Share…", File, &[], BROWSER, || Box::new(Share)),
         ),
-        on(
-            SELECTION,
-            command("Send with LocalSend…", File, &[], BROWSER, || {
-                Box::new(SendWithLocalSend)
-            }),
-        ),
+        command("Send with LocalSend…", File, &[], BROWSER, || {
+            Box::new(SendWithLocalSend)
+        }),
         // What's on offer depends on the row: each is there only where it
         // would run, which the views decide.
         on(
@@ -777,9 +774,10 @@ pub fn is_shortcut_of(stroke: &Keystroke, id: &str, cx: &App) -> bool {
 }
 
 /// Whether command `id` acts on what's selected or the folder shown: anything
-/// a context menu offers, past the View menu's display settings, and Move Here.
+/// a context menu offers, past the View menu's display settings, Move Here and
+/// Send with LocalSend.
 pub(crate) fn acts_on_target(id: &str) -> bool {
-    id == MoveHere.name()
+    [MoveHere.name(), SendWithLocalSend.name()].contains(&id)
         || all().iter().any(|command| {
             command.id() == id && !command.scopes.is_empty() && command.group != Group::View
         })
@@ -1082,6 +1080,7 @@ mod tests {
             Duplicate.name(),
             NewFolder.name(),
             MoveHere.name(),
+            SendWithLocalSend.name(),
         ] {
             assert!(acts_on_target(acts), "{acts}");
         }
@@ -1236,6 +1235,15 @@ mod tests {
                 "Eject ⌘E",
                 "Clear Recents"
             ]
+        );
+        // With LocalSend on, it's reached through Share… alone.
+        let sending = Preferences {
+            localsend: true,
+            ..Preferences::default()
+        };
+        assert_eq!(
+            shown(&[Scope::Selection, Scope::Package], &sending, &all),
+            shown(&[Scope::Selection, Scope::Package], &prefs, &all)
         );
         // New Folder with Selection is for several, after the ways to open.
         let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
