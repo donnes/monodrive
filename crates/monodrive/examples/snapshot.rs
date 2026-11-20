@@ -1033,7 +1033,7 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
         save(cx, window, out, name)?;
         if name == "overview-low" {
             // Review… on the worktrees' row, the third of Free up.
-            let review = point(px(1038.), px(302.));
+            let review = point(px(1038.), px(321.));
             let none = Modifiers::default();
             let away = point(px(120.), px(680.));
             let click = vec![

@@ -2702,9 +2702,16 @@ fn a_row_opens_its_folder_and_back_returns_to_the_page(cx: &mut TestAppContext) 
     let home = world.dir.path().canonicalize().unwrap();
     let documents = home.join("Documents");
     std::fs::create_dir(&documents).unwrap();
-    std::fs::write(documents.join("a.txt"), "hello").unwrap();
+    std::fs::write(documents.join("a.txt"), vec![1; 64 * 1024]).unwrap();
+    std::fs::create_dir(home.join("Pictures")).unwrap();
     let (browser, cx) = open(&world, &home, cx);
     press(cx, "cmd-alt-o");
+    // The left column picks which kind the list shows, by a press or ↑ and ↓.
+    press_on(cx, "overview-pick-Pictures");
+    assert!(on_screen(cx, "overview-spot-Pictures"));
+    assert!(!on_screen(cx, "overview-spot-Documents"));
+    press(cx, "up");
+    assert!(!on_screen(cx, "overview-spot-Pictures"));
     assert!(on_screen(cx, "overview-spot-Documents"));
     press_on(cx, "overview-spot-Documents");
     assert_eq!(here(&browser, cx), documents);
@@ -2741,6 +2748,17 @@ fn suggestions_show_when_the_disk_is_low_and_their_button_can_be_undone(cx: &mut
 }
 
 #[gpui::test]
+fn a_low_disk_leads_with_what_can_be_freed_while_nothing_can_yet(cx: &mut TestAppContext) {
+    let world = world(vec![disk(100_000)], cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    std::fs::create_dir(home.join("Documents")).unwrap();
+    let (_browser, cx) = open(&world, &home, cx);
+    press(cx, "cmd-alt-o");
+    assert!(on_screen(cx, "overview-pick-Can be freed"));
+    assert!(!on_screen(cx, "overview-spot-Documents"));
+}
+
+#[gpui::test]
 fn a_drive_shows_nothing_until_someone_asks_for_a_scan(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mount = dir.path().canonicalize().unwrap();
@@ -2757,6 +2775,8 @@ fn a_drive_shows_nothing_until_someone_asks_for_a_scan(cx: &mut TestAppContext) 
     let home = world.dir.path().canonicalize().unwrap();
     let (browser, cx) = open(&world, &home, cx);
     press(cx, "cmd-alt-o");
+    assert!(!on_screen(cx, "overview-scan"));
+    press_on(cx, "overview-pick-Backup");
     assert!(on_screen(cx, "overview-scan"));
     assert!(!on_screen(cx, "overview-row-Photos"));
 

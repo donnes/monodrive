@@ -11,8 +11,8 @@ use super::sidebar::Places;
 use super::{ConnectToServer, EmptyTrash, Offer, Operations, lock, with_owner};
 use crate::theme::{self, ButtonLook, content, icon, row_icon_button, section_label, text_button};
 use gpui::{
-    AnyElement, App, Context, FontWeight, Global, Hsla, MouseButton, Role, Task, Window, div,
-    prelude::*, px, relative,
+    AnyElement, App, Context, FontWeight, Global, Hsla, MouseButton, Role, ScrollHandle, Task,
+    Window, div, prelude::*, px, relative,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::ops::{self, AgentChange, Origin, Request};
@@ -46,17 +46,65 @@ const SIZE_SLOT: f32 = 72.;
 const ACTION_SLOT: f32 = 20.;
 /// Wide enough for "Free up"'s widest button.
 const FREE_ACTION_SLOT: f32 = 112.;
-/// The disk's bar, and each dot of its key.
+/// The disk's bar, and the dot that marks each of its parts.
 const BAR_HEIGHT: f32 = 12.;
 const SWATCH: f32 = 8.;
-const CHIP_MIN_WIDTH: f32 = 330.;
-const CHIP_HEIGHT: f32 = 48.;
+/// What the parts the bar doesn't have picked fade to while one is.
+const FADED: f32 = 0.4;
+/// The left column's share of the pane, and the least it keeps. A pane with
+/// less than both minimums puts the list under the picks.
+const PICKER_SHARE: f32 = 0.3;
+const PICKER_MIN_WIDTH: f32 = 220.;
+const LIST_MIN_WIDTH: f32 = 420.;
+const MARK_SLOT: f32 = 16.;
+
+/// What the left column picked, which the right lists: a part of the startup
+/// disk, another location, or what agents changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Pick {
+    Part(Part),
+    /// By where it's mounted, since two drives can share a name, and by name
+    /// while it isn't.
+    Location {
+        mount: Option<PathBuf>,
+        name: String,
+    },
+    Changes,
+}
+
+impl Pick {
+    fn location(location: &Location) -> Self {
+        Pick::Location {
+            mount: location.mount.clone(),
+            name: location.name.clone(),
+        }
+    }
+
+    /// Unique among the picks, for its row and the right column's scroll.
+    fn key(&self) -> String {
+        match self {
+            Pick::Part(part) => part.name().to_string(),
+            Pick::Location {
+                mount: Some(mount), ..
+            } => format!("on-{}", mount.display()),
+            Pick::Location { name, .. } => format!("named-{name}"),
+            Pick::Changes => "changes".to_string(),
+        }
+    }
+}
 
 /// What the page shows, as last read.
 #[derive(Default)]
 pub(in crate::browser) struct OverviewPage {
     about: Option<Overview>,
     changes: Vec<AgentChange>,
+    /// What the left column has picked. `None` until someone picks, and then
+    /// the page leads with what can be freed or the largest kind.
+    pick: Option<Pick>,
+    /// The left column's scroll, and whether it scrolls the pick into view at
+    /// the next draw, after a key moved it.
+    picker_scroll: ScrollHandle,
+    reveal: bool,
     /// Reads what's saved, then again each time a folder is measured, while
     /// the page is on screen.
     reading: Option<Task<()>>,
@@ -471,7 +519,64 @@ impl Pane {
         cx.notify();
     }
 
-    /// The page, when it's what's on screen.
+    /// The left column's picks, top to bottom: the startup disk's parts, the
+    /// other locations, then what agents changed, when they changed anything.
+    fn picks(&self, about: &Overview, listed: &[(Part, Option<u64>)]) -> Vec<Pick> {
+        listed
+            .iter()
+            .map(|(part, _)| Pick::Part(*part))
+            .chain(about.locations.iter().map(Pick::location))
+            .chain((!self.overview.changes.is_empty()).then_some(Pick::Changes))
+            .collect()
+    }
+
+    /// What the right lists: the pick, while it's still there to pick, or else
+    /// what can be freed on a low disk, or else the largest kind.
+    fn picked(&self, about: &Overview, listed: &[(Part, Option<u64>)]) -> Option<Pick> {
+        let picks = self.picks(about, listed);
+        if let Some(pick) = self.overview.pick.as_ref().filter(|p| picks.contains(p)) {
+            return Some(pick.clone());
+        }
+        let freeable = Pick::Part(Part::Freeable);
+        if about.headline.as_ref().is_some_and(|disk| disk.low) && picks.contains(&freeable) {
+            return Some(freeable);
+        }
+        picks
+            .iter()
+            .find(|pick| matches!(pick, Pick::Part(Part::Kind(_))))
+            .or(picks.first())
+            .cloned()
+    }
+
+    fn pick(&mut self, pick: Pick, cx: &mut Context<Self>) {
+        self.overview.pick = Some(pick);
+        cx.notify();
+    }
+
+    /// ↑ and ↓ move the left column's pick.
+    pub(super) fn step_overview(&mut self, down: bool, cx: &mut Context<Self>) {
+        let Some(about) = &self.overview.about else {
+            return;
+        };
+        let listed = disk_parts(about, &about.parts());
+        let picks = self.picks(about, &listed);
+        let at = self
+            .picked(about, &listed)
+            .and_then(|pick| picks.iter().position(|p| *p == pick));
+        let next = match at {
+            Some(at) if down => (at + 1).min(picks.len().saturating_sub(1)),
+            Some(at) => at.saturating_sub(1),
+            None => 0,
+        };
+        if let Some(pick) = picks.into_iter().nth(next) {
+            self.overview.reveal = true;
+            self.pick(pick, cx);
+        }
+    }
+
+    /// The page, when it's what's on screen: how much is free and the disk's
+    /// bar across the top, then the startup disk's parts and the other
+    /// locations on the left, and what the picked one holds on the right.
     pub(super) fn overview_page(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.showing_overview() {
             return None;
@@ -480,76 +585,84 @@ impl Pane {
         let progress = cx.try_global::<Measurer>().and_then(Measurer::progress);
         let measuring = progress.is_some();
         let now = overview::now();
+        let parts = about.parts();
+        let listed = disk_parts(&about, &parts);
+        let pick = self.picked(&about, &listed);
 
         let headline = about
             .headline
             .as_ref()
-            .map(|disk| self.headline(&about, disk));
-        // What the green part of the disk's bar is made of, so the section
-        // adds up to it.
-        let trash = about
-            .headline
+            .map(|disk| self.headline(&parts, disk, pick.as_ref(), cx));
+        let (picker, at) = self.picker(&about, &listed, pick.as_ref(), measuring, cx);
+        if std::mem::take(&mut self.overview.reveal)
+            && let Some(at) = at
+        {
+            self.overview.picker_scroll.scroll_to_item(at);
+        }
+        let picked = pick
             .as_ref()
-            .and_then(|disk| disk.trash)
-            .filter(|trash| trash.unshared > 0);
-        let free_up = (!about.suggestions.is_empty() || trash.is_some()).then(|| {
-            let sizes: Vec<Measured> = about
-                .suggestions
-                .iter()
-                .map(|suggestion| suggestion.size)
-                .chain(trash)
-                .collect();
-            let mut total = amount(sizes.iter().map(|size| size.unshared).sum());
-            if sizes.iter().any(|size| !size.complete) {
-                total.push('+');
-            }
+            .map(|pick| self.picked_page(&about, &listed, pick, measuring, now, cx));
+        // Rows pad themselves by 8 pt, so every text starts on the pane's
+        // inset, as the footer's does.
+        let inset = px(theme::PANE_INSET - ROW_INSET);
+        let columns = if self.chrome.width < PICKER_MIN_WIDTH + LIST_MIN_WIDTH {
+            // Too narrow for two: the picks, then what's picked, under them.
             div()
-                .flex()
-                .flex_col()
-                .child(section_label(format!("Free up {total}")))
-                .children(
-                    about
-                        .suggestions
-                        .iter()
-                        .map(|suggestion| self.suggestion_row(suggestion, cx)),
-                )
-                .children(trash.map(|trash| self.trash_row(trash, cx)))
-        });
-        let largest = self.largest(&about, measuring, now, cx);
-        // As many tiles across as fit whole, each as wide as the others.
-        let inside = self.chrome.width - 2. * theme::PANE_INSET;
-        let across = ((inside / CHIP_MIN_WIDTH).floor() as u16).max(1);
-        let locations = (!about.locations.is_empty()).then(|| {
+                .id("overview")
+                .role(Role::Group)
+                .aria_label("Overview")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.overview.picker_scroll)
+                .border_t_1()
+                .border_color(content(0.06))
+                .px(inset)
+                .pb_4()
+                .children(picker)
+                .children(picked)
+        } else {
+            // A scroll of its own for each pick, so a new one starts at the top.
+            let scroll = format!(
+                "overview-{}",
+                pick.as_ref().map_or_else(String::new, Pick::key)
+            );
             div()
+                .id("overview-columns")
+                .flex_1()
+                .min_h_0()
                 .flex()
-                .flex_col()
-                .child(section_label("Other locations"))
+                .border_t_1()
+                .border_color(content(0.06))
                 .child(
                     div()
-                        .mx(px(ROW_INSET))
-                        .grid()
-                        .grid_cols(across)
-                        .gap_2()
-                        .children(
-                            about
-                                .locations
-                                .iter()
-                                .map(|location| self.location_chip(location, now, cx)),
-                        ),
+                        .id("overview-picker")
+                        .role(Role::ListBox)
+                        .aria_label("What fills the disk")
+                        .w(relative(PICKER_SHARE))
+                        .min_w(px(PICKER_MIN_WIDTH))
+                        .flex_shrink_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.overview.picker_scroll)
+                        .border_r_1()
+                        .border_color(content(0.06))
+                        .px(inset)
+                        .pb_2()
+                        .children(picker),
                 )
-        });
-        let changes = (!self.overview.changes.is_empty()).then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .child(section_label("Changed by agents"))
-                .children(
-                    self.overview
-                        .changes
-                        .iter()
-                        .map(|change| change_row(change, now)),
+                .child(
+                    div()
+                        .id(scroll)
+                        .role(Role::Group)
+                        .aria_label("Overview")
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_y_scroll()
+                        .px(inset)
+                        .pb_4()
+                        .children(picked),
                 )
-        });
+        };
         Some(
             div()
                 .debug_selector(|| "overview-page".into())
@@ -566,48 +679,286 @@ impl Pane {
                     }),
                 )
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                .child(
+                .children(headline.map(|headline| {
                     div()
-                        .id("overview")
-                        .role(Role::Group)
-                        .aria_label("Overview")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        // Rows pad themselves by 8 pt, so every text starts on
-                        // the pane's inset, as the footer's does.
-                        .px(px(theme::PANE_INSET - ROW_INSET))
-                        .py_4()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .children(headline)
-                                .children(free_up)
-                                .child(largest)
-                                .children(locations)
-                                .children(changes),
-                        ),
-                )
+                        .flex_shrink_0()
+                        .px(inset)
+                        .pt_4()
+                        .pb_3()
+                        .child(headline)
+                }))
+                .child(columns)
                 .child(footer(&about, progress, now))
                 .into_any_element(),
         )
     }
 
-    /// How much is free, in the page's one large figure, and the disk drawn
-    /// by what fills it, with a key.
-    fn headline(&self, about: &Overview, disk: &Headline) -> impl IntoElement + use<> {
-        let parts = about.parts();
-        let key = parts.iter().map(|(part, bytes)| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(swatch(*part))
-                .child(div().text_color(content(0.65)).child(part.name()))
-                .child(amount(*bytes))
+    /// The left column, one element a row or label: the startup disk's parts
+    /// with what each takes, then the other locations and what agents changed.
+    /// Also where the pick is among them, to scroll it into view.
+    fn picker(
+        &self,
+        about: &Overview,
+        listed: &[(Part, Option<u64>)],
+        pick: Option<&Pick>,
+        measuring: bool,
+        cx: &mut Context<Self>,
+    ) -> (Vec<AnyElement>, Option<usize>) {
+        let parts: Vec<AnyElement> = listed
+            .iter()
+            .map(|&(part, bytes)| {
+                let this = Pick::Part(part);
+                let picked = pick == Some(&this);
+                let trail = Trail::Size(size_label(bytes, false, measuring));
+                let mark = swatch(part).into_any_element();
+                self.pick_row(this, mark, part.name().to_string(), trail, picked, cx)
+            })
+            .collect();
+        let locations: Vec<AnyElement> = about
+            .locations
+            .iter()
+            .map(|location| {
+                let this = Pick::location(location);
+                let picked = pick == Some(&this);
+                let note = match location.capacity {
+                    _ if !location.connected => "Not connected".to_string(),
+                    Some((_, free)) => format!("{} free", amount(free)),
+                    None => String::new(),
+                };
+                let mark = location_mark(location).into_any_element();
+                let name = location.name.clone();
+                self.pick_row(this, mark, name, Trail::Note(note), picked, cx)
+            })
+            .collect();
+        let changes = (!self.overview.changes.is_empty()).then(|| {
+            let count = self.overview.changes.len().to_string();
+            let mark = icon("bot", 16.)
+                .text_color(content(0.55))
+                .into_any_element();
+            let picked = pick == Some(&Pick::Changes);
+            let name = "Changed by agents".to_string();
+            self.pick_row(Pick::Changes, mark, name, Trail::Note(count), picked, cx)
         });
+        let mut items: Vec<AnyElement> = Vec::new();
+        if let Some(disk) = &about.headline {
+            items.push(section_label(disk.name.clone()).into_any_element());
+        }
+        items.extend(parts);
+        if !locations.is_empty() {
+            items.push(section_label("Other locations").into_any_element());
+            items.extend(locations);
+        }
+        if let Some(changes) = changes {
+            items.push(section_label("Agents").into_any_element());
+            items.push(changes);
+        }
+        // Each label stands before its rows, so the picks are in order among
+        // the items that aren't labels.
+        let picks = self.picks(about, listed);
+        let at = pick
+            .and_then(|pick| picks.iter().position(|p| p == pick))
+            .map(|at| {
+                let labels = usize::from(about.headline.is_some())
+                    + usize::from(at >= listed.len() && !about.locations.is_empty())
+                    + usize::from(at >= listed.len() + about.locations.len());
+                at + labels
+            });
+        (items, at)
+    }
+
+    /// A row of the left column, which picks what the right lists.
+    fn pick_row(
+        &self,
+        pick: Pick,
+        mark: AnyElement,
+        name: String,
+        trail: Trail,
+        picked: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let trail = match trail {
+            Trail::Size(size) => div().flex_shrink_0().child(size),
+            Trail::Note(note) => div()
+                .flex_shrink_0()
+                .text_size(px(theme::TEXT_CAPTION))
+                .text_color(content(0.65))
+                .child(note),
+        };
+        let selector = format!("overview-pick-{name}");
+        theme::row_slot(format!("overview-pick-{}", pick.key()))
+            .role(Role::ListBoxOption)
+            .aria_label(name.clone())
+            .aria_selected(picked)
+            .debug_selector(move || selector)
+            .on_click(cx.listener(move |this, _, _, cx| this.pick(pick.clone(), cx)))
+            .child(
+                div()
+                    .h(px(theme::SIDEBAR_ROW_HEIGHT))
+                    .px(px(ROW_INSET))
+                    .rounded(px(theme::RADIUS_ROW))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(theme::TEXT_BODY))
+                    .map(|row| {
+                        if picked {
+                            row.bg(content(0.14))
+                        } else {
+                            row.group_hover(theme::ROW_GROUP, |s| s.bg(content(0.08)))
+                        }
+                    })
+                    .child(mark_slot(mark))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(trail),
+            )
+            .into_any_element()
+    }
+
+    /// The right column: what the picked part or location holds, under its
+    /// name and what it is.
+    fn picked_page(
+        &self,
+        about: &Overview,
+        listed: &[(Part, Option<u64>)],
+        pick: &Pick,
+        measuring: bool,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (header, rows) = match pick {
+            Pick::Part(part) => {
+                let bytes = listed
+                    .iter()
+                    .find(|(listed, _)| listed == part)
+                    .and_then(|(_, bytes)| *bytes);
+                let share = bytes.map(|bytes| format!("{} of used", percent(bytes, used(about))));
+                let (size, rows) = match part {
+                    Part::Freeable => {
+                        let (total, rows) = self.free_up(about, cx);
+                        match bytes {
+                            Some(_) => (total, rows),
+                            None => (size_label(None, false, measuring), rows),
+                        }
+                    }
+                    Part::Kind(kind) => (
+                        size_label(bytes, false, measuring),
+                        self.kind_rows(about, *kind, measuring, now, cx),
+                    ),
+                    Part::Other => (size_label(bytes, false, measuring), Vec::new()),
+                };
+                let header = page_header(
+                    swatch(*part).into_any_element(),
+                    part.name().to_string(),
+                    described(*part).to_string(),
+                    figure(size, share),
+                );
+                (header, rows)
+            }
+            Pick::Location { .. } => {
+                let Some(location) = about
+                    .locations
+                    .iter()
+                    .find(|location| Pick::location(location) == *pick)
+                else {
+                    return div().into_any_element();
+                };
+                let scanning = location.mount.as_ref().is_some_and(|mount| {
+                    self.overview
+                        .scanning
+                        .as_ref()
+                        .is_some_and(|scanning| &scanning.mount == mount)
+                });
+                let action = self
+                    .location_action(location, scanning, cx)
+                    .unwrap_or_else(|| div().into_any_element());
+                let header = page_header(
+                    location_mark(location).into_any_element(),
+                    location.name.clone(),
+                    location_state(location, scanning, now),
+                    action,
+                );
+                let mut rows = Vec::new();
+                if let Some(scan) = &location.scan {
+                    let most = scan
+                        .rows
+                        .iter()
+                        .map(|row| row.size.on_disk)
+                        .max()
+                        .unwrap_or(0);
+                    for row in &scan.rows {
+                        let share = row.size.on_disk as f32 / most.max(1) as f32;
+                        rows.push(self.scan_row(row, location, share, now, cx));
+                    }
+                }
+                (header, rows)
+            }
+            Pick::Changes => {
+                let header = page_header(
+                    icon("bot", 16.)
+                        .text_color(content(0.55))
+                        .into_any_element(),
+                    "Changed by agents".to_string(),
+                    "What agents changed in the last day.".to_string(),
+                    div().into_any_element(),
+                );
+                let rows = self
+                    .overview
+                    .changes
+                    .iter()
+                    .map(|change| change_row(change, now).into_any_element())
+                    .collect();
+                (header, rows)
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .child(header)
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// What the suggestions and the Trash free, together, and a row for each.
+    /// They add up to the green part of the disk's bar.
+    fn free_up(&self, about: &Overview, cx: &mut Context<Self>) -> (String, Vec<AnyElement>) {
+        let trash = about
+            .headline
+            .as_ref()
+            .and_then(|disk| disk.trash)
+            .filter(|trash| trash.unshared > 0);
+        let sizes: Vec<Measured> = about
+            .suggestions
+            .iter()
+            .map(|suggestion| suggestion.size)
+            .chain(trash)
+            .collect();
+        let mut total = amount(sizes.iter().map(|size| size.unshared).sum());
+        if sizes.iter().any(|size| !size.complete) {
+            total.push('+');
+        }
+        let mut rows: Vec<AnyElement> = about
+            .suggestions
+            .iter()
+            .map(|suggestion| self.suggestion_row(suggestion, cx).into_any_element())
+            .collect();
+        rows.extend(trash.map(|trash| self.trash_row(trash, cx).into_any_element()));
+        (total, rows)
+    }
+
+    /// How much is free, in the page's one large figure, and the disk drawn
+    /// by what fills it.
+    fn headline(
+        &self,
+        parts: &[(Part, u64)],
+        disk: &Headline,
+        pick: Option<&Pick>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let picked = match pick {
+            Some(Pick::Part(part)) => Some(*part),
+            _ => None,
+        };
+        let bar = self.disk_bar(parts, disk, picked, cx);
         div()
             .px(px(ROW_INSET))
             .flex()
@@ -641,16 +992,47 @@ impl Pane {
                             .child(format!("of {} on {}", amount(disk.total), disk.name)),
                     ),
             )
-            .child(div().mt_3().child(disk_bar(&parts, disk)))
+            .child(div().mt_3().child(bar))
+    }
+
+    /// The startup disk as one pill of touching parts: each part in its color,
+    /// then the free space as track. A press on a part picks it, and while one
+    /// is picked the others fade. Only the pill's two ends are round, since a
+    /// parent can't clip its children to its corners.
+    fn disk_bar(
+        &self,
+        parts: &[(Part, u64)],
+        disk: &Headline,
+        picked: Option<Part>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let segment = |grow: u64, color: Hsla| {
+            div()
+                .h_full()
+                .flex_basis(px(0.))
+                .flex_grow(grow as f32)
+                .min_w(px(3.))
+                .bg(color)
+        };
+        div()
+            .h(px(BAR_HEIGHT))
+            .flex()
+            .children(parts.iter().enumerate().map(|(ix, (part, bytes))| {
+                let part = *part;
+                segment(*bytes, part_color(part))
+                    .when(ix == 0, |d| d.rounded_l_full())
+                    .when(picked.is_some_and(|picked| picked != part), |d| {
+                        d.opacity(FADED)
+                    })
+                    .id(format!("overview-part-{}", part.name()))
+                    .role(Role::Button)
+                    .aria_label(part.name())
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick(Pick::Part(part), cx)))
+            }))
             .child(
-                div()
-                    .mt_2()
-                    .flex()
-                    .flex_wrap()
-                    .gap_x(px(14.))
-                    .gap_y_1()
-                    .text_size(px(theme::TEXT_SMALL))
-                    .children(key),
+                segment(disk.free, content(0.14))
+                    .rounded_r_full()
+                    .when(parts.is_empty(), |d| d.rounded_l_full()),
             )
     }
 
@@ -731,16 +1113,17 @@ impl Pane {
         )
     }
 
-    /// The largest things on the startup disk, then on each scanned drive,
-    /// each list with bars against its own largest, since a backup's folders
-    /// and the startup disk's don't share any space.
-    fn largest(
+    /// A kind's things on the startup disk, largest first, with bars against
+    /// the list's largest. macOS's own volumes lead the system's list, since
+    /// no folder holds them.
+    fn kind_rows(
         &self,
         about: &Overview,
+        kind: Kind,
         measuring: bool,
         now: u64,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    ) -> Vec<AnyElement> {
         let startup = about.headline.as_ref().map(|disk| disk.name.as_str());
         // A project with copies elsewhere ranks by what it takes here; its
         // detail says what the others take.
@@ -752,7 +1135,27 @@ impl Pane {
                 .filter_map(|spot| spot.size.map(|size| size.on_disk))
                 .reduce(|all, size| all + size)
         };
-        let most = about.stuff.iter().filter_map(here).max().unwrap_or(0);
+        let groups: Vec<&Group> = about
+            .stuff
+            .iter()
+            .filter(|group| group.kind == kind)
+            .collect();
+        let volumes = about
+            .headline
+            .as_ref()
+            .and_then(|disk| disk.system)
+            .filter(|_| kind == Kind::System);
+        let most = groups
+            .iter()
+            .filter_map(|group| here(group))
+            .chain(volumes)
+            .max()
+            .unwrap_or(0);
+        // A list with a button anywhere keeps its room on every row.
+        let room = groups.iter().any(|group| {
+            group.spots.len() > 1
+                || group.kind == Kind::Cloud && group.spots.iter().any(|spot| spot.reachable)
+        });
         let share =
             |size: Option<u64>, most: u64| size.map_or(0., |size| size as f32 / most.max(1) as f32);
         // What "Free up" counts inside a spot on the startup disk, so its bar
@@ -770,7 +1173,22 @@ impl Pane {
                 .sum()
         };
         let mut ranked: Vec<(Option<u64>, AnyElement)> = Vec::new();
-        for group in &about.stuff {
+        if let Some(bytes) = volumes {
+            let row = stuff_row(
+                ("hard-drive", tint(kind)),
+                "macOS".to_string(),
+                "Its own volumes".to_string(),
+                Bar {
+                    share: share(Some(bytes), most),
+                    freeable: 0.,
+                    ink: tint(kind),
+                },
+                amount(bytes),
+                if room { End::Room } else { End::Size },
+            );
+            ranked.push((Some(bytes), still(row).into_any_element()));
+        }
+        for group in groups {
             let size = here(group);
             let freed = group.spots.iter().map(freeable).sum::<u64>();
             ranked.push((
@@ -779,7 +1197,7 @@ impl Pane {
                     group,
                     size,
                     (share(size, most), share(Some(freed), most)),
-                    measuring,
+                    (measuring, room),
                     now,
                     cx,
                 ),
@@ -804,7 +1222,7 @@ impl Pane {
                             share(spot.size.map(|size| size.on_disk), most),
                             share(Some(freeable(spot)), most),
                         ),
-                        measuring,
+                        (measuring, room),
                         now,
                         cx,
                     );
@@ -814,36 +1232,7 @@ impl Pane {
         }
         // Stable, so a project's copies stay under it.
         ranked.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
-        let title = startup.map_or("Largest".to_string(), |name| format!("Largest on {name}"));
-        let drives = about.locations.iter().filter_map(|location| {
-            let scan = location
-                .scan
-                .as_ref()
-                .filter(|scan| !scan.rows.is_empty())?;
-            let most = scan.rows.iter().map(|row| row.size.on_disk).max();
-            Some(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(section_label(format!("Largest on {}", location.name)))
-                    .children(scan.rows.iter().map(|row| {
-                        let share = share(Some(row.size.on_disk), most.unwrap_or(0));
-                        self.scan_row(row, location, share, now, cx)
-                    })),
-            )
-        });
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(section_label(title))
-                    .children(ranked.into_iter().map(|(_, row)| row)),
-            )
-            .children(drives.collect::<Vec<_>>())
+        ranked.into_iter().map(|(_, row)| row).collect()
     }
 
     /// A group's row. With copies in several places it lists them on a press;
@@ -853,7 +1242,7 @@ impl Pane {
         group: &Group,
         here: Option<u64>,
         (share, freeable): (f32, f32),
-        measuring: bool,
+        (measuring, room): (bool, bool),
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -863,7 +1252,7 @@ impl Pane {
                 spot,
                 group,
                 (share, freeable),
-                measuring,
+                (measuring, room),
                 now,
                 cx,
             );
@@ -951,17 +1340,8 @@ impl Pane {
             .into_any_element()
     }
 
-    /// Whether a row of the startup disk's list has a button: a group's
-    /// folders to list, or a cloud folder's download to remove.
-    fn startup_buttons(&self) -> bool {
-        self.overview.about.as_ref().is_some_and(|about| {
-            about.stuff.iter().any(|group| {
-                group.spots.len() > 1
-                    || group.kind == Kind::Cloud && group.spots.iter().any(|spot| spot.reachable)
-            })
-        })
-    }
-
+    /// A folder's row, which opens it. `room` keeps a button's room at its end
+    /// for a list where another row has one.
     #[allow(clippy::too_many_arguments)]
     fn spot_row(
         &self,
@@ -969,7 +1349,7 @@ impl Pane {
         spot: &Spot,
         group: &Group,
         (share, freeable): (f32, f32),
-        measuring: bool,
+        (measuring, room): (bool, bool),
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1012,7 +1392,7 @@ impl Pane {
         });
         let end = match action {
             Some(button) => End::Button(button),
-            None if self.startup_buttons() => End::Room,
+            None if room => End::Room,
             None => End::Size,
         };
         let row = stuff_row(
@@ -1108,20 +1488,14 @@ impl Pane {
             .into_any_element()
     }
 
-    /// Another location as a tile: its name, how it stands in a line, and its
-    /// button. The sidebar lists them too; this says what each holds.
-    fn location_chip(
+    /// Another location's button: scan it, stop the scan, or connect a saved
+    /// share that isn't mounted.
+    fn location_action(
         &self,
         location: &Location,
-        now: u64,
+        scanning: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let scanning = location.mount.as_ref().is_some_and(|mount| {
-            self.overview
-                .scanning
-                .as_ref()
-                .is_some_and(|scanning| &scanning.mount == mount)
-        });
+    ) -> Option<AnyElement> {
         let action = match (&location.kind, &location.mount) {
             (_, Some(_)) if scanning => Some(
                 text_button("overview-cancel-scan", "Cancel", ButtonLook::Secondary)
@@ -1153,31 +1527,186 @@ impl Pane {
             ),
             _ => None,
         };
-        let glyph = match location.kind {
-            LocationKind::Share { .. } | LocationKind::Sftp { .. } => "server",
-            LocationKind::Drive | LocationKind::Disconnected => "hard-drive",
-        };
-        let mark =
-            icon(glyph, 16.).text_color(content(if location.connected { 0.55 } else { 0.3 }));
-        div()
-            .min_w_0()
-            .h(px(CHIP_HEIGHT))
-            .px_3()
-            .rounded(px(theme::RADIUS_ROW))
-            .border_1()
-            .border_color(content(0.08))
-            .bg(content(0.03))
-            .flex()
-            .items_center()
-            .gap_2()
-            .when(!location.connected, |d| d.text_color(content(0.65)))
-            .child(marked(
-                mark,
-                location.name.clone(),
-                Detail::Line(location_state(location, scanning, now)),
-            ))
-            .children(action.map(|action| action.flex_shrink_0()))
+        action.map(IntoElement::into_any_element)
     }
+}
+
+/// The startup disk's `parts` as the left column lists them, each with what
+/// it takes once measured: what can be freed first, then each kind, largest
+/// first, then the kinds with nothing of their own left once a suggestion is
+/// counted or with nothing measured yet, then the rest. A low disk always
+/// lists what can be freed, so the page can lead with it while it's measured.
+fn disk_parts(about: &Overview, parts: &[(Part, u64)]) -> Vec<(Part, Option<u64>)> {
+    let Some(disk) = &about.headline else {
+        return Vec::new();
+    };
+    let of = |wanted: fn(&Part) -> bool| {
+        parts
+            .iter()
+            .filter(move |(part, _)| wanted(part))
+            .map(|(part, bytes)| (*part, Some(*bytes)))
+    };
+    let mut listed: Vec<(Part, Option<u64>)> = of(|part| *part == Part::Freeable)
+        .chain(of(|part| matches!(part, Part::Kind(_))))
+        .collect();
+    if disk.low
+        && listed
+            .first()
+            .is_none_or(|(part, _)| *part != Part::Freeable)
+    {
+        // Nothing to free is only known once nothing is left to measure.
+        listed.insert(0, (Part::Freeable, about.due.is_empty().then_some(0)));
+    }
+    for group in &about.stuff {
+        let part = Part::Kind(group.kind);
+        let spots: Vec<&Spot> = group
+            .spots
+            .iter()
+            .filter(|spot| spot.location == disk.name)
+            .collect();
+        if spots.is_empty() || listed.iter().any(|(listed, _)| *listed == part) {
+            continue;
+        }
+        let measured = spots.iter().any(|spot| spot.size.is_some());
+        listed.push((part, measured.then_some(0)));
+    }
+    listed.extend(of(|part| *part == Part::Other));
+    listed
+}
+
+/// The startup disk's used space.
+fn used(about: &Overview) -> u64 {
+    about
+        .headline
+        .as_ref()
+        .map_or(0, |disk| disk.total.saturating_sub(disk.free))
+}
+
+/// `bytes` as a share of `of`, rounded, and never 0% when there's something.
+fn percent(bytes: u64, of: u64) -> String {
+    let share = bytes as f64 * 100. / of.max(1) as f64;
+    if bytes > 0 && share < 1. {
+        "<1%".to_string()
+    } else {
+        format!("{share:.0}%")
+    }
+}
+
+/// What a part of the disk is, under its name on the right.
+fn described(part: Part) -> &'static str {
+    match part {
+        Part::Freeable => {
+            "What the suggestions and the Trash give back. Each suggestion goes to the Trash first."
+        }
+        Part::Kind(Kind::Documents) => {
+            "Desktop, Documents, Downloads and the other folders in Home."
+        }
+        Part::Kind(Kind::Projects) => {
+            "Git repositories on this Mac. A copy on another drive lists under its project."
+        }
+        Part::Kind(Kind::Pictures) => "Your Pictures folder.",
+        Part::Kind(Kind::Media) => "Your Movies and Music folders.",
+        Part::Kind(Kind::Cloud) => {
+            "What cloud folders keep downloaded. Placeholders take no space."
+        }
+        Part::Kind(Kind::Apps) => "Applications, and what apps keep in Library.",
+        Part::Kind(Kind::Developer) => {
+            "Developer tools, and the hidden folders in Home, which are mostly theirs."
+        }
+        Part::Kind(Kind::System) => "macOS's own volumes and the system's folders.",
+        Part::Other => "Used, and in none of the above or not measured yet.",
+    }
+}
+
+/// What a row of the left column ends in.
+enum Trail {
+    /// A part's size. The right column's title says its share.
+    Size(String),
+    /// How a location stands, or how many changes there are.
+    Note(String),
+}
+
+/// A row's mark, centered in the column every mark of the list keeps.
+fn mark_slot(mark: impl IntoElement) -> gpui::Div {
+    div()
+        .w(px(MARK_SLOT))
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .child(mark)
+}
+
+/// A location's mark, fainter while it's away.
+fn location_mark(location: &Location) -> gpui::Svg {
+    let glyph = match location.kind {
+        LocationKind::Share { .. } | LocationKind::Sftp { .. } => "server",
+        LocationKind::Drive | LocationKind::Disconnected => "hard-drive",
+    };
+    icon(glyph, 16.).text_color(content(if location.connected { 0.55 } else { 0.3 }))
+}
+
+/// The right column's title: the pick's mark and name, what it is, and its
+/// size or button at the end.
+fn page_header(mark: AnyElement, title: String, detail: String, end: AnyElement) -> gpui::Div {
+    div()
+        .px(px(ROW_INSET))
+        .pt_4()
+        .pb_2()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(mark_slot(mark))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(theme::TEXT_TITLE))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_BODY))
+                        .text_color(content(0.65))
+                        .child(detail),
+                ),
+        )
+        .child(div().flex_shrink_0().child(end))
+}
+
+/// A part's size over its share of the used space, at the header's end.
+fn figure(size: String, share: Option<String>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_end()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(theme::TEXT_TITLE))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(size),
+        )
+        .children(share.map(|share| {
+            div()
+                .text_size(px(theme::TEXT_CAPTION))
+                .text_color(content(0.65))
+                .child(share)
+        }))
+        .into_any_element()
 }
 
 /// A kind's icon in its rows.
@@ -1202,31 +1731,6 @@ fn tint(kind: Kind) -> Hsla {
     }
 }
 
-/// The startup disk as one pill of touching parts: each part in its color,
-/// then the free space as track. Only the pill's two ends are round, since
-/// a parent can't clip its children to its corners.
-fn disk_bar(parts: &[(Part, u64)], disk: &Headline) -> impl IntoElement + use<> {
-    let segment = |grow: u64, color: Hsla| {
-        div()
-            .h_full()
-            .flex_basis(px(0.))
-            .flex_grow(grow as f32)
-            .min_w(px(3.))
-            .bg(color)
-    };
-    div()
-        .h(px(BAR_HEIGHT))
-        .flex()
-        .children(parts.iter().enumerate().map(|(ix, (part, bytes))| {
-            segment(*bytes, part_color(*part)).when(ix == 0, |d| d.rounded_l_full())
-        }))
-        .child(
-            segment(disk.free, content(0.14))
-                .rounded_r_full()
-                .when(parts.is_empty(), |d| d.rounded_l_full()),
-        )
-}
-
 fn part_color(part: Part) -> Hsla {
     match part {
         Part::Kind(kind) => tint(kind),
@@ -1235,7 +1739,7 @@ fn part_color(part: Part) -> Hsla {
     }
 }
 
-/// A part's dot in the bar's key.
+/// A part's dot in the left column and over its list.
 fn swatch(part: Part) -> impl IntoElement {
     div()
         .size(px(SWATCH))
