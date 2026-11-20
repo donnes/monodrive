@@ -11,11 +11,11 @@ use crate::preferences::Preferences;
 use crate::theme::{self, ButtonLook, accent, circle_button, content, danger, text_button};
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, Global, KeyBinding, Role, Stateful, Task, Window,
-    actions, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Entity, FontWeight, Global, HighlightStyle, KeyBinding,
+    Role, Stateful, StyledText, Task, Window, actions, div, prelude::*, px,
 };
 use monodrive_core::VERSION;
-use monodrive_core::updates::{self, Channel, Release};
+use monodrive_core::updates::{self, Change, Channel, Release};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -36,6 +36,8 @@ const COUNTDOWN: u8 = 5;
 const WIDTH: f32 = 360.;
 /// The most releases the popover lists.
 const SHOWN: usize = 5;
+/// The most changes it lists for each, as the release notes ask for.
+const CHANGES: usize = 7;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Stage {
@@ -348,9 +350,7 @@ impl Updates {
                 format!("Downloading {}… {:.0}%", release.version, fraction * 100.)
             }
             (Stage::Installing(_), Some(release)) => format!("Installing {}…", release.version),
-            (_, Some(release)) => {
-                format!("Click the update button to install {}", release.version)
-            }
+            (_, Some(_)) => "Update ready to download".into(),
             (Stage::Checking, None) => "Checking for updates…".into(),
             (_, None) if self.app == Some(None) => {
                 "This copy isn't a signed release, so it can't update itself.".into()
@@ -372,6 +372,36 @@ fn age(published: &str, now: DateTime<Utc>) -> Option<String> {
     })
 }
 
+/// A change as a bullet, its title in semibold.
+fn bullet(change: &Change) -> AnyElement {
+    let (text, bold) = match &change.title {
+        Some(title) => (format!("{title} {}", change.text), Some(0..title.len())),
+        None => (change.text.clone(), None),
+    };
+    let bold = bold.map(|range| {
+        let style = HighlightStyle {
+            font_weight: Some(FontWeight::SEMIBOLD),
+            ..Default::default()
+        };
+        (range, style)
+    });
+    div()
+        .px_2()
+        .py_1()
+        .flex()
+        .gap_2()
+        .text_size(px(theme::TEXT_SMALL))
+        .text_color(content(1.))
+        .child(div().flex_shrink_0().child("•"))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(StyledText::new(text).with_highlights(bold)),
+        )
+        .into_any_element()
+}
+
 impl Render for Updates {
     /// The card of what's new; the browser places it and closes it.
     fn render(&mut self, window: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -389,7 +419,7 @@ impl Render for Updates {
                 .px_2()
                 .py_2()
                 .text_size(px(theme::TEXT_BODY))
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(FontWeight::MEDIUM)
                 .child(self.headline())
                 .into_any_element(),
         ];
@@ -414,17 +444,16 @@ impl Render for Updates {
                     .clone()
                     .map(|highlights| text(highlights, theme::TEXT_SMALL, content(1.))),
             );
-            // Highlights say enough; the fixes wait on GitHub, as in T3 Code.
-            if release.notes.highlights.is_none() {
-                lines.extend(
-                    release
-                        .notes
-                        .changes
-                        .iter()
-                        .take(SHOWN)
-                        .map(|change| text(change.clone(), theme::TEXT_SMALL, content(1.))),
-                );
-            }
+            lines.extend(release.notes.changes.iter().take(CHANGES).map(bullet));
+            lines.extend(release.notes.more.clone().map(|more| {
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_size(px(theme::TEXT_SMALL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(more)
+                    .into_any_element()
+            }));
             let page = release.page.clone();
             let label = release
                 .notes
