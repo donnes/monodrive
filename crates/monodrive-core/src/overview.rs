@@ -986,6 +986,34 @@ pub fn read(
     }
 }
 
+/// The clean worktrees `check_worktrees` last found on the startup disk, as
+/// the one suggestion `read` makes of them, and those to measure again for
+/// it. Unlike `read`'s, it doesn't wait for the disk to run low.
+pub fn clean_worktrees(
+    env: &Env,
+    volumes: &[Volume],
+    now: u64,
+) -> (Option<Suggestion>, Vec<PathBuf>) {
+    let saved = Saved::read(&env.saved());
+    let total = |path: &Path| saved.totals.get(path).copied();
+    let mut due = Vec::new();
+    let mut wanted = |path: &Path, size: Option<Measured>| {
+        if size.is_none_or(|size| now.saturating_sub(size.at) >= REMEASURE) {
+            due.push(path.to_path_buf());
+        }
+    };
+    let clean: Vec<&CleanWorktree> = saved
+        .worktrees
+        .iter()
+        .filter(|worktree| {
+            holding(volumes, &worktree.path).is_none_or(|volume| volume.startup)
+                && worktree.path.is_dir()
+        })
+        .collect();
+    let suggestion = worktrees_suggestion(&clean, total, &mut wanted);
+    (suggestion, due)
+}
+
 /// Every clean worktree as one suggestion, ranked by what they free together,
 /// once any of them is measured. Until all are, it says how far it got and
 /// counts what it has as "at least".

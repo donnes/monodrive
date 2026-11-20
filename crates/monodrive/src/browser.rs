@@ -41,7 +41,7 @@ mod search_tests;
 mod tests;
 
 pub(crate) use duplicates::grouped;
-pub(crate) use overview::measure_overview;
+pub(crate) use overview::{measure_overview, watch_storage};
 pub use pane::format_bytes;
 pub use sidebar::{Drives, Places, System};
 pub(crate) use sidebar::{glyph_of, label_of};
@@ -692,6 +692,18 @@ impl Browser {
                 }
             });
         }
+    }
+
+    /// Opens `page` in the pane commands act on, as Go's commands do.
+    pub(crate) fn show(
+        &mut self,
+        page: session::Shows,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane()
+            .clone()
+            .update(cx, |pane, cx| pane.open_page(page, window, cx));
     }
 
     /// The pane commands act on.

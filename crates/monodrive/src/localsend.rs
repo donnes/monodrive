@@ -5,11 +5,9 @@
 
 use crate::feedback::{self, Sound};
 use crate::frame;
+use crate::notify::{self, Kind};
 use crate::preferences::Preferences;
-use gpui::{
-    App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Global, SystemNotification,
-    SystemNotificationAction,
-};
+use gpui::{App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Global};
 use monodrive_core::localsend::{
     self as core, Cancel, Device, Ended, Event, Identity, Message, Messages, Nearby, Offer,
     Progress, Receiver, SendError, Update,
@@ -131,7 +129,6 @@ const ACCEPT: &str = "accept";
 const DECLINE: &str = "decline";
 
 /// Receives from launch while Settings says to, and follows Settings.
-/// Answers offers from their notifications, the app's only ones.
 pub fn start(cx: &mut App) {
     let localsend = get(cx);
     localsend.update(cx, |this, cx| this.follow_settings(cx));
@@ -139,18 +136,25 @@ pub fn start(cx: &mut App) {
         localsend.update(cx, |this, cx| this.follow_settings(cx));
     })
     .detach();
-    cx.on_system_notification_response(|response, cx| {
-        let Some(id) = response.tag.strip_prefix(OFFER_TAG) else {
-            return;
-        };
-        let accept = match response.action_id.as_deref() {
-            Some(ACCEPT) => true,
-            Some(DECLINE) => false,
-            _ => return frame::bring_forward(cx),
-        };
-        let id = id.to_owned();
-        get(cx).update(cx, |localsend, cx| localsend.answer(&id, accept, cx));
-    });
+}
+
+/// Answers an offer from a press on its notification's `action`. Says
+/// whether `tag` was an offer's.
+pub fn respond(tag: &str, action: Option<&str>, cx: &mut App) -> bool {
+    let Some(id) = tag.strip_prefix(OFFER_TAG) else {
+        return false;
+    };
+    let accept = match action {
+        Some(ACCEPT) => true,
+        Some(DECLINE) => false,
+        _ => {
+            frame::bring_forward(cx);
+            return true;
+        }
+    };
+    let id = id.to_owned();
+    get(cx).update(cx, |localsend, cx| localsend.answer(&id, accept, cx));
+    true
 }
 
 impl LocalSend {
@@ -421,21 +425,25 @@ impl LocalSend {
             ),
             (false, None) => (format!("Received {what} from {from}"), false),
         };
-        self.say(text, failed, show, cx);
+        self.say_ended(text, failed, show, cx);
     }
 
-    /// Says it in the windows' toasts, and in a notification while another
-    /// app is in front.
+    /// Says it in the windows' toasts.
     fn say(&self, text: String, failed: bool, show: Option<PathBuf>, cx: &mut Context<Self>) {
-        if !frame::in_front() && !frame::unattended() {
-            cx.show_system_notification(SystemNotification {
-                tag: "localsend".into(),
-                title: "LocalSend".into(),
-                body: text.clone().into(),
-                actions: Vec::new(),
-            });
-        }
         cx.emit(Said { text, failed, show });
+    }
+
+    /// Says how a send or a receive ended, in a notification too while
+    /// another app is in front.
+    fn say_ended(&self, text: String, failed: bool, show: Option<PathBuf>, cx: &mut Context<Self>) {
+        notify::post(
+            Kind::LocalSendEnded,
+            "localsend".into(),
+            text.clone(),
+            &[],
+            cx,
+        );
+        self.say(text, failed, show, cx);
     }
 
     fn key(&mut self) -> u64 {
@@ -602,7 +610,7 @@ impl LocalSend {
                             0 => String::new(),
                             n => format!("; it declined {}", count(n, "file")),
                         };
-                        self.say(format!("Sent {what} to {to}{declined}"), false, None, cx);
+                        self.say_ended(format!("Sent {what} to {to}{declined}"), false, None, cx);
                     }
                     // Settings turned LocalSend off since: nobody asks.
                     Err(SendError::Pin { .. }) if !cx.global::<Preferences>().localsend => {}
@@ -614,9 +622,9 @@ impl LocalSend {
                         })
                     }
                     Err(SendError::Cancelled) => {
-                        self.say(format!("Stopped sending to {to}"), false, None, cx);
+                        self.say_ended(format!("Stopped sending to {to}"), false, None, cx);
                     }
-                    Err(e) => self.say(e.says(to), true, None, cx),
+                    Err(e) => self.say_ended(e.says(to), true, None, cx),
                 }
             }
         }
@@ -686,29 +694,24 @@ fn offer_tag(id: &str) -> String {
     format!("{OFFER_TAG}{id}")
 }
 
-/// Gets a person to an offer: AirDrop's chime, the app in front, and a
-/// notification that answers it, since macOS may keep another app in front.
+/// Gets a person to an offer: the app in front, and, while Settings wants
+/// it, AirDrop's chime and a notification that answers it, since macOS may
+/// keep another app in front.
 fn call_over(offer: &Offer, cx: &mut App) {
-    if frame::unattended() {
-        return;
+    if notify::wanted(Kind::LocalSendOffer, cx) {
+        feedback::sound(Sound::Invite, cx);
     }
-    feedback::sound(Sound::Invite, cx);
-    if !frame::in_front() {
-        let (what, take) = match offer.text {
-            Some(_) => ("text".to_string(), "Copy to Clipboard"),
-            None => (count(offer.files.len(), "file"), "Accept"),
-        };
-        let action = |id: &str, label: &str| SystemNotificationAction {
-            id: id.to_owned().into(),
-            label: label.to_owned().into(),
-        };
-        cx.show_system_notification(SystemNotification {
-            tag: offer_tag(&offer.id).into(),
-            title: "LocalSend".into(),
-            body: format!("{} wants to send you {what}", offer.from).into(),
-            actions: vec![action(DECLINE, "Decline"), action(ACCEPT, take)],
-        });
-    }
+    let (what, take) = match offer.text {
+        Some(_) => ("text".to_string(), "Copy to Clipboard"),
+        None => (count(offer.files.len(), "file"), "Accept"),
+    };
+    notify::post(
+        Kind::LocalSendOffer,
+        offer_tag(&offer.id),
+        format!("{} wants to send you {what}", offer.from),
+        &[(DECLINE, "Decline"), (ACCEPT, take)],
+        cx,
+    );
     frame::bring_forward(cx);
 }
 
