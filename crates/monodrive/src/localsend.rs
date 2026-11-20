@@ -3,11 +3,16 @@
 //! LocalSend page lists while one is open. One for the app, so every window
 //! shows the same; `monodrive_core::localsend` does the work.
 
+use crate::feedback::{self, Sound};
+use crate::frame;
 use crate::preferences::Preferences;
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
+use gpui::{
+    App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Global, SystemNotification,
+    SystemNotificationAction,
+};
 use monodrive_core::localsend::{
-    self as core, Cancel, Device, Ended, Event, Identity, Nearby, Offer, Progress, Receiver,
-    SendError, Update,
+    self as core, Cancel, Device, Ended, Event, Identity, Message, Messages, Nearby, Offer,
+    Progress, Receiver, SendError, Update,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -82,6 +87,9 @@ pub struct LocalSend {
     pub scanning: bool,
     /// For the active window to ask for.
     pub pin_wanted: Option<PinWanted>,
+    /// The text devices sent, newest first, once read.
+    pub messages: Vec<Message>,
+    messages_read: bool,
 }
 
 impl EventEmitter<Said> for LocalSend {}
@@ -110,12 +118,20 @@ pub fn get(cx: &mut App) -> Entity<LocalSend> {
         devices: Vec::new(),
         scanning: false,
         pin_wanted: None,
+        messages: Vec::new(),
+        messages_read: false,
     });
     cx.set_global(Shared(localsend.clone()));
     localsend
 }
 
+/// The tag of offer `id`'s notification, and its buttons.
+const OFFER_TAG: &str = "localsend-offer:";
+const ACCEPT: &str = "accept";
+const DECLINE: &str = "decline";
+
 /// Receives from launch while Settings says to, and follows Settings.
+/// Answers offers from their notifications, the app's only ones.
 pub fn start(cx: &mut App) {
     let localsend = get(cx);
     localsend.update(cx, |this, cx| this.follow_settings(cx));
@@ -123,6 +139,18 @@ pub fn start(cx: &mut App) {
         localsend.update(cx, |this, cx| this.follow_settings(cx));
     })
     .detach();
+    cx.on_system_notification_response(|response, cx| {
+        let Some(id) = response.tag.strip_prefix(OFFER_TAG) else {
+            return;
+        };
+        let accept = match response.action_id.as_deref() {
+            Some(ACCEPT) => true,
+            Some(DECLINE) => false,
+            _ => return frame::bring_forward(cx),
+        };
+        let id = id.to_owned();
+        get(cx).update(cx, |localsend, cx| localsend.answer(&id, accept, cx));
+    });
 }
 
 impl LocalSend {
@@ -180,6 +208,9 @@ impl LocalSend {
             .then(|| (prefs.localsend_pin.clone(), prefs.localsend_save_to()));
         if !on {
             self.stop_sending(cx);
+        } else if !self.messages_read {
+            self.messages_read = true;
+            self.change_messages(Messages::list, cx);
         }
         match (wanted, self.applied.clone()) {
             (None, None) => {}
@@ -291,6 +322,7 @@ impl LocalSend {
         if let Some(receiver) = self.receiver.take() {
             for offer in self.offers.drain(..) {
                 receiver.answer(&offer.id, false);
+                cx.dismiss_system_notification(&offer_tag(&offer.id));
             }
             self.retiring
                 .lock()
@@ -306,10 +338,14 @@ impl LocalSend {
 
     fn heard(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Offer(offer) => self.offers.push(offer),
+            Event::Offer(offer) => {
+                call_over(&offer, cx);
+                self.offers.push(offer);
+            }
             Event::Withdrawn(id) => {
                 if let Some(at) = self.offers.iter().position(|offer| offer.id == id) {
                     let offer = self.offers.remove(at);
+                    cx.dismiss_system_notification(&offer_tag(&id));
                     self.say(format!("{} stopped asking.", offer.from), false, None, cx);
                 }
             }
@@ -388,7 +424,17 @@ impl LocalSend {
         self.say(text, failed, show, cx);
     }
 
+    /// Says it in the windows' toasts, and in a notification while another
+    /// app is in front.
     fn say(&self, text: String, failed: bool, show: Option<PathBuf>, cx: &mut Context<Self>) {
+        if !frame::in_front() && !frame::unattended() {
+            cx.show_system_notification(SystemNotification {
+                tag: "localsend".into(),
+                title: "LocalSend".into(),
+                body: text.clone().into(),
+                actions: Vec::new(),
+            });
+        }
         cx.emit(Said { text, failed, show });
     }
 
@@ -397,13 +443,65 @@ impl LocalSend {
         self.next_key
     }
 
-    /// Takes every file of the offer, or none.
+    /// Takes every file of the offer, or none. A message goes to the
+    /// clipboard and the messages instead.
     pub fn answer(&mut self, id: &str, accept: bool, cx: &mut Context<Self>) {
-        self.offers.retain(|offer| offer.id != id);
+        let Some(at) = self.offers.iter().position(|offer| offer.id == id) else {
+            return;
+        };
+        let offer = self.offers.remove(at);
+        cx.dismiss_system_notification(&offer_tag(id));
         if let Some(receiver) = &self.receiver {
             receiver.answer(id, accept);
         }
+        if accept && let Some(text) = offer.text {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            self.say(format!("Copied text from {}", offer.from), false, None, cx);
+            let at = chrono::Utc::now().timestamp_millis().unsigned_abs();
+            self.change_messages(move |messages| messages.add(offer.from, text, at), cx);
+        }
         cx.notify();
+    }
+
+    /// Puts a message on the clipboard again.
+    pub fn copy_message(&mut self, at: u64, cx: &mut Context<Self>) {
+        let Some(message) = self.messages.iter().find(|message| message.at == at) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(message.text.clone()));
+        let said = format!("Copied text from {}", message.from);
+        self.say(said, false, None, cx);
+    }
+
+    pub fn forget_message(&mut self, at: u64, cx: &mut Context<Self>) {
+        self.change_messages(move |messages| messages.forget(at), cx);
+    }
+
+    pub fn clear_messages(&mut self, cx: &mut Context<Self>) {
+        self.change_messages(Messages::clear, cx);
+    }
+
+    /// Reads or changes the messages off this thread, then shows them.
+    fn change_messages(
+        &mut self,
+        change: impl FnOnce(&Messages) -> Result<Vec<Message>, String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(messages) = Messages::user() else {
+            return;
+        };
+        let changed = cx.background_spawn(async move { change(&messages) });
+        cx.spawn(async move |this, cx| {
+            let changed = changed.await;
+            let _ = this.update(cx, |this, cx| match changed {
+                Ok(messages) => {
+                    this.messages = messages;
+                    cx.notify();
+                }
+                Err(why) => this.say(why, true, None, cx),
+            });
+        })
+        .detach();
     }
 
     pub fn cancel(&mut self, key: u64, cx: &mut Context<Self>) {
@@ -582,6 +680,36 @@ impl LocalSend {
         }
         cx.notify();
     }
+}
+
+fn offer_tag(id: &str) -> String {
+    format!("{OFFER_TAG}{id}")
+}
+
+/// Gets a person to an offer: AirDrop's chime, the app in front, and a
+/// notification that answers it, since macOS may keep another app in front.
+fn call_over(offer: &Offer, cx: &mut App) {
+    if frame::unattended() {
+        return;
+    }
+    feedback::sound(Sound::Invite, cx);
+    if !frame::in_front() {
+        let (what, take) = match offer.text {
+            Some(_) => ("text".to_string(), "Copy to Clipboard"),
+            None => (count(offer.files.len(), "file"), "Accept"),
+        };
+        let action = |id: &str, label: &str| SystemNotificationAction {
+            id: id.to_owned().into(),
+            label: label.to_owned().into(),
+        };
+        cx.show_system_notification(SystemNotification {
+            tag: offer_tag(&offer.id).into(),
+            title: "LocalSend".into(),
+            body: format!("{} wants to send you {what}", offer.from).into(),
+            actions: vec![action(DECLINE, "Decline"), action(ACCEPT, take)],
+        });
+    }
+    frame::bring_forward(cx);
 }
 
 /// Stops the receivers waiting in `retiring`, and waits for their ports.

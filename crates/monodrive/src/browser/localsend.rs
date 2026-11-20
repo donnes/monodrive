@@ -3,7 +3,7 @@
 //! Finder's AirDrop page is.
 
 use super::drag::{Spot, Target, offers};
-use super::pane::Pane;
+use super::pane::{Pane, format_date};
 use super::{Browser, Offer, Sheet, format_bytes};
 use crate::localsend::{self, Direction, LocalSend, Receiving, Said, count};
 use crate::localsend_ask::{Done, OfferView, PinView};
@@ -12,7 +12,7 @@ use crate::session::Shows;
 use crate::theme::{self, ButtonLook, content, danger, text_button};
 use gpui::{
     AnyElement, AppContext, Context, Entity, Focusable, FontWeight, Hsla, PathPromptOptions, Role,
-    Subscription, Toggled, Window, div, prelude::*, px,
+    Subscription, Toggled, Window, deferred, div, prelude::*, px,
 };
 use monodrive_core::localsend::{Device, Kind};
 use std::path::PathBuf;
@@ -25,6 +25,11 @@ pub(super) struct LocalSendPage {
     pub(super) sending: Vec<PathBuf>,
     /// Waits for LocalSend to be picked in the share menu on screen.
     pub(super) sharing: gpui::Task<()>,
+    /// The received text's popover is open.
+    pub(super) history: bool,
+    /// The pointer is on the button that opens it, whose press toggles it
+    /// rather than counting as one outside.
+    on_history_button: bool,
 }
 
 impl Default for LocalSendPage {
@@ -33,6 +38,8 @@ impl Default for LocalSendPage {
             looking: None,
             sending: Vec::new(),
             sharing: gpui::Task::ready(()),
+            history: false,
+            on_history_button: false,
         }
     }
 }
@@ -66,6 +73,7 @@ impl Pane {
     /// Stops looking, and lets go of what Send with LocalSend chose.
     pub(super) fn leave_localsend(&mut self, cx: &mut Context<Self>) {
         self.localsend.sending.clear();
+        self.localsend.history = false;
         if self.localsend.looking.take().is_some() {
             localsend::get(cx).update(cx, |localsend, _| localsend.stop_looking());
         }
@@ -227,6 +235,35 @@ impl Pane {
                     }))
                 }),
             )
+            .child(self.history_button(entity, cx))
+    }
+
+    /// The clock that opens the text devices sent, under it.
+    fn history_button(
+        &self,
+        entity: &Entity<LocalSend>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let open = self.localsend.history;
+        div()
+            .relative()
+            .flex_shrink_0()
+            .child(theme::tip_below(
+                theme::icon_button("localsend-history", "Received Text", "clock", true)
+                    .debug_selector(|| "localsend-history".into())
+                    .when(open, |d| d.bg(content(0.14)))
+                    .on_hover(cx.listener(|this, over: &bool, _, _| {
+                        this.localsend.on_history_button = *over;
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.localsend.history = !this.localsend.history;
+                        cx.notify();
+                    })),
+                "Received Text",
+            ))
+            .when(open, |d| {
+                d.child(deferred(history(entity, cx)).with_priority(1))
+            })
     }
 
     fn device(
@@ -300,6 +337,146 @@ impl Pane {
                     .child(detail),
             )
     }
+}
+
+/// How many rows the popover shows before it scrolls.
+const HISTORY_ROWS: f32 = 6.;
+
+/// The text devices sent, newest first: a press copies one again, and each
+/// can be forgotten, or all of them.
+fn history(entity: &Entity<LocalSend>, cx: &mut Context<Pane>) -> impl IntoElement + use<> {
+    let messages: Vec<(u64, String, String)> = entity
+        .read(cx)
+        .messages
+        .iter()
+        .map(|message| (message.at, message.from.clone(), one_line(&message.text)))
+        .collect();
+    let today = chrono::Local::now().date_naive();
+    let close = |pane: &mut Pane, cx: &mut Context<Pane>| {
+        pane.localsend.history = false;
+        cx.notify();
+    };
+    let rows = messages
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (at, from, line))| history_row(ix, at, from, line, today, close, cx));
+    let list = if rows.len() == 0 {
+        div()
+            .px(px(theme::CARD_TEXT_PADDING - theme::CARD_PADDING))
+            .pb_3()
+            .text_size(px(theme::TEXT_SMALL))
+            .text_color(content(0.65))
+            .child("Text a device sends you lands here once you copy it.")
+            .into_any_element()
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("localsend-messages")
+                    .max_h(px(HISTORY_ROWS * (theme::TALL_ROW_HEIGHT + theme::ROW_GAP)))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
+            .child(
+                theme::row_slot("localsend-clear-history")
+                    .debug_selector(|| "localsend-clear-history".into())
+                    .role(Role::MenuItem)
+                    .aria_label("Clear History")
+                    .on_click(cx.listener(move |pane, _, _, cx| {
+                        localsend::get(cx).update(cx, |localsend, cx| localsend.clear_messages(cx));
+                        close(pane, cx);
+                    }))
+                    .child(theme::row(false).child("Clear History")),
+            )
+            .into_any_element()
+    };
+    theme::inset_rows(
+        theme::floating(theme::Elevation::Popover)
+            .id("localsend-history-popover")
+            .debug_selector(|| "localsend-history-popover".into())
+            .absolute()
+            .top(px(theme::BUTTON_HEIGHT + 4.))
+            .right_0()
+            .w(px(320.))
+            .occlude()
+            .on_mouse_down_out(cx.listener(move |pane, _, _, cx| {
+                if !pane.localsend.on_history_button {
+                    close(pane, cx);
+                }
+            }))
+            .flex()
+            .flex_col(),
+    )
+    .child(theme::section_label("Received Text").mt_0())
+    .child(list)
+}
+
+fn history_row(
+    ix: usize,
+    at: u64,
+    from: String,
+    line: String,
+    today: chrono::NaiveDate,
+    close: fn(&mut Pane, &mut Context<Pane>),
+    cx: &mut Context<Pane>,
+) -> impl IntoElement + use<> {
+    let ink = theme::row_muted(false);
+    let when = format_date(at / 1000, today);
+    theme::row_slot(("localsend-message", ix))
+        .debug_selector(move || format!("localsend-message-{ix}"))
+        .role(Role::MenuItem)
+        .aria_label(format!("Copy text from {from}"))
+        .on_click(cx.listener(move |pane, _, _, cx| {
+            localsend::get(cx).update(cx, |localsend, cx| localsend.copy_message(at, cx));
+            close(pane, cx);
+        }))
+        .child(
+            theme::row(false)
+                .h(px(theme::TALL_ROW_HEIGHT))
+                // The button's glyph, not its circle, ends on the text's edge.
+                .pr_1()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().truncate().child(line))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(theme::TEXT_CAPTION))
+                                .text_color(ink)
+                                .child(format!("{from} · {when}")),
+                        ),
+                )
+                .child(
+                    theme::tip(
+                        theme::row_icon_button(
+                            ("localsend-forget", ix),
+                            "Remove",
+                            "cancel-01",
+                            ink,
+                        ),
+                        "Remove",
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        localsend::get(cx)
+                            .update(cx, |localsend, cx| localsend.forget_message(at, cx));
+                    }),
+                ),
+        )
+}
+
+/// A message's start on one line, short enough to lay out at once.
+fn one_line(text: &str) -> String {
+    let start: String = text.chars().take(200).collect();
+    start.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn send(device: Device, paths: Vec<PathBuf>, cx: &mut gpui::App) {

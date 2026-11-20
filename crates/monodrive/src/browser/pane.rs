@@ -4108,6 +4108,10 @@ impl Pane {
         if self.showing_duplicates() && self.stop_duplicates(cx) {
             return;
         }
+        if self.showing_localsend() && self.localsend.history {
+            self.localsend.history = false;
+            return cx.notify();
+        }
         if self.showing_localsend() && !self.localsend.sending.is_empty() {
             self.localsend.sending.clear();
             return cx.notify();

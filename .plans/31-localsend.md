@@ -41,6 +41,8 @@ Off by default; Settings and the LocalSend page turn it on. Only the window rece
 
 - The server takes 53317, or a port macOS picks when another app (the LocalSend app) holds it; the announcement carries the port.
 - Every offer asks in a card in the window: who, how many files and how big, the first names, and where they'll go. ↩ accepts, Esc declines. Nothing auto-accepts.
+- A message (one text file whose preview holds the text, as the LocalSend app sends it) shows its text in the card. Copy takes none of its files, which answers 204 as the app does, puts the text on the clipboard and keeps it in `localsend/messages.json` (0600, newest 50), which Received Text on the page lists to copy again, forget or clear. Agents don't read it: a message may be a password.
+- An offer plays AirDrop's invite chime and brings the app forward. macOS may keep another app in front, so while one is, the offer also posts a notification whose Decline and Accept (or Copy) answer it, and how a transfer ended posts one too. Only a bundled build can post them; an agent's run neither chimes, comes forward nor posts.
 - Optional PIN: Monodrive makes a 6-digit one, shown on the page and in Settings, with New PIN.
 - Files go to the save folder, Downloads by default, chosen in Settings. Each file is written under a hidden `.monodrive-localsend-…` name in that folder and renamed into place under a free name (Finder's `name 2`), so a partial file never takes a real name. A folder keeps its structure; each part of a name is sanitized and `..` can't climb out. A failed file goes to the Trash. Received files get `com.apple.quarantine`.
 - While a transfer runs, a card where toasts show says who, how far, and Cancel. A toast says how it ended.

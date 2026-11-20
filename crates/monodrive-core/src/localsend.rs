@@ -3,6 +3,7 @@
 //! MCP server both call this. `.plans/31-localsend.md` and
 //! `docs/localsend.md` say how it fits together.
 
+mod messages;
 mod nearby;
 mod receive;
 mod send;
@@ -10,6 +11,7 @@ mod send;
 #[cfg(test)]
 mod tests;
 
+pub use messages::{KEPT, Message, Messages};
 pub use nearby::{Nearby, look, merged};
 pub use receive::{Ended, Event, Offer, Receiver};
 pub use send::{Cancel, Progress, SendError, Sent, Update, send, spawn_send};
