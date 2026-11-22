@@ -920,6 +920,27 @@ impl SettingsView {
             group("Finder", None, vec![self.show_in_finder(cx)]),
             self.localsend_group(p, cx),
             self.updates_group(p, cx),
+            group(
+                "Privacy",
+                None,
+                vec![row(
+                    "Share anonymous usage",
+                    Some(
+                        "Sends PostHog the app and macOS versions with a random ID each launch. Never your files.",
+                    ),
+                    self.focusable(
+                        "share-usage",
+                        true,
+                        toggle(
+                            "share-usage",
+                            "Share anonymous usage",
+                            p.share_usage,
+                            |p, on| p.set_share_usage(on),
+                        ),
+                        cx,
+                    ),
+                )],
+            ),
         ]
     }
 

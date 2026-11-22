@@ -260,6 +260,10 @@ pub struct Preferences {
     pub notify_worktrees: bool,
     /// In GB.
     pub notify_worktrees_over: u32,
+    /// The user agreed to send anonymous usage events.
+    pub share_usage: bool,
+    /// The random ID those events go by, kept only while `share_usage` is on.
+    pub usage_id: Option<String>,
 }
 
 /// The amounts, in GB, clean worktrees may pass before Monodrive says so.
@@ -332,6 +336,8 @@ impl Default for Preferences {
             notify_low_disk: true,
             notify_worktrees: true,
             notify_worktrees_over: 20,
+            share_usage: false,
+            usage_id: None,
         }
     }
 }
@@ -366,6 +372,17 @@ impl Preferences {
         self.localsend_receive = defaults.localsend_receive;
         self.localsend_folder = defaults.localsend_folder;
         self.localsend_pin = defaults.localsend_pin;
+        self.set_share_usage(defaults.share_usage);
+    }
+
+    /// Turning it off forgets the ID, so turning it back on starts a new one.
+    pub fn set_share_usage(&mut self, on: bool) {
+        self.share_usage = on;
+        if !on {
+            self.usage_id = None;
+        } else if self.usage_id.is_none() {
+            self.usage_id = Some(monodrive_core::usage::new_id());
+        }
     }
 
     pub fn restore_notifications(&mut self) {
@@ -425,6 +442,8 @@ impl Preferences {
             notify_low_disk: self.notify_low_disk,
             notify_worktrees: self.notify_worktrees,
             notify_worktrees_over: self.notify_worktrees_over,
+            share_usage: self.share_usage,
+            usage_id: self.usage_id.take(),
             ..Self::default()
         };
     }
@@ -563,6 +582,22 @@ mod tests {
         assert!(!older.show_inspector);
         assert_eq!(older.collapsed, Collapsed::default());
         assert_eq!(older.terminal, Terminal::Terminal);
+    }
+
+    #[test]
+    fn turning_usage_off_forgets_its_id_and_turning_it_on_makes_a_new_one() {
+        let mut prefs = Preferences::default();
+        prefs.set_share_usage(true);
+        let first = prefs.usage_id.clone().unwrap();
+        prefs.set_share_usage(true);
+        assert_eq!(prefs.usage_id.as_deref(), Some(first.as_str()));
+        prefs.restore_general();
+        assert_eq!(
+            (prefs.share_usage, prefs.usage_id.as_deref()),
+            (false, None)
+        );
+        prefs.set_share_usage(true);
+        assert_ne!(prefs.usage_id, Some(first));
     }
 
     #[test]
