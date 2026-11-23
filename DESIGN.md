@@ -94,6 +94,10 @@ Each selected row shows its new name, medium, with the old one after it at 0.65.
 A signed release checks GitHub 15 seconds after launch, every 4 minutes after that, and when Settings' update track changes. While a newer release is out, a download icon with an accent dot sits left of Settings at the sidebar's foot and opens a 360 pt `Popover` above it. The popover lists what's new, newest first, with Download at the end. Download closes the popover, and the icon becomes a ring that fills as the download arrives. Once the update is in place, a pill reads "Restart in 5s" and counts down to the restart, with Later to put it off. After Later, a restart icon with the dot stays, and its popover has Restart. Check for Updates… reaches the same popover while the sidebar is closed. A debug or ad hoc build says it can't update itself and never reaches the network.
 
 
+### Anonymous usage
+
+Sharing anonymous usage is off until the user turns it on, from onboarding's checklist or Settings › General › Privacy. While it's on, each launch sends PostHog one `app_opened` event with a random ID, the app's version and macOS's, and nothing about the user's files; turning it off forgets the ID. Only release builds send, and only when the release workflow set `MONODRIVE_POSTHOG_KEY`.
+
 ### Notifications
 
 Settings › Notifications, last in its page list, has Allow notifications and Banners and sounds, which opens macOS's own Notifications settings, then a switch for each kind: LocalSend's offers, LocalSend's sends and receives that end, the startup disk running low, and clean worktrees taking more than an amount picked from 5 to 100 GB, 20 by default. All are on by default, and a kind's switch dims while Allow notifications is off. Nothing posts while Monodrive is in front, since its window says the same, nor while an agent runs it. The offers' switch covers AirDrop's chime too. The storage kinds are looked at 10 seconds after launch and every 3 hours, asking Git and measuring only for a switch that's on; each says so once, then keeps quiet for a week, and `notified.json` in the support folder remembers when. Clicking one opens the Overview or the Worktrees page.
@@ -153,7 +157,7 @@ Until its Edit reorders them, Locations lists the startup disk first, then the c
 
 ### Onboarding
 
-A fixed 640 by 520 pt window of its own, not a sheet, because no main window is behind it on first launch. Welcome is centered: the icon, one line of why and the keys to know. The checklist is a card of rows, Full Disk Access first and then the coding agents, each with a button that turns into a green check as it finishes, and the row stays draggable into System Settings' list until the access is on. ↩ does what the button in the accent color does, Esc goes back a step and never closes it, and ⌘W closes it for now, so it comes back next launch. Open Monodrive is always available, since neither the access nor an agent is required.
+A fixed 640 by 520 pt window of its own, not a sheet, because no main window is behind it on first launch. Welcome is centered: the icon, one line of why and the keys to know. The checklist is a card of rows, Full Disk Access first, then the default file browser, anonymous usage and the coding agents, each with a button that turns into a green check as it finishes, and the row stays draggable into System Settings' list until the access is on. ↩ does what the button in the accent color does, Esc goes back a step and never closes it, and ⌘W closes it for now, so it comes back next launch. Open Monodrive is always available, since neither the access nor an agent is required.
 
 ### Type
 

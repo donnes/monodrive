@@ -12,7 +12,7 @@ libc = "0.2"
 # Moves files to the Trash the way Finder does, lists and ejects volumes, and
 # reads what Get Info shows, through Foundation.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSArray", "NSAttributedString", "NSBundle", "NSDictionary", "NSEnumerator", "NSError", "NSFileManager", "NSGeometry", "NSString", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSArray", "NSAttributedString", "NSBundle", "NSDictionary", "NSEnumerator", "NSError", "NSFileManager", "NSGeometry", "NSProcessInfo", "NSString", "NSURL", "NSValue"] }
 # Open With, through NSWorkspace.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "NSAttributedString", "NSColor", "NSFont", "NSFontDescriptor", "NSGraphicsContext", "NSRunningApplication", "NSStringDrawing", "NSWorkspace"] }
 block2 = "0.6"

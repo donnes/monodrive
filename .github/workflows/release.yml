@@ -14,6 +14,9 @@ name: Release
 #   APPLE_API_ISSUER   its issuer ID
 #
 # OPENROUTER_API_KEY, optional, has Claude summarize the changes in the notes.
+#
+# The POSTHOG_KEY variable, optional, is the PostHog project key that users who
+# share anonymous usage send to. POSTHOG_HOST picks the region; US without it.
 
 on:
   push:
@@ -192,6 +195,8 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          MONODRIVE_POSTHOG_KEY: ${{ vars.POSTHOG_KEY }}
+          MONODRIVE_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
         run: scripts/release "$VERSION"
       - uses: actions/upload-artifact@v4
         with:

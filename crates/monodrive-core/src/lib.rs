@@ -23,6 +23,7 @@ pub mod sizes;
 pub mod storage;
 pub mod thumbnails;
 pub mod updates;
+pub mod usage;
 pub mod user_commands;
 pub mod volumes;
 pub mod worktrees;

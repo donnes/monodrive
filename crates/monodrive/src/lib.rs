@@ -43,6 +43,7 @@ mod theme;
 mod thumbnails;
 mod traffic_lights;
 pub mod updates;
+mod usage;
 mod workspace;
 
 use commands::{CloseWindow, Hide, HideOthers, Minimize, NewWindow, Quit, ShowAll, ShowWelcome};
@@ -203,6 +204,7 @@ pub fn run(folder: Option<PathBuf>) {
         updates::start(cx);
         localsend::start(cx);
         notify::start(cx);
+        usage::start(cx);
         // Once the first listings are done, so it doesn't compete with them.
         cx.spawn(async |cx| {
             cx.background_executor().timer(MEASURE_AFTER).await;

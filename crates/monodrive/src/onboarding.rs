@@ -1,6 +1,6 @@
 //! First launch, in a window of its own: what Monodrive is and the keys to
-//! know, then one checklist of Full Disk Access, Show in Finder and coding
-//! agents. It comes
+//! know, then one checklist of Full Disk Access, Show in Finder, anonymous
+//! usage and coding agents. It comes
 //! before the main windows and before the first crawl, which would otherwise
 //! run without the access and again after it. Show Welcome and the sidebar's
 //! notice open it later.
@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 /// Raise it to show onboarding once more to everyone who finished this one.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 const WIDTH: f32 = 640.;
 const HEIGHT: f32 = 520.;
@@ -835,17 +835,8 @@ impl Onboarding {
                 cx,
             )
             .aria_label(format!("{label} {}", harness.name()));
-        let tile = div()
-            .size(px(TILE))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(theme::RADIUS_THUMB))
-            .bg(content(0.08))
-            .child(icon(harness.icon(), 16.).text_color(content(1.)));
         row(
-            tile.into_any_element(),
+            tile(harness.icon()),
             harness.name(),
             subtitle,
             div()
@@ -898,17 +889,8 @@ impl Onboarding {
             } else {
                 "Make Monodrive the default file browser"
             });
-        let tile = div()
-            .size(px(TILE))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(theme::RADIUS_THUMB))
-            .bg(content(0.08))
-            .child(icon("folder-01", 16.).text_color(content(1.)));
         row(
-            tile.into_any_element(),
+            tile("folder-01"),
             "Default file browser",
             subtitle,
             div()
@@ -916,6 +898,44 @@ impl Onboarding {
                 .items_center()
                 .gap_2()
                 .when(on, |d| d.child(done("On")))
+                .child(toggle)
+                .into_any_element(),
+        )
+    }
+
+    /// Offers anonymous usage events, off until the user turns them on here
+    /// or in Settings.
+    fn usage_row(&self, cx: &mut Context<Self>) -> Div {
+        let on = cx.global::<Preferences>().share_usage;
+        let (label, look) = if on {
+            ("Turn Off", ButtonLook::Ghost)
+        } else {
+            ("Share", ButtonLook::Secondary)
+        };
+        let toggle = self
+            .button(
+                "share-usage",
+                label,
+                look,
+                move |_, _, cx| preferences::update(cx, |p| p.set_share_usage(!on)),
+                cx,
+            )
+            .aria_label(if on {
+                "Stop sharing anonymous usage"
+            } else {
+                "Share anonymous usage"
+            });
+        row(
+            tile("lock"),
+            "Anonymous usage",
+            div()
+                .text_color(content(0.65))
+                .child("Sends PostHog the app and macOS versions with a random ID each launch. Never your files."),
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .when(on, |d| d.child(done("Shared")))
                 .child(toggle)
                 .into_any_element(),
         )
@@ -955,6 +975,8 @@ impl Onboarding {
                     .child(self.access_row(cx))
                     .child(hairline())
                     .child(self.finder_row(cx))
+                    .child(hairline())
+                    .child(self.usage_row(cx))
                     .children(agents.into_iter().flat_map(|agent| {
                         [hairline().into_any_element(), agent.into_any_element()]
                     }))
@@ -1039,6 +1061,20 @@ fn note(text: &'static str) -> Div {
         .text_size(px(theme::TEXT_CAPTION))
         .text_color(content(0.65))
         .child(text)
+}
+
+/// A checklist row's icon on a rounded square.
+fn tile(path: &'static str) -> AnyElement {
+    div()
+        .size(px(TILE))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::RADIUS_THUMB))
+        .bg(content(0.08))
+        .child(icon(path, 16.).text_color(content(1.)))
+        .into_any_element()
 }
 
 /// A checklist row's finished state.
