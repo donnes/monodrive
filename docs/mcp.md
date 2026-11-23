@@ -4,7 +4,7 @@
 
 ## Profiles
 
-`tools/list` offers one of two profiles. **core** is the default: finding, reading and changing files, the jobs that do it, and what takes up space, 29 tools. **all** adds places, servers, saved searches, Git, saved commands, edits and organize, 54 tools. `monodrive mcp --profile all` picks it on the command line; without the flag, the server reads Settings' Agents page ("Management tools") when the session starts. A tool outside the profile answers like a tool that doesn't exist.
+`tools/list` offers one of two profiles. **core** is the default: finding, reading and changing files, the jobs that do it, and what takes up space, 29 tools. **all** adds places, servers, saved searches, Git, saved commands, edits and organize, and LocalSend's two tools once Settings turns LocalSend on: 56 tools in all. `monodrive mcp --profile all` picks it on the command line; without the flag, the server reads Settings' Agents page ("Management tools") when the session starts. A tool outside the profile answers like a tool that doesn't exist.
 
 Profiles exist because every listed tool costs each agent session tokens before it does anything. A test keeps what core gives a model (names, descriptions and input schemas) under 16 KB.
 
@@ -45,7 +45,7 @@ The contract test applies these rules. An addition refreshes `contract/v1.json`,
 | `failed` | The disk or a service said no, for the reason in the message. |
 | `internal` | A bug in Monodrive. |
 
-**Jobs.** Copies, moves, archives, continued jobs and saved commands reply with one job object, even when it's already done. `wait_seconds`, up to 60, holds the reply until a file job ends; the server waits on the owner's journal, not a clock. Job ids are opaque strings; a saved command's starts with `cmd-`. A copy that takes 100 ms or 10 minutes has the same reply, so an agent's code doesn't change when Monodrive gets faster.
+**Jobs.** Copies, moves, archives, continued jobs and saved commands reply with one job object, even when it's already done. `wait_seconds`, up to 60, holds the reply until a file job ends; the server waits on the owner's journal, not a clock. Job ids are opaque strings; a saved command's starts with `cmd-`. A copy that takes 100 ms or 10 minutes has the same reply, so an agent's code doesn't change when Monodrive gets faster. `trash` is the exception that keeps its own reply: from 100 items it runs as a job, and it answers with where each item went once the job ends, or after a minute with what's done so far and `job` to follow.
 
 **Dry runs.** `rename`, `cleanup_duplicates`, `organize`, `remove_worktree` and `run_command` take `dry_run: true`, which returns the plan and a `token`. `confirm: token` runs exactly that plan, once, within 10 minutes, and the owner refuses it whole if the files changed since. `cleanup_duplicates` and `organize` only run a confirmed plan, and `remove_worktree` needs one when the worktree holds work nothing else has.
 

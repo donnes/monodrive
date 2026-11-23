@@ -1,0 +1,41 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="night" x1="0" y1="242" x2="0" y2="782" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B2346"/><stop offset="1" stop-color="#071526"/>
+    </linearGradient>
+    <radialGradient id="g1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(380 560) rotate(-38) scale(560 130)">
+      <stop stop-color="#6BFFC0"/><stop offset="0.6" stop-color="#3DE89A" stop-opacity="0.6"/><stop offset="1" stop-color="#3DE89A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g2" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(600 430) rotate(-30) scale(520 110)">
+      <stop stop-color="#5CE1FF"/><stop offset="0.6" stop-color="#38B6FF" stop-opacity="0.55"/><stop offset="1" stop-color="#38B6FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g3" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(700 660) rotate(-42) scale(480 150)">
+      <stop stop-color="#C08BFF"/><stop offset="0.6" stop-color="#8F5CFF" stop-opacity="0.6"/><stop offset="1" stop-color="#8F5CFF" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="cells" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect x="172" y="242" width="120" height="120" fill="white"/>
+      <rect x="312" y="242" width="120" height="120" fill="white"/>
+      <rect x="172" y="382" width="120" height="120" fill="white"/>
+      <rect x="312" y="382" width="120" height="120" fill="white"/>
+      <rect x="452" y="382" width="120" height="120" fill="white"/>
+      <rect x="592" y="382" width="120" height="120" fill="white"/>
+      <rect x="732" y="382" width="120" height="120" fill="white"/>
+      <rect x="172" y="522" width="120" height="120" fill="white"/>
+      <rect x="312" y="522" width="120" height="120" fill="white"/>
+      <rect x="452" y="522" width="120" height="120" fill="white"/>
+      <rect x="592" y="522" width="120" height="120" fill="white"/>
+      <rect x="732" y="522" width="120" height="120" fill="white"/>
+      <rect x="172" y="662" width="120" height="120" fill="white"/>
+      <rect x="312" y="662" width="120" height="120" fill="white"/>
+      <rect x="452" y="662" width="120" height="120" fill="white"/>
+      <rect x="592" y="662" width="120" height="120" fill="white"/>
+      <rect x="732" y="662" width="120" height="120" fill="white"/>
+    </mask>
+  </defs>
+  <g mask="url(#cells)">
+    <rect x="160" y="230" width="704" height="570" fill="url(#night)"/>
+    <rect x="160" y="230" width="704" height="570" fill="url(#g3)"/>
+    <rect x="160" y="230" width="704" height="570" fill="url(#g1)"/>
+    <rect x="160" y="230" width="704" height="570" fill="url(#g2)"/>
+  </g>
+</svg>

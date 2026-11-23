@@ -20,12 +20,15 @@
 //! The sidebar shows a made-up set of volumes and a temp folder's favorites,
 //! so nothing real is listed, mounted or ejected. The last pictures are
 //! `sidebar-keys.png`, `sidebar-edit.png`, `sidebar-folded.png`, with Favorites folded,
+//! `sidebar-edit-locations.png`, with Installer hidden,
 //! `connect.png`, `connect-failed.png`, `trash.png`,
 //! `recents.png` and `recents-grid.png`, then `updates.png`. The Overview's are last: see `shoot_overview`. Then `palette.png`, `palette-query.png`, the palette's pages
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
 //! `palette-favorites.png`), `server.png` and `server-failed.png`, a saved
 //! SFTP server opened from there and one that won't connect,
-//! `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
+//! `palette-selection.png`, `goto.png`, `goto-error.png`, `address.png`,
+//! `address-completions.png` and `address-error.png`, the path bar edited as
+//! a path, `settings-menu.png` and one
 //! `settings-<page>.png` for each Settings page, `background.png`, the list
 //! over a picture that runs from bright to dark, `narrow.png`, where the path
 //! collapses, and `no-path-bar.png`.
@@ -55,6 +58,10 @@
 //! `search-contents.png` is a content search with its matching lines,
 //! `search-menu.png` the search field's menu over it, with made-up saved and
 //! recent searches, and `search-save.png` that menu naming a new one.
+//! `search-filter.png` is the field offering kinds for the filter being
+//! typed after a finished one became a token, `search-typo.png` a bad filter
+//! marked where it sits beside two tokens, and `search-token-menu.png` the
+//! menu of the token the keys are on.
 //!
 //! `batch-rename.png` is rename in the list with several selected, replacing
 //! text, `batch-rename-number.png` numbering them, `batch-rename-problem.png`
@@ -79,20 +86,23 @@ use gpui::{
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Back, Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives,
-    EditFavorites, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder, ExtendNext,
-    ExtendPrevious, FindDuplicates, FocusNext, FocusSearch, GoOverview, GoRecents, GoToFolder,
-    GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings, OpenWith, Operations,
-    OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents, SelectLast, SelectNext,
-    SelectPrevious, ShowContextMenu, ShowCopiesAndMoves, ShowSearches, SuggestNames, ToggleSplit,
-    Undo, ViewAsGrid, ViewAsList,
+    EditFavorites, EditLocations, EditPath, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder,
+    ExtendNext, ExtendPrevious, FindDuplicates, FocusNext, FocusSearch, GoAirDrop, GoOverview,
+    GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings,
+    OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents,
+    SelectLast, SelectNext, SelectPrevious, ShowContextMenu, ShowCopiesAndMoves, ShowSearches,
+    SuggestNames, ToggleSplit, Undo, ViewAsGrid, ViewAsList,
 };
 use monodrive::connect;
 use monodrive::downloads;
 use monodrive::finder;
 use monodrive::native::{self, Native, SizeDone};
 use monodrive::onboarding::{Onboarding, Setup, Step};
-use monodrive::preferences::{Collapsed, Preferences, Theme, View, WorkspaceStyle};
+use monodrive::preferences::{
+    Collapsed, Drive, HiddenDrive, Preferences, Theme, View, WorkspaceStyle,
+};
 use monodrive::session::{PaneState, Shows, StopState, TabState, WindowState};
+use monodrive::sharing::{AirDrop, Discoverable};
 use monodrive::updates::{self, Updates};
 use monodrive_core::apps::App as MacApp;
 use monodrive_core::cloud::{Asked, Availability, CloudFolder, Progress, Quota};
@@ -105,7 +115,7 @@ use monodrive_core::remote::{Connections, RemoteError, Source, Transport};
 use monodrive_core::search::{Looks, Scope, Search};
 use monodrive_core::servers::Cancel;
 use monodrive_core::sizes::FolderSize;
-use monodrive_core::updates::{Channel, Notes, Release};
+use monodrive_core::updates::{Change, Channel, Notes, Release};
 use monodrive_core::volumes::{Volume, VolumeId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -363,6 +373,22 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
         })
     });
     save(&mut cx, window, out, "sidebar-folded")?;
+    cx.update(|cx| {
+        cx.set_global(Preferences {
+            collapsed: Collapsed {
+                favorites: true,
+                locations: false,
+            },
+            hidden_drives: vec![HiddenDrive {
+                name: "Installer".into(),
+                drive: Drive::Volume(VolumeId::Uuid("Installer".into())),
+            }],
+            ..base.clone()
+        })
+    });
+    dispatch(&mut cx, window, &EditLocations)?;
+    save(&mut cx, window, out, "sidebar-edit-locations")?;
+    dispatch(&mut cx, window, &EditLocations)?;
     cx.update(|cx| cx.set_global(base.clone()));
     dispatch(&mut cx, window, &ConnectToServer)?;
     save(&mut cx, window, out, "connect")?;
@@ -387,8 +413,19 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
         version: "0.2.0".parse()?,
         published: "2026-10-30T12:00:00Z".into(),
         notes: Notes {
-            highlights: Some("Search inside archives. Check for updates from the sidebar.".into()),
-            changes: vec!["Eject works on network drives again".into()],
+            highlights: None,
+            changes: vec![
+                Change {
+                    title: Some("Archive search.".into()),
+                    text: "Search finds files inside zip and tar archives without opening them."
+                        .into(),
+                },
+                Change {
+                    title: Some("Network drives.".into()),
+                    text: "Eject works on network drives again.".into(),
+                },
+            ],
+            more: Some("Plus 4 more bug fixes and improvements.".into()),
             stats: Some("12 changes from 2 contributors".into()),
         },
         page: "https://github.com/donnes/monodrive/releases".into(),
@@ -483,13 +520,30 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
 
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();
+    dispatch(&mut cx, window, &EditPath)?;
+    save(&mut cx, window, out, "address")?;
+    let typed = monodrive_core::paths::abbreviate(folder);
+    type_text(&mut cx, window, &format!("{typed}/"))?;
+    save(&mut cx, window, out, "address-completions")?;
+    type_text(&mut cx, window, "nowhere/at/all")?;
+    dispatch(&mut cx, window, &*go)?;
+    save(&mut cx, window, out, "address-error")?;
+
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
     dispatch(&mut cx, window, &OpenSettings)?;
     settle();
     save(&mut cx, window, out, "settings-general")?;
     // Tab onto the page list, whose arrows change pages.
     let next = named(&mut cx, "settings::FocusNext")?;
     dispatch(&mut cx, window, &*next)?;
-    for page in ["window", "appearance", "keyboard", "agents"] {
+    for page in [
+        "window",
+        "appearance",
+        "keyboard",
+        "agents",
+        "notifications",
+    ] {
         press(&mut cx, window, "down")?;
         save(&mut cx, window, out, &format!("settings-{page}"))?;
     }
@@ -548,6 +602,7 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     shoot_batch_rename(&mut cx, out, folder, &base)?;
     shoot_inspector(&mut cx, out, folder, &base)?;
     shoot_worktrees(&mut cx, out, folder, &base)?;
+    shoot_airdrop(&mut cx, out, folder)?;
     shoot_duplicates(&mut cx, out, &base)?;
     shoot_columns(&mut cx, out, made_up, &base)?;
     shoot_overview(&mut cx, out, folder, &base)?;
@@ -631,6 +686,20 @@ fn shoot_columns(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> 
 /// card that asks before one goes: `worktrees-remove-clean.png`,
 /// `-dirty`, `-unpushed`, `-detached`, `-forget` for a missing folder, and
 /// `-locked` and `-main`, which it refuses. Nothing is removed.
+/// AirDrop's page, `airdrop.png`.
+fn shoot_airdrop(cx: &mut Cx, out: &Path, folder: &Path) -> gpui::Result<()> {
+    cx.update(|cx| {
+        cx.set_global(AirDrop {
+            me: "Sam Rivera".into(),
+            discoverable: Some(Discoverable::ContactsOnly),
+            live: false,
+        })
+    });
+    let window = open(cx, folder)?;
+    dispatch(cx, window, &GoAirDrop)?;
+    save(cx, window, out, "airdrop")
+}
+
 fn shoot_worktrees(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> gpui::Result<()> {
     // With its sidebar row, which Settings turns on.
     cx.update(|cx| {
@@ -998,7 +1067,7 @@ fn shoot_overview(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) ->
         save(cx, window, out, name)?;
         if name == "overview-low" {
             // Review… on the worktrees' row, the third of Free up.
-            let review = point(px(1038.), px(302.));
+            let review = point(px(1038.), px(321.));
             let none = Modifiers::default();
             let away = point(px(120.), px(680.));
             let click = vec![
@@ -1694,7 +1763,7 @@ fn shoot_search(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> g
     save(cx, window, out, "search-contents")?;
     dispatch(cx, window, &ShowSearches)?;
     let down = named(cx, "context_menu::Down")?;
-    for _ in 0..4 {
+    for _ in 0..7 {
         dispatch(cx, window, &*down)?;
     }
     save(cx, window, out, "search-menu")?;
@@ -1702,6 +1771,24 @@ fn shoot_search(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> g
     dispatch(cx, window, &*dismiss)?;
     dispatch(cx, window, &SaveSearch)?;
     save(cx, window, out, "search-save")?;
+    dispatch(cx, window, &*dismiss)?;
+    dispatch(cx, window, &*dismiss)?;
+    // Back to names, with what's typed selected to type over.
+    dispatch(cx, window, &SearchContents)?;
+    type_text(cx, window, "invoice modified:30d kind:")?;
+    save(cx, window, out, "search-filter")?;
+    type_text(cx, window, "document size:big ")?;
+    save(cx, window, out, "search-typo")?;
+    // Onto the last token, and its menu.
+    for name in [
+        "text_field::Home",
+        "text_field::Backspace",
+        "search_field::OpenChip",
+    ] {
+        let action = named(cx, name)?;
+        dispatch(cx, window, &*action)?;
+    }
+    save(cx, window, out, "search-token-menu")?;
     Ok(())
 }
 

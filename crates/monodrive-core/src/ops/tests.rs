@@ -719,6 +719,175 @@ fn a_cancelled_or_interrupted_empty_trash_keeps_the_rest_until_a_person_continue
     assert!(run(&mut shared.lock(), Request::Undo).is_err());
 }
 
+/// `count` files in `files`, `000.txt` on, and a Trash of their own beside
+/// them (see `disk::trash`), so nothing reaches the user's.
+fn trash_fixture(dir: &Path, files: &Path, count: usize) -> (PathBuf, Vec<PathBuf>) {
+    // SAFETY: geteuid has no preconditions.
+    let trash = dir
+        .join(".Trashes")
+        .join(unsafe { libc::geteuid() }.to_string());
+    std::fs::create_dir_all(&trash).unwrap();
+    let paths = (0..count)
+        .map(|i| {
+            let path = files.join(format!("{i:03}.txt"));
+            std::fs::write(&path, i.to_string()).unwrap();
+            path
+        })
+        .collect();
+    (trash, paths)
+}
+
+fn trash(paths: &[PathBuf]) -> Request {
+    Request::Trash {
+        paths: paths.to_vec(),
+    }
+}
+
+#[test]
+fn many_items_go_to_the_trash_as_a_job_that_reports_each_and_undoes_whole() {
+    let (dir, files, mut engine) = engine();
+    let (own_trash, paths) = trash_fixture(dir.path(), &files, TRASH_JOB_AT);
+    // Fewer answer at once.
+    let few = run(&mut engine, trash(&paths[..TRASH_JOB_AT - 1])).unwrap();
+    assert!(!few.job);
+    assert_eq!(few.items.len(), TRASH_JOB_AT - 1);
+    assert!(run(&mut engine, Request::Undo).is_ok());
+
+    let shared = jobs::Shared::new(engine, None);
+    let gone = files.join("gone.txt");
+    let mut asked = paths.clone();
+    asked.push(gone.clone());
+    let agent = Origin::Agent {
+        client: Some("test".into()),
+    };
+    let queued = shared
+        .lock()
+        .submit(submission(agent, trash(&asked)))
+        .unwrap();
+    assert!(queued.job && queued.items.is_empty());
+    assert!(paths[0].exists());
+    // Swapped for another file while the job waits: that one stays.
+    let other = dir.path().join("other.txt");
+    std::fs::write(&other, "other").unwrap();
+    std::fs::rename(&other, &paths[1]).unwrap();
+    jobs::run(&shared, queued.op);
+    let done = status(&shared, queued.op);
+    assert_eq!(
+        (done.title.as_str(), done.state),
+        ("Move to Trash", State::Failed)
+    );
+    assert_eq!(done.into, dir.path().join("Trash"));
+    let failed: Vec<(usize, &str)> = done
+        .tasks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, task)| match &task.done {
+            Some(Done::To(to)) => {
+                assert!(to.starts_with(&own_trash), "{}", to.display());
+                None
+            }
+            Some(Done::Failed(why)) => Some((i, why.as_str())),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert!(failed[0].0 == 1 && failed[0].1.contains("a different item"));
+    assert!(failed[1].0 == TRASH_JOB_AT && failed[1].1.contains("gone.txt"));
+    assert_eq!(read(&paths[1]), "other");
+    assert!(done.undoable);
+    let changes = agent_changes(&paths_of(&shared), 0, 1);
+    assert_eq!(
+        (changes[0].title.as_str(), changes[0].items),
+        ("Move to Trash", TRASH_JOB_AT + 1)
+    );
+
+    // One undo puts back every item that went.
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    assert_eq!(undone.items.len(), TRASH_JOB_AT - 1);
+    assert!(paths.iter().all(|path| path.exists()));
+    assert_eq!(read(&paths[0]), "0");
+    assert_eq!(std::fs::read_dir(&own_trash).unwrap().count(), 0);
+}
+
+fn paths_of(shared: &jobs::Shared) -> Paths {
+    shared.lock().paths.clone()
+}
+
+#[test]
+fn a_cancelled_trash_job_keeps_what_went_and_undo_puts_it_back() {
+    let (dir, files, engine) = engine();
+    let (own_trash, paths) = trash_fixture(dir.path(), &files, TRASH_JOB_AT);
+    let shared = jobs::Shared::new(engine, None);
+    let op = run(&mut shared.lock(), trash(&paths)).unwrap().op;
+    assert!(jobs::next(&shared, op) && jobs::next(&shared, op));
+    run(&mut shared.lock(), Request::Cancel { job: op }).unwrap();
+    assert!(!jobs::next(&shared, op));
+    let cancelled = status(&shared, op);
+    assert_eq!(cancelled.state, State::Cancelled);
+    assert!(cancelled.undoable);
+    let went = cancelled.tasks.iter().filter(|t| t.done.is_some()).count();
+    assert_eq!(went, 2);
+    assert!(!paths[1].exists() && paths[2].exists());
+    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
+    assert_eq!(undone.items.len(), 2);
+    assert!(paths.iter().all(|path| path.exists()));
+    assert_eq!(std::fs::read_dir(&own_trash).unwrap().count(), 0);
+}
+
+#[test]
+fn a_trash_job_cut_short_by_a_crash_is_settled_from_the_disk_and_undoes_whole() {
+    let (dir, files, engine) = engine();
+    let (own_trash, items) = trash_fixture(dir.path(), &files, TRASH_JOB_AT);
+    let shared = jobs::Shared::new(engine, None);
+    // The same file named twice, of which only one went, and a hard link to
+    // another, which share an identity.
+    let linked = files.join("linked.txt");
+    std::fs::hard_link(&items[2], &linked).unwrap();
+    let mut asked = items.clone();
+    asked.extend([items[1].clone(), linked.clone()]);
+    let op = run(&mut shared.lock(), trash(&asked)).unwrap().op;
+    assert!(jobs::next(&shared, op));
+    // The owner goes once the next items are in the Trash, before their
+    // records reach the journal.
+    let landed = disk::trash(&items[1]).unwrap();
+    let both = [
+        disk::trash(&items[2]).unwrap(),
+        disk::trash(&linked).unwrap(),
+    ];
+    drop(shared);
+    let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
+    let interrupted = status(&shared, op);
+    assert_eq!(interrupted.state, State::Interrupted);
+    assert!(matches!(&interrupted.tasks[0].done, Some(Done::To(to)) if to.starts_with(&own_trash)));
+    assert_eq!(interrupted.tasks[1].done, Some(Done::To(landed)));
+    let mut found: Vec<Option<Done>> = [2, TRASH_JOB_AT + 1]
+        .map(|i| interrupted.tasks[i].done.clone())
+        .into();
+    found.sort_by_key(|done| format!("{done:?}"));
+    assert_eq!(found, both.map(|to| Some(Done::To(to))));
+    assert_eq!(interrupted.tasks[3].done, None);
+    assert!(
+        matches!(&interrupted.tasks[TRASH_JOB_AT].done, Some(Done::Failed(why)) if why.contains("can't find")),
+        "{:?}",
+        interrupted.tasks[TRASH_JOB_AT].done
+    );
+
+    let continued = continued(&shared, op, None);
+    assert_eq!(continued.state, State::Failed);
+    assert!(items.iter().all(|path| !path.exists()));
+    // Each run is its own step back: the continued one, then the first.
+    assert_eq!(
+        run(&mut shared.lock(), Request::Undo).unwrap().items.len(),
+        TRASH_JOB_AT - 3
+    );
+    assert_eq!(
+        run(&mut shared.lock(), Request::Undo).unwrap().items.len(),
+        4
+    );
+    assert!(items.iter().chain([&linked]).all(|path| path.exists()));
+    assert_eq!(std::fs::read_dir(&own_trash).unwrap().count(), 0);
+}
+
 #[test]
 fn one_owner_serves_clients_and_exits_once_the_last_one_leaves() {
     let dir = tempfile::tempdir().unwrap();
@@ -1296,6 +1465,7 @@ fn trimming_keeps_an_old_job_that_was_continued_lately() {
             title: "Undo".into(),
             items: Vec::new(),
             interrupted: false,
+            job: false,
         };
         let end = Record::End {
             op,
@@ -2643,6 +2813,7 @@ fn agent_changes_say_who_changed_what_lately_and_need_no_owner() {
                 },
             ],
             interrupted: false,
+            job: false,
         },
         steps: Vec::new(),
     };

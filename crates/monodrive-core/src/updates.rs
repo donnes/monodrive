@@ -38,12 +38,21 @@ impl Default for Channel {
 /// What `scripts/release-notes` wrote above the full list.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Notes {
-    /// A paragraph on the new features.
+    /// A paragraph on the new features, in releases from before the list.
     pub highlights: Option<String>,
-    /// One line a fix, or a change in notes without the sections.
-    pub changes: Vec<String>,
+    pub changes: Vec<Change>,
+    /// Such as "Plus 4 more bug fixes and improvements."
+    pub more: Option<String>,
     /// Such as "12 changes from 2 contributors".
     pub stats: Option<String>,
+}
+
+/// One bullet of a release's notes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Change {
+    /// The bold lead, such as "Disk overview."
+    pub title: Option<String>,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -130,8 +139,9 @@ fn newer(listed: Vec<Listed>, channel: Channel, current: &Version) -> Vec<Releas
     releases
 }
 
-/// Reads a release's body: `scripts/release-notes`' header, highlights and
-/// fixes, or GitHub's generated list on an older release.
+/// Reads a release's body: `scripts/release-notes`' header and list, or the
+/// highlights and fixes it wrote before, or GitHub's generated list on an
+/// older release.
 fn notes(body: &str) -> Notes {
     let summary = body.split("<details>").next().unwrap_or(body);
     let mut notes = Notes::default();
@@ -142,15 +152,37 @@ fn notes(body: &str) -> Notes {
         }
         if line.starts_with("**v") {
             notes.stats = line.split_once(" · ").map(|(_, stats)| stats.to_string());
+        } else if let Some(more) = line
+            .strip_prefix("**Plus ")
+            .and_then(|more| more.strip_suffix("**"))
+        {
+            notes.more = Some(format!("Plus {more}"));
         } else if let Some(change) = line.strip_prefix("- ").or(line.strip_prefix("* ")) {
             let change = change.split(" by @").next().unwrap_or(change);
-            notes.changes.push(without_pull_request(change).to_string());
+            notes
+                .changes
+                .push(self::change(without_pull_request(change)));
         } else if !line.is_empty() && !line.starts_with('#') && !line.starts_with("**") {
             highlights.push(line);
         }
     }
     notes.highlights = (!highlights.is_empty()).then(|| highlights.join(" "));
     notes
+}
+
+/// A bullet, with its bold lead apart when it has one.
+fn change(line: &str) -> Change {
+    let titled = line
+        .strip_prefix("**")
+        .and_then(|line| line.split_once("**"))
+        .map(|(title, text)| Change {
+            title: Some(title.to_string()),
+            text: text.trim_start().to_string(),
+        });
+    titled.unwrap_or_else(|| Change {
+        title: None,
+        text: line.to_string(),
+    })
 }
 
 /// A line without its ending " (#123)", which only means something on GitHub.
@@ -183,7 +215,12 @@ pub fn saved_channel() -> Channel {
 pub fn installed_app() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let app = exe.ancestors().nth(3)?;
-    (app.extension() == Some(OsStr::new("app")) && signed_by_us(app).is_ok()).then(|| app.into())
+    // Not --strict: it rejects the Finder information a custom icon from
+    // Settings puts on the bundle, which the seal doesn't cover.
+    let signed = run(Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "-R", SIGNED_BY_US])
+        .arg(app));
+    (app.extension() == Some(OsStr::new("app")) && signed.is_ok()).then(|| app.into())
 }
 
 fn signed_by_us(path: &Path) -> Result<(), String> {
@@ -419,30 +456,58 @@ mod tests {
         assert!(newer(vec![bare, draft], Channel::Stable, &Version::new(0, 1, 0)).is_empty());
     }
 
+    fn plain(text: &str) -> Change {
+        Change {
+            title: None,
+            text: text.into(),
+        }
+    }
+
     #[test]
     fn notes_read_the_summary_and_stop_before_the_full_list() {
-        let body = "**v0.2.0** · 12 changes from 2 contributors\n\n## Highlights\nSearch got faster.\nTabs arrived.\n\n## Fixes\n- Eject works again (#12)\n- Sizes add up\n\n<details>\n<summary>Full changelog</summary>\n\n- feat: everything (abc)\n</details>\n";
+        let body = "**v0.2.0** · 12 changes from 2 contributors\n\n- **Tabs.** Open folders side by side.\n- **Eject.** Works again (#12)\n- Sizes add up\n\n**Plus 3 more bug fixes and improvements.**\n\n<details>\n<summary>Full changelog</summary>\n\n- feat: everything (abc)\n</details>\n";
+        let titled = |title: &str, text: &str| Change {
+            title: Some(title.into()),
+            text: text.into(),
+        };
         assert_eq!(
             notes(body),
             Notes {
-                highlights: Some("Search got faster. Tabs arrived.".into()),
-                changes: vec!["Eject works again".into(), "Sizes add up".into()],
+                highlights: None,
+                changes: vec![
+                    titled("Tabs.", "Open folders side by side."),
+                    titled("Eject.", "Works again"),
+                    plain("Sizes add up"),
+                ],
+                more: Some("Plus 3 more bug fixes and improvements.".into()),
                 stats: Some("12 changes from 2 contributors".into()),
             }
         );
     }
 
     #[test]
-    fn notes_keep_generated_changes_and_drop_authors_and_links() {
+    fn older_notes_keep_their_highlights_and_generated_changes() {
         let body = "## What's Changed\n* feat: a thing by @me in https://x/1\n* fix: another\n\n## New Contributors\n* @me made their first contribution\n\n**Full Changelog**: https://x";
         assert_eq!(
             notes(body),
             Notes {
                 highlights: None,
-                changes: vec!["feat: a thing".into(), "fix: another".into()],
+                changes: vec![plain("feat: a thing"), plain("fix: another")],
+                more: None,
                 stats: None,
             }
         );
         assert_eq!(notes("**Full Changelog**: https://x"), Notes::default());
+        let before_the_list =
+            "## Highlights\nSearch got faster.\nTabs arrived.\n\n## Fixes\n- Eject works again\n";
+        assert_eq!(
+            notes(before_the_list),
+            Notes {
+                highlights: Some("Search got faster. Tabs arrived.".into()),
+                changes: vec![plain("Eject works again")],
+                more: None,
+                stats: None,
+            }
+        );
     }
 }

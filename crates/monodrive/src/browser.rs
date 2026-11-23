@@ -1,6 +1,7 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
+mod airdrop;
 mod archive;
 mod batch_rename;
 mod cloud;
@@ -8,11 +9,13 @@ mod columns;
 mod drag;
 mod duplicates;
 mod inspector;
+mod localsend;
 mod open_with;
 mod organize;
 mod overview;
 mod pane;
 pub(crate) mod remote;
+mod search_tokens;
 mod searches;
 mod sidebar;
 mod tabs;
@@ -39,7 +42,7 @@ mod search_tests;
 mod tests;
 
 pub(crate) use duplicates::grouped;
-pub(crate) use overview::measure_overview;
+pub(crate) use overview::{measure_overview, watch_storage};
 pub use pane::format_bytes;
 pub use sidebar::{Drives, Places, System};
 pub(crate) use sidebar::{glyph_of, label_of};
@@ -76,7 +79,10 @@ use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Origin, Request};
 use monodrive_core::places::Favorite;
 use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
-use searches::{SearchMenu, SearchMenuEvent};
+use searches::{
+    AcceptCompletion, DismissCompletions, LeaveChips, NextChip, NextCompletion, OpenChip,
+    PreviousChip, PreviousCompletion, RemoveChip, SearchMenu, SearchMenuEvent,
+};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -129,6 +135,7 @@ actions!(
         ToggleHiddenFiles,
         TogglePathBar,
         GoToFolder,
+        EditPath,
         CopyPath,
         ViewAsList,
         ViewAsGrid,
@@ -161,8 +168,11 @@ actions!(
         EmptyTrash,
         MoveHere,
         ShowPackageContents,
+        ShowInEnclosingFolder,
         RevealInFinder,
         OpenInTerminal,
+        Share,
+        SendWithLocalSend,
         QuickLook,
         OpenInQuickLook,
         EditPreview,
@@ -177,6 +187,8 @@ actions!(
         GoOverview,
         GoRecents,
         GoWorktrees,
+        GoAirDrop,
+        GoLocalSend,
         GoTrash,
         GoFavorite1,
         GoFavorite2,
@@ -190,8 +202,9 @@ actions!(
         GoFavorite10,
         ConnectToServer,
         EditFavorites,
-        FavoriteUp,
-        FavoriteDown,
+        EditLocations,
+        MovePlaceUp,
+        MovePlaceDown,
         NewTab,
         CloseTab,
         NextTab,
@@ -293,8 +306,28 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", PlacePrevious, Some("Sidebar")),
         KeyBinding::new("down", PlaceNext, Some("Sidebar")),
         KeyBinding::new("enter", OpenPlace, Some("Sidebar")),
-        // Return in the search field opens the best hit.
+        // Return in the search field opens the best hit, unless it's
+        // finishing a filter.
         KeyBinding::new("enter", OpenSelected, Some("Search")),
+        KeyBinding::new("up", PreviousCompletion, Some("Completing")),
+        KeyBinding::new("down", NextCompletion, Some("Completing")),
+        KeyBinding::new("tab", AcceptCompletion, Some("Completing")),
+        KeyBinding::new("enter", AcceptCompletion, Some("Completing")),
+        KeyBinding::new("escape", DismissCompletions, Some("Completing")),
+        // On a token, the keys move between them, open its menu or remove it.
+        KeyBinding::new("left", PreviousChip, Some("Chips")),
+        KeyBinding::new("right", NextChip, Some("Chips")),
+        KeyBinding::new("backspace", RemoveChip, Some("Chips")),
+        KeyBinding::new("delete", RemoveChip, Some("Chips")),
+        KeyBinding::new("enter", OpenChip, Some("Chips")),
+        KeyBinding::new("space", OpenChip, Some("Chips")),
+        KeyBinding::new("down", OpenChip, Some("Chips")),
+        KeyBinding::new("escape", LeaveChips, Some("Chips")),
+        KeyBinding::new("up", PreviousCompletion, Some("ChipMenu")),
+        KeyBinding::new("down", NextCompletion, Some("ChipMenu")),
+        KeyBinding::new("enter", AcceptCompletion, Some("ChipMenu")),
+        KeyBinding::new("space", AcceptCompletion, Some("ChipMenu")),
+        KeyBinding::new("escape", DismissCompletions, Some("ChipMenu")),
         KeyBinding::new("enter", CommitRename, Some("Rename")),
         KeyBinding::new("escape", CancelRename, Some("Rename")),
         // The list's arrows would move the selection out from under the
@@ -302,8 +335,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", text_field::Home, Some("Rename")),
         KeyBinding::new("down", text_field::End, Some("Rename")),
         // In Edit mode, the keys' way to do what dragging a handle does.
-        KeyBinding::new("alt-up", FavoriteUp, Some("Sidebar")),
-        KeyBinding::new("alt-down", FavoriteDown, Some("Sidebar")),
+        KeyBinding::new("alt-up", MovePlaceUp, Some("Sidebar")),
+        KeyBinding::new("alt-down", MovePlaceDown, Some("Sidebar")),
         // → steps from the sidebar into the files, as it does into a folder.
         KeyBinding::new("right", FocusList, Some("Sidebar")),
         // The context menu on the selection, as on other desktops. GPUI's
@@ -433,7 +466,7 @@ impl Browser {
         };
         let pane = browser.add_pane(Opening::at(Stop::folder(folder), view, sort), cx);
         pane.update(cx, |pane, cx| {
-            pane.set_shown(true);
+            pane.set_shown(true, cx);
             pane.reload(cx);
         });
         browser.tabs.push(Tab::new(pane));
@@ -453,7 +486,7 @@ impl Browser {
                 let pane = browser.add_pane(Opening::restored(pane), cx);
                 if shown {
                     pane.update(cx, |pane, cx| {
-                        pane.set_shown(true);
+                        pane.set_shown(true, cx);
                         pane.reload(cx);
                     });
                 }
@@ -560,6 +593,7 @@ impl Browser {
 
     fn empty(cx: &mut Context<Self>) -> Self {
         Self::follow_downloads(cx);
+        Self::follow_localsend(cx);
         let sidebar_open = cx.global::<Preferences>().show_sidebar;
         let jobs = cx.new(|_| Jobs::new());
         cx.subscribe(&jobs, |this, _, event: &JobsEvent, cx| match event {
@@ -584,8 +618,10 @@ impl Browser {
         // the pane the commands act on, and nothing else changes those.
         cx.observe_global::<Preferences>(|this, cx| {
             this.sidebar.worktrees = cx.global::<Preferences>().show_worktrees;
-            this.show_drives(cx);
+            this.sidebar.localsend = cx.global::<Preferences>().localsend;
+            this.arrange_locations(cx);
             this.fold_sections(cx.global::<Preferences>().collapsed, cx);
+            cx.notify();
             let adopt = matches!(this.sheet, Some(Sheet::Settings(_)));
             let focused = this.pane().clone();
             for pane in this.shown_panes() {
@@ -599,7 +635,7 @@ impl Browser {
         let index = cx
             .try_global::<SharedIndex>()
             .map_or_else(Arc::default, |shared| shared.0.clone());
-        Self {
+        let mut browser = Self {
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle().tab_stop(true),
             settings_focus: cx.focus_handle().tab_stop(true),
@@ -648,13 +684,17 @@ impl Browser {
                 let prefs = cx.try_global::<Preferences>();
                 sidebar::Sidebar::new(
                     prefs.is_some_and(|p| p.show_worktrees),
+                    prefs.is_some_and(|p| p.localsend),
                     prefs.map(|p| p.collapsed).unwrap_or_default(),
                 )
             },
             frame: None,
             session_key: None,
             session_save: Task::ready(()),
-        }
+        };
+        // AirDrop and LocalSend don't wait for the drives to be listed.
+        browser.arrange_locations(cx);
+        browser
     }
 
     /// The disk changed: every pane on screen checks what it's showing.
@@ -668,6 +708,27 @@ impl Browser {
     /// The menu bar's checkmarks go with the window in front.
     pub fn window_activated(&self, cx: &mut Context<Self>) {
         self.mirror_pane(cx);
+        // Who can find this Mac may have changed in System Settings.
+        for pane in self.shown_panes() {
+            pane.update(cx, |pane, cx| {
+                if pane.showing_airdrop() {
+                    pane.read_airdrop(cx);
+                    cx.notify();
+                }
+            });
+        }
+    }
+
+    /// Opens `page` in the pane commands act on, as Go's commands do.
+    pub(crate) fn show(
+        &mut self,
+        page: session::Shows,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane()
+            .clone()
+            .update(cx, |pane, cx| pane.open_page(page, window, cx));
     }
 
     /// The pane commands act on.
@@ -1267,8 +1328,13 @@ impl Browser {
     fn remember_focus(&mut self, window: &Window, cx: &App) {
         if !self.sheet_open() {
             // Clicking the gear focuses the window's root first; that isn't
-            // somewhere to come back to.
-            self.focus_before_sheet = window.focused(cx).filter(|f| *f != self.focus);
+            // somewhere to come back to. Neither is the path being typed,
+            // which closes as the sheet takes the keys.
+            let address = self.pane().read(cx).address.as_ref();
+            let address = address.map(|address| address.view.focus_handle(cx));
+            self.focus_before_sheet = window
+                .focused(cx)
+                .filter(|f| *f != self.focus && Some(f) != address.as_ref());
         }
     }
 
@@ -1367,6 +1433,7 @@ impl Browser {
                     SearchMenuEvent::Dismissed => {}
                     SearchMenuEvent::ToggleContents => pane.toggle_contents(window, cx),
                     SearchMenuEvent::ToggleThisFolder => pane.toggle_this_folder(window, cx),
+                    SearchMenuEvent::StartFilter(filter) => pane.start_filter(*filter, window, cx),
                     SearchMenuEvent::Run(search) => pane.run_search(search.clone(), window, cx),
                 });
             },
@@ -1413,7 +1480,8 @@ impl Browser {
     }
 
     /// Check for Updates…: asks now, and shows what it finds in the updates
-    /// popover, above the sidebar's foot.
+    /// popover, above the sidebar's foot, in place of Settings or any other
+    /// sheet.
     fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(shared) = cx.try_global::<updates::Shared>() {
             shared.0.clone().update(cx, |updates, cx| updates.check(cx));
@@ -1604,6 +1672,17 @@ impl Browser {
             .update(cx, |pane, cx| pane.go_to(to.folder, to.select, window, cx));
     }
 
+    /// Opens the LocalSend page holding what another app's share menu sent.
+    pub(crate) fn send_with_localsend(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane()
+            .update(cx, |pane, cx| pane.send_with_localsend(paths, window, cx));
+    }
+
     /// Opens the palette on what would run now, which is read off the frame
     /// drawn last. Another sheet closes first, and the palette waits for it.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1721,6 +1800,8 @@ impl Browser {
         self.toast(jobs::report(&job), false, undo, cx);
         if job.tasks.iter().any(|task| task.done == Some(Done::Erased)) {
             feedback::sound(Sound::EmptyTrash, cx);
+        } else if jobs::trashes(&job) && job.undoable {
+            feedback::sound(Sound::MoveToTrash, cx);
         }
         // A job's bytes may have moved between volumes.
         self.load_volumes(cx);
@@ -1915,6 +1996,9 @@ impl Browser {
     /// The toast at the bottom of the files, with its Undo.
     fn toast_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let toast = self.toast.as_ref().filter(|_| self.fetching.is_none())?;
+        if self.transferring(cx) {
+            return None;
+        }
         // Above the path bar, if it's showing.
         let bar = if cx.global::<Preferences>().show_path_bar {
             theme::PATH_BAR_HEIGHT
@@ -1955,6 +2039,7 @@ impl Browser {
                 let label = match &offer {
                     Offer::Undo(_) => "Undo",
                     Offer::Download(label, _) => label,
+                    Offer::Show(_) => "Show",
                 };
                 d.child(
                     theme::text_button("toast-offer", label, ButtonLook::Ghost)
@@ -1969,6 +2054,12 @@ impl Browser {
                                     pane.submit(Request::UndoOf { op: *op }, window, cx)
                                 }
                                 Offer::Download(_, paths) => pane.download(paths.clone(), cx),
+                                Offer::Show(path) => {
+                                    if let Some(folder) = path.parent() {
+                                        pane.go(folder.to_path_buf(), window, cx);
+                                        pane.select_on_listing(vec![path.clone()]);
+                                    }
+                                }
                             });
                         })),
                 )
@@ -2043,6 +2134,7 @@ impl Render for Browser {
         if let Some(path) = self.look_at.take() {
             self.quick_look_file(path, window, cx);
         }
+        self.ask_localsend(window, cx);
         self.sidebar.command_held = sidebar::command_held(window);
         let prefs = cx.global::<Preferences>().clone();
         self.step_sidebar(prefs.show_sidebar, window, cx);
@@ -2174,11 +2266,16 @@ impl Render for Browser {
                     .on_action(cx.listener(|this, _: &ConnectToServer, window, cx| {
                         this.open_connect(window, cx)
                     }))
-                    // Folded favorites have nothing to edit.
+                    // A folded section has nothing to edit.
                     .when(!self.sidebar.collapsed.favorites, |d| {
-                        d.on_action(
-                            cx.listener(|this, _: &EditFavorites, _, cx| this.toggle_editing(cx)),
-                        )
+                        d.on_action(cx.listener(|this, _: &EditFavorites, _, cx| {
+                            this.toggle_editing_favorites(cx)
+                        }))
+                    })
+                    .when(!self.sidebar.collapsed.locations, |d| {
+                        d.on_action(cx.listener(|this, _: &EditLocations, _, cx| {
+                            this.toggle_editing_locations(cx)
+                        }))
                     })
                     .on_action(cx.listener(|this, _: &ShowSearches, window, cx| {
                         this.toggle_searches(window, cx)
@@ -2202,8 +2299,8 @@ impl Render for Browser {
                         if this.tools_kept_it(cx) || this.close_preview(cx) {
                             return;
                         }
-                        if this.sidebar.editing {
-                            return this.toggle_editing(cx);
+                        if this.stop_editing(cx) {
+                            return;
                         }
                         this.pane()
                             .update(cx, |pane, cx| pane.clear_search(window, cx));
@@ -2272,6 +2369,12 @@ impl Render for Browser {
                 d.on_action(
                     cx.listener(|this, _: &GoToFolder, window, cx| this.open_goto(window, cx)),
                 )
+                .on_action(cx.listener(|this, _: &EditPath, window, cx| {
+                    let pane = this.pane().clone();
+                    if !pane.update(cx, |pane, cx| pane.edit_path(window, cx)) {
+                        this.open_goto(window, cx)
+                    }
+                }))
                 // Not while a name is edited, so Space types there.
                 // During a drag, Space opens what it rests on, selected or not.
                 .when(!renaming && (selected || self.drag.active()), |d| {
@@ -2297,13 +2400,13 @@ impl Render for Browser {
                         },
                     ))
                 })
-                .on_action(cx.listener(|this, _: &ShowCopiesAndMoves, window, cx| {
-                    this.toggle_jobs(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
-                    this.check_for_updates(window, cx)
-                }))
+                .on_action(cx.listener(
+                    |this, _: &ShowCopiesAndMoves, window, cx| this.toggle_jobs(window, cx),
+                ))
             })
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                this.check_for_updates(window, cx)
+            }))
             // Said, as a folder with nothing hidden looks the same either way.
             .on_action(cx.listener(|this, _: &ToggleHiddenFiles, _, cx| {
                 preferences::update(cx, |p| p.show_hidden = !p.show_hidden);
@@ -2377,6 +2480,7 @@ impl Render for Browser {
                                     .flex()
                                     .child(self.split_view(boxy, window, cx))
                                     .children(self.fetching_toast(cx))
+                                    .children(self.localsend_toast(cx))
                                     .children(self.toast_view(cx)),
                             )
                             .children(self.inspector_view(boxy, split, window, cx)),
@@ -2394,6 +2498,8 @@ impl Render for Browser {
                         .map_or_else(|| div().into_any_element(), |p| p.into_any_element()),
                     Sheet::Searches(view) => view.clone().into_any_element(),
                     Sheet::EmptyTrash(view) => view.clone().into_any_element(),
+                    Sheet::LocalSendOffer(view) => view.clone().into_any_element(),
+                    Sheet::LocalSendPin(view) => view.clone().into_any_element(),
                     Sheet::RemoveWorktree(view) => view.clone().into_any_element(),
                     Sheet::ReviewDuplicates(view) => view.clone().into_any_element(),
                     Sheet::Connect(view) => view.clone().into_any_element(),
@@ -2543,6 +2649,8 @@ pub(super) enum Offer {
     Undo(u64),
     /// Downloads these, under this label: Download, or Try Again.
     Download(&'static str, Vec<PathBuf>),
+    /// Shows this in its folder, selected.
+    Show(PathBuf),
 }
 
 /// A message after a change.
@@ -2584,6 +2692,8 @@ enum Sheet {
     /// The search field's menu.
     Searches(Entity<SearchMenu>),
     EmptyTrash(Entity<EmptyTrashView>),
+    LocalSendOffer(Entity<crate::localsend_ask::OfferView>),
+    LocalSendPin(Entity<crate::localsend_ask::PinView>),
     RemoveWorktree(Entity<RemoveWorktreeView>),
     ReviewDuplicates(Entity<ReviewDuplicatesView>),
     Connect(Entity<ConnectView>),

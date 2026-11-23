@@ -120,6 +120,9 @@ fn a_saved_server_opens_in_the_pane_and_back_leaves_it(cx: &mut TestAppContext) 
         toast(&browser, cx),
         Some(("Copied 2 paths".into(), false, false))
     );
+    // Go › AirDrop leaves the server for the AirDrop page.
+    press(cx, "cmd-shift-r");
+    assert!(in_pane(&browser, cx, |pane, _| pane.showing_airdrop()));
 }
 
 /// The text on the clipboard.
@@ -191,6 +194,29 @@ fn disconnecting_waits_to_be_asked_and_forgetting_leaves_the_server_alone(cx: &m
     assert!(!connected(cx));
     assert!(far.join("a.txt").exists() && far.join("docs/inner.md").exists());
     assert_eq!(browser.read_with(cx, |b, _| b.sidebar.remotes.len()), 0);
+}
+
+#[gpui::test]
+fn forgetting_a_server_above_the_keys_leaves_them_on_theirs(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    for id in ["one", "two", "three"] {
+        let host = format!("{id}.example");
+        world.store.add_remote(&host, Some(id), None).unwrap();
+    }
+    let (browser, cx) = open(&world, &project, cx);
+    let row = server_row(&browser, 1, cx);
+    let ix: usize = row.trim_start_matches("place-").parse().unwrap();
+    browser.update(cx, |b, cx| {
+        b.sidebar_cursor = ix;
+        b.forget_server("one", cx);
+    });
+    cx.run_until_parked();
+    let on = browser.read_with(cx, |b, _| match b.row_at(b.sidebar_cursor) {
+        Some(Row::Server(at)) => Some(b.sidebar.remotes[at].id.clone()),
+        _ => None,
+    });
+    assert_eq!(on.as_deref(), Some("two"));
 }
 
 #[gpui::test]

@@ -328,7 +328,8 @@ fn favorites_and_locations_fold_on_their_own_and_the_keys_skip_what_is_folded(
 
     // Folded, Favorites' rows and Edit go, with the Edit session, and
     // Locations follow Recents.
-    let editing = |cx: &mut VisualTestContext| browser.read_with(cx, |b, _| b.sidebar.editing);
+    let editing =
+        |cx: &mut VisualTestContext| browser.read_with(cx, |b, _| b.sidebar.editing_favorites);
     cx.dispatch_action(EditFavorites);
     assert!(editing(cx));
     press_on(cx, "favorites-toggle");
@@ -340,8 +341,18 @@ fn favorites_and_locations_fold_on_their_own_and_the_keys_skip_what_is_folded(
     assert!(!editing(cx));
     assert_eq!(row(cx, 2), Some(Row::Volume(0)));
     assert_eq!(row(cx, 3), Some(Row::Volume(1)));
-    assert!(on_screen(cx, "place-3"));
-    assert!(!on_screen(cx, "place-4"));
+    assert_eq!(row(cx, 4), Some(Row::AirDrop));
+    assert!(on_screen(cx, "place-4"));
+    assert!(!on_screen(cx, "place-5"));
+    // LocalSend follows AirDrop once Settings turns it on.
+    assert_eq!(row(cx, 5), None);
+    cx.update(|_, cx| crate::preferences::update(cx, |p| p.localsend = true));
+    cx.run_until_parked();
+    assert_eq!(row(cx, 5), Some(Row::LocalSend));
+    assert!(on_screen(cx, "place-5"));
+    cx.update(|_, cx| crate::preferences::update(cx, |p| p.localsend = false));
+    cx.run_until_parked();
+    assert!(!on_screen(cx, "place-5"));
 
     // With both folded, the keys stop at Recents.
     press_on(cx, "locations-toggle");
@@ -372,10 +383,12 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
     let ext = tempfile::tempdir().unwrap();
     let drive = ext.path().canonicalize().unwrap();
     let world = world(vec![startup(), volume("Backup", &drive, "B", 100, 10)], cx);
+    let icloud = project.join("Library/Mobile Documents/com~apple~CloudDocs");
+    std::fs::create_dir_all(&icloud).unwrap();
     *world.fake.cloud.lock().unwrap() = vec![
         CloudFolder {
             name: "iCloud Drive".into(),
-            path: project.join("docs"),
+            path: icloud.clone(),
         },
         CloudFolder {
             name: "ProtonDrive".into(),
@@ -387,13 +400,13 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
         .cloud_free
         .lock()
         .unwrap()
-        .insert(project.join("docs"), Quota::Free(5_000_000_000));
+        .insert(icloud.clone(), Quota::Free(5_000_000_000));
     let owned = own(cx);
     let (browser, cx) = open(&world, &project, cx);
-    // iCloud Drive says what's left; the other provider says nothing.
+    // iCloud Drive says what's left; the other provider has no line for it.
     assert!(on_screen(cx, "cloud-free-0"));
-    assert!(!on_screen(cx, "cloud-unknown-1"));
     assert!(!on_screen(cx, "cloud-free-1"));
+    assert!(!on_screen(cx, "cloud-failed-1"));
     let first = favorites(&browser, cx).len() + 2;
     let rows: Vec<_> = (first..first + 4)
         .map(|ix| browser.read_with(cx, |b, _| b.row_at(ix)))
@@ -409,7 +422,7 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
     };
     focus_sidebar(cx);
     press(cx, "up enter");
-    assert_eq!(here(&browser, cx), project.join("docs"));
+    assert_eq!(here(&browser, cx), icloud.clone());
     focus_sidebar(cx);
     press(cx, "down down cmd-e");
     assert_eq!(*world.fake.ejected.lock().unwrap(), vec![drive]);
@@ -419,21 +432,11 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
         .cloud_free
         .lock()
         .unwrap()
-        .insert(project.join("docs"), Quota::Failed);
+        .insert(icloud.clone(), Quota::Failed);
     browser.update(cx, |b, cx| b.load_volumes(cx));
     cx.run_until_parked();
+    assert!(on_screen(cx, "cloud-failed-0"));
     assert!(!on_screen(cx, "cloud-free-0"));
-    assert!(!on_screen(cx, "cloud-unknown-0"));
-    let hover = |cx: &mut VisualTestContext, row| {
-        let at = center(cx, &format!("place-{row}"));
-        cx.simulate_mouse_move(at, None, with(""));
-        cx.run_until_parked();
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(1));
-        on_screen(cx, "tooltip")
-    };
-    assert!(!hover(cx, first + 2));
-    assert!(hover(cx, first + 1));
     release(owned, cx);
 }
 
@@ -546,15 +549,15 @@ fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_
     assert_eq!(
         toast(&browser, cx),
         Some((
-            "Hid Backup from the sidebar. Settings shows it again.".into(),
+            "Hid Backup from the sidebar. Edit Locations shows it again.".into(),
             false,
             false
         ))
     );
     assert_eq!(shown(cx), ["Macintosh HD", "iCloud Drive"]);
-    // Backup was the last row, so the keys move up onto the one now last.
+    // The keys stay put, on AirDrop, which follows every location.
     let cursor = browser.read_with(cx, |b, _| b.row_at(b.sidebar_cursor));
-    assert_eq!(cursor, Some(Row::Cloud(0)));
+    assert_eq!(cursor, Some(Row::AirDrop));
     // A renamed cloud folder is listed in Settings by the name it was given.
     let docs = project.join("docs");
     cx.update(|_, cx| {
@@ -588,6 +591,139 @@ fn hide_from_sidebar_leaves_a_drive_out_wherever_it_mounts_until_settings_shows_
         hidden.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
         ["Personal"]
     );
+}
+
+#[gpui::test]
+fn edit_locations_reorders_and_the_eye_hides_until_done_for_good(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let ext = tempfile::tempdir().unwrap();
+    let drive = ext.path().canonicalize().unwrap();
+    let world = world(vec![startup(), volume("Backup", &drive, "B", 100, 10)], cx);
+    *world.fake.cloud.lock().unwrap() = vec![CloudFolder {
+        name: "iCloud Drive".into(),
+        path: project.join("docs"),
+    }];
+    let (browser, cx) = open(&world, &project, cx);
+    let names = |cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, _| {
+            let sidebar = &b.sidebar;
+            (sidebar.locations.iter())
+                .map(|row| match *row {
+                    Row::Volume(ix) => sidebar.volumes[ix].name.clone(),
+                    Row::Cloud(ix) => sidebar.cloud[ix].name.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let hidden = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let prefs = cx.global::<Preferences>();
+            prefs
+                .hidden_drives
+                .iter()
+                .map(|h| h.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "iCloud Drive", "Backup", "AirDrop"]
+    );
+    assert!(!on_screen(cx, "location-handle-0"));
+    assert!(!on_screen(cx, "location-eye-0"));
+    assert!(on_screen(cx, "volume-eject-1"));
+
+    // In Edit mode, a click goes nowhere and the handles move rows.
+    click(cx, "locations-edit");
+    assert!(!on_screen(cx, "volume-eject-1"));
+    let first = favorites(&browser, cx).len() + 2;
+    press_on(cx, &format!("place-{}", first + 2));
+    assert_eq!(here(&browser, cx), project);
+    let from = center(cx, "location-handle-2");
+    let to = center(cx, &format!("place-{first}"));
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    assert_eq!(
+        names(cx),
+        ["Backup", "Macintosh HD", "iCloud Drive", "AirDrop"]
+    );
+
+    // ⌥↓ moves the row the keys are on, and the keys go with it.
+    browser.update_in(cx, |b, window, cx| {
+        b.sidebar_cursor = first;
+        window.focus(&b.sidebar_focus, cx);
+    });
+    press(cx, "alt-down");
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
+    assert_eq!(browser.read_with(cx, |b, _| b.sidebar_cursor), first + 1);
+
+    // The eye hides a row, which stays, dimmed, until Done. The keys stay
+    // on Backup as the row above it goes and comes back.
+    let on_backup = |cx: &mut VisualTestContext| {
+        browser.read_with(cx, |b, _| match b.row_at(b.sidebar_cursor) {
+            Some(Row::Volume(ix)) => b.sidebar.volumes[ix].name == "Backup",
+            _ => false,
+        })
+    };
+    press_on(cx, "location-eye-0");
+    assert_eq!(hidden(cx), ["Macintosh HD"]);
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
+    click(cx, "locations-edit");
+    assert_eq!(names(cx), ["Backup", "iCloud Drive", "AirDrop"]);
+    assert!(on_backup(cx));
+    assert!(!on_screen(cx, "location-eye-0"));
+
+    // Edit brings it back in its place, and its eye shows it again.
+    click(cx, "locations-edit");
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
+    assert!(on_backup(cx));
+    press_on(cx, "location-eye-0");
+    assert!(hidden(cx).is_empty());
+    press(cx, "escape");
+    assert!(!browser.read_with(cx, |b, _| b.sidebar.editing_locations));
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
+
+    // The order is kept, so the drives come back in it however they mount.
+    world.fake.volumes.lock().unwrap().reverse();
+    world.volumes_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        names(cx),
+        ["Macintosh HD", "Backup", "iCloud Drive", "AirDrop"]
+    );
+
+    // AirDrop moves like any location, and keeps its place.
+    click(cx, "locations-edit");
+    let from = center(cx, "location-handle-3");
+    let to = center(cx, &format!("place-{first}"));
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    cx.run_until_parked();
+    press(cx, "escape");
+    assert_eq!(
+        names(cx),
+        ["AirDrop", "Macintosh HD", "Backup", "iCloud Drive"]
+    );
+    let order = cx.update(|_, cx| cx.global::<Preferences>().location_order.clone());
+    assert_eq!(order.first(), Some(&crate::preferences::Location::AirDrop));
 }
 
 #[gpui::test]
@@ -938,6 +1074,24 @@ fn recents_list_what_was_opened_mark_what_went_and_clear(cx: &mut TestAppContext
     let said = toast(&browser, cx).unwrap();
     assert_eq!(said.0, "\"gone.txt\" is no longer there.");
     assert_eq!(world.fake.opened.lock().unwrap().len(), 1);
+
+    // Show in Enclosing Folder opens the folder holding a recent file with it
+    // selected, and Back returns to Recents.
+    let inner = project.join("docs/inner.md");
+    world.store.opened(&inner).unwrap();
+    world.lists_changed.try_send(()).unwrap();
+    cx.run_until_parked();
+    press(cx, "alt-up cmd-r");
+    assert_eq!(
+        in_pane(&browser, cx, |b, _| b.folder().to_path_buf()),
+        project.join("docs")
+    );
+    assert_eq!(
+        shown(&browser, cx),
+        (vec!["inner.md".into()], vec!["inner.md".into()])
+    );
+    press(cx, "cmd-[");
+    assert!(in_pane(&browser, cx, |b, _| b.showing_recents()));
 
     // What opened elsewhere shows when the watch speaks.
     world.store.opened(&project.join("zeta")).unwrap();
@@ -1457,8 +1611,9 @@ fn a_drive_going_under_the_palette_stops_eject_reaching_the_next_one(cx: &mut Te
         assert_eq!(under_keys(&view, cx).as_deref(), Some("Eject"));
         press(cx, "enter");
     };
+    // B itself goes, so the keys fall to C, the next one.
     press(cx, "cmd-k");
-    world.fake.volumes.lock().unwrap().remove(1);
+    world.fake.volumes.lock().unwrap().remove(2);
     world.volumes_changed.try_send(()).unwrap();
     cx.run_until_parked();
     eject_from_palette(cx);
@@ -1493,6 +1648,16 @@ fn the_palette_over_another_sheet_still_knows_what_would_run(cx: &mut TestAppCon
     let view = palette(&browser, cx);
     assert_eq!(under_keys(&view, cx).as_deref(), Some("Open"));
     assert!(view.read_with(cx, |v, _| v.rows[0].enabled));
+}
+
+#[gpui::test]
+fn check_for_updates_from_settings_shows_the_updates(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-,");
+    cx.dispatch_action(CheckForUpdates);
+    assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Updates))));
 }
 
 #[gpui::test]
@@ -2532,6 +2697,14 @@ fn the_overview_is_a_place_in_the_history_and_the_session(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn airdrop_is_in_locations_before_the_drives_are_listed(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let locations = browser.read_with(cx, |b, _| b.sidebar.locations.clone());
+    assert_eq!(locations, [Row::AirDrop]);
+}
+
+#[gpui::test]
 fn the_sidebars_keys_reach_the_overview_above_recents(cx: &mut TestAppContext) {
     let world = world(vec![disk(900_000)], cx);
     let (_dir, project) = folder();
@@ -2551,9 +2724,16 @@ fn a_row_opens_its_folder_and_back_returns_to_the_page(cx: &mut TestAppContext) 
     let home = world.dir.path().canonicalize().unwrap();
     let documents = home.join("Documents");
     std::fs::create_dir(&documents).unwrap();
-    std::fs::write(documents.join("a.txt"), "hello").unwrap();
+    std::fs::write(documents.join("a.txt"), vec![1; 64 * 1024]).unwrap();
+    std::fs::create_dir(home.join("Pictures")).unwrap();
     let (browser, cx) = open(&world, &home, cx);
     press(cx, "cmd-alt-o");
+    // The left column picks which kind the list shows, by a press or ↑ and ↓.
+    press_on(cx, "overview-pick-Pictures");
+    assert!(on_screen(cx, "overview-spot-Pictures"));
+    assert!(!on_screen(cx, "overview-spot-Documents"));
+    press(cx, "up");
+    assert!(!on_screen(cx, "overview-spot-Pictures"));
     assert!(on_screen(cx, "overview-spot-Documents"));
     press_on(cx, "overview-spot-Documents");
     assert_eq!(here(&browser, cx), documents);
@@ -2590,6 +2770,17 @@ fn suggestions_show_when_the_disk_is_low_and_their_button_can_be_undone(cx: &mut
 }
 
 #[gpui::test]
+fn a_low_disk_leads_with_what_can_be_freed_while_nothing_can_yet(cx: &mut TestAppContext) {
+    let world = world(vec![disk(100_000)], cx);
+    let home = world.dir.path().canonicalize().unwrap();
+    std::fs::create_dir(home.join("Documents")).unwrap();
+    let (_browser, cx) = open(&world, &home, cx);
+    press(cx, "cmd-alt-o");
+    assert!(on_screen(cx, "overview-pick-Can be freed"));
+    assert!(!on_screen(cx, "overview-spot-Documents"));
+}
+
+#[gpui::test]
 fn a_drive_shows_nothing_until_someone_asks_for_a_scan(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mount = dir.path().canonicalize().unwrap();
@@ -2606,6 +2797,8 @@ fn a_drive_shows_nothing_until_someone_asks_for_a_scan(cx: &mut TestAppContext) 
     let home = world.dir.path().canonicalize().unwrap();
     let (browser, cx) = open(&world, &home, cx);
     press(cx, "cmd-alt-o");
+    assert!(!on_screen(cx, "overview-scan"));
+    press_on(cx, "overview-pick-Backup");
     assert!(on_screen(cx, "overview-scan"));
     assert!(!on_screen(cx, "overview-row-Photos"));
 

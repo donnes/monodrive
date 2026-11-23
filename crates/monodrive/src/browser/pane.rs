@@ -8,21 +8,23 @@ use super::batch_rename::BatchRename;
 use super::columns::{COLUMN_WIDTH, Columns, chevron};
 use super::drag::{Drag, Spot, Target, offers};
 use super::duplicates::DuplicatesPage;
+use super::localsend::LocalSendPage;
 use super::organize::Review;
 use super::overview::OverviewPage;
 use super::remote::RemotePage;
-use super::searches::{CONTENT_SETTLE, Matches};
+use super::searches::{CONTENT_SETTLE, Completing, Matches};
 use super::worktrees::WorktreesPage;
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, Compress, CopyPath, DeselectAll, Download,
     Duplicate, EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext,
-    ExtendPrevious, ExtendRight, Extract, FindDuplicates, FocusSearch, Forward, GoApplications,
-    GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoOverview, GoRecents, GoToFolder,
-    GoTrash, GoWorktrees, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, Offer,
-    OpenInTerminal, OpenSelected, OrganizeFolder, PageDown, PageUp, Places, PutBack, QuickLook,
-    Redo, RemoveDownload, Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop,
-    SearchContents, SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-    ShowContextMenu, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
+    ExtendPrevious, ExtendRight, Extract, FindDuplicates, FocusSearch, Forward, GoAirDrop,
+    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoLocalSend,
+    GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveHere, MoveToTrash, NewFile,
+    NewFolder, NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected, OrganizeFolder,
+    PageDown, PageUp, Places, PutBack, QuickLook, Redo, RemoveDownload, Rename, RevealInFinder,
+    ReverseSort, ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder, SelectFirst,
+    SelectLast, SelectNext, SelectPrevious, SendWithLocalSend, Share, ShowContextMenu,
+    ShowInEnclosingFolder, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
     SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash,
     with_owner,
 };
@@ -31,6 +33,7 @@ use crate::commands::Scope;
 use crate::downloads::Downloads;
 use crate::feedback::{self, Sound};
 use crate::file_icons;
+use crate::goto::{GotoEvent, GotoView};
 use crate::jobs;
 use crate::onboarding::IndexGate;
 use crate::pasteboard::Pasteboard;
@@ -43,11 +46,11 @@ use crate::thumbnails::{self, Thumb};
 use crate::workspace;
 use chrono::{DateTime, Local};
 use gpui::{
-    App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollStrategy,
-    ScrollWheelEvent, Subscription, Task, TextOverflow, UniformListScrollHandle, Window, canvas,
-    div, point, prelude::*, px, uniform_list,
+    AnyWindowHandle, App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
+    ScrollHandle, ScrollStrategy, ScrollWheelEvent, Subscription, Task, TextOverflow,
+    UniformListScrollHandle, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
@@ -55,7 +58,7 @@ use monodrive_core::index::Index;
 use monodrive_core::info;
 use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
 use monodrive_core::places::{self, Availability, Favorite};
-use monodrive_core::search::{Looks, Scope as SearchScope};
+use monodrive_core::search::{Looks, Query, Scope as SearchScope};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -253,6 +256,8 @@ pub struct Pane {
     consented: bool,
     /// The name being edited in place.
     pub(super) renaming: Option<Renaming>,
+    /// The path bar, edited as a path.
+    pub(super) address: Option<Address>,
     /// Rename in the list: the bar, and the selected rows' new names.
     pub(super) batch: Option<BatchRename>,
     /// Organize's review, in place of the list.
@@ -268,14 +273,25 @@ pub struct Pane {
     pub(super) keep_selection: bool,
     /// What a change made, to select once the listing that has it lands.
     select_after: Vec<PathBuf>,
-    /// The trimmed search text; empty while showing the folder.
+    /// The search as text, the tokens' then the words typed; empty while
+    /// showing the folder.
     pub(super) query: String,
+    /// The finished filters, shown as tokens before the words in the field.
+    pub(super) filters: Query,
+    /// The token the keys are on, and the row of its menu while that's open.
+    pub(super) chip: Option<usize>,
+    pub(super) chip_menu: Option<usize>,
+    /// Where the keys go while they're on a token.
+    pub(super) chips_focus: FocusHandle,
+    pub(super) chips_scroll: ScrollHandle,
     /// What a search looks at. Leaving a search goes back to names.
     pub(super) looks: Looks,
     /// Where a search looks. Leaving a search goes back to everywhere.
     pub(super) search_scope: SearchScope,
     /// A content search's matching lines, and the rows that show them.
     pub(super) matches: Matches,
+    /// Values that could finish the filter being typed, while the field shows them.
+    pub(super) completing: Option<Completing>,
     /// How tall a row was last drawn.
     list_row_height: f32,
     /// Keeps the results on screen as a recent search, once they've stayed.
@@ -320,6 +336,8 @@ pub struct Pane {
     pub(super) overview: OverviewPage,
     /// The worktrees, as last scanned.
     pub(super) worktrees: WorktreesPage,
+    /// Looking for LocalSend devices while its page is open.
+    pub(super) localsend: LocalSendPage,
     /// What Find Duplicates found, as last looked through.
     pub(super) duplicates: DuplicatesPage,
     /// The archive on screen, as last read; dropped on leaving it.
@@ -345,12 +363,9 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| TextField::new("Search", "Search", cx));
-        cx.subscribe(&search, |this, search, _: &text_field::Changed, cx| {
-            let query = search.read(cx).text().trim().to_string();
-            if query != this.query {
-                this.query = query;
-                this.reload(cx);
-            }
+        cx.subscribe(&search, |this, _, _: &text_field::Changed, cx| {
+            this.follow_typing(cx);
+            this.sync_query(cx);
         })
         .detach();
         // Cleanup otherwise runs while drawing, and a closed tab, pane or window
@@ -358,6 +373,9 @@ impl Pane {
         cx.on_release(|this, cx| {
             for (thumb, image) in this.thumbs.drain() {
                 thumbnails::release(&thumb, image, None, cx);
+            }
+            if this.localsend.looking() {
+                super::localsend::stop_looking(cx);
             }
         })
         .detach();
@@ -405,6 +423,7 @@ impl Pane {
             unavailable: None,
             consented: false,
             renaming: None,
+            address: None,
             batch: None,
             organizing: None,
             preview: None,
@@ -413,9 +432,15 @@ impl Pane {
             keep_selection: false,
             select_after: Vec::new(),
             query: String::new(),
+            filters: Query::default(),
+            chip: None,
+            chip_menu: None,
+            chips_focus: cx.focus_handle(),
+            chips_scroll: ScrollHandle::new(),
             looks: Looks::default(),
             search_scope: SearchScope::default(),
             matches: Matches::default(),
+            completing: None,
             list_row_height: 0.,
             remember: Task::ready(()),
             selection: Selection::default(),
@@ -438,6 +463,7 @@ impl Pane {
             open_after_download: HashSet::new(),
             overview: OverviewPage::default(),
             worktrees: WorktreesPage::default(),
+            localsend: LocalSendPage::default(),
             duplicates: DuplicatesPage::default(),
             archived: None,
             remote: RemotePage::default(),
@@ -449,7 +475,7 @@ impl Pane {
     }
 
     /// Whether its tab is on screen.
-    pub(super) fn set_shown(&mut self, shown: bool) {
+    pub(super) fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.shown = shown;
         if !shown {
             self.opening = Task::ready(());
@@ -458,6 +484,7 @@ impl Pane {
             self.marquee = None;
             self.leave_overview();
             self.leave_duplicates();
+            self.leave_localsend(cx);
         }
     }
 
@@ -530,7 +557,9 @@ impl Pane {
                 Some(StopState {
                     place: stop.place.clone()?,
                     shows: match stop.shows {
-                        Shows::Archive | Shows::Duplicates => Shows::Folder,
+                        Shows::Archive | Shows::Duplicates | Shows::AirDrop | Shows::LocalSend => {
+                            Shows::Folder
+                        }
                         shows => shows,
                     },
                     remote: stop.remote.clone(),
@@ -548,6 +577,12 @@ impl Pane {
     /// Preferences changed: lists again if the hidden files did. With `adopt`,
     /// Settings chose them for this pane, so it takes their view and sort.
     pub(super) fn preferences_changed(&mut self, adopt: bool, cx: &mut Context<Self>) {
+        if self.showing_localsend() {
+            match cx.global::<Preferences>().localsend {
+                true => self.enter_localsend(cx),
+                false => self.leave_localsend(cx),
+            }
+        }
         let prefs = cx.global::<Preferences>();
         let (view, sort, show_hidden) = (prefs.view, prefs.sort, prefs.show_hidden);
         self.grid_icon = prefs.grid_icon;
@@ -628,6 +663,10 @@ impl Pane {
             "Overview".to_string()
         } else if self.showing_worktrees() {
             "Worktrees".to_string()
+        } else if self.showing_airdrop() {
+            "AirDrop".to_string()
+        } else if self.showing_localsend() {
+            "LocalSend".to_string()
         } else if self.showing_duplicates() {
             format!("Duplicates in {}", level_name(self.folder()))
         } else if self.showing_remote() {
@@ -713,11 +752,8 @@ impl Pane {
         self.expanded = to.expanded;
         self.selection = to.selection;
         self.keep_selection = true;
-        self.query = to.query;
         self.set_search_mode(to.looks, to.search_scope, cx);
-        let (query, end) = (self.query.clone(), self.query.len());
-        self.search
-            .update(cx, |field, cx| field.set_text(&query, end..end, cx));
+        self.show_query(&to.query, cx);
         cx.emit(PaneEvent::Moved);
         self.reload(cx);
     }
@@ -748,7 +784,18 @@ impl Pane {
     /// Leaves search, if any, and lists the current folder.
     pub(super) fn show_folder(&mut self, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::Moved);
+        // A path typed for the folder being left would lead back to it.
+        if let Some(address) = self.address.take() {
+            let list = self.list_focus.clone();
+            cx.defer(move |cx| {
+                let _ = address
+                    .window
+                    .update(cx, |_, window, cx| window.focus(&list, cx));
+            });
+        }
         self.query.clear();
+        self.filters = Query::default();
+        (self.chip, self.chip_menu) = (None, None);
         self.search.update(cx, |field, cx| field.clear(cx));
         self.reset_search_mode(cx);
         self.reload(cx);
@@ -788,6 +835,11 @@ impl Pane {
             self.remember = Task::ready(());
         }
         self.asking.clear();
+        if self.showing_localsend() && cx.global::<Preferences>().localsend {
+            self.enter_localsend(cx);
+        } else {
+            self.leave_localsend(cx);
+        }
         if self.showing_remote() {
             // Nothing local is on screen, so nothing local can be chosen.
             self.leave_overview();
@@ -818,6 +870,9 @@ impl Pane {
         }
         if self.showing_worktrees() {
             self.scan_worktrees(cx);
+        }
+        if self.showing_airdrop() {
+            self.read_airdrop(cx);
         }
         if self.showing_duplicates() {
             self.read_duplicates(cx);
@@ -2088,6 +2143,9 @@ impl Pane {
 
     /// ↑ and ↓: a row of the list, or of the grid.
     pub(super) fn select_vertically(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+        if self.showing_overview() {
+            return self.step_overview(down, cx);
+        }
         if self.showing_worktrees() {
             return self.step_worktree(down, cx);
         }
@@ -2239,6 +2297,21 @@ impl Pane {
         self.focus_list(window, cx);
     }
 
+    /// Search results and Recents come from anywhere: shows the folder holding
+    /// the first selected, with what's selected in it still selected.
+    fn show_in_enclosing_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = self.chosen();
+        let Some(folder) = chosen.first().and_then(|path| path.parent()) else {
+            return;
+        };
+        let folder = folder.to_path_buf();
+        let select = chosen
+            .into_iter()
+            .filter(|path| path.parent() == Some(folder.as_path()))
+            .collect();
+        self.go_to(folder, select, window, cx);
+    }
+
     /// Selects `paths` once the listing that has them lands, the first with
     /// the cursor on it. Nothing asked keeps the selection the listing picks.
     fn select_when_listed(&mut self, mut paths: Vec<PathBuf>) {
@@ -2290,6 +2363,11 @@ impl Pane {
             Ok(done) => done,
             Err(e) => return self.toast(e, true, None, cx),
         };
+        // Many items to the Trash: Activity follows the job, and its end
+        // says how it went.
+        if outcome.job {
+            return cx.emit(PaneEvent::Follow(outcome.op));
+        }
         if let Some(why) = outcome.failures().next() {
             // A copy of what isn't downloaded is refused: offer to download it.
             let download = cloud::refused(why).map(|path| Offer::Download("Download", vec![path]));
@@ -2332,6 +2410,33 @@ impl Pane {
             }
         }
         self.list(!select, cx);
+    }
+
+    /// Whether the selection is on this Mac's disk for macOS to share.
+    pub(super) fn shareable(&self) -> bool {
+        !self.selection.is_empty() && !self.showing_remote() && !self.showing_archive()
+    }
+
+    /// macOS's share menu on the selection, under `at` in the window.
+    /// Share…, with LocalSend among the services while it's on: picking it
+    /// opens the LocalSend page holding what was shared.
+    pub(super) fn share(&mut self, window: &mut Window, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let paths = self.chosen();
+        let localsend = cx.global::<Preferences>().localsend.then(|| {
+            let (pick, picked) = async_channel::bounded(1);
+            let held = paths.clone();
+            self.localsend.sharing = cx.spawn_in(window, async move |this, cx| {
+                if picked.recv().await.is_ok() {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.send_with_localsend(held, window, cx)
+                    });
+                }
+            });
+            Box::new(move || {
+                let _ = pick.try_send(());
+            }) as Box<dyn Fn()>
+        });
+        crate::sharing::share(&paths, window, at, localsend);
     }
 
     /// The selected paths, in the order shown.
@@ -2760,6 +2865,42 @@ impl Pane {
         self.toast(said, false, None, cx);
     }
 
+    /// Turns the path bar into the folder's path, selected, to type over.
+    /// Only a folder on this Mac has one; elsewhere it says no.
+    pub(super) fn edit_path(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.showing_folder() || self.unavailable.is_some() {
+            return false;
+        }
+        if let Some(address) = &self.address {
+            window.focus(&address.view.focus_handle(cx), cx);
+            return true;
+        }
+        let folder = self.folder().to_path_buf();
+        let view = cx.new(|cx| GotoView::in_bar(folder, cx));
+        let focus = view.focus_handle(cx);
+        let went = cx.subscribe_in(&view, window, |this, _, event: &GotoEvent, window, cx| {
+            this.address = None;
+            this.focus_list(window, cx);
+            if let GotoEvent::Go(destination) = event {
+                let select = destination.select.iter().cloned().collect();
+                this.go_to(destination.folder.clone(), select, window, cx);
+            }
+            cx.notify();
+        });
+        let blur = cx.on_blur(&focus, window, |this, _, cx| {
+            this.address = None;
+            cx.notify();
+        });
+        window.focus(&focus, cx);
+        self.address = Some(Address {
+            view,
+            window: window.window_handle(),
+            _closes: [went, blur],
+        });
+        cx.notify();
+        true
+    }
+
     /// The folder's path as clickable steps, from the disk to here.
     fn crumbs(
         &self,
@@ -2898,6 +3039,15 @@ impl Pane {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
+        if let Some(address) = &self.address {
+            return Some(
+                theme::pane_bar(theme::PATH_BAR_HEIGHT)
+                    .debug_selector(|| "path-bar".into())
+                    .border_t_1()
+                    .border_color(content(0.06))
+                    .child(address.view.clone()),
+            );
+        }
         if !cx.global::<Preferences>().show_path_bar
             || self.unavailable.is_some()
             || self.showing_page()
@@ -3512,6 +3662,14 @@ pub(super) fn rename_reason(why: &str, path: &Path) -> String {
 }
 
 /// A name being edited in place.
+pub(super) struct Address {
+    pub(super) view: Entity<GotoView>,
+    /// Where the list takes the keys back when the pane goes elsewhere.
+    window: AnyWindowHandle,
+    /// Going, Esc and clicking away close it.
+    _closes: [Subscription; 2],
+}
+
 pub(super) struct Renaming {
     pub(super) path: PathBuf,
     pub(super) field: Entity<TextField>,
@@ -4034,6 +4192,14 @@ impl Pane {
         if self.showing_duplicates() && self.stop_duplicates(cx) {
             return;
         }
+        if self.showing_localsend() && self.localsend.history {
+            self.localsend.history = false;
+            return cx.notify();
+        }
+        if self.showing_localsend() && !self.localsend.sending.is_empty() {
+            self.localsend.sending.clear();
+            return cx.notify();
+        }
         if self.query.is_empty() {
             if self.search_mode_is_plain() {
                 self.selection.clear();
@@ -4069,6 +4235,8 @@ impl Pane {
         let can_make_here = self.takes_files(cx);
         let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
         let selected = !self.selection.is_empty();
+        let localsend = cx.global::<Preferences>().localsend;
+        let scattered = self.showing_recents() || !self.query.is_empty();
         let renaming = self.changing_names();
         let can_extract = self.can_extract(cx);
         let can_compress = self.can_compress(cx);
@@ -4103,6 +4271,14 @@ impl Pane {
                 .on_action(cx.listener(|this, _: &GoWorktrees, window, cx| {
                     this.open_page(Shows::Worktrees, window, cx)
                 }))
+                .on_action(cx.listener(|this, _: &GoAirDrop, window, cx| {
+                    this.open_page(Shows::AirDrop, window, cx)
+                }))
+                .when(localsend, |d| {
+                    d.on_action(cx.listener(|this, _: &GoLocalSend, window, cx| {
+                        this.open_page(Shows::LocalSend, window, cx)
+                    }))
+                })
                 .when(self.showing_folder(), |d| {
                     d.on_action(cx.listener(|this, _: &FindDuplicates, window, cx| {
                         this.find_duplicates(window, cx)
@@ -4151,6 +4327,21 @@ impl Pane {
                 .when(selected && on_disk, |d| {
                     d.on_action(cx.listener(|this, _: &RevealInFinder, _, _| {
                         workspace::reveal(&this.chosen())
+                    }))
+                    .on_action(cx.listener(|this, _: &Share, window, cx| {
+                        let at = this.menu_point(cx);
+                        this.share(window, at, cx)
+                    }))
+                    .when(localsend, |d| {
+                        d.on_action(cx.listener(|this, _: &SendWithLocalSend, window, cx| {
+                            let chosen = this.chosen();
+                            this.send_with_localsend(chosen, window, cx)
+                        }))
+                    })
+                })
+                .when(selected && on_disk && scattered, |d| {
+                    d.on_action(cx.listener(|this, _: &ShowInEnclosingFolder, window, cx| {
+                        this.show_in_enclosing_folder(window, cx)
                     }))
                 })
                 .when(package, |d| {
@@ -4575,6 +4766,8 @@ impl Pane {
                 self.organize_page(cx)
                     .or_else(|| self.overview_page(cx))
                     .or_else(|| self.worktrees_page(cx))
+                    .or_else(|| self.airdrop_page(cx))
+                    .or_else(|| self.localsend_page(cx))
                     .or_else(|| self.duplicates_page(cx))
                     .or_else(|| {
                         // Until it has something to show, so it never

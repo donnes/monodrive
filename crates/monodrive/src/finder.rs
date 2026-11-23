@@ -264,6 +264,8 @@ enum Asker {
     ShowInFinder,
     /// Open in Monodrive, in Finder's right-click menu.
     Service,
+    /// Send with LocalSend, in another app's share menu.
+    LocalSend,
 }
 
 impl Request {
@@ -271,6 +273,12 @@ impl Request {
     /// Monodrive declares no document types, so these come from Show in
     /// Finder or `open`.
     pub fn opened(urls: &[String]) -> Self {
+        if let Some(paths) = urls.iter().find_map(|url| to_send(url)) {
+            return Self {
+                paths,
+                from: Asker::LocalSend,
+            };
+        }
         let paths = urls
             .iter()
             .filter_map(|url| pasteboard::path_of(&NSString::from_str(url)))
@@ -280,6 +288,22 @@ impl Request {
             from: Asker::ShowInFinder,
         }
     }
+}
+
+/// The files in the `monodrive://localsend?path=…` URL the share extension
+/// opens this app with.
+fn to_send(url: &str) -> Option<Vec<PathBuf>> {
+    let url = url::Url::parse(url).ok()?;
+    if url.scheme() != "monodrive" || url.host_str() != Some("localsend") {
+        return None;
+    }
+    let paths: Vec<PathBuf> = url
+        .query_pairs()
+        .filter(|(key, _)| key == "path")
+        .map(|(_, path)| PathBuf::from(path.into_owned()))
+        .filter(|path| path.is_absolute())
+        .collect();
+    (!paths.is_empty()).then_some(paths)
 }
 
 /// Where a request takes the window: a folder, and what to select in it.
@@ -340,10 +364,13 @@ fn sort_out(paths: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
         .collect()
 }
 
-/// Moves waiting for a browser window, as on a launch that onboarding holds
-/// back.
+/// What waits for a browser window, as on a launch that onboarding holds
+/// back: moves, and files to send with LocalSend.
 #[derive(Default)]
-struct Waiting(Vec<Move>);
+struct Waiting {
+    moves: Vec<Move>,
+    sending: Vec<PathBuf>,
+}
 impl Global for Waiting {}
 
 /// Lands each request that `arrived` in the window in front, and answers
@@ -357,12 +384,21 @@ pub fn serve(
     cx.spawn(async move |cx| {
         while let Ok(request) = arrived.recv().await {
             let from = request.from;
+            if from == Asker::LocalSend {
+                cx.update(|cx| {
+                    cx.default_global::<Waiting>().sending = request.paths;
+                    deliver(cx);
+                });
+                continue;
+            }
             let items = cx
                 .background_executor()
                 .spawn(async move { sort_out(request.paths) })
                 .await;
             cx.update(|cx| {
-                cx.default_global::<Waiting>().0.extend(plan(items, from));
+                cx.default_global::<Waiting>()
+                    .moves
+                    .extend(plan(items, from));
                 deliver(cx);
             });
         }
@@ -380,8 +416,8 @@ pub fn deliver(cx: &mut App) {
     let Some(front): Option<WindowHandle<Browser>> = front else {
         return;
     };
-    let moves = std::mem::take(&mut cx.default_global::<Waiting>().0);
-    if moves.is_empty() {
+    let Waiting { moves, sending } = std::mem::take(cx.default_global::<Waiting>());
+    if moves.is_empty() && sending.is_empty() {
         return;
     }
     // A command may be running inside that window's own update.
@@ -389,6 +425,9 @@ pub fn deliver(cx: &mut App) {
         let _ = front.update(cx, |browser, window, cx| {
             for to in moves {
                 browser.land(to, window, cx);
+            }
+            if !sending.is_empty() {
+                browser.send_with_localsend(sending, window, cx);
             }
             window.activate_window();
         });
@@ -447,6 +486,21 @@ fn offer_service(requests: async_channel::Sender<Request>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_share_extension_url_gives_back_its_paths_and_nothing_else_does() {
+        let url = "monodrive://localsend?path=/Users/me/a%20b%2Bc%26d.txt&path=/Users/me/relat%C3%B3rio&path=notes.txt";
+        assert_eq!(
+            to_send(url),
+            Some(vec![
+                PathBuf::from("/Users/me/a b+c&d.txt"),
+                PathBuf::from("/Users/me/relatório"),
+            ])
+        );
+        assert_eq!(to_send("file:///Users/me/a.txt"), None);
+        assert_eq!(to_send("monodrive://localsend"), None);
+        assert_eq!(to_send("monodrive://other?path=/a"), None);
+    }
 
     fn items(paths: &[(&str, bool)]) -> Vec<(PathBuf, bool)> {
         paths

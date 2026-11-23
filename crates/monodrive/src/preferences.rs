@@ -144,6 +144,17 @@ impl Drive {
     }
 }
 
+/// A row in the sidebar's Locations, as its saved order names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Location {
+    Drive(Drive),
+    /// A saved SFTP server, by its id.
+    Server(String),
+    AirDrop,
+    LocalSend,
+}
+
 /// Monocode's interface scale steps.
 pub const UI_SCALE_PERCENTS: [u32; 16] = [
     50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
@@ -159,6 +170,9 @@ pub struct Preferences {
     pub show_worktrees: bool,
     /// What Locations leaves out, in the order it was hidden.
     pub hidden_drives: Vec<HiddenDrive>,
+    /// The order Locations' Edit put its rows in. Rows it doesn't name
+    /// follow, in the order Locations lists them by default.
+    pub location_order: Vec<Location>,
     pub theme: Theme,
     /// A preset from `palettes::PALETTES`.
     pub palette: String,
@@ -178,6 +192,8 @@ pub struct Preferences {
     /// Percent opacity in a folder with items.
     pub background_folder: u32,
     pub workspace_style: WorkspaceStyle,
+    /// `None` keeps the icon this build came with.
+    pub app_icon: Option<crate::app_icon::AppIcon>,
     /// Percent; one of `UI_SCALE_PERCENTS`.
     pub ui_scale: u32,
     /// Points, within `SIDEBAR_WIDTHS`.
@@ -221,7 +237,37 @@ pub struct Preferences {
     pub onboarding_version: u32,
     /// Names the sidebar gives cloud folders instead of their own, by path.
     pub cloud_names: BTreeMap<PathBuf, String>,
+    /// LocalSend is in the sidebar, the menus and Share…, and agents can use
+    /// it. Off, Monodrive makes no LocalSend key and never looks for devices.
+    pub localsend: bool,
+    /// Devices nearby running LocalSend may offer this Mac files, each one
+    /// asked about in the window.
+    pub localsend_receive: bool,
+    /// Where received files go; `None` is Downloads.
+    pub localsend_folder: Option<PathBuf>,
+    /// What senders must type, if anything.
+    pub localsend_pin: Option<String>,
+    /// Monodrive posts notifications, each kind while its own switch is on,
+    /// and only while another app is in front.
+    pub notifications: bool,
+    /// A LocalSend device offers this Mac something.
+    pub notify_localsend_offers: bool,
+    /// A LocalSend send or receive ended.
+    pub notify_localsend_ended: bool,
+    /// The startup disk went under the Overview's low line.
+    pub notify_low_disk: bool,
+    /// Clean worktrees together passed `notify_worktrees_over`.
+    pub notify_worktrees: bool,
+    /// In GB.
+    pub notify_worktrees_over: u32,
+    /// The user agreed to send anonymous usage events.
+    pub share_usage: bool,
+    /// The random ID those events go by, kept only while `share_usage` is on.
+    pub usage_id: Option<String>,
 }
+
+/// The amounts, in GB, clean worktrees may pass before Monodrive says so.
+pub const WORKTREE_LIMITS: [u32; 5] = [5, 10, 20, 50, 100];
 
 /// Which of the sidebar's sections are folded, each on its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +288,7 @@ impl Default for Preferences {
             show_path_bar: true,
             show_worktrees: false,
             hidden_drives: Vec::new(),
+            location_order: Vec::new(),
             theme: Theme::Dark,
             palette: "default".into(),
             accent: None,
@@ -256,6 +303,7 @@ impl Default for Preferences {
             background_empty: 24,
             background_folder: 24,
             workspace_style: WorkspaceStyle::Rounded,
+            app_icon: None,
             ui_scale: 100,
             sidebar_width: 240.,
             show_sidebar: true,
@@ -278,6 +326,18 @@ impl Default for Preferences {
             update_channel: Default::default(),
             onboarding_version: 0,
             cloud_names: BTreeMap::new(),
+            localsend: false,
+            localsend_receive: false,
+            localsend_folder: None,
+            localsend_pin: None,
+            notifications: true,
+            notify_localsend_offers: true,
+            notify_localsend_ended: true,
+            notify_low_disk: true,
+            notify_worktrees: true,
+            notify_worktrees_over: 20,
+            share_usage: false,
+            usage_id: None,
         }
     }
 }
@@ -293,6 +353,7 @@ impl Preferences {
         self.show_path_bar = defaults.show_path_bar;
         self.show_worktrees = defaults.show_worktrees;
         self.hidden_drives = defaults.hidden_drives;
+        self.location_order = defaults.location_order;
         self.view = defaults.view;
         self.grid_icon = defaults.grid_icon;
         self.grid_label = defaults.grid_label;
@@ -307,6 +368,38 @@ impl Preferences {
         self.sort = defaults.sort;
         self.terminal = defaults.terminal;
         self.update_channel = defaults.update_channel;
+        self.localsend = defaults.localsend;
+        self.localsend_receive = defaults.localsend_receive;
+        self.localsend_folder = defaults.localsend_folder;
+        self.localsend_pin = defaults.localsend_pin;
+        self.set_share_usage(defaults.share_usage);
+    }
+
+    /// Turning it off forgets the ID, so turning it back on starts a new one.
+    pub fn set_share_usage(&mut self, on: bool) {
+        self.share_usage = on;
+        if !on {
+            self.usage_id = None;
+        } else if self.usage_id.is_none() {
+            self.usage_id = Some(monodrive_core::usage::new_id());
+        }
+    }
+
+    pub fn restore_notifications(&mut self) {
+        let defaults = Self::default();
+        self.notifications = defaults.notifications;
+        self.notify_localsend_offers = defaults.notify_localsend_offers;
+        self.notify_localsend_ended = defaults.notify_localsend_ended;
+        self.notify_low_disk = defaults.notify_low_disk;
+        self.notify_worktrees = defaults.notify_worktrees;
+        self.notify_worktrees_over = defaults.notify_worktrees_over;
+    }
+
+    /// Where LocalSend saves what it receives.
+    pub fn localsend_save_to(&self) -> PathBuf {
+        self.localsend_folder
+            .clone()
+            .unwrap_or_else(|| crate::browser::home().join("Downloads"))
     }
 
     /// Everything on the Appearance page. What other pages own, and the
@@ -327,6 +420,7 @@ impl Preferences {
             show_path_bar: self.show_path_bar,
             show_worktrees: self.show_worktrees,
             hidden_drives: std::mem::take(&mut self.hidden_drives),
+            location_order: std::mem::take(&mut self.location_order),
             view: self.view,
             grid_icon: self.grid_icon,
             grid_label: self.grid_label,
@@ -338,6 +432,18 @@ impl Preferences {
             update_channel: self.update_channel,
             onboarding_version: self.onboarding_version,
             cloud_names: std::mem::take(&mut self.cloud_names),
+            localsend: self.localsend,
+            localsend_receive: self.localsend_receive,
+            localsend_folder: self.localsend_folder.take(),
+            localsend_pin: self.localsend_pin.take(),
+            notifications: self.notifications,
+            notify_localsend_offers: self.notify_localsend_offers,
+            notify_localsend_ended: self.notify_localsend_ended,
+            notify_low_disk: self.notify_low_disk,
+            notify_worktrees: self.notify_worktrees,
+            notify_worktrees_over: self.notify_worktrees_over,
+            share_usage: self.share_usage,
+            usage_id: self.usage_id.take(),
             ..Self::default()
         };
     }
@@ -476,6 +582,22 @@ mod tests {
         assert!(!older.show_inspector);
         assert_eq!(older.collapsed, Collapsed::default());
         assert_eq!(older.terminal, Terminal::Terminal);
+    }
+
+    #[test]
+    fn turning_usage_off_forgets_its_id_and_turning_it_on_makes_a_new_one() {
+        let mut prefs = Preferences::default();
+        prefs.set_share_usage(true);
+        let first = prefs.usage_id.clone().unwrap();
+        prefs.set_share_usage(true);
+        assert_eq!(prefs.usage_id.as_deref(), Some(first.as_str()));
+        prefs.restore_general();
+        assert_eq!(
+            (prefs.share_usage, prefs.usage_id.as_deref()),
+            (false, None)
+        );
+        prefs.set_share_usage(true);
+        assert_ne!(prefs.usage_id, Some(first));
     }
 
     #[test]

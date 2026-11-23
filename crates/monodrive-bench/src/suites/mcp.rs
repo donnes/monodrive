@@ -30,7 +30,7 @@ fn io(path: &Path) -> impl Fn(std::io::Error) -> String + '_ {
     move |e| format!("{}: {e}", path.display())
 }
 
-fn cp_clone(from: &Path, to: &Path) -> Result<(), String> {
+pub fn cp_clone(from: &Path, to: &Path) -> Result<(), String> {
     let status = Command::new("cp")
         .args(["-c", "-R"])
         .arg(from)
@@ -63,12 +63,7 @@ pub fn prepare(fixture: &Path, seed: u64) -> Result<(), String> {
     }
     // The real folder grep reads is in the index too, as it would be.
     search::prepare_with(fixture, seed, Some(&grepped))?;
-    let home = fixture.join("home");
-    for dir in INDEX_DIRS {
-        let at = home.join(dir);
-        std::fs::create_dir_all(at.parent().unwrap_or(&home)).map_err(io(&at))?;
-        cp_clone(&search::index_dir(fixture), &at)?;
-    }
+    home_with_index(fixture, &fixture.join("home"))?;
     let listed = fixture.join("listed");
     std::fs::create_dir(&listed).map_err(io(&listed))?;
     for i in 0..LISTED {
@@ -82,6 +77,32 @@ pub fn prepare(fixture: &Path, seed: u64) -> Result<(), String> {
         std::fs::write(&path, i.to_le_bytes()).map_err(io(&path))?;
     }
     Ok(())
+}
+
+/// Makes `home` hold the fixture's generated index where a dev build and a
+/// release build look, so what runs there loads it and crawls nothing.
+pub fn home_with_index(fixture: &Path, home: &Path) -> Result<(), String> {
+    for dir in INDEX_DIRS {
+        let at = home.join(dir);
+        std::fs::create_dir_all(at.parent().unwrap_or(home)).map_err(io(&at))?;
+        cp_clone(&search::index_dir(fixture), &at)?;
+    }
+    Ok(())
+}
+
+/// The app's binary, built beside this tool.
+pub fn app() -> Result<PathBuf, String> {
+    let binary = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name("monodrive");
+    if binary.is_file() {
+        Ok(binary)
+    } else {
+        Err(format!(
+            "{}: build it with cargo build --release -p monodrive",
+            binary.display()
+        ))
+    }
 }
 
 #[derive(Serialize)]
@@ -429,15 +450,7 @@ fn session(
 }
 
 pub fn round(fixture: &Path) -> Result<Vec<Measured>, String> {
-    let binary: PathBuf = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .with_file_name("monodrive");
-    if !binary.is_file() {
-        return Err(format!(
-            "{}: build it with cargo build --release -p monodrive",
-            binary.display()
-        ));
-    }
+    let binary = app()?;
     let work = fixture.join(format!("session-{}", std::process::id()));
     std::fs::create_dir(&work).map_err(io(&work))?;
     let home = work.join("home");

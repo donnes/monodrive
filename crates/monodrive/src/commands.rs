@@ -10,23 +10,24 @@
 use crate::browser::{
     AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab, Compress,
     ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Download, Duplicate, EditFavorites,
-    EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract, FindDuplicates, FocusSearch, Forward,
-    GetInfo, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1,
-    GoFavorite2, GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8,
-    GoFavorite9, GoFavorite10, GoHome, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees,
-    HideFromSidebar, HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
+    EditLocations, EditPath, EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract,
+    FindDuplicates, FocusSearch, Forward, GetInfo, GoAirDrop, GoApplications, GoComputer,
+    GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
+    GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome,
+    GoLocalSend, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, HideFromSidebar,
+    HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
     NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal,
     OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo,
     RemoveDownload, RemoveFromSidebar, Rename, RenameLocation, ResetZoom, RevealInFinder,
-    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, ShowCopiesAndMoves,
-    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
-    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo,
-    ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, SendWithLocalSend, Share,
+    ShowCopiesAndMoves, ShowInEnclosingFolder, ShowPackageContents, ShowSearches, SortByKind,
+    SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar,
+    ToggleSidebar, ToggleSplit, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
-    browser, connect, empty_trash, goto, jobs, menu, onboarding, palette, remove_worktree,
-    review_duplicates, settings, text_field, updates,
+    browser, connect, empty_trash, goto, jobs, localsend_ask, menu, onboarding, palette,
+    remove_worktree, review_duplicates, settings, text_field, updates,
 };
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
@@ -285,6 +286,18 @@ pub fn all() -> Vec<Command> {
                 Box::new(ShowPackageContents)
             }),
         ),
+        // Where rows come from many folders: search results and Recents. ⌘R,
+        // as Finder's.
+        on(
+            SELECTION,
+            command(
+                "Show in Enclosing Folder",
+                File,
+                &["cmd-r"],
+                BROWSER,
+                || Box::new(ShowInEnclosingFolder),
+            ),
+        ),
         on(
             SELECTION,
             command("Reveal in Finder", File, &[], BROWSER, || {
@@ -297,6 +310,13 @@ pub fn all() -> Vec<Command> {
                 Box::new(OpenInTerminal)
             }),
         ),
+        on(
+            SELECTION,
+            command("Share…", File, &[], BROWSER, || Box::new(Share)),
+        ),
+        command("Send with LocalSend…", File, &[], BROWSER, || {
+            Box::new(SendWithLocalSend)
+        }),
         // What's on offer depends on the row: each is there only where it
         // would run, which the views decide.
         on(
@@ -515,6 +535,13 @@ pub fn all() -> Vec<Command> {
         command("Worktrees", Go, &["cmd-alt-g"], BROWSER, || {
             Box::new(GoWorktrees)
         }),
+        // ⇧⌘R, as Finder's.
+        command("AirDrop", Go, &["cmd-shift-r"], BROWSER, || {
+            Box::new(GoAirDrop)
+        }),
+        command("LocalSend", Go, &["cmd-shift-l"], BROWSER, || {
+            Box::new(GoLocalSend)
+        }),
         command("Home", Go, &["cmd-shift-h"], BROWSER, || Box::new(GoHome)),
         command("Desktop", Go, &["cmd-shift-d"], BROWSER, || {
             Box::new(GoDesktop)
@@ -535,6 +562,7 @@ pub fn all() -> Vec<Command> {
         command("Go to Folder…", Go, &["cmd-shift-g"], BROWSER, || {
             Box::new(GoToFolder)
         }),
+        command("Edit Path", Go, &["cmd-l"], BROWSER, || Box::new(EditPath)),
         command(
             "Connect to Server…",
             Go,
@@ -589,6 +617,9 @@ pub fn all() -> Vec<Command> {
         separated(command("Edit Favorites", View, &[], BROWSER, || {
             Box::new(EditFavorites)
         })),
+        command("Edit Locations", View, &[], BROWSER, || {
+            Box::new(EditLocations)
+        }),
         on(
             FOLDER,
             separated(command("Show Hidden Files", View, &["cmd->"], None, || {
@@ -688,10 +719,13 @@ fn valid(keys: &str) -> bool {
 /// Contexts drawn inside others, whose keys therefore compete: the list,
 /// sidebar and search field inside the browser, the name being edited in the
 /// list, the field inside the palette, Go to Folder and Connect to Server.
-const NESTED: [(&str, &str); 8] = [
+const NESTED: [(&str, &str); 11] = [
     ("Browser", "FileList"),
     ("Browser", "Sidebar"),
     ("Browser", "Search"),
+    ("Browser", "Completing"),
+    ("Browser", "Chips"),
+    ("Browser", "ChipMenu"),
     ("Browser", "TextField"),
     ("FileList", "Rename"),
     ("Palette", "TextField"),
@@ -744,9 +778,10 @@ pub fn is_shortcut_of(stroke: &Keystroke, id: &str, cx: &App) -> bool {
 }
 
 /// Whether command `id` acts on what's selected or the folder shown: anything
-/// a context menu offers, past the View menu's display settings, and Move Here.
+/// a context menu offers, past the View menu's display settings, Move Here and
+/// Send with LocalSend.
 pub(crate) fn acts_on_target(id: &str) -> bool {
-    id == MoveHere.name()
+    [MoveHere.name(), SendWithLocalSend.name()].contains(&id)
         || all().iter().any(|command| {
             command.id() == id && !command.scopes.is_empty() && command.group != Group::View
         })
@@ -843,7 +878,8 @@ pub fn context_menu(
             group = Some(command.group);
         }
         let action = (command.action)();
-        if !command.scopes.iter().any(|scope| scopes.contains(scope)) || !runs(&*action) {
+        let offered = command.scopes.iter().any(|scope| scopes.contains(scope));
+        if !offered || hidden(&command, prefs) || !runs(&*action) {
             continue;
         }
         rows.push(MenuRow {
@@ -861,6 +897,11 @@ pub fn context_menu(
         last = Some(section);
     }
     rows
+}
+
+/// Whether Settings leaves `command` out: LocalSend's, until it's turned on.
+pub(crate) fn hidden(command: &Command, prefs: &Preferences) -> bool {
+    !prefs.localsend && [GoLocalSend.name(), SendWithLocalSend.name()].contains(&command.id())
 }
 
 /// The overrides the keymap was last built from.
@@ -888,6 +929,7 @@ pub fn apply(cx: &mut App) {
     jobs::bind(cx);
     updates::bind(cx);
     empty_trash::bind(cx);
+    localsend_ask::bind(cx);
     remove_worktree::bind(cx);
     review_duplicates::bind(cx);
     menu::bind(cx);
@@ -919,8 +961,9 @@ pub fn apply(cx: &mut App) {
 /// Set once the window has drawn: setting the main menu makes AppKit load
 /// Writing Tools on the main thread (about 70 ms), so launch doesn't wait.
 struct MenusReady {
-    /// The commands checked in the menus as last installed.
-    checked: Option<Vec<&'static str>>,
+    /// The commands checked in the menus as last installed, and whether
+    /// LocalSend's were there.
+    checked: Option<(Vec<&'static str>, bool)>,
 }
 impl Global for MenusReady {}
 
@@ -958,7 +1001,8 @@ pub(crate) fn checked(prefs: &Preferences) -> Vec<&'static str> {
 
 /// Rebuilds the menu bar when a checkmark is out of date.
 pub fn refresh_menus(cx: &mut App) {
-    let checked = checked(cx.global::<Preferences>());
+    let prefs = cx.global::<Preferences>();
+    let checked = (checked(prefs), prefs.localsend);
     if cx
         .try_global::<MenusReady>()
         .is_some_and(|ready| ready.checked.as_ref() != Some(&checked))
@@ -971,8 +1015,12 @@ fn install_menus(cx: &mut App) {
     if !cx.has_global::<MenusReady>() {
         return;
     }
-    let ticked = checked(cx.global::<Preferences>());
-    let commands = all();
+    let prefs = cx.global::<Preferences>();
+    let ticked = checked(prefs);
+    let commands: Vec<Command> = all()
+        .into_iter()
+        .filter(|command| !hidden(command, prefs))
+        .collect();
     let items = |group: Group| {
         let mut items = Vec::new();
         for command in commands.iter().filter(|c| c.group == group && !c.keys_only) {
@@ -1003,7 +1051,8 @@ fn install_menus(cx: &mut App) {
         menu(Group::Window, items(Group::Window)),
         menu(Group::Help, items(Group::Help)),
     ]);
-    cx.global_mut::<MenusReady>().checked = Some(ticked);
+    let localsend = cx.global::<Preferences>().localsend;
+    cx.global_mut::<MenusReady>().checked = Some((ticked, localsend));
 }
 
 #[cfg(test)]
@@ -1035,6 +1084,7 @@ mod tests {
             Duplicate.name(),
             NewFolder.name(),
             MoveHere.name(),
+            SendWithLocalSend.name(),
         ] {
             assert!(acts_on_target(acts), "{acts}");
         }
@@ -1136,8 +1186,10 @@ mod tests {
                 "Remove Download",
                 "Open in New Tab ⌃⌘O",
                 "Show Package Contents",
+                "Show in Enclosing Folder ⌘R",
                 "Reveal in Finder",
                 "Open in Terminal",
+                "Share…",
                 "| Add to Sidebar ⌃⌘T",
                 "Get Info ⌘I",
                 "| Rename ↩",
@@ -1188,10 +1240,19 @@ mod tests {
                 "Clear Recents"
             ]
         );
+        // With LocalSend on, it's reached through Share… alone.
+        let sending = Preferences {
+            localsend: true,
+            ..Preferences::default()
+        };
+        assert_eq!(
+            shown(&[Scope::Selection, Scope::Package], &sending, &all),
+            shown(&[Scope::Selection, Scope::Package], &prefs, &all)
+        );
         // New Folder with Selection is for several, after the ways to open.
         let several = shown(&[Scope::Selection, Scope::Several], &prefs, &all);
         assert_eq!(
-            several[9..12],
+            several[11..14],
             [
                 "| New Folder with Selection ⌃⌘N",
                 "Rename ↩",

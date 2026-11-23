@@ -8,9 +8,9 @@ use crate::feedback::{self, Haptic};
 use crate::preferences::Preferences;
 use crate::theme::{self, accent, content, icon_button, row_icon_button};
 use gpui::{
-    App, Context, CursorStyle, DispatchPhase, Entity, Focusable, FontWeight, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Role, Stateful, Window, canvas, div, prelude::*,
-    px,
+    App, ClickEvent, Context, CursorStyle, DispatchPhase, Entity, Focusable, FontWeight,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Role, Stateful, Window, canvas, div,
+    point, prelude::*, px,
 };
 use std::path::PathBuf;
 
@@ -155,7 +155,7 @@ impl Browser {
         } else {
             let second = self.add_pane(Opening::at(stop, view, sort), cx);
             second.update(cx, |pane, cx| {
-                pane.set_shown(true);
+                pane.set_shown(true, cx);
                 pane.reload(cx);
             });
             let tab = &mut self.tabs[self.active];
@@ -365,14 +365,14 @@ impl Browser {
         {
             let left: Vec<_> = left.panes().cloned().collect();
             for pane in left {
-                pane.update(cx, |pane, _| pane.set_shown(false));
+                pane.update(cx, |pane, cx| pane.set_shown(false, cx));
             }
         }
         self.active = at;
         let panes: Vec<_> = self.tabs[at].panes().cloned().collect();
         for pane in panes {
             pane.update(cx, |pane, cx| {
-                pane.set_shown(true);
+                pane.set_shown(true, cx);
                 pane.list(true, cx);
             });
         }
@@ -555,6 +555,7 @@ impl Browser {
             pane.at > 0 || pane.organizing.is_some(),
             pane.at + 1 < pane.history.len(),
         );
+        let shareable = pane.shareable();
         // Until the sidebar has slid away, its field is still the one drawn.
         let closed = !cx.global::<Preferences>().show_sidebar && self.sidebar_fraction == 0.;
         // With no sidebar to hold it, the field shows while it's in use.
@@ -617,6 +618,18 @@ impl Browser {
                 )
             })
             .child(drag_area().flex_1().min_w(px(DRAG_ROOM)).h_full())
+            .child(
+                theme::tip_below(icon_button("share", "Share", "share", shareable), "Share").when(
+                    shareable,
+                    |d| {
+                        d.on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                            let under = point(event.position().x, px(theme::TITLE_BAR_HEIGHT));
+                            this.pane()
+                                .update(cx, |pane, cx| pane.share(window, under, cx));
+                        }))
+                    },
+                ),
+            )
             .when(searching, |d| {
                 d.child(self.search_field(window, cx).w(px(SEARCH_WIDTH)))
             })

@@ -84,6 +84,12 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>CFBundleURLTypes</key><array><dict>
+  <key>CFBundleURLName</key><string>$id</string>
+  <key>CFBundleTypeRole</key><string>Viewer</string>
+  <key>CFBundleURLSchemes</key><array><string>monodrive</string></array>
+</dict></array>
+<key>NSLocalNetworkUsageDescription</key><string>$name finds devices nearby running LocalSend, sends them files, and receives theirs when you turn that on.</string>
 <key>NSServices</key><array><dict>
   <key>NSMenuItem</key><dict><key>default</key><string>Open in $name</string></dict>
   <key>NSMessage</key><string>openInMonodrive</string>
@@ -94,5 +100,46 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
+# Send with LocalSend in other apps' share menus: it opens this app with a
+# monodrive://localsend URL holding the files, which finder.rs reads. macOS
+# loads only sandboxed extensions, and opens a URL for one only in an app that
+# claims its scheme, as CFBundleURLTypes does above. The app's signature seals
+# the extension's.
+share_name="Send with LocalSend"
+[[ -z ${MONODRIVE_VERSION:-} ]] && share_name="$share_name (Dev)"
+appex="$app/Contents/PlugIns/Share.appex"
+rm -rf "$appex"
+mkdir -p "$appex/Contents/MacOS"
+xcrun swiftc -O -parse-as-library -application-extension -target arm64-apple-macos14.0 \
+  -module-name Share -Xlinker -e -Xlinker _NSExtensionMain \
+  -o "$appex/Contents/MacOS/share" crates/monodrive/share-extension/Share.swift
+cat > "$appex/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>share</string>
+<key>CFBundleIdentifier</key><string>$id.share</string>
+<key>CFBundleName</key><string>$share_name</string>
+<key>CFBundleDisplayName</key><string>$share_name</string>
+<key>CFBundlePackageType</key><string>XPC!</string>
+<key>CFBundleShortVersionString</key><string>${version%%-*}</string>
+<key>CFBundleVersion</key><string>${version/-nightly./.}</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSExtension</key><dict>
+  <key>NSExtensionPointIdentifier</key><string>com.apple.share-services</string>
+  <key>NSExtensionPrincipalClass</key><string>MonodriveShare</string>
+  <key>NSExtensionAttributes</key><dict>
+    <key>NSExtensionActivationRule</key>
+    <string>SUBQUERY(extensionItems, \$item, SUBQUERY(\$item.attachments, \$a, ANY \$a.registeredTypeIdentifiers UTI-CONFORMS-TO "public.file-url").@count &gt; 0).@count &gt; 0</string>
+  </dict>
+</dict>
+</dict></plist>
+PLIST
+
+# A custom icon from Settings is Finder information codesign refuses to sign
+# over; the app writes it again at launch.
+rm -f "$app/Icon"$'\r'
+xattr -c "$app"
+codesign --force --sign - --entitlements crates/monodrive/share-extension/Share.entitlements "$appex"
 codesign --force --sign - "$app"
 echo "$app"

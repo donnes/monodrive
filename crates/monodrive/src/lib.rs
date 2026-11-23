@@ -2,6 +2,7 @@
 //! views from here.
 
 pub mod agents;
+mod app_icon;
 pub mod assets;
 mod background;
 pub mod browser;
@@ -15,10 +16,13 @@ pub mod finder;
 mod frame;
 mod goto;
 mod jobs;
+mod localsend;
+mod localsend_ask;
 mod menu;
 mod motion;
 pub mod native;
 mod native_view;
+mod notify;
 pub mod onboarding;
 mod palette;
 mod palettes;
@@ -33,11 +37,13 @@ mod review_duplicates;
 mod selection;
 pub mod session;
 mod settings;
+pub mod sharing;
 mod text_field;
 mod theme;
 mod thumbnails;
 mod traffic_lights;
 pub mod updates;
+mod usage;
 mod workspace;
 
 use commands::{CloseWindow, Hide, HideOthers, Minimize, NewWindow, Quit, ShowAll, ShowWelcome};
@@ -111,6 +117,16 @@ pub fn run(folder: Option<PathBuf>) {
         #[cfg(feature = "profile")]
         profile::start(cx);
         preferences::init(cx);
+        let mut icon = cx.global::<Preferences>().app_icon;
+        app_icon::apply(icon, true, cx);
+        cx.observe_global::<Preferences>(move |cx| {
+            let chosen = cx.global::<Preferences>().app_icon;
+            if chosen != icon {
+                icon = chosen;
+                app_icon::apply(chosen, false, cx);
+            }
+        })
+        .detach();
         // Read at launch. GPUI's animations and the sidebar's slide skip
         // to where they end with it.
         cx.set_reduce_motion(
@@ -186,10 +202,14 @@ pub fn run(folder: Option<PathBuf>) {
         window_commands(cx);
         finder::serve(requests, arrived, cx);
         updates::start(cx);
+        localsend::start(cx);
+        notify::start(cx);
+        usage::start(cx);
         // Once the first listings are done, so it doesn't compete with them.
         cx.spawn(async |cx| {
             cx.background_executor().timer(MEASURE_AFTER).await;
             cx.update(browser::measure_overview);
+            cx.update(browser::watch_storage);
         })
         .detach();
         let explicit = folder.is_some();

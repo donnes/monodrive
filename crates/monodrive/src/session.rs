@@ -83,6 +83,12 @@ pub enum Shows {
     Recents,
     Overview,
     Worktrees,
+    /// AirDrop's page. Saved as the folder, so a launch never looks for
+    /// people nearby.
+    AirDrop,
+    /// LocalSend's devices nearby. Saved as the folder, so a launch never
+    /// looks for them.
+    LocalSend,
     /// The copies of each other in `folder`, which reads every file there.
     /// Saved as the folder, so a launch never starts that read.
     Duplicates,

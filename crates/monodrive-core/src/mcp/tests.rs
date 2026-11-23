@@ -172,7 +172,8 @@ fn the_core_profile_lists_file_tools_only_and_stays_cheap() {
     for name in ["pin", "rm_rf"] {
         assert_eq!(rpc(&mut core, name, json!({}))["error"]["code"], -32602);
     }
-    assert_eq!(listed(&mut server()).len(), TOOLS.len());
+    let all = &mut server().offering_localsend(true);
+    assert_eq!(listed(all).len(), TOOLS.len());
 }
 
 #[test]
@@ -522,6 +523,51 @@ fn change_tools_reply_with_resulting_paths_and_share_undo_with_the_owner() {
         );
         assert!(!result.to_string().contains("secret"), "{result}");
     }
+    stop(serving, server);
+}
+
+#[test]
+fn trashing_many_items_replies_with_where_each_went_once_its_job_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    // A Trash of the test's own, as on a volume with one (see `disk::trash`).
+    // SAFETY: geteuid has no preconditions.
+    let own_trash = dir
+        .path()
+        .join(".Trashes")
+        .join(unsafe { libc::geteuid() }.to_string());
+    std::fs::create_dir_all(&own_trash).unwrap();
+    let files = dir.path().join("files");
+    std::fs::create_dir(&files).unwrap();
+    let mut paths: Vec<PathBuf> = (0..ops::TRASH_JOB_AT)
+        .map(|i| files.join(format!("{i:03}.txt")))
+        .collect();
+    for path in &paths {
+        std::fs::write(path, "x").unwrap();
+    }
+    paths.push(files.join("gone.txt"));
+    let (serving, mut server) = owned(dir.path());
+    let result = call(&mut server, "trash", json!({"paths": paths}));
+    let items = data(&result)["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), paths.len());
+    assert_eq!(data(&result)["title"], "Move to Trash");
+    assert_eq!(data(&result)["failed"], 1);
+    assert!(data(&result).get("job").is_none(), "{result}");
+    let to = items[0]["to"].as_str().unwrap();
+    assert!(Path::new(to).ends_with("000.txt"), "{to}");
+    assert!(
+        items[ops::TRASH_JOB_AT]["error"]
+            .as_str()
+            .is_some_and(|why| why.contains("gone.txt")),
+        "{result}"
+    );
+    assert_eq!(text(&result).lines().count(), paths.len());
+    let result = call(&mut server, "undo", json!({}));
+    assert_eq!(
+        data(&result)["items"].as_array().unwrap().len(),
+        ops::TRASH_JOB_AT
+    );
+    assert!(paths[..ops::TRASH_JOB_AT].iter().all(|path| path.exists()));
+    assert_eq!(std::fs::read_dir(&own_trash).unwrap().count(), 0);
     stop(serving, server);
 }
 
@@ -1719,4 +1765,50 @@ fn remove_worktree_trashes_a_clean_worktree_and_shows_work_at_risk_before_a_toke
     let result = call(&mut server, "remove_worktree", json!({"path": main}));
     assert!(text(&result).contains("own checkout"), "{result}");
     stop(serving, server);
+}
+
+#[test]
+fn localsend_is_offered_once_settings_turns_it_on_and_sends_only_to_a_listed_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "a").unwrap();
+    let send = json!({"fingerprint": "AB12", "paths": [shown(&file)]});
+    let named = |tools: Vec<Value>| -> Vec<String> {
+        tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| name.starts_with("localsend_"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let saved = dir.path().join("settings.json");
+    let mut server = server().following_settings(saved.clone());
+    assert!(named(listed(&mut server)).is_empty());
+    assert_eq!(
+        rpc(&mut server, "localsend_send", send.clone())["error"]["code"],
+        -32602
+    );
+
+    // Settings' switch reaches a session already running, both ways.
+    std::fs::write(&saved, r#"{"localsend": true}"#).unwrap();
+    assert_eq!(
+        named(listed(&mut server)),
+        ["localsend_devices", "localsend_send"]
+    );
+    let result = call(
+        &mut server,
+        "localsend_send",
+        json!({"fingerprint": "AB12", "paths": [shown(&file)]}),
+    );
+    assert_eq!(code(&result), "not_found");
+    assert!(
+        text(&result).contains("localsend_devices"),
+        "{}",
+        text(&result)
+    );
+    std::fs::write(&saved, r#"{"localsend": false}"#).unwrap();
+    assert_eq!(
+        rpc(&mut server, "localsend_send", send)["error"]["code"],
+        -32602
+    );
 }

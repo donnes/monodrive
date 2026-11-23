@@ -21,12 +21,17 @@ MONODRIVE_VERSION=$version scripts/bundle --release
 app=target/release/Monodrive.app
 
 # Notarization requires the hardened runtime. Ad hoc builds use it too, so a
-# nightly fails here the same way a signed release would.
-if [[ "$identity" == - ]]; then
-  codesign --force --options runtime --timestamp=none --sign - "$app"
-else
-  codesign --force --options runtime --timestamp --sign "$identity" "$app"
-fi
+# nightly fails here the same way a signed release would. The share extension
+# is signed before the app that seals it.
+sign() {
+  if [[ "$identity" == - ]]; then
+    codesign --force --options runtime --timestamp=none --sign - "$@"
+  else
+    codesign --force --options runtime --timestamp --sign "$identity" "$@"
+  fi
+}
+sign --entitlements crates/monodrive/share-extension/Share.entitlements "$app/Contents/PlugIns/Share.appex"
+sign "$app"
 codesign --verify --deep --strict "$app"
 
 # --version opens no window, so it doesn't start the index.

@@ -106,22 +106,35 @@ fn provider_name(path: &Path) -> Option<String> {
     })
 }
 
+impl CloudFolder {
+    /// Whether [`free_space`] asks this folder's provider what's left. Only
+    /// iCloud Drive answers: no File Provider API gives a quota.
+    pub fn reports_free_space(&self) -> bool {
+        self.path.ends_with(ICLOUD_DRIVE)
+    }
+}
+
+/// What a folder that [`reports_free_space`](CloudFolder::reports_free_space)
+/// said about its account.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Quota {
     Free(u64),
     Failed,
 }
 
-/// How much is left in the cloud account behind `folder`, in bytes. Returns
-/// `None` when the lookup isn't supported. Only iCloud Drive answers, using
-/// the private `BRFetchQuotaOperation` that `brctl quota` reads. It gives the
-/// remaining space only.
-/// iCloud Drive's daemon may ask Apple, which takes about 250 ms, so call it
-/// off the UI thread.
+/// How much is left in the cloud account behind `folder`, in bytes, or
+/// `None` for a folder that doesn't report it. iCloud Drive's daemon may ask
+/// Apple, which takes about 250 ms, so call it off the UI thread.
 pub fn free_space(folder: &CloudFolder) -> Option<Quota> {
-    if !folder.path.ends_with(ICLOUD_DRIVE) {
-        return None;
-    }
+    folder
+        .reports_free_space()
+        .then(|| icloud_free_space().map_or(Quota::Failed, Quota::Free))
+}
+
+/// What's left in iCloud Drive, from the private `BRFetchQuotaOperation`
+/// that `brctl quota` reads, since no public API says. It never gives the
+/// account's total.
+fn icloud_free_space() -> Option<u64> {
     // SAFETY: a system framework, which stays loaded.
     let loaded = unsafe {
         libc::dlopen(
@@ -135,15 +148,9 @@ pub fn free_space(folder: &CloudFolder) -> Option<Quota> {
     let class = AnyClass::get(c"BRFetchQuotaOperation")?;
     let (sent, answer) = std::sync::mpsc::channel();
     let finished = RcBlock::new(move |free: *mut NSNumber, error: *mut NSError| {
-        let quota = if error.is_null() {
-            // SAFETY: the daemon passes a valid number or null.
-            unsafe { free.as_ref() }.map_or(Quota::Failed, |free| {
-                Quota::Free(free.unsignedLongLongValue())
-            })
-        } else {
-            Quota::Failed
-        };
-        let _ = sent.send(quota);
+        // SAFETY: the daemon passes a valid number or null.
+        let free = unsafe { free.as_ref() }.filter(|_| error.is_null());
+        let _ = sent.send(free.map(|free| free.unsignedLongLongValue()));
     });
     objc2::rc::autoreleasepool(|_| {
         // SAFETY: an NSOperation subclass, which `new` makes.
@@ -159,11 +166,10 @@ pub fn free_space(folder: &CloudFolder) -> Option<Quota> {
             let _: () = msg_send![&operation, start];
         }
         // The daemon may never answer, as when iCloud is signed out.
-        Some(
-            answer
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap_or(Quota::Failed),
-        )
+        answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .ok()
+            .flatten()
     })
 }
 

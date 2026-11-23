@@ -242,6 +242,25 @@ fn the_preview_takes_the_panes_list_and_gives_it_back(cx: &mut TestAppContext) {
     assert!(!drawn(cx, "preview"));
 }
 
+#[gpui::test]
+fn an_env_file_opens_with_its_values_blurred(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::write(project.join("y.env"), "KEY=secret\n").unwrap();
+    std::fs::write(project.join("z.env"), "KEY=secret\n").unwrap();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down");
+    assert_eq!(shown(&browser, cx).1, ["z.env"]);
+    press(cx, "space");
+    assert!(drawn(cx, "preview-secret"));
+    let reveal = cx.debug_bounds("preview-reveal").unwrap().center();
+    cx.simulate_click(reveal, with(""));
+    assert!(!drawn(cx, "preview-secret"));
+    // The next file is blurred again.
+    press(cx, "up");
+    assert_eq!(shown(&browser, cx).1, ["y.env"]);
+    assert!(drawn(cx, "preview-secret"));
+}
+
 /// A preview's real path: the keys and mouse through the real `Browser`, a real
 /// recipe flattened and saved through a real owner, and one Undo.
 #[gpui::test]
@@ -1567,6 +1586,72 @@ fn the_path_bar_shows_by_default_and_its_command_hides_it_for_good(cx: &mut Test
     assert!(shown(cx));
 }
 
+fn on_screen(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.debug_bounds(selector).is_some()
+}
+
+#[gpui::test]
+fn the_path_bar_takes_a_typed_path_and_tab_completes_it(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-l");
+    assert!(on_screen(cx, "address-bar"));
+    // The path starts selected, so typing replaces it.
+    cx.simulate_input(&format!("{}/do", project.display()));
+    cx.run_until_parked();
+    press(cx, "tab enter");
+    assert_eq!(shown(&browser, cx).0, ["inner.md"]);
+    assert!(in_pane(&browser, cx, |pane, _| pane.address.is_none()));
+    assert!(keys_on_the_list(&browser, cx));
+}
+
+#[gpui::test]
+fn a_path_that_isnt_there_says_so_and_stays(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let before = shown(&browser, cx).0;
+    press(cx, "cmd-l");
+    cx.simulate_input(&format!("{}/nowhere", project.display()));
+    press(cx, "enter");
+    assert!(on_screen(cx, "address-error"));
+    assert_eq!(shown(&browser, cx).0, before);
+    assert!(in_pane(&browser, cx, |pane, _| pane.address.is_some()));
+}
+
+#[gpui::test]
+fn going_elsewhere_while_typing_a_path_hands_the_keys_to_the_list(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-l cmd-up");
+    assert!(in_pane(&browser, cx, |pane, _| pane.address.is_none()));
+    assert!(keys_on_the_list(&browser, cx));
+}
+
+#[gpui::test]
+fn a_sheet_opened_while_typing_a_path_hands_the_keys_to_the_list_on_closing(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-l cmd-k escape");
+    assert!(keys_on_the_list(&browser, cx));
+}
+
+#[gpui::test]
+fn esc_hands_the_keys_back_to_the_list_and_a_hidden_path_bar_hides_again(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-cmd-p");
+    assert!(!on_screen(cx, "path-bar"));
+    press(cx, "cmd-l");
+    assert!(on_screen(cx, "address-bar"));
+    press(cx, "escape");
+    assert!(!on_screen(cx, "path-bar"));
+    assert!(keys_on_the_list(&browser, cx));
+}
+
 #[gpui::test]
 fn a_click_in_the_gap_under_a_palette_row_runs_that_row(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
@@ -1810,11 +1895,12 @@ pub(super) fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
     cx.simulate_mouse_up(at, MouseButton::Right, with(""));
 }
 
-const ON_A_FILE: [&str; 14] = [
+const ON_A_FILE: [&str; 15] = [
     "Open",
     "Open With",
     "Reveal in Finder",
     "Open in Terminal",
+    "Share…",
     "Get Info",
     "Rename",
     "Suggest Names",
@@ -1852,9 +1938,10 @@ fn a_right_click_selects_first_and_the_menu_offers_what_applies(cx: &mut TestApp
     assert_eq!(shown(&browser, cx).1, ["b.txt", "c.txt"]);
     let (titles, _) = menu(&browser, cx).unwrap();
     assert_eq!(
-        titles[3..7],
+        titles[3..8],
         [
             "Open in Terminal",
+            "Share…",
             "Get Info",
             "New Folder with Selection",
             "Rename"
@@ -1923,7 +2010,7 @@ fn shift_f10_opens_the_menu_on_the_selection_and_return_runs_a_row(cx: &mut Test
     // ↑ and ↓ come round from the ends.
     press(cx, "up");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Copy Path"));
-    press(cx, "down down down down down down down down");
+    press(cx, "down down down down down down down down down");
     assert_eq!(menu(&browser, cx).unwrap().1, Some("Duplicate"));
     press(cx, "enter");
     assert_eq!(menu(&browser, cx), None);
@@ -2868,6 +2955,7 @@ fn a_compressed_folder_opens_read_only_and_extracts_beside_itself(cx: &mut TestA
         &Compress,
         &NewFolder,
         &RevealInFinder,
+        &Share,
         &QuickLook,
     ] {
         assert!(!offered(cx, action), "{}", action.name());

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Writes a release's notes: a header, a short summary, and every commit folded
-# under it. The updater reads everything before <details>. Commits land on main
-# without PRs, so GitHub's generated notes would be empty.
+# Writes a release's notes: a header, a list of what changed, and every commit
+# folded under it. The updater reads everything before <details>. Commits land
+# on main without PRs, so GitHub's generated notes would be empty.
 #
 #   scripts/release-notes <version> <previous tag or ""> <commit> <output>
 #
-# With OPENROUTER_API_KEY, Claude writes the summary. Without it, or when the
-# call fails, the feat and fix subjects do.
+# With OPENROUTER_API_KEY, Claude writes the list. Without it, or when the
+# call fails, the feat, fix and perf subjects do.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,15 +20,20 @@ range=${previous:+$previous..}$commit
 read -r -d '' instructions <<'PROMPT' || true
 You write release notes for Monodrive, a fast file manager for macOS that replaces Finder, searches the whole disk, and gives coding agents the same index over MCP.
 
-You get the commits since the last release, oldest first. Output Markdown in exactly this shape and nothing else:
+You get the commits since the last release, oldest first. Output a Markdown list and nothing else, one bullet a change, in exactly this shape:
 
-## Highlights
-Up to 4 short sentences. Name only the new features a user would care about most. If none matter to users, write one sentence about the most useful change.
+- **Short title.** One sentence on what the user can do now, or what works now.
 
-## Fixes
-- Up to 10 bullets, one fix each, under 10 words. Fewer is fine. Never pad. Leave out this section if no fix matters to users.
-- Each bullet names what was broken and says it works now. A user who hit the bug should recognize it.
-- Only list fixes from fix commits.
+- Up to 7 bullets, the ones users will care about most first, new features before fixes. Fewer is fine. Never pad.
+- The title names the feature or the place in the app in 1 to 3 words, in sentence case, with its period inside the bold.
+- The sentence is plain and concrete, under 20 words. For a fix, say what works now, so a user who hit the bug recognizes it.
+- One bullet can cover several commits about the same thing.
+
+If user-facing fix, feat or perf commits are left out of the list, end with a blank line and then this line, with N the number of them:
+
+**Plus N more bug fixes and improvements.**
+
+For just one, write **Plus 1 more bug fix or improvement.**
 
 Pick only significant, user-facing changes. Leave out visual polish, refactors, tests, CI, build, docs and plans. Say what the user gets, as short as possible. No internal names, file paths or code terms. No em dashes. No hype words. Do not invent anything that is not in the input.
 PROMPT
@@ -60,19 +65,21 @@ summarize() {
 
 sentence() { awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }'; }
 
-# The same shape from the subjects alone.
+# The same list from the subjects alone, features first.
 from_subjects() {
-  local features fixes
-  features=$(git log --reverse --format=%s "$range" | sed -nE 's/^feat(\([^)]*\))?!?: //p')
-  fixes=$(git log --reverse --format=%s "$range" | sed -nE 's/^fix(\([^)]*\))?!?: //p')
-  if [[ -n "$features" ]]; then
-    printf '## Highlights\n'
-    sentence <<<"$features" | sed 's/$/./' | paste -sd ' ' -
-    printf '\n'
-  fi
-  if [[ -n "$fixes" ]]; then
-    printf '## Fixes\n'
-    sentence <<<"$fixes" | sed 's/^/- /'
+  local subjects noticed more
+  subjects=$(git log --reverse --format=%s "$range")
+  noticed=$({
+    sed -nE 's/^feat(\([^)]*\))?!?: //p' <<<"$subjects"
+    sed -nE 's/^(fix|perf)(\([^)]*\))?!?: //p' <<<"$subjects"
+  } | sentence | sed -E 's/ \(#[0-9]+\)$//; s/^/- /; s/$/./')
+  [[ -n "$noticed" ]] || return 0
+  head -n 7 <<<"$noticed"
+  more=$(($(wc -l <<<"$noticed") - 7))
+  if ((more == 1)); then
+    printf '\n**Plus 1 more bug fix or improvement.**\n'
+  elif ((more > 1)); then
+    printf '\n**Plus %s more bug fixes and improvements.**\n' "$more"
   fi
 }
 

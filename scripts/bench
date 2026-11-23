@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Monodrive's benchmarks. See docs/performance.md.
 #
-#   scripts/bench [suite...]                     runs the suites (platform core search storage mcp workload compare) and writes
+#   scripts/bench [suite...]                     runs the suites (platform core search storage mcp workload compare frames launch) and writes
 #                                                results.json and report.html to target/bench/<time>
 #   scripts/bench --against <commit> [suite...]  the same, alternating with a build of <commit>
 #   scripts/bench report <results.json> [saved]  rewrites a run's report, beside a saved run's medians
@@ -15,17 +15,47 @@ cd "$(dirname "$0")/.."
 tool=target/release/monodrive-bench
 rounds=${BENCH_ROUNDS:-20}
 
-# The packages a run needs: the MCP suite runs the app's binary.
+# Whether the suites named, or all of them, include any of the ones after --.
+wants() {
+    local named=() suite
+    while [ "$1" != -- ]; do named+=("$1"); shift; done
+    shift
+    [ ${#named[@]} -eq 0 ] && return 0
+    for suite in "${named[@]}"; do
+        case " $* " in *" $suite "*) return 0 ;; esac
+    done
+    return 1
+}
+
+# The packages a run needs: the MCP and launch suites run the app's binary,
+# and the launch suite reads the line its profile feature prints.
 packages() {
-    local needs_app=0
-    if [ $# -eq 0 ]; then needs_app=1; fi
-    for suite in "$@"; do [ "$suite" = mcp ] && needs_app=1; done
     echo "-p monodrive-bench"
-    [ $needs_app = 1 ] && echo "-p monodrive"
+    if wants "$@" -- launch; then
+        echo "-p monodrive --features monodrive/profile"
+    elif wants "$@" -- mcp; then
+        echo "-p monodrive"
+    fi
     return 0
 }
 
+# The app's scrolling benchmark, linked beside the tool as the frames suite
+# expects. Uses the target folder cargo does.
+frames() {
+    local target=${CARGO_TARGET_DIR:-target} exe
+    exe=$(cargo bench --locked -p monodrive --bench scrolling --no-run --message-format=json |
+        grep '"kind":\["bench"\]' | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -1 || true)
+    if [ -z "$exe" ]; then
+        echo "cargo bench built no scrolling benchmark." >&2
+        return 1
+    fi
+    ln -sfn "$exe" "$target/release/monodrive-frames"
+}
+
+# cargo bench builds the app's binary too, without the profile feature, so
+# the benchmark goes first.
 build() {
+    if wants "$@" -- frames; then frames; fi
     # shellcheck disable=SC2046
     cargo build --release --locked $(packages "$@")
 }
@@ -74,7 +104,13 @@ baseline() {
         exit 1
     fi
     # shellcheck disable=SC2046
-    (cd "$base" && CARGO_TARGET_DIR="$PWD/target" cargo build --release --locked $(packages "$@")) >&2
+    (
+        cd "$base"
+        export CARGO_TARGET_DIR="$PWD/target"
+        # An older commit's run notes a suite it can't run.
+        if wants "$@" -- frames; then frames || true; fi
+        cargo build --release --locked $(packages "$@")
+    ) >&2
     echo "$base/target/release/monodrive-bench $short"
 }
 

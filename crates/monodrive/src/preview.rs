@@ -5,6 +5,7 @@
 mod html;
 mod markdown;
 mod media;
+mod syntax;
 mod tools;
 mod zoom;
 
@@ -32,17 +33,15 @@ use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSRect, NSString, NSURL};
 use objc2_quick_look_ui::QLPreviewView;
 use std::cell::{Cell, RefCell};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
+use syntax::{Line, Spans};
 use zoom::{Zoom, place};
 
-/// Beyond this, text stays plain: highlighting walks the whole file.
-const HIGHLIGHT_LIMIT: usize = 512 * 1024;
 /// Pixels asked for at 100%, as a picture's own size isn't known beforehand.
 const FULL_SIDE: u32 = 8192;
 /// The side a picture decodes at to fill the window: the window's longer side
@@ -77,13 +76,6 @@ impl Asset for Sharp {
     }
 }
 
-/// A line of text with its colors.
-#[derive(Clone)]
-struct Line {
-    text: SharedString,
-    spans: Vec<(std::ops::Range<usize>, HighlightStyle)>,
-}
-
 enum Body {
     Loading,
     /// Something to say in place of the file.
@@ -94,6 +86,8 @@ enum Body {
     Text {
         lines: Arc<Vec<Line>>,
         cut: bool,
+        /// An env file's values, by line, blurred until revealed.
+        secrets: Option<Secrets>,
     },
     Markdown {
         blocks: Arc<Vec<Block>>,
@@ -116,6 +110,7 @@ enum Body {
 }
 
 type SystemView = (Host<QLPreviewView>, PathBuf);
+type Secrets = Arc<Vec<Option<Range<usize>>>>;
 
 pub struct PreviewView {
     pub(crate) path: PathBuf,
@@ -125,6 +120,8 @@ pub struct PreviewView {
     generation: u64,
     body: Body,
     show_source: bool,
+    /// An env file's values show as written, until another file opens.
+    revealed: bool,
     zoom: Zoom,
     /// Actual Size was asked for, and waits on the full decode to know it.
     want_actual: bool,
@@ -179,6 +176,7 @@ impl PreviewView {
             generation: 0,
             body: Body::Loading,
             show_source: false,
+            revealed: false,
             zoom: Zoom::default(),
             want_actual: false,
             frame: Rc::new(Cell::new(Bounds::default())),
@@ -261,11 +259,10 @@ impl PreviewView {
         self.generation += 1;
         let generation = self.generation;
         self.loading = Some((path.clone(), folder, position));
-        let light = theme::is_light();
         let side = fit_side(cx);
         let work = cx
             .background_executor()
-            .spawn(async move { read(&path, light, side) });
+            .spawn(async move { read(&path, side) });
         self._reading = Some(cx.spawn(async move |this, cx| {
             let body = work.await;
             let _ = this.update(cx, |this, cx| {
@@ -289,6 +286,7 @@ impl PreviewView {
         self.position = position;
         self.loading_ticks = 40;
         self.show_source = false;
+        self.revealed = false;
         self.zoom = Zoom::default();
         self.want_actual = false;
         self.panning = None;
@@ -455,6 +453,23 @@ impl PreviewView {
                         .debug_selector(|| "preview-source".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.show_source = !this.show_source;
+                            cx.notify();
+                        })),
+                )
+            }
+            Body::Text {
+                secrets: Some(_), ..
+            } => {
+                let label = if self.revealed {
+                    "Hide Values"
+                } else {
+                    "Reveal Values"
+                };
+                Some(
+                    text_button("preview-reveal", label, ButtonLook::Ghost)
+                        .debug_selector(|| "preview-reveal".into())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.revealed = !this.revealed;
                             cx.notify();
                         })),
                 )
@@ -1157,7 +1172,7 @@ fn set_item(view: &Retained<QLPreviewView>, path: &Path, folder: bool) {
     unsafe { view.setPreviewItem(Some(&item)) };
 }
 
-fn read(path: &Path, light: bool, side: u32) -> Body {
+fn read(path: &Path, side: u32) -> Body {
     let notice = |why: &str| Body::Notice(why.to_string());
     match preview::classify(path) {
         Kind::NotDownloaded => Body::NotDownloaded,
@@ -1188,13 +1203,19 @@ fn read(path: &Path, light: bool, side: u32) -> Body {
         }
         Kind::Zip => zip_rows(path),
         Kind::Text => match preview::read_text(path) {
-            Ok(file) => {
-                let lines = highlighted(&file.text, path, light);
-                Body::Text {
-                    lines: Arc::new(lines),
-                    cut: file.cut,
-                }
-            }
+            Ok(file) => Body::Text {
+                lines: Arc::new(syntax::file(&file.text, path)),
+                cut: file.cut,
+                secrets: None,
+            },
+            Err(why) => Body::Notice(why),
+        },
+        Kind::Env => match preview::read_text(path) {
+            Ok(file) => Body::Text {
+                lines: Arc::new(syntax::env(&file.text)),
+                cut: file.cut,
+                secrets: Some(Arc::new(preview::env_values(&file.text))),
+            },
             Err(why) => Body::Notice(why),
         },
         Kind::Markdown => match preview::read_text(path) {
@@ -1211,7 +1232,7 @@ fn read(path: &Path, light: bool, side: u32) -> Body {
                 });
                 Body::Markdown {
                     blocks: Arc::new(blocks),
-                    source: Arc::new(highlighted(&file.text, path, light)),
+                    source: Arc::new(syntax::file(&file.text, path)),
                 }
             }
             Err(why) => Body::Notice(why),
@@ -1242,76 +1263,52 @@ fn zip_rows(path: &Path) -> Body {
     }
 }
 
-fn plain_lines(text: &str) -> Vec<Line> {
-    text.lines()
-        .map(|line| Line {
-            text: SharedString::from(line.to_string()),
-            spans: Vec::new(),
+/// What `spans` say each piece of code is, in the palette's colors.
+fn colors(spans: &Spans) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    spans
+        .iter()
+        .map(|(range, kind)| {
+            let style = HighlightStyle {
+                color: Some(theme::syntax(*kind)),
+                ..Default::default()
+            };
+            (range.clone(), style)
         })
         .collect()
 }
 
-/// The text with colors, when it's small enough and its syntax is known.
-fn highlighted(text: &str, path: &Path, light: bool) -> Vec<Line> {
-    if text.len() > HIGHLIGHT_LIMIT {
-        return plain_lines(text);
-    }
-    static SYNTAXES: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
-    static THEMES: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
-    let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
-    let themes = THEMES.get_or_init(ThemeSet::load_defaults);
-    let extension = path
-        .extension()
-        .map(|ext| ext.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let Some(syntax) = syntaxes.find_syntax_by_extension(&extension) else {
-        return plain_lines(text);
-    };
-    let theme = &themes.themes[if light {
-        "InspiredGitHub"
-    } else {
-        "base16-ocean.dark"
-    }];
-    let mut lines = HighlightLines::new(syntax, theme);
-    syntect::util::LinesWithEndings::from(text)
-        .map(|line| {
-            let mut spans = Vec::new();
-            let mut at = 0;
-            let stripped = line.trim_end_matches(['\n', '\r']);
-            for (style, piece) in lines.highlight_line(line, syntaxes).unwrap_or_default() {
-                let end = (at + piece.len()).min(stripped.len());
-                if at < end {
-                    // design: a syntax theme's colors, not the app's.
-                    let color = gpui::Rgba {
-                        r: f32::from(style.foreground.r) / 255.,
-                        g: f32::from(style.foreground.g) / 255.,
-                        b: f32::from(style.foreground.b) / 255.,
-                        a: 1.,
-                    };
-                    spans.push((
-                        at..end,
-                        HighlightStyle {
-                            color: Some(color.into()),
-                            ..Default::default()
-                        },
-                    ));
-                }
-                at += piece.len();
-            }
-            Line {
-                text: SharedString::from(stripped.to_string()),
-                spans,
-            }
-        })
-        .collect()
-}
-
-fn text_rows(lines: Arc<Vec<Line>>, scroll: &UniformListScrollHandle) -> gpui::AnyElement {
+/// `hidden` blurs those parts of the lines.
+fn text_rows(
+    lines: Arc<Vec<Line>>,
+    hidden: Option<Secrets>,
+    scroll: &UniformListScrollHandle,
+) -> gpui::AnyElement {
     let digits = lines.len().max(1).ilog10() as usize + 1;
     uniform_list("preview-lines", lines.len(), move |range, _, _| {
         range
             .map(|ix| {
                 let line = &lines[ix];
+                let text = match hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone()) {
+                    Some(secret) => {
+                        let key = &line.text[..secret.start];
+                        let mut seed = DefaultHasher::new();
+                        (ix, key).hash(&mut seed);
+                        let shown: Spans = line
+                            .spans
+                            .iter()
+                            .filter(|(range, _)| range.start < secret.start)
+                            .map(|(range, kind)| (range.start..range.end.min(secret.start), *kind))
+                            .collect();
+                        div()
+                            .flex()
+                            .child(StyledText::new(key.to_string()).with_highlights(colors(&shown)))
+                            .child(blurred(seed.finish()))
+                            .into_any_element()
+                    }
+                    None => StyledText::new(line.text.clone())
+                        .with_highlights(colors(&line.spans))
+                        .into_any_element(),
+                };
                 div()
                     .h(px(theme::ROW_HEIGHT - 8.))
                     .flex()
@@ -1323,7 +1320,7 @@ fn text_rows(lines: Arc<Vec<Line>>, scroll: &UniformListScrollHandle) -> gpui::A
                             .text_color(content(0.65))
                             .child(format!("{:>digits$}", ix + 1)),
                     )
-                    .child(StyledText::new(line.text.clone()).with_highlights(line.spans.clone()))
+                    .child(text)
             })
             .collect()
     })
@@ -1333,6 +1330,43 @@ fn text_rows(lines: Arc<Vec<Line>>, scroll: &UniformListScrollHandle) -> gpui::A
     .font_family(theme::MONO_FONT)
     .text_size(px(theme::TEXT_SMALL))
     .into_any_element()
+}
+
+/// Blurred letters where a value would be, made up from `seed`. Values are
+/// never drawn, so the blur gives nothing of them away.
+fn blurred(seed: u64) -> impl IntoElement {
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzaceimnorsuvwxzAKRT2479-_.";
+    let mut state = seed | 1;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let count = 16 + next() % 17;
+    let stand_in =
+        (0..count).map(move |_| char::from(LETTERS[(next() % LETTERS.len() as u64) as usize]));
+    div()
+        .debug_selector(|| "preview-secret".into())
+        .h_full()
+        .flex()
+        .items_end()
+        .pb(px(10.5))
+        .children(stand_in.map(|letter| {
+            let (height, lift) = match letter {
+                'A'..='Z' | '0'..='9' | 'b' | 'd' | 'f' | 'h' | 'k' | 'l' | 't' => (4., 0.),
+                'g' | 'j' | 'p' | 'q' | 'y' => (4., -3.),
+                'a'..='z' => (1., 0.),
+                _ => (0., 0.),
+            };
+            div()
+                .flex_shrink_0()
+                .w_0()
+                .mx(px(4.))
+                .mb(px(lift))
+                .h(px(height))
+                .when(height > 0., |d| d.shadow(theme::blurred_letter()))
+        }))
 }
 
 fn inline_text(id: (&'static str, usize), inline: &Inline) -> gpui::AnyElement {
@@ -1439,14 +1473,14 @@ fn block(ix: usize, block: &Block) -> gpui::AnyElement {
             )
             .child(div().min_w_0().child(inline_text(id, inline)))
             .into_any_element(),
-        Block::Code(text) => div()
+        Block::Code(text, spans) => div()
             .mb_2()
             .p_2()
             .rounded(px(theme::RADIUS_ROW))
             .bg(content(0.06))
             .font_family(theme::MONO_FONT)
             .text_size(px(theme::TEXT_SMALL))
-            .child(text.clone())
+            .child(StyledText::new(text.clone()).with_highlights(colors(spans)))
             .into_any_element(),
         Block::Image(path) => div()
             .pb_2()
@@ -1490,9 +1524,14 @@ impl Render for PreviewView {
             Body::Loading => div().size_full().into_any_element(),
             Body::Notice(why) => notice(why.clone()),
             Body::NotDownloaded => self.not_downloaded(cx),
-            Body::Text { lines, cut } => {
+            Body::Text {
+                lines,
+                cut,
+                secrets,
+            } => {
                 let cut = *cut;
-                let rows = text_rows(lines.clone(), &self.scroll);
+                let hidden = secrets.clone().filter(|_| !self.revealed);
+                let rows = text_rows(lines.clone(), hidden, &self.scroll);
                 div()
                     .debug_selector(|| "preview-text".into())
                     .size_full()
@@ -1515,7 +1554,7 @@ impl Render for PreviewView {
             }
             Body::Markdown { blocks, source } => {
                 if self.show_source || self.blocks.is_none() {
-                    text_rows(source.clone(), &self.scroll)
+                    text_rows(source.clone(), None, &self.scroll)
                 } else {
                     let blocks = blocks.clone();
                     let state = self
@@ -1629,24 +1668,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn colors_cover_the_line_without_its_newline() {
-        let lines = highlighted("fn a() {}\nlet b = 1;\n", Path::new("a.rs"), false);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text.as_ref(), "fn a() {}");
-        assert!(lines[0].spans.len() > 1, "a known syntax gets colors");
-        assert_eq!(lines[0].spans.last().unwrap().0.end, "fn a() {}".len());
-        // An unknown syntax stays plain.
-        let plain = highlighted("hello", Path::new("a.unknownext"), false);
-        assert!(plain[0].spans.is_empty());
-    }
-
-    #[test]
     fn a_picture_that_cant_be_decoded_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let broken = dir.path().join("broken.png");
         std::fs::write(&broken, b"not a picture").unwrap();
         assert!(matches!(
-            read(&broken, false, 256),
+            read(&broken, 256),
             Body::Notice(why) if why == "This picture can't be shown."
         ));
     }

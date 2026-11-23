@@ -2,6 +2,7 @@
 //! pane can show: no scripts or raw HTML, remote images stay out, and a link
 //! opens only when it's clicked.
 
+use super::syntax::{self, Spans};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,8 @@ pub enum Block {
     /// The marker ("•" or "3."), its depth, and the text.
     Item(String, usize, Inline),
     Quote(Inline),
-    Code(String),
+    /// The code and its colors.
+    Code(String, Spans),
     Image(PathBuf),
     Rule,
 }
@@ -35,7 +37,8 @@ pub fn parse(source: &str, folder: &Path) -> Vec<Block> {
     let mut open: Vec<(usize, Tag)> = Vec::new();
     let mut lists: Vec<Option<u64>> = Vec::new();
     let mut quotes = 0usize;
-    let mut code: Option<String> = None;
+    // The open fence's info string and code so far.
+    let mut code: Option<(String, String)> = None;
     // Inside an image, whose alt text isn't part of the paragraph.
     let mut images = 0usize;
     // An item's own text ends where a list inside it starts, or where it does.
@@ -58,12 +61,17 @@ pub fn parse(source: &str, folder: &Path) -> Vec<Block> {
     for event in Parser::new_ext(source, options) {
         match event {
             Event::Start(Tag::CodeBlock(kind)) => {
-                let _: CodeBlockKind = kind;
-                code = Some(String::new());
+                let info = match kind {
+                    CodeBlockKind::Fenced(info) => info.to_string(),
+                    CodeBlockKind::Indented => String::new(),
+                };
+                code = Some((info, String::new()));
             }
             Event::End(TagEnd::CodeBlock) => {
-                if let Some(text) = code.take() {
-                    blocks.push(Block::Code(text.trim_end().to_string()));
+                if let Some((info, text)) = code.take() {
+                    let text = text.trim_end().to_string();
+                    let spans = syntax::fence(&text, &info);
+                    blocks.push(Block::Code(text, spans));
                 }
             }
             Event::Start(Tag::List(start)) => {
@@ -116,7 +124,7 @@ pub fn parse(source: &str, folder: &Path) -> Vec<Block> {
             }
             Event::Text(_) if images > 0 => {}
             Event::Text(text) => match &mut code {
-                Some(code) => code.push_str(&text),
+                Some((_, code)) => code.push_str(&text),
                 None => inline.text.push_str(&text),
             },
             Event::Code(text) => {
@@ -149,6 +157,7 @@ fn heading_level(level: HeadingLevel) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palettes::Syntax;
 
     #[test]
     fn it_reads_as_blocks_with_styled_ranges() {
@@ -166,7 +175,15 @@ mod tests {
         assert!(matches!(&blocks[0], Block::Heading(1, title) if title.text == "Title"));
         assert!(matches!(&blocks[2], Block::Item(m, 0, t) if m == "•" && t.text == "one"));
         assert!(matches!(&blocks[4], Block::Item(m, 0, t) if m == "1." && t.text == "first"));
-        assert_eq!(blocks[5], Block::Code("fn a() {}".into()));
+        let Block::Code(code, spans) = &blocks[5] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(code, "fn a() {}");
+        assert_eq!(
+            spans[0],
+            (0..2, Syntax::Keyword),
+            "the fence's language colors it"
+        );
         assert!(matches!(&blocks[6], Block::Quote(t) if t.text == "said"));
         assert_eq!(blocks[7], Block::Rule);
     }

@@ -511,3 +511,17 @@ fn the_app_is_the_bundle_a_binary_runs_from() {
         Path::new("/repo/target/debug/monodrive")
     );
 }
+
+#[gpui::test]
+fn the_checklist_turns_usage_sharing_on_and_back_off(cx: &mut TestAppContext) {
+    let fake = no_grant();
+    launched(&fake, false, cx);
+    let (_, cx) = flow(cx);
+    press("enter", cx);
+    let sharing =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Preferences>().share_usage);
+    click("share-usage", cx);
+    assert!(sharing(cx));
+    click("share-usage", cx);
+    assert!(!sharing(cx));
+}

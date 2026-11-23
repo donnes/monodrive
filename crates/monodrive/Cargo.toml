@@ -12,18 +12,21 @@ gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["font-kit", "runtime_shaders"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 unicode-segmentation = "1"
-# Pins the traffic lights to Monocode's spacing, draws Finder's icons, puts
+# Reads the URL the share extension opens the app with.
+url = "2"
+# Pins the traffic lights to Monocode's spacing, sets the app's icon, draws Finder's icons, puts
 # files on the pasteboard, hands them to Finder and Terminal, previews
 # them with Quick Look, and taps the trackpad.
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "objc2-uniform-type-identifiers", "NSAccessibility", "NSApplication", "NSBitmapImageRep", "NSButton", "NSControl", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSHapticFeedback", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSBundle", "NSDictionary", "NSGeometry", "NSObject", "NSString", "NSURL", "NSUserDefaults"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "objc2-uniform-type-identifiers", "NSAccessibility", "NSApplication", "NSBitmapImageRep", "NSButton", "NSControl", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSHapticFeedback", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSScreen", "NSSharingService", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSGeometry", "NSObject", "NSPathUtilities", "NSString", "NSURL", "NSUserDefaults"] }
 # Finder's sounds, through AudioToolbox, and NSFileViewer, which sends other
 # apps' Show in Finder here.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFPreferences", "CFString", "CFURL"] }
 objc2-quick-look-ui = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "QLPreviewItem", "QLPreviewPanel", "QLPreviewView"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes", "UTType"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotificationSettings", "UNUserNotificationCenter"] }
 raw-window-handle = "0.6"
 serde.workspace = true
 # preserve_order: adding an agent rewrites its config without reordering it.
@@ -44,9 +47,11 @@ objc2-quartz-core = { version = "0.3", default-features = false, features = ["st
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKContentRuleList", "WKContentRuleListStore", "WKFrameInfo", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKPreferences", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKWebpagePreferences", "WKWebsiteDataStore"] }
 # The preview's Markdown and colored text. Syntect's pure-Rust regex engine
-# keeps a C library out of the build; its syntaxes load only when a file needs them.
+# keeps a C library out of the build; bat's syntaxes, through two-face, load
+# only when a file needs them.
 pulldown-cmark = { version = "0.13", default-features = false }
-syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+syntect = { version = "5", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 
 [features]
 # Prints the launch time once the folder's contents are drawn, and frame

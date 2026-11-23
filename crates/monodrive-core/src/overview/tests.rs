@@ -769,6 +769,11 @@ fn clean_worktrees_are_one_suggestion_ranked_by_what_they_free_together() {
         (600, true, NOW - 7_200)
     );
     assert!(read(&env, &[startup(10_000, 2_000)]).suggestions.is_empty());
+    // Watching them doesn't wait for a low disk, and measures what's stale.
+    let (watched, due) = clean_worktrees(&env, &[startup(10_000, 9_000)], NOW);
+    let watched = watched.expect("the clean worktrees, on a roomy disk");
+    assert_eq!((watched.size.unshared, watched.size.complete), (600, true));
+    assert_eq!(due, std::slice::from_ref(&other));
 
     // Asked again, one that changed since drops out, index or not.
     std::fs::write(other.join("new"), "").unwrap();

@@ -11,7 +11,7 @@ use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{
     NSBitmapImageRep, NSCompositingOperation, NSDeviceRGBColorSpace, NSGraphicsContext, NSImage,
-    NSWorkspace,
+    NSImageInterpolation, NSWorkspace,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_uniform_type_identifiers::{UTType, UTTypeData, UTTypeFolder};
@@ -86,7 +86,7 @@ fn path_icon(path: &Path) -> Option<Retained<NSImage>> {
 /// Draws `icon` `pixels` square. AppKit picks the representation that fits
 /// and draws into a bitmap context of this thread's own, so it's safe off
 /// the main thread.
-fn draw(icon: &NSImage, pixels: u32) -> Option<RenderImage> {
+pub(crate) fn draw(icon: &NSImage, pixels: u32) -> Option<RenderImage> {
     let side = isize::try_from(pixels).ok()?;
     // Premultiplied RGBA, rows padded to `bytesPerRow`.
     let bitmap = unsafe {
@@ -107,6 +107,7 @@ fn draw(icon: &NSImage, pixels: u32) -> Option<RenderImage> {
     let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&bitmap)?;
     NSGraphicsContext::saveGraphicsState_class();
     NSGraphicsContext::setCurrentContext(Some(&context));
+    context.setImageInterpolation(NSImageInterpolation::High);
     let rect = NSRect::new(NSPoint::ZERO, NSSize::new(side as f64, side as f64));
     icon.drawInRect_fromRect_operation_fraction(
         rect,

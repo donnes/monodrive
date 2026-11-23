@@ -3,6 +3,7 @@
 //! Every control writes straight to [`Preferences`], so changes apply live.
 
 use crate::agents::{self, Action, Harness, Setup};
+use crate::app_icon::{AppIcon, Picture};
 use crate::background::{self, Backdrop, Effect, Look, Scope};
 use crate::browser::CheckForUpdates;
 use crate::commands::{self, Group};
@@ -13,7 +14,7 @@ use crate::native::native;
 use crate::palettes::{self, PALETTES};
 use crate::preferences::{
     self, GRID_ICON_SIZES, Preferences, RowSize, Terminal, Theme, UI_SCALE_PERCENTS, View,
-    WindowSize, WorkspaceStyle,
+    WORKTREE_LIMITS, WindowSize, WorkspaceStyle,
 };
 use crate::theme::{
     self, ButtonLook, Elevation, accent, content, focus_ring, icon, icon_button, knob, knob_shadow,
@@ -24,7 +25,7 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, PromptLevel, Role, ScrollHandle,
     SharedString, Stateful, Subscription, Toggled, Window, actions, anchored, canvas, deferred,
-    div, point, prelude::*, px, relative,
+    div, img, point, prelude::*, px, relative,
 };
 use monodrive_core::entries::SortBy;
 use monodrive_core::mcp::{Profile, TOOLS};
@@ -78,15 +79,17 @@ enum Page {
     Appearance,
     Keyboard,
     Agents,
+    Notifications,
 }
 
 impl Page {
-    const ALL: [Page; 5] = [
+    const ALL: [Page; 6] = [
         Page::General,
         Page::Window,
         Page::Appearance,
         Page::Keyboard,
         Page::Agents,
+        Page::Notifications,
     ];
 
     fn label(self) -> &'static str {
@@ -94,6 +97,7 @@ impl Page {
             Page::General => "General",
             Page::Window => "Window",
             Page::Appearance => "Appearance",
+            Page::Notifications => "Notifications",
             Page::Keyboard => "Keyboard",
             Page::Agents => "Agents",
         }
@@ -104,6 +108,7 @@ impl Page {
             Page::General => "sliders",
             Page::Window => "app-window",
             Page::Appearance => "palette",
+            Page::Notifications => "bell",
             Page::Keyboard => "keyboard",
             Page::Agents => "bot",
         }
@@ -114,6 +119,7 @@ impl Page {
             Page::General => "nav-General",
             Page::Window => "nav-Window",
             Page::Appearance => "nav-Appearance",
+            Page::Notifications => "nav-Notifications",
             Page::Keyboard => "nav-Keyboard",
             Page::Agents => "nav-Agents",
         }
@@ -125,6 +131,7 @@ impl Page {
             Page::General => Some(Preferences::restore_general),
             Page::Window => Some(Preferences::restore_window),
             Page::Appearance => Some(Preferences::restore_appearance),
+            Page::Notifications => Some(Preferences::restore_notifications),
             Page::Keyboard => Some(|p| p.shortcuts.clear()),
             Page::Agents => Some(|p| {
                 p.agents_change_files = true;
@@ -911,8 +918,147 @@ impl SettingsView {
                 ],
             ),
             group("Finder", None, vec![self.show_in_finder(cx)]),
+            self.localsend_group(p, cx),
             self.updates_group(p, cx),
+            group(
+                "Privacy",
+                None,
+                vec![row(
+                    "Share anonymous usage",
+                    Some(
+                        "Sends PostHog the app and macOS versions with a random ID each launch. Never your files.",
+                    ),
+                    self.focusable(
+                        "share-usage",
+                        true,
+                        toggle(
+                            "share-usage",
+                            "Share anonymous usage",
+                            p.share_usage,
+                            |p, on| p.set_share_usage(on),
+                        ),
+                        cx,
+                    ),
+                )],
+            ),
         ]
+    }
+
+    /// Receiving with LocalSend: whether, where to, and with what PIN. The
+    /// LocalSend page's footer has the same switch.
+    fn localsend_group(&self, p: &Preferences, cx: &mut Context<Self>) -> AnyElement {
+        let folder = monodrive_core::paths::abbreviate(&p.localsend_save_to());
+        let pin = p.localsend_pin.clone();
+        let pin_said = match &pin {
+            Some(pin) => format!("Senders type {pin}."),
+            None => "Anyone nearby can offer you files.".to_string(),
+        };
+        let use_localsend = row(
+            "Use LocalSend",
+            Some("Send files to phones and computers nearby running LocalSend."),
+            self.focusable(
+                "localsend",
+                true,
+                toggle("localsend", "Use LocalSend", p.localsend, |p, on| {
+                    p.localsend = on
+                }),
+                cx,
+            ),
+        );
+        if !p.localsend {
+            return group("LocalSend", None, vec![use_localsend]).into_any_element();
+        }
+        group(
+            "LocalSend",
+            None,
+            vec![
+                use_localsend,
+                row(
+                    "Receive files",
+                    Some("Devices nearby can offer you files, and you accept each one. They see this Mac by its name in Sharing settings."),
+                    self.focusable(
+                        "localsend-receive",
+                        true,
+                        toggle(
+                            "localsend-receive",
+                            "Receive files",
+                            p.localsend_receive,
+                            |p, on| p.localsend_receive = on,
+                        ),
+                        cx,
+                    ),
+                ),
+                row_with(
+                    "Save to",
+                    Some(folder.into()),
+                    self.focusable(
+                        "localsend-folder",
+                        true,
+                        text_button("localsend-folder", "Choose…", ButtonLook::Secondary).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.choose_localsend_folder(window, cx)
+                            }),
+                        ),
+                        cx,
+                    ),
+                ),
+                row_with(
+                    "Require a PIN",
+                    Some(pin_said.into()),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .when(pin.is_some(), |d| {
+                            d.child(
+                                self.focusable(
+                                    "localsend-new-pin",
+                                    true,
+                                    text_button(
+                                        "localsend-new-pin",
+                                        "New PIN",
+                                        ButtonLook::Secondary,
+                                    )
+                                    .on_click(|_, _, cx| {
+                                        preferences::update(cx, |p| {
+                                            p.localsend_pin = Some(new_pin())
+                                        })
+                                    }),
+                                    cx,
+                                ),
+                            )
+                        })
+                        .child(self.focusable(
+                            "localsend-pin",
+                            true,
+                            toggle("localsend-pin", "Require a PIN", pin.is_some(), |p, on| {
+                                p.localsend_pin = on.then(new_pin)
+                            }),
+                            cx,
+                        )),
+                ),
+            ],
+        )
+        .into_any_element()
+    }
+
+    fn choose_localsend_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            if let Some(folder) = paths.into_iter().next() {
+                let _ = cx
+                    .update(|_, cx| preferences::update(cx, |p| p.localsend_folder = Some(folder)));
+            }
+        })
+        .detach();
     }
 
     /// The switch that sends other apps' Show in Finder here. It shows what
@@ -991,6 +1137,175 @@ impl SettingsView {
             ],
         )
         .into_any_element()
+    }
+
+    /// A notification's switch, dimmed and out of reach while notifications
+    /// are off.
+    fn notify_toggle(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        on: bool,
+        p: &Preferences,
+        set: fn(&mut Preferences, bool),
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let enabled = p.notifications;
+        let switch = if enabled {
+            toggle(id, label, on, set)
+        } else {
+            theme::switch(on)
+                .id(id)
+                .role(Role::Switch)
+                .aria_label(label)
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
+                .opacity(0.4)
+        };
+        self.focusable(id, enabled, switch, cx)
+    }
+
+    fn allow_notifications(&self, p: &Preferences, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.focusable(
+            "notifications",
+            true,
+            toggle(
+                "notifications",
+                "Allow notifications",
+                p.notifications,
+                |p, on| p.notifications = on,
+            ),
+            cx,
+        )
+    }
+
+    fn system_notifications(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.focusable(
+            "notifications-system",
+            true,
+            text_button(
+                "notifications-system",
+                "Open System Settings",
+                ButtonLook::Secondary,
+            )
+            .on_click(|_, _, cx| {
+                cx.open_url("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+            }),
+            cx,
+        )
+    }
+
+    fn worktree_limit(
+        &self,
+        p: &Preferences,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let limits = WORKTREE_LIMITS
+            .into_iter()
+            .map(|gb| MenuItem {
+                label: format!("{gb} GB").into(),
+                icon: None,
+                selected: gb == p.notify_worktrees_over,
+                choose: Rc::new(move |cx| {
+                    preferences::update(cx, |p| p.notify_worktrees_over = gb)
+                }),
+            })
+            .collect();
+        div()
+            .when(!(p.notifications && p.notify_worktrees), |d| d.opacity(0.4))
+            .child(self.popup(
+                "notify-worktrees-over",
+                "Clean worktrees over",
+                80.,
+                limits,
+                window,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// A master switch, then a group per feature.
+    fn notifications(
+        &self,
+        p: &Preferences,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        vec![
+            group(
+                "Notifications",
+                None,
+                vec![
+                    row("Allow notifications", None, self.allow_notifications(p, cx)),
+                    row("Banners and sounds", None, self.system_notifications(cx)),
+                ],
+            ),
+            group(
+                "LocalSend",
+                None,
+                vec![
+                    row(
+                        "Offers from devices",
+                        Some("Accept or decline from the notification. Plays AirDrop's chime."),
+                        self.notify_toggle(
+                            "notify-localsend-offers",
+                            "Offers from devices",
+                            p.notify_localsend_offers,
+                            p,
+                            |p, on| p.notify_localsend_offers = on,
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Sends and receives that end",
+                        Some("Whether everything arrived, or why not."),
+                        self.notify_toggle(
+                            "notify-localsend-ended",
+                            "Sends and receives that end",
+                            p.notify_localsend_ended,
+                            p,
+                            |p, on| p.notify_localsend_ended = on,
+                            cx,
+                        ),
+                    ),
+                ],
+            ),
+            group(
+                "Storage",
+                Some("Each says so once, then waits a week before saying it again."),
+                vec![
+                    row(
+                        "Startup disk running low",
+                        Some("Under 20% free, with what could free space."),
+                        self.notify_toggle(
+                            "notify-low-disk",
+                            "Startup disk running low",
+                            p.notify_low_disk,
+                            p,
+                            |p, on| p.notify_low_disk = on,
+                            cx,
+                        ),
+                    ),
+                    row(
+                        "Clean worktrees take more than",
+                        Some("Worktrees holding nothing their repositories don't."),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(self.worktree_limit(p, window, cx))
+                            .child(self.notify_toggle(
+                                "notify-worktrees",
+                                "Clean worktrees",
+                                p.notify_worktrees,
+                                p,
+                                |p, on| p.notify_worktrees = on,
+                                cx,
+                            )),
+                    ),
+                ],
+            ),
+        ]
     }
 
     fn window_page(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1432,7 +1747,7 @@ impl SettingsView {
         };
         let tools = TOOLS
             .iter()
-            .filter(|tool| profile.offers(tool.profile))
+            .filter(|tool| profile.offers(tool.profile) && (p.localsend || !tool.is_localsend()))
             .map(|tool| {
                 div()
                     .py(px(8.))
@@ -1515,7 +1830,10 @@ impl SettingsView {
 
     /// Every command and its shortcut, grouped as in the menu bar.
     fn keyboard(&self, p: &Preferences, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let all = commands::all();
+        let all: Vec<_> = commands::all()
+            .into_iter()
+            .filter(|command| !commands::hidden(command, p))
+            .collect();
         let mut page = Vec::new();
         if let Some(error) = &self.recording_error {
             page.push(
@@ -1716,7 +2034,7 @@ impl SettingsView {
     fn appearance(
         &self,
         p: &Preferences,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let light = theme::is_light();
@@ -1777,6 +2095,19 @@ impl SettingsView {
                         Some("Selection, switches and sliders."),
                         self.focusable("accent", true, accent_picker(p, light), cx),
                     ),
+                ],
+            ),
+            group(
+                "App Icon",
+                None,
+                vec![
+                    self.focusable(
+                        "app-icon",
+                        true,
+                        app_icon_picker(p.app_icon, window, cx),
+                        cx,
+                    )
+                    .into_any_element(),
                 ],
             ),
             group(
@@ -2320,6 +2651,7 @@ impl Render for SettingsView {
             Page::General => self.general(&prefs, cx),
             Page::Window => self.window_page(&prefs, cx),
             Page::Appearance => self.appearance(&prefs, window, cx),
+            Page::Notifications => self.notifications(&prefs, window, cx),
             Page::Keyboard => self.keyboard(&prefs, cx),
             Page::Agents => self.agents(&prefs, window, cx),
         };
@@ -2419,6 +2751,14 @@ impl Render for SettingsView {
                 scrim.bg(theme::scrim(t))
             })
     }
+}
+
+/// Six digits, as LocalSend's PINs usually are.
+fn new_pin() -> String {
+    use std::hash::BuildHasher;
+    let random =
+        std::collections::hash_map::RandomState::new().hash_one(std::time::SystemTime::now());
+    format!("{:06}", random % 1_000_000)
 }
 
 /// The value at `offset` points along a track `width` wide. The knob's
@@ -2650,6 +2990,74 @@ fn accent_picker(p: &Preferences, light: bool) -> Stateful<Div> {
                         .on_click(move |_, _, cx| preferences::update(cx, |p| p.accent = value))
                 }),
         )
+}
+
+/// The icons on offer, as the pictures the Dock will show. With no choice,
+/// the one this build came with is selected.
+fn app_icon_picker(chosen: Option<AppIcon>, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+    const SIDE: f32 = 76.;
+    // The pictures keep macOS's icon margin, 100 of every 1024 points on each
+    // side; the icons' own edges line up with the plate's text instead.
+    let margin = SIDE * 100. / 1024.;
+    let shown = chosen.or(AppIcon::bundled());
+    let at = shown.and_then(|shown| AppIcon::ALL.iter().position(|icon| *icon == shown));
+    div()
+        .id("app-icon")
+        .role(Role::RadioGroup)
+        .aria_label("App icon")
+        .on_key_down(move |event: &KeyDownEvent, _, cx| {
+            if let Some(step) = arrow(&event.keystroke.key) {
+                let next = at.map_or(0, |at| {
+                    at.saturating_add_signed(step).min(AppIcon::ALL.len() - 1)
+                });
+                preferences::update(cx, |p| p.app_icon = Some(AppIcon::ALL[next]));
+                cx.stop_propagation();
+            }
+        })
+        .mx(px(-margin))
+        .pt(px(12. - margin))
+        .pb(px(10.))
+        .rounded(px(theme::RADIUS_CARD))
+        .flex()
+        .flex_wrap()
+        .justify_between()
+        .gap(px(8.))
+        .children(AppIcon::ALL.into_iter().enumerate().map(|(ix, choice)| {
+            let selected = shown == Some(choice);
+            let picture = Picture {
+                icon: choice,
+                pixels: (SIDE * window.scale_factor()).ceil() as u32,
+            };
+            let picture = window.use_asset::<Picture>(&picture, cx).flatten();
+            div()
+                .id(("app-icon", ix))
+                .role(Role::RadioButton)
+                .aria_label(choice.label())
+                .aria_selected(selected)
+                .flex()
+                .flex_col()
+                .items_center()
+                .cursor_pointer()
+                .child(match picture {
+                    Some(picture) => img(picture).size(px(SIDE)).into_any_element(),
+                    None => div().size(px(SIDE)).into_any_element(),
+                })
+                .child(
+                    div()
+                        .mt(px(6. - margin))
+                        .text_size(px(theme::TEXT_SMALL))
+                        .map(|d| {
+                            if selected {
+                                d.font_weight(FontWeight::MEDIUM).text_color(accent())
+                            } else {
+                                d.text_color(content(0.65))
+                            }
+                        })
+                        .child(choice.label()),
+                )
+                .when(!selected, |d| d.hover(|s| s.text_color(content(1.))))
+                .on_click(move |_, _, cx| preferences::update(cx, |p| p.app_icon = Some(choice)))
+        }))
 }
 
 /// The step an arrow key takes through a group: back for ← and ↑.

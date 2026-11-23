@@ -1,19 +1,19 @@
 # Monodrive worktree management plan
 
-Status: inventory and management done (scan, Worktrees page, removal through the Trash; see docs/worktrees.md). The creation milestones below wait on their own design review.
+Status: done (scan, Worktrees page, removal through the Trash; see docs/worktrees.md). Creating worktrees, through MCP or the window, was dropped on 2026-11-23 along with agent handoff.
 Terminology: "Work3" is interpreted as "worktree".
 
 ## Goal and order
 
 Maintainer's goal, which overrides the order below where they conflict: one place to manage all worktrees. Monodrive scans for them, lists them together, and can delete them. Deleting still needs the reviewed design this plan describes: dirty files, untracked files, branches and locks are preserved or explicitly confirmed, and removal is reversible through the Trash where possible.
 
-Make Monodrive useful for managing existing Git worktrees first. Design and implement worktree creation through Monodrive MCP only after the management foundation is usable and its behavior has been reviewed. Monodrive doesn't launch agents; handing work to T3 Code or Monocode is in the [agent features plan](23-agent-features.md).
+Monodrive manages existing Git worktrees. It doesn't create them, launch agents or hand work to agent apps; T3 Code and Monocode do that.
 
 Git remains authoritative for repositories, branches and worktree registration. `monodrive-core` owns worktree behavior. GPUI and MCP call the same services. Keep filesystem mutations explicit, keep disk I/O off the UI thread, and preserve worktrees created by other applications.
 
 ## Roadmap dependencies
 
-Read-only inventory can proceed independently of the file-management sequence. Mutating management, creation and setup depend on [shared operation ownership and jobs](03-file-operations.md); use that owner for cross-client coordination, receipts and recovery instead of designing another queue. The creation review still decides worktree-specific locking, reservation and setup behavior.
+Read-only inventory can proceed independently of the file-management sequence. Removal depends on [shared operation ownership and jobs](03-file-operations.md); use that owner for cross-client coordination, receipts and recovery instead of designing another queue.
 
 Worktree navigation reuses existing browsing. Remote file access alone does not authorize remote Git operations, setup or agent launch. Local inventory and management do not wait for cloud backends or agent features.
 
@@ -51,33 +51,6 @@ Cleanup requires a separate reviewed design within this milestone. Define how Tr
 - Opening has Back.
 - Mutations run in the background, report errors and have an explicit recovery path.
 - Cleanup cannot silently discard user data.
-- First-release management is useful without worktree creation.
-
-## Design review for creation through MCP
-
-Start this milestone only after the management behavior has been evaluated. Do not add creation tools, run project setup, maintain a prepared pool or launch agents during the inventory and management milestones.
-
-Resolve these questions before implementation:
-
-- Which explicit inputs identify the repository, local base commit/ref, new or existing branch, and destination? What happens on branch/path collisions or a changed base ref?
-- How does an MCP request authorize a filesystem mutation and any project-defined setup hooks? How are hooks trusted and their working directory/environment constrained? Creation should not perform an implicit fetch or resolve a fuzzy repository name.
-- Does creation return a checkout immediately with a separate setup job, or wait for setup-ready? Define checkout-ready, preparing, ready, failed and cancelled states, with observable progress and retry behavior.
-- How does the shared operation owner coordinate worktree creation, reservations and any prepared pool across UI and MCP clients? Reuse its receipts and recovery; define worktree-specific race and crash handling without creating independent queues.
-- How do idempotent retries, exclusive allocation, cancellation and crash recovery avoid duplicate worktrees or deleting work another client has begun using?
-- Is a small bounded pool worth its storage and replenishment costs? Define matching/invalidation inputs, pool misses, eviction and user-visible storage limits before choosing a default. No automatic reuse or reset of user-created worktrees.
-- What future agent reservation records are needed? Distinguish Monodrive-owned prepared worktrees, allocated worktrees and external worktrees. Defer actual agent launch, provider adapters and session management.
-
-Review the creation contract and lifecycle before implementing it. Creation then becomes a core service exposed through MCP and an appropriate UI entry point, not MCP-only logic. Long-running setup must not block the UI or require agents to guess readiness. Keep initial execution local to macOS. Do not add remote-machine orchestration as part of this feature.
-
-## Creation implementation and performance validation
-
-Implement only the design accepted in the creation review. Begin with correct ordinary Git creation, typed job state and observable setup. Keep subprocesses and any setup artifacts scoped to the requested worktree. Bound concurrency and track exactly which processes Monodrive starts. Add prepared reuse only when its ownership, validity and recovery rules are implemented; creation must remain correct on a pool miss.
-
-Benchmark the real MCP request through setup-ready and the equivalent UI operation. Separate cold creation, cached dependency setup, prepared-pool hits, pool misses and concurrent requests. Include validation, coordination and allocation in measured handoff latency. Verify resulting `HEAD`, branch, independent writable state and setup completion. A faster incomplete workspace is not a successful result.
-
-Use the existing benchmark only as a starting point: on this Mac and T3 Code commit `680152e27b2a961686389ca69a1557cbb2c55f08`, Git checkout took about 2 seconds, fresh checkout plus cached setup took 33-36 seconds, and a same-commit prepared-worktree preflight plus branch assignment took 0.16-0.50 seconds. Two concurrent setups finished in 56.7 seconds. APFS source/dependency copying was slower than ordinary Git/pnpm in the tested strategies. These were small samples and did not measure a Monodrive creation service or agent startup.
-
-Target a subsecond prepared allocation as a hypothesis to validate. A 10-20x reduction in request-to-ready wait is a pool-hit target, not a promise of faster first-time setup or greater sustained throughput. Measure replenishment, retained storage and cleanup separately. Do not flush system caches or alter machine security settings to obtain results.
 
 ## Verification and delivery
 
@@ -86,10 +59,5 @@ Use isolated temporary Git fixtures for core behavior and MCP tests. Cover parsi
 Verify UI changes with before/after headless GPUI snapshots. Drive meaningful browser behavior through the existing GPUI test conventions. Show concrete design choices before UI implementation; ask before real-app screen capture. Run targeted checks first and `scripts/check` before any requested push. Review the project performance budgets when browser rendering or listing changes.
 
 Deliver milestones separately with core behavior, UI and MCP parity, relevant verification and measured limitations. No PR, commit, cleanup of unrelated work, live index changes, dev-server startup or agent launch is authorized by writing this plan.
-
-## References
-
-- [Worktree benchmark report](../target/worktree-benchmark/report.txt)
-- [Worktree benchmark results](../target/worktree-benchmark/results.json)
 
 This plan is a local artifact under `.plans` and is not committed repository documentation.
