@@ -33,6 +33,7 @@ use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSRect, NSString, NSURL};
 use objc2_quick_look_ui::QLPreviewView;
 use std::cell::{Cell, RefCell};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -1289,6 +1290,9 @@ fn text_rows(
                 let line = &lines[ix];
                 let text = match hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone()) {
                     Some(secret) => {
+                        let key = &line.text[..secret.start];
+                        let mut seed = DefaultHasher::new();
+                        (ix, key).hash(&mut seed);
                         let shown: Spans = line
                             .spans
                             .iter()
@@ -1297,11 +1301,8 @@ fn text_rows(
                             .collect();
                         div()
                             .flex()
-                            .child(
-                                StyledText::new(line.text[..secret.start].to_string())
-                                    .with_highlights(colors(&shown)),
-                            )
-                            .child(blurred())
+                            .child(StyledText::new(key.to_string()).with_highlights(colors(&shown)))
+                            .child(blurred(seed.finish()))
                             .into_any_element()
                     }
                     None => StyledText::new(line.text.clone())
@@ -1331,17 +1332,27 @@ fn text_rows(
     .into_any_element()
 }
 
-/// Blurred letters where a value would be. Values are never drawn, and they
-/// all blur to this one length, so the blur gives nothing away.
-fn blurred() -> impl IntoElement {
-    const STAND_IN: &str = "sk_live9fQe2wLm-4xTrgB.vKa";
+/// Blurred letters where a value would be, made up from `seed`. Values are
+/// never drawn, so the blur gives nothing of them away.
+fn blurred(seed: u64) -> impl IntoElement {
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzaceimnorsuvwxzAKRT2479-_.";
+    let mut state = seed | 1;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let count = 16 + next() % 17;
+    let stand_in =
+        (0..count).map(move |_| char::from(LETTERS[(next() % LETTERS.len() as u64) as usize]));
     div()
         .debug_selector(|| "preview-secret".into())
         .h_full()
         .flex()
         .items_end()
         .pb(px(10.5))
-        .children(STAND_IN.chars().map(|letter| {
+        .children(stand_in.map(|letter| {
             let (height, lift) = match letter {
                 'A'..='Z' | '0'..='9' | 'b' | 'd' | 'f' | 'h' | 'k' | 'l' | 't' => (4., 0.),
                 'g' | 'j' | 'p' | 'q' | 'y' => (4., -3.),
