@@ -839,7 +839,10 @@ fn a_trash_job_cut_short_by_a_crash_is_settled_from_the_disk_and_undoes_whole() 
     let (dir, files, engine) = engine();
     let (own_trash, items) = trash_fixture(dir.path(), &files, TRASH_JOB_AT);
     let shared = jobs::Shared::new(engine, None);
-    let op = run(&mut shared.lock(), trash(&items)).unwrap().op;
+    // The same file named twice: only one of them went.
+    let mut asked = items.clone();
+    asked.push(items[1].clone());
+    let op = run(&mut shared.lock(), trash(&asked)).unwrap().op;
     assert!(jobs::next(&shared, op));
     // The owner goes once the next item is in the Trash, before its record
     // reaches the journal.
@@ -851,9 +854,14 @@ fn a_trash_job_cut_short_by_a_crash_is_settled_from_the_disk_and_undoes_whole() 
     assert!(matches!(&interrupted.tasks[0].done, Some(Done::To(to)) if to.starts_with(&own_trash)));
     assert_eq!(interrupted.tasks[1].done, Some(Done::To(landed)));
     assert_eq!(interrupted.tasks[2].done, None);
+    assert!(
+        matches!(&interrupted.tasks[TRASH_JOB_AT].done, Some(Done::Failed(why)) if why.contains("can't find")),
+        "{:?}",
+        interrupted.tasks[TRASH_JOB_AT].done
+    );
 
     let continued = continued(&shared, op, None);
-    assert_eq!(continued.state, State::Completed);
+    assert_eq!(continued.state, State::Failed);
     assert!(items.iter().all(|path| !path.exists()));
     // Each run is its own step back: the continued one, then the first.
     assert_eq!(

@@ -15,6 +15,7 @@ use crate::archives::{self, Archive};
 use crate::cloud;
 use crate::remote::{Connections, Connector, RemotePath};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -1339,13 +1340,15 @@ fn trashing(source: &Path, id: FileId, stamp: Stamp) -> Step {
 /// A Move to Trash item a crash may have cut short before its record
 /// reached the disk: in the Trash, found by its identity, or nowhere Monodrive
 /// can find. `None` while it's still where it was, so continuing the job
-/// moves it.
-fn settle_trashed(work: &Work) -> Option<Work> {
+/// moves it. An entry in `claimed`, which another of the job's items took,
+/// isn't this one's, as when a path is named twice.
+fn settle_trashed(work: &Work, claimed: &mut HashSet<PathBuf>) -> Option<Work> {
     let id = work.id?;
     if disk::id(&work.source) == Some(id) {
         return None;
     }
     let found = disk::find_in_trash(id, &work.source)
+        .filter(|there| claimed.insert(there.clone()))
         .and_then(|there| Some((disk::stamp(&there).ok()?.1, there)));
     let mut work = work.clone();
     work.done = Some(match found {
@@ -1526,10 +1529,18 @@ impl Engine {
     pub(super) fn settle_jobs(&self) -> Vec<Record> {
         let mut records = Vec::new();
         for job in self.jobs.iter().filter(|job| job.state.active()) {
+            let mut claimed: HashSet<PathBuf> = job
+                .work
+                .iter()
+                .filter_map(|work| match &work.done {
+                    Some(Done::To(to)) => Some(to.clone()),
+                    _ => None,
+                })
+                .collect();
             for (index, work) in job.work.iter().enumerate() {
                 if job.spec.kind == Kind::Trash {
                     if work.done.is_none()
-                        && let Some(work) = settle_trashed(work)
+                        && let Some(work) = settle_trashed(work, &mut claimed)
                     {
                         records.push(Record::Work {
                             op: job.id,

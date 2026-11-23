@@ -425,7 +425,11 @@ impl Jobs {
             ));
         }
         if job.state.active() && matches!(job.title.as_str(), MOVE_TO_TRASH | EMPTY_TRASH) {
-            let gone = grouped(ended(job) as u64);
+            let gone = match job.title.as_str() {
+                EMPTY_TRASH => erased(job),
+                _ => ended(job),
+            };
+            let gone = grouped(gone as u64);
             caption.push(format!("{gone} of {}", items(job.tasks.len())));
         }
         if let Origin::Agent { client } = &job.origin {
