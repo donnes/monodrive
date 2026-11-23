@@ -1,4 +1,4 @@
-//! Activity: copies, moves and emptying the Trash in the title bar. A ring of
+//! Activity: copies, moves, moving to and emptying the Trash in the title bar. A ring of
 //! how far they've got, shown while one is queued, running, waiting for an
 //! answer or failed, and a popover under it listing those (⌥⌘J), which also shows while
 //! the pointer rests on the ring. Agents' jobs show too. A job with several
@@ -171,11 +171,14 @@ impl Jobs {
             if self.followed.remove(&id) {
                 match job.state {
                     State::Completed => cx.emit(JobsEvent::Finished(job.clone())),
-                    // Cancelling an extraction or compression says what it
-                    // kept, and Undo can take that back. Cancelling an Empty
-                    // Trash says how much it had erased.
+                    // Cancelling an extraction, compression or Move to Trash
+                    // says what it kept, and Undo can take that back.
+                    // Cancelling an Empty Trash says how much it had erased.
                     State::Cancelled
-                        if matches!(job.title.as_str(), "Extract" | "Compress" | EMPTY_TRASH) =>
+                        if matches!(
+                            job.title.as_str(),
+                            "Extract" | "Compress" | MOVE_TO_TRASH | EMPTY_TRASH
+                        ) =>
                     {
                         cx.emit(JobsEvent::Finished(job.clone()))
                     }
@@ -421,8 +424,8 @@ impl Jobs {
                 format_bytes(job.total_bytes)
             ));
         }
-        if job.state.active() && job.title == EMPTY_TRASH {
-            let gone = grouped(erased(job) as u64);
+        if job.state.active() && matches!(job.title.as_str(), MOVE_TO_TRASH | EMPTY_TRASH) {
+            let gone = grouped(ended(job) as u64);
             caption.push(format!("{gone} of {}", items(job.tasks.len())));
         }
         if let Origin::Agent { client } = &job.origin {
@@ -799,8 +802,11 @@ pub fn title(job: &Job) -> String {
     }
     let what = match job.tasks.as_slice() {
         [one] => item_name(one),
-        tasks => format!("{} items", tasks.len()),
+        tasks => items(tasks.len()),
     };
+    if trashes(job) {
+        return format!("{verb} {what} to the Trash");
+    }
     // The server's side prints as `source:/path`.
     let on_server = |label: &Path| {
         let label = label.to_string_lossy();
@@ -831,6 +837,7 @@ fn verbs(job: &Job) -> (&'static str, &'static str, &'static str) {
         "Move" => ("Moving", "Moved", "Stopped moving"),
         "Compress" => ("Compressing", "Compressed", "Stopped compressing"),
         "Extract" => ("Extracting", "Extracted", "Stopped extracting"),
+        MOVE_TO_TRASH => ("Moving", "Moved", "Stopped moving"),
         EMPTY_TRASH => ("Erasing", "Erased", "Stopped erasing"),
         _ => ("Copying", "Copied", "Stopped copying"),
     }
@@ -838,11 +845,23 @@ fn verbs(job: &Job) -> (&'static str, &'static str, &'static str) {
 
 /// The owner's title for an Empty Trash.
 const EMPTY_TRASH: &str = "Empty Trash";
+/// The owner's title for a Move to Trash of many items.
+const MOVE_TO_TRASH: &str = "Move to Trash";
+
+/// Whether the job moves items to the Trash.
+pub fn trashes(job: &Job) -> bool {
+    job.title == MOVE_TO_TRASH
+}
 
 /// How many of an Empty Trash's items are erased so far.
 fn erased(job: &Job) -> usize {
     let erased = |task: &&ops::Task| task.done == Some(Done::Erased);
     job.tasks.iter().filter(erased).count()
+}
+
+/// How many of the job's items have ended, however each did.
+fn ended(job: &Job) -> usize {
+    job.tasks.iter().filter(|task| task.done.is_some()).count()
 }
 
 fn items(count: usize) -> String {
@@ -877,6 +896,18 @@ fn emptied(job: &Job) -> String {
 pub fn report(job: &Job) -> String {
     if job.title == EMPTY_TRASH {
         return emptied(job);
+    }
+    if trashes(job) && job.state == State::Cancelled {
+        let went = job
+            .tasks
+            .iter()
+            .filter(|task| matches!(task.done, Some(Done::To(_))))
+            .count();
+        return format!(
+            "Stopped moving to the Trash. {} of {} moved.",
+            grouped(went as u64),
+            items(job.tasks.len())
+        );
     }
     let said = title(job);
     // Core's words for an unfinished item it trashed, the only way a task

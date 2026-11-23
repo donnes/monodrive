@@ -136,6 +136,10 @@ fn mix_parts(inode: u64, size: u64, seconds: u64, nanoseconds: u64) -> u64 {
 /// Moves `path` to its volume's Trash and returns where it landed. Fails
 /// rather than deleting when the volume has no Trash.
 pub fn trash(path: &Path) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(landed) = test_trash(path) {
+        return landed;
+    }
     objc2::rc::autoreleasepool(|_| {
         let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
         let mut landed = None;
@@ -493,6 +497,28 @@ pub fn ignores_case(folder: &Path) -> bool {
     };
     // SAFETY: a NUL-terminated path that outlives the call.
     unsafe { libc::pathconf(folder.as_ptr(), libc::_PC_CASE_SENSITIVE) != 1 }
+}
+
+/// In tests, a temp folder holding `.Trashes/<uid>` is a volume with a
+/// Trash of its own: what's in it goes there instead of the user's Trash,
+/// numbered when its name is taken.
+#[cfg(test)]
+fn test_trash(path: &Path) -> Option<Result<PathBuf, String>> {
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let trash = path
+        .ancestors()
+        .skip(1)
+        .filter(|dir| dir.parent().is_some())
+        .map(|dir| dir.join(".Trashes").join(uid.to_string()))
+        .find(|trash| trash.is_dir())?;
+    let name = path.file_name()?;
+    let landed = super::free_name(&trash.join(name));
+    Some(
+        rename_new(path, &landed)
+            .map(|()| landed)
+            .map_err(|e| format!("{}: {e}", path.display())),
+    )
 }
 
 /// Looks through the Trash of the volume `original` was on for the item

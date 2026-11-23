@@ -352,11 +352,11 @@ impl Jobs {
         })
     }
 
-    /// Runs `request` and, for a job, waits for it to end. Returns where the
-    /// items went.
-    pub(super) fn run(&mut self, request: Request, job: bool) -> Result<Vec<PathBuf>, String> {
+    /// Runs `request` and, when it's a job, waits for it to end. Returns
+    /// where the items went.
+    pub(super) fn run(&mut self, request: Request) -> Result<Vec<PathBuf>, String> {
         let outcome = self.client.submit(Origin::Window, request)?;
-        if !job {
+        if !outcome.job {
             return outcome.items.into_iter().map(|item| item.result).collect();
         }
         loop {
@@ -375,8 +375,9 @@ impl Jobs {
                     })
                     .collect();
             }
-            // The journal changes when the job ends.
+            // The journal changes when the job ends, and as each item does.
             self.changed.recv().map_err(|e| e.to_string())?;
+            while self.changed.try_recv().is_ok() {}
         }
     }
 }
@@ -396,14 +397,11 @@ fn jobs(fixture: &Path, out: &mut Vec<Measured>) -> Result<(), String> {
     let group = "Jobs through the owner";
 
     let (sample, done) = measure::here(|| {
-        jobs.run(
-            Request::Copy {
-                paths: vec![tree.clone()],
-                into: into.clone(),
-                conflict: Default::default(),
-            },
-            true,
-        )
+        jobs.run(Request::Copy {
+            paths: vec![tree.clone()],
+            into: into.clone(),
+            conflict: Default::default(),
+        })
     });
     let copy = one(done?, "copy")?;
     let (copied, private) = (walk_count(&copy).map_err(io(&copy))?, private_bytes(&copy)?);
@@ -418,12 +416,9 @@ fn jobs(fixture: &Path, out: &mut Vec<Measured>) -> Result<(), String> {
     ));
 
     let (sample, done) = measure::here(|| {
-        jobs.run(
-            Request::Duplicate {
-                paths: vec![tree.clone()],
-            },
-            false,
-        )
+        jobs.run(Request::Duplicate {
+            paths: vec![tree.clone()],
+        })
     });
     let duplicate = one(done?, "duplicate")?;
     let (copied, private) = (
@@ -441,14 +436,11 @@ fn jobs(fixture: &Path, out: &mut Vec<Measured>) -> Result<(), String> {
     ));
 
     let (sample, done) = measure::here(|| {
-        jobs.run(
-            Request::Move {
-                paths: vec![tree.clone()],
-                into: into.clone(),
-                conflict: Default::default(),
-            },
-            true,
-        )
+        jobs.run(Request::Move {
+            paths: vec![tree.clone()],
+            into: into.clone(),
+            conflict: Default::default(),
+        })
     });
     let moved = one(done?, "move")?;
     let count = walk_count(&moved).map_err(io(&moved))?;
@@ -494,12 +486,9 @@ fn trash(fixture: &Path, jobs: &mut Jobs, out: &mut Vec<Measured>) -> Result<(),
     let group = "Move to Trash, on a disk image";
 
     let (sample, done) = measure::here(|| {
-        jobs.run(
-            Request::Trash {
-                paths: vec![tree.clone()],
-            },
-            false,
-        )
+        jobs.run(Request::Trash {
+            paths: vec![tree.clone()],
+        })
     });
     let landed = one(done?, "trash")?;
     if !landed.starts_with(&volume) {
@@ -527,7 +516,7 @@ fn trash(fixture: &Path, jobs: &mut Jobs, out: &mut Vec<Measured>) -> Result<(),
         .collect::<Result<_, _>>()
         .map_err(io(&files))?;
     paths.sort();
-    let (sample, done) = measure::here(|| jobs.run(Request::Trash { paths }, false));
+    let (sample, done) = measure::here(|| jobs.run(Request::Trash { paths }));
     let trashed = done?;
     let left = std::fs::read_dir(&files).map_err(io(&files))?.count();
     out.push(measured(

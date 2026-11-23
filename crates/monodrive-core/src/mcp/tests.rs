@@ -527,6 +527,51 @@ fn change_tools_reply_with_resulting_paths_and_share_undo_with_the_owner() {
 }
 
 #[test]
+fn trashing_many_items_replies_with_where_each_went_once_its_job_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    // A Trash of the test's own, as on a volume with one (see `disk::trash`).
+    // SAFETY: geteuid has no preconditions.
+    let own_trash = dir
+        .path()
+        .join(".Trashes")
+        .join(unsafe { libc::geteuid() }.to_string());
+    std::fs::create_dir_all(&own_trash).unwrap();
+    let files = dir.path().join("files");
+    std::fs::create_dir(&files).unwrap();
+    let mut paths: Vec<PathBuf> = (0..ops::TRASH_JOB_AT)
+        .map(|i| files.join(format!("{i:03}.txt")))
+        .collect();
+    for path in &paths {
+        std::fs::write(path, "x").unwrap();
+    }
+    paths.push(files.join("gone.txt"));
+    let (serving, mut server) = owned(dir.path());
+    let result = call(&mut server, "trash", json!({"paths": paths}));
+    let items = data(&result)["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), paths.len());
+    assert_eq!(data(&result)["title"], "Move to Trash");
+    assert_eq!(data(&result)["failed"], 1);
+    assert!(data(&result).get("job").is_none(), "{result}");
+    let to = items[0]["to"].as_str().unwrap();
+    assert!(Path::new(to).ends_with("000.txt"), "{to}");
+    assert!(
+        items[ops::TRASH_JOB_AT]["error"]
+            .as_str()
+            .is_some_and(|why| why.contains("gone.txt")),
+        "{result}"
+    );
+    assert_eq!(text(&result).lines().count(), paths.len());
+    let result = call(&mut server, "undo", json!({}));
+    assert_eq!(
+        data(&result)["items"].as_array().unwrap().len(),
+        ops::TRASH_JOB_AT
+    );
+    assert!(paths[..ops::TRASH_JOB_AT].iter().all(|path| path.exists()));
+    assert_eq!(std::fs::read_dir(&own_trash).unwrap().count(), 0);
+    stop(serving, server);
+}
+
+#[test]
 fn a_repeated_request_id_changes_nothing_twice() {
     let dir = tempfile::tempdir().unwrap();
     let (serving, mut server) = owned(dir.path());

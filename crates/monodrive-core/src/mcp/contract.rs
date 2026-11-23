@@ -338,6 +338,9 @@ pub struct Change {
     pub failed: usize,
     /// The owner stopped partway and read these results back from the disk.
     pub interrupted: bool,
+    /// The job still moving the items left: job_status follows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job: Option<String>,
 }
 
 impl Change {
@@ -357,6 +360,45 @@ impl Change {
             items,
             failed: outcome.failures().count(),
             interrupted: outcome.interrupted,
+            job: None,
+        }
+    }
+
+    /// A change that ran as a job, as far as it has got. An item a job still
+    /// going hasn't reached has neither `to` nor `error`.
+    pub fn of_job(job: &Job) -> Self {
+        let going = job.state.active();
+        let items: Vec<Changed> = job
+            .tasks
+            .iter()
+            .map(|task| {
+                let (to, error) = match &task.done {
+                    Some(Done::To(to)) => (Some(shown(to)), None),
+                    Some(Done::Skipped(why) | Done::Failed(why)) => (None, Some(why.clone())),
+                    Some(Done::Erased) => (None, None),
+                    None if going => (None, None),
+                    None => (
+                        None,
+                        Some(format!(
+                            "{}: left as it was, since the job stopped first.",
+                            task.source.display()
+                        )),
+                    ),
+                };
+                Changed {
+                    path: shown(&task.source),
+                    to,
+                    error,
+                    method: None,
+                }
+            })
+            .collect();
+        Self {
+            title: job.title.clone(),
+            failed: items.iter().filter(|item| item.error.is_some()).count(),
+            items,
+            interrupted: job.state == ops::State::Interrupted,
+            job: going.then(|| job.id.to_string()),
         }
     }
 
@@ -379,6 +421,11 @@ impl Change {
             out.push_str(
                 "(Monodrive stopped partway; these results were read back from the disk.)\n",
             );
+        }
+        if let Some(job) = &self.job {
+            out.push_str(&format!(
+                "(Still going as job {job}; job_status follows it.)\n"
+            ));
         }
         out
     }
@@ -439,6 +486,8 @@ pub enum JobKind {
     Download,
     Upload,
     Command,
+    /// Moving many items to the Trash, as trash does from 100 items.
+    Trash,
     /// A person emptying the Trash from Monodrive's window. Agents can
     /// cancel one, and never start or continue one.
     EmptyTrash,
@@ -539,6 +588,7 @@ impl JobView {
             "Download" => JobKind::Download,
             "Upload" => JobKind::Upload,
             "Empty Trash" => JobKind::EmptyTrash,
+            "Move to Trash" => JobKind::Trash,
             _ => JobKind::Copy,
         };
         let state = match job.state {
