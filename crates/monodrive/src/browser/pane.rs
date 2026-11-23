@@ -33,6 +33,7 @@ use crate::commands::Scope;
 use crate::downloads::Downloads;
 use crate::feedback::{self, Sound};
 use crate::file_icons;
+use crate::goto::{GotoEvent, GotoView};
 use crate::jobs;
 use crate::onboarding::IndexGate;
 use crate::pasteboard::Pasteboard;
@@ -45,11 +46,11 @@ use crate::thumbnails::{self, Thumb};
 use crate::workspace;
 use chrono::{DateTime, Local};
 use gpui::{
-    App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollHandle,
-    ScrollStrategy, ScrollWheelEvent, Subscription, Task, TextOverflow, UniformListScrollHandle,
-    Window, canvas, div, point, prelude::*, px, uniform_list,
+    AnyWindowHandle, App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
+    ScrollHandle, ScrollStrategy, ScrollWheelEvent, Subscription, Task, TextOverflow,
+    UniformListScrollHandle, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
@@ -255,6 +256,8 @@ pub struct Pane {
     consented: bool,
     /// The name being edited in place.
     pub(super) renaming: Option<Renaming>,
+    /// The path bar, edited as a path.
+    pub(super) address: Option<Address>,
     /// Rename in the list: the bar, and the selected rows' new names.
     pub(super) batch: Option<BatchRename>,
     /// Organize's review, in place of the list.
@@ -420,6 +423,7 @@ impl Pane {
             unavailable: None,
             consented: false,
             renaming: None,
+            address: None,
             batch: None,
             organizing: None,
             preview: None,
@@ -780,6 +784,15 @@ impl Pane {
     /// Leaves search, if any, and lists the current folder.
     pub(super) fn show_folder(&mut self, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::Moved);
+        // A path typed for the folder being left would lead back to it.
+        if let Some(address) = self.address.take() {
+            let list = self.list_focus.clone();
+            cx.defer(move |cx| {
+                let _ = address
+                    .window
+                    .update(cx, |_, window, cx| window.focus(&list, cx));
+            });
+        }
         self.query.clear();
         self.filters = Query::default();
         (self.chip, self.chip_menu) = (None, None);
@@ -2852,6 +2865,42 @@ impl Pane {
         self.toast(said, false, None, cx);
     }
 
+    /// Turns the path bar into the folder's path, selected, to type over.
+    /// Only a folder on this Mac has one; elsewhere it says no.
+    pub(super) fn edit_path(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.showing_folder() || self.unavailable.is_some() {
+            return false;
+        }
+        if let Some(address) = &self.address {
+            window.focus(&address.view.focus_handle(cx), cx);
+            return true;
+        }
+        let folder = self.folder().to_path_buf();
+        let view = cx.new(|cx| GotoView::in_bar(folder, cx));
+        let focus = view.focus_handle(cx);
+        let went = cx.subscribe_in(&view, window, |this, _, event: &GotoEvent, window, cx| {
+            this.address = None;
+            this.focus_list(window, cx);
+            if let GotoEvent::Go(destination) = event {
+                let select = destination.select.iter().cloned().collect();
+                this.go_to(destination.folder.clone(), select, window, cx);
+            }
+            cx.notify();
+        });
+        let blur = cx.on_blur(&focus, window, |this, _, cx| {
+            this.address = None;
+            cx.notify();
+        });
+        window.focus(&focus, cx);
+        self.address = Some(Address {
+            view,
+            window: window.window_handle(),
+            _closes: [went, blur],
+        });
+        cx.notify();
+        true
+    }
+
     /// The folder's path as clickable steps, from the disk to here.
     fn crumbs(
         &self,
@@ -2990,6 +3039,15 @@ impl Pane {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
+        if let Some(address) = &self.address {
+            return Some(
+                theme::pane_bar(theme::PATH_BAR_HEIGHT)
+                    .debug_selector(|| "path-bar".into())
+                    .border_t_1()
+                    .border_color(content(0.06))
+                    .child(address.view.clone()),
+            );
+        }
         if !cx.global::<Preferences>().show_path_bar
             || self.unavailable.is_some()
             || self.showing_page()
@@ -3604,6 +3662,14 @@ pub(super) fn rename_reason(why: &str, path: &Path) -> String {
 }
 
 /// A name being edited in place.
+pub(super) struct Address {
+    pub(super) view: Entity<GotoView>,
+    /// Where the list takes the keys back when the pane goes elsewhere.
+    window: AnyWindowHandle,
+    /// Going, Esc and clicking away close it.
+    _closes: [Subscription; 2],
+}
+
 pub(super) struct Renaming {
     pub(super) path: PathBuf,
     pub(super) field: Entity<TextField>,
