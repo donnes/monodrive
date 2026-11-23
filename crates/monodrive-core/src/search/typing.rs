@@ -197,14 +197,10 @@ pub fn start_filter(text: &str, filter: Filter) -> (String, usize) {
                     term(&word),
                     Ok(Term::Kind(kinds)) if !kinds.iter().any(|kind| kind.alone())
                 );
-            let (at, put) = if widens {
-                (range.end..range.end, ",")
-            } else {
-                (range, key.as_str())
-            };
-            let caret = at.start + put.len();
+            let put = if widens { format!("{word},") } else { key };
+            let caret = range.start + put.len();
             let mut edited = text.to_string();
-            edited.replace_range(at, put);
+            edited.replace_range(range, &put);
             (edited, caret)
         }
         None => {
@@ -325,6 +321,10 @@ mod tests {
         assert_eq!(
             start_filter("a size:>1gb b", Filter::Size),
             ("a size: b".into(), 7)
+        );
+        assert_eq!(
+            start_filter("kind:\"image\"", Filter::Kind),
+            ("kind:image,".into(), 11)
         );
         assert_eq!(
             start_filter("a \"size:>1gb\" b", Filter::Size),
