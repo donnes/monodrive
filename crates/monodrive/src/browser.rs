@@ -135,6 +135,7 @@ actions!(
         ToggleHiddenFiles,
         TogglePathBar,
         GoToFolder,
+        EditPath,
         CopyPath,
         ViewAsList,
         ViewAsGrid,
@@ -2363,6 +2364,12 @@ impl Render for Browser {
                 d.on_action(
                     cx.listener(|this, _: &GoToFolder, window, cx| this.open_goto(window, cx)),
                 )
+                .on_action(cx.listener(|this, _: &EditPath, window, cx| {
+                    let pane = this.pane().clone();
+                    if !pane.update(cx, |pane, cx| pane.edit_path(window, cx)) {
+                        this.open_goto(window, cx)
+                    }
+                }))
                 // Not while a name is edited, so Space types there.
                 // During a drag, Space opens what it rests on, selected or not.
                 .when(!renaming && (selected || self.drag.active()), |d| {

@@ -10,19 +10,19 @@
 use crate::browser::{
     AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab, Compress,
     ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Download, Duplicate, EditFavorites,
-    EditLocations, EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract, FindDuplicates,
-    FocusSearch, Forward, GetInfo, GoAirDrop, GoApplications, GoComputer, GoDesktop, GoDocuments,
-    GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6,
-    GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome, GoLocalSend, GoOverview,
-    GoRecents, GoToFolder, GoTrash, GoWorktrees, HideFromSidebar, HideInspector, MoveHere,
-    MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab,
-    OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenSelected, OpenSettings, OpenWith,
-    OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo, RemoveDownload, RemoveFromSidebar,
-    Rename, RenameLocation, ResetZoom, RevealInFinder, ReverseSort, SaveSearch, SearchContents,
-    SearchThisFolder, SendWithLocalSend, Share, ShowCopiesAndMoves, ShowInEnclosingFolder,
-    ShowPackageContents, ShowSearches, SortByKind, SortByModified, SortByName, SortBySize,
-    SuggestNames, ToggleHiddenFiles, TogglePathBar, ToggleSidebar, ToggleSplit, Undo,
-    ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+    EditLocations, EditPath, EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract,
+    FindDuplicates, FocusSearch, Forward, GetInfo, GoAirDrop, GoApplications, GoComputer,
+    GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
+    GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome,
+    GoLocalSend, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, HideFromSidebar,
+    HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
+    NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal,
+    OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo,
+    RemoveDownload, RemoveFromSidebar, Rename, RenameLocation, ResetZoom, RevealInFinder,
+    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, SendWithLocalSend, Share,
+    ShowCopiesAndMoves, ShowInEnclosingFolder, ShowPackageContents, ShowSearches, SortByKind,
+    SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar,
+    ToggleSidebar, ToggleSplit, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
 };
 use crate::preferences::Preferences;
 use crate::{
@@ -562,6 +562,7 @@ pub fn all() -> Vec<Command> {
         command("Go to Folder…", Go, &["cmd-shift-g"], BROWSER, || {
             Box::new(GoToFolder)
         }),
+        command("Edit Path", Go, &["cmd-l"], BROWSER, || Box::new(EditPath)),
         command(
             "Connect to Server…",
             Go,

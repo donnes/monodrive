@@ -26,7 +26,9 @@
 //! (`palette-remote.png`, `palette-cloud.png`, `palette-drives.png`,
 //! `palette-favorites.png`), `server.png` and `server-failed.png`, a saved
 //! SFTP server opened from there and one that won't connect,
-//! `palette-selection.png`, `goto.png`, `goto-error.png`, `settings-menu.png` and one
+//! `palette-selection.png`, `goto.png`, `goto-error.png`, `address.png`,
+//! `address-completions.png` and `address-error.png`, the path bar edited as
+//! a path, `settings-menu.png` and one
 //! `settings-<page>.png` for each Settings page, `background.png`, the list
 //! over a picture that runs from bright to dark, `narrow.png`, where the path
 //! collapses, and `no-path-bar.png`.
@@ -84,7 +86,7 @@ use gpui::{
 use monodrive::agents::{self, Harness};
 use monodrive::browser::{
     Back, Browser, CancelRename, CheckForUpdates, CommitRename, ConnectToServer, Drives,
-    EditFavorites, EditLocations, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder,
+    EditFavorites, EditLocations, EditPath, EditPreview, EmptyTrash, EnclosingFolder, ExpandFolder,
     ExtendNext, ExtendPrevious, FindDuplicates, FocusNext, FocusSearch, GoAirDrop, GoOverview,
     GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveToTrash, NewTab, OpenSelected, OpenSettings,
     OpenWith, Operations, OrganizeFolder, Places, QuickLook, Rename, SaveSearch, SearchContents,
@@ -515,6 +517,16 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     let go = named(&mut cx, "goto::Go")?;
     dispatch(&mut cx, window, &*go)?;
     save(&mut cx, window, out, "goto-error")?;
+
+    let window = open(&mut cx, folder)?;
+    cx.run_until_parked();
+    dispatch(&mut cx, window, &EditPath)?;
+    save(&mut cx, window, out, "address")?;
+    type_text(&mut cx, window, &format!("{}/", folder.display()))?;
+    save(&mut cx, window, out, "address-completions")?;
+    type_text(&mut cx, window, "nowhere/at/all")?;
+    dispatch(&mut cx, window, &*go)?;
+    save(&mut cx, window, out, "address-error")?;
 
     let window = open(&mut cx, folder)?;
     cx.run_until_parked();

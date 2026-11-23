@@ -1586,6 +1586,53 @@ fn the_path_bar_shows_by_default_and_its_command_hides_it_for_good(cx: &mut Test
     assert!(shown(cx));
 }
 
+fn on_screen(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.debug_bounds(selector).is_some()
+}
+
+#[gpui::test]
+fn the_path_bar_takes_a_typed_path_and_tab_completes_it(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-l");
+    assert!(on_screen(cx, "address-bar"));
+    // The path starts selected, so typing replaces it.
+    cx.simulate_input(&format!("{}/do", project.display()));
+    cx.run_until_parked();
+    press(cx, "tab enter");
+    assert_eq!(shown(&browser, cx).0, ["inner.md"]);
+    assert!(in_pane(&browser, cx, |pane, _| pane.address.is_none()));
+    assert!(keys_on_the_list(&browser, cx));
+}
+
+#[gpui::test]
+fn a_path_that_isnt_there_says_so_and_stays(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    let before = shown(&browser, cx).0;
+    press(cx, "cmd-l");
+    cx.simulate_input(&format!("{}/nowhere", project.display()));
+    press(cx, "enter");
+    assert!(on_screen(cx, "address-error"));
+    assert_eq!(shown(&browser, cx).0, before);
+    assert!(in_pane(&browser, cx, |pane, _| pane.address.is_some()));
+}
+
+#[gpui::test]
+fn esc_hands_the_keys_back_to_the_list_and_a_hidden_path_bar_hides_again(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-cmd-p");
+    assert!(!on_screen(cx, "path-bar"));
+    press(cx, "cmd-l");
+    assert!(on_screen(cx, "address-bar"));
+    press(cx, "escape");
+    assert!(!on_screen(cx, "path-bar"));
+    assert!(keys_on_the_list(&browser, cx));
+}
+
 #[gpui::test]
 fn a_click_in_the_gap_under_a_palette_row_runs_that_row(cx: &mut TestAppContext) {
     let (_dir, project) = folder();

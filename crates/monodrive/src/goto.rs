@@ -1,14 +1,15 @@
-//! Go to Folder (⇧⌘G): type or paste a path. A folder opens; a file opens
-//! its folder with it selected, so a path from an agent's output lands on
-//! the right file. Completions come from the disk as you type; Tab takes one.
+//! Go to Folder (⇧⌘G), and the path bar while it's edited (⌘L): type or
+//! paste a path. A folder opens; a file opens its folder with it selected, so
+//! a path from an agent's output lands on the right file. Completions come
+//! from the disk as you type; Tab takes one.
 
 use crate::palette;
 use crate::preferences::Preferences;
 use crate::text_field::{self, TextField};
 use crate::theme::{self, content, danger};
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Role,
-    Task, Window, actions, div, prelude::*, px,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Role,
+    Stateful, Task, Window, actions, div, prelude::*, px,
 };
 use monodrive_core::paths::{self, Destination};
 use std::path::PathBuf;
@@ -32,8 +33,12 @@ pub enum GotoEvent {
 }
 
 const LIMIT: usize = 8;
+/// The path bar's completions, above it.
+const BAR_COMPLETIONS_WIDTH: f32 = 420.;
 
 pub struct GotoView {
+    /// It edits the pane's path bar in place, rather than in a sheet.
+    in_bar: bool,
     field: Entity<TextField>,
     /// What the field started with, selected so typing replaces it.
     prefill: String,
@@ -58,7 +63,25 @@ impl Focusable for GotoView {
 impl GotoView {
     /// Starts at `folder`, so typing a name completes inside it.
     pub fn new(folder: PathBuf, cx: &mut Context<Self>) -> Self {
-        let field = cx.new(|cx| TextField::new("Path", "Type or paste a path", cx));
+        let mut view = Self::starting_at(folder, false, cx);
+        view.complete(cx);
+        view
+    }
+
+    /// The path bar's field, which offers nothing until something's typed.
+    pub fn in_bar(folder: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self::starting_at(folder, true, cx)
+    }
+
+    fn starting_at(folder: PathBuf, in_bar: bool, cx: &mut Context<Self>) -> Self {
+        let field = cx.new(|cx| {
+            let field = TextField::new("Path", "Type or paste a path", cx);
+            if in_bar {
+                field.with_font_size(theme::TEXT_SMALL)
+            } else {
+                field
+            }
+        });
         let mut start = paths::abbreviate(&folder);
         if !start.ends_with('/') {
             start.push('/');
@@ -69,7 +92,8 @@ impl GotoView {
             this.complete(cx)
         })
         .detach();
-        let mut view = Self {
+        Self {
+            in_bar,
             field,
             prefill: start,
             base: folder,
@@ -77,9 +101,7 @@ impl GotoView {
             selected: None,
             error: None,
             work: Task::ready(()),
-        };
-        view.complete(cx);
-        view
+        }
     }
 
     /// A path of its own typed after what the field started with, with the
@@ -172,8 +194,38 @@ impl GotoView {
     }
 }
 
-impl Render for GotoView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl GotoView {
+    /// The keys both looks answer.
+    fn keys<E: InteractiveElement>(&self, d: E, cx: &mut Context<Self>) -> E {
+        d.key_context("GoTo")
+            .on_action(cx.listener(|this, _: &Up, _, cx| this.step(false, cx)))
+            .on_action(cx.listener(|this, _: &Down, _, cx| this.step(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &Complete, window, cx| this.take_completion(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &Go, _, cx| this.go(cx)))
+            .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(GotoEvent::Dismissed)))
+    }
+
+    fn error_line(&self, selector: &'static str) -> Option<Stateful<Div>> {
+        self.error.clone().map(|error| {
+            // A long name wraps inside the card.
+            div()
+                .id(selector)
+                .debug_selector(move || selector.into())
+                .role(Role::Alert)
+                .aria_label(error.clone())
+                .min_h(px(theme::ROW_HEIGHT))
+                .w_full()
+                .px_2()
+                .py(px(6.))
+                .text_size(px(theme::TEXT_SMALL))
+                .text_color(danger())
+                .child(error)
+        })
+    }
+
+    fn sheet(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let rows = self.completions.iter().enumerate().map(|(ix, path)| {
             let selected = self.selected == Some(ix);
             theme::row_slot(ix)
@@ -191,18 +243,7 @@ impl Render for GotoView {
             .flex_col()
             // The last row's gap is part of the card's inset.
             .when(!self.completions.is_empty(), |d| d.mb(px(-theme::ROW_GAP)))
-            .children(self.error.clone().map(|error| {
-                // A long name wraps inside the card.
-                div()
-                    .debug_selector(|| "goto-error".into())
-                    .min_h(px(theme::ROW_HEIGHT))
-                    .w_full()
-                    .px_2()
-                    .py(px(6.))
-                    .text_size(px(theme::TEXT_SMALL))
-                    .text_color(danger())
-                    .child(error)
-            }))
+            .children(self.error_line("goto-error"))
             .children(rows)
             .when(self.completions.is_empty() && self.error.is_none(), |d| {
                 d.child(
@@ -216,15 +257,7 @@ impl Render for GotoView {
                         .child("Return opens it. A file opens its folder with it selected."),
                 )
             });
-        palette::overlay("goto-overlay")
-            .key_context("GoTo")
-            .on_action(cx.listener(|this, _: &Up, _, cx| this.step(false, cx)))
-            .on_action(cx.listener(|this, _: &Down, _, cx| this.step(true, cx)))
-            .on_action(
-                cx.listener(|this, _: &Complete, window, cx| this.take_completion(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &Go, _, cx| this.go(cx)))
-            .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(GotoEvent::Dismissed)))
+        self.keys(palette::overlay("goto-overlay"), cx)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(GotoEvent::Dismissed)),
@@ -235,6 +268,90 @@ impl Render for GotoView {
                 self.field.clone(),
                 body,
             ))
+    }
+
+    /// The field in place of the crumbs, with the completions and any error
+    /// above the bar, their text on the field's line.
+    fn bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let rows = self.completions.iter().enumerate().map(|(ix, path)| {
+            let selected = self.selected == Some(ix);
+            // Every completion is in the folder the field already says.
+            let full = paths::abbreviate(path);
+            let start = full.trim_end_matches('/').rfind('/').map_or(0, |at| at + 1);
+            let text = full[start..].to_owned();
+            theme::row_slot(("address-completion", ix))
+                .debug_selector(move || format!("address-completion-{ix}"))
+                .role(Role::ListBoxOption)
+                .aria_label(text.clone())
+                .aria_selected(selected)
+                // Before the press could take the keys from the field.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.selected = Some(ix);
+                        this.go(cx);
+                    }),
+                )
+                .child(
+                    theme::row(selected)
+                        .text_size(px(theme::TEXT_SMALL))
+                        .child(div().truncate().child(text)),
+                )
+        });
+        let shows = !self.completions.is_empty() || self.error.is_some();
+        let popover = shows.then(|| {
+            div().absolute().left_0().top_0().child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::BottomLeft)
+                        .offset(gpui::point(px(-theme::CARD_TEXT_PADDING), px(-4.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            theme::floating(theme::Elevation::Popover)
+                                .id("address-completions")
+                                .debug_selector(|| "address-completions".into())
+                                .role(Role::ListBox)
+                                .aria_label("Completions")
+                                .w(px(BAR_COMPLETIONS_WIDTH))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    theme::inset_rows(div())
+                                        .relative()
+                                        .flex()
+                                        .flex_col()
+                                        .children(self.error_line("address-error"))
+                                        // With no row, no row's gap ends the inset.
+                                        .when(self.completions.is_empty(), |d| {
+                                            d.pb(px(theme::CARD_PADDING))
+                                        })
+                                        .children(rows),
+                                ),
+                        ),
+                )
+                .with_priority(1),
+            )
+        });
+        self.keys(div(), cx)
+            .debug_selector(|| "address-bar".into())
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .child(self.field.clone())
+            .children(popover)
+    }
+}
+
+impl Render for GotoView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.in_bar {
+            self.bar(cx).into_any_element()
+        } else {
+            self.sheet(cx).into_any_element()
+        }
     }
 }
 

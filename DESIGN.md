@@ -55,6 +55,8 @@ The path bar is 28 pt, under the files, and part of the pane, so each pane gets 
 
 A crumb has 4 pt of side padding, and its 12 pt chevron has 1 pt on each side. Path crumbs show the current folder and as many ancestors as fit, at full width, counted from the right. Everything else collapses into one "…", which is only a marker: Go to Folder reaches the hidden levels. No ancestor is shown cut short. The current folder's name doesn't truncate until the status text beside it has given way.
 
+⌘L (Edit Path) turns the bar into the folder's path as text, selected, in `TEXT_SMALL` on the crumbs' line, and shows the bar while it's hidden. The status steps aside. It works as Go to Folder does: completions from the disk in a 420 pt `Popover` above the bar, their text on the field's line, Tab to take one, ↩ to go, and a path that isn't there says so in `danger()` in the same popover and goes nowhere. Esc and going give the crumbs back and the keys to the list; a click away gives the crumbs back too. Where there are no crumbs, as on a page, a server or search results, ⌘L opens Go to Folder.
+
 A name that can't be used turns the rename field's outline red and shows one short line right under it, over the row below. No row moves, and the line stays in the window.
 
 ### Closing the sidebar
