@@ -1,6 +1,6 @@
 # Benchmarks and reports
 
-Status: done, except the quiet Mac itself, which needs buying and setting up. `scripts/bench` runs the platform, core, search, MCP, workload and compare suites, `--against <commit>` alternates with another commit's build, and `docs/performance.md` says how to use them. The Spotlight comparison is `scripts/bench spotlight`. GitHub's macOS runners count no instructions, so the counter gate runs in `.github/workflows/bench.yml` on the quiet Mac, which stays off until the `BENCH_RUNNER` variable is set. The scrolling benchmark and launch profile still report outside it, since they don't write raw samples yet. The numbers behind plans 25 and 26 came from throwaway C programs in `target/fs-bench`, run on a Mac at load 13 to 28. They are good enough to choose work and not good enough to publish.
+Status: done, except the quiet Mac itself, which needs buying and setting up. `scripts/bench` runs the platform, core, search, MCP, workload, compare, frames and launch suites, `--against <commit>` alternates with another commit's build, and `docs/performance.md` says how to use them. The Spotlight comparison is `scripts/bench spotlight`. GitHub's macOS runners count no instructions, so the counter gate runs in `.github/workflows/bench.yml` on the quiet Mac, which stays off until the `BENCH_RUNNER` variable is set. The frames and launch suites bring in the scrolling benchmark and the launch profile. The numbers behind plans 25 and 26 came from throwaway C programs in `target/fs-bench`, run on a Mac at load 13 to 28. They are good enough to choose work and not good enough to publish.
 
 ## Goal
 
@@ -63,7 +63,7 @@ The crate calls only what `monodrive-core` already makes public: `list_dir`, `so
 
 Budgets move from the table in `docs/performance.md` to `benchmarks/budgets.toml`, and the doc links to the report's budget table. Results stay out of the repo except for one baseline file per quiet machine, updated on purpose. PR evidence follows AGENTS.md: upload the report to GitHub, never commit it.
 
-Once the runner covers `list_dir` and sorting, delete `benches/listing.rs` and the `criterion` dev-dependency, so there's one system. Keep `scrolling.rs`'s measuring code until it can emit samples.
+Once the runner covers `list_dir` and sorting, delete `benches/listing.rs` and the `criterion` dev-dependency, so there's one system. `scrolling.rs` stays a Criterion benchmark; the frames suite reads its report's p99 draw time.
 
 ## Removing the noise
 

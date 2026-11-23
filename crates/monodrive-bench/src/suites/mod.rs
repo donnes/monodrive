@@ -8,6 +8,10 @@ pub mod compare;
 #[cfg(target_os = "macos")]
 pub mod core;
 #[cfg(target_os = "macos")]
+pub mod frames;
+#[cfg(target_os = "macos")]
+pub mod launch;
+#[cfg(target_os = "macos")]
 pub mod mcp;
 pub mod platform;
 #[cfg(target_os = "macos")]
@@ -33,6 +37,10 @@ pub enum Suite {
     Workload,
     #[cfg(target_os = "macos")]
     Compare,
+    #[cfg(target_os = "macos")]
+    Frames,
+    #[cfg(target_os = "macos")]
+    Launch,
 }
 
 impl Suite {
@@ -47,6 +55,8 @@ impl Suite {
             Suite::Mcp,
             Suite::Workload,
             Suite::Compare,
+            Suite::Frames,
+            Suite::Launch,
         ];
         #[cfg(not(target_os = "macos"))]
         return vec![Suite::Platform, Suite::Workload];
@@ -66,6 +76,10 @@ impl Suite {
             Suite::Workload => "workload",
             #[cfg(target_os = "macos")]
             Suite::Compare => "compare",
+            #[cfg(target_os = "macos")]
+            Suite::Frames => "frames",
+            #[cfg(target_os = "macos")]
+            Suite::Launch => "launch",
         }
     }
 
@@ -83,6 +97,10 @@ impl Suite {
             "workload" => Ok(Suite::Workload),
             #[cfg(target_os = "macos")]
             "compare" => Ok(Suite::Compare),
+            #[cfg(target_os = "macos")]
+            "frames" => Ok(Suite::Frames),
+            #[cfg(target_os = "macos")]
+            "launch" => Ok(Suite::Launch),
             other => Err(format!(
                 "{other}: no such suite on {}",
                 std::env::consts::OS
@@ -114,6 +132,10 @@ impl Suite {
             Suite::Workload => workload::prepare(fixture, seed),
             #[cfg(target_os = "macos")]
             Suite::Compare => compare::prepare(fixture, seed, made.tree),
+            #[cfg(target_os = "macos")]
+            Suite::Frames => Ok(()),
+            #[cfg(target_os = "macos")]
+            Suite::Launch => launch::prepare(fixture, seed),
         }
     }
 
@@ -132,6 +154,10 @@ impl Suite {
             Suite::Workload => workload::round(fixture),
             #[cfg(target_os = "macos")]
             Suite::Compare => compare::round(fixture),
+            #[cfg(target_os = "macos")]
+            Suite::Frames => frames::round(fixture),
+            #[cfg(target_os = "macos")]
+            Suite::Launch => launch::round(fixture),
         }
     }
 

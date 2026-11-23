@@ -78,9 +78,14 @@ fn print_launch(landed: Instant, cx: &mut App) {
         .iter()
         .find(|t| t.draw_start >= landed)
         .and_then(|t| since_start(t.draw_end));
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
     match (first, contents, shown) {
+        // `scripts/bench launch` reads this line.
         (Some(first), Some(contents), Some(shown)) => eprintln!(
-            "launch: first frame drawn {first:.1?}, the folder's contents {contents:.1?}, on the display by {shown:.1?} after the process started"
+            "launch: first frame drawn {:.1} ms, the folder's contents {:.1} ms, on the display by {:.1} ms after the process started",
+            ms(first),
+            ms(contents),
+            ms(shown)
         ),
         _ => eprintln!("launch: unknown"),
     }

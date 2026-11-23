@@ -551,16 +551,7 @@ fn budget_table(page: &mut String, judged: &[(Budget, Status)]) {
                 "not judged, noisy run".to_string(),
                 "missing",
             ),
-            Status::Missing => (
-                "–".to_string(),
-                budget
-                    .measured_by
-                    .as_ref()
-                    .map_or("not in this run".to_string(), |by| {
-                        format!("measured by {by}")
-                    }),
-                "missing",
-            ),
+            Status::Missing => ("–".to_string(), "not in this run".to_string(), "missing"),
         };
         let why = budget.why.as_ref().map_or(String::new(), |why| {
             format!("<small>{}</small>", escape(why))
