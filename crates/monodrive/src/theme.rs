@@ -2,7 +2,7 @@
 //! varying alpha instead of fixed greys. [`configure`] sets them from the
 //! preferences before each frame; views read them through these functions.
 
-use crate::palettes;
+use crate::palettes::{self, Syntax};
 use crate::preferences::{Preferences, Theme};
 use gpui::{
     Bounds, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, PathBuilder, Pixels, Role,
@@ -60,6 +60,7 @@ struct Tokens {
     accent: Hsla,
     shell: Hsla,
     pane: Hsla,
+    syntax: [u32; 11],
 }
 
 thread_local! {
@@ -106,6 +107,7 @@ fn derive(p: &Preferences, system_light: bool) -> Tokens {
         accent: rgb(p.accent.unwrap_or(palette.accent)).into(),
         shell,
         pane,
+        syntax: palette.syntax,
     }
 }
 
@@ -136,6 +138,11 @@ pub fn content(alpha: f32) -> Hsla {
 
 pub fn accent() -> Hsla {
     tokens().accent
+}
+
+/// The palette's color for code of this kind.
+pub(crate) fn syntax(kind: Syntax) -> Hsla {
+    rgb(tokens().syntax[kind as usize]).into()
 }
 
 /// Red ink for what failed or can't be undone, at 4.5:1 on the theme's panes.
