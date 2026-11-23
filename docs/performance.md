@@ -21,7 +21,7 @@ Monodrive can't change what the kernel and APFS charge per call, so it goes fast
 
 Measured and decided:
 
-- **Trash at scale.** Move to Trash goes through `NSFileManager` one item at a time: 1,000 selected files took 0.66 s on 2026-11-09, at load 5, on the core suite's disk image. That's fine as one request for now; past a few thousand items it's worth becoming a job with progress. A whole folder is one rename, and a 20,000-entry `node_modules` went to the Trash in 0.45 to 0.5 s against 1.8 s for `rm -rf`, which the `trash` tool's description now tells agents. Only a person empties the Trash, so agents that clean up often grow it, and the description says so rather than changing that rule.
+- **Trash at scale.** Move to Trash goes through `NSFileManager` one item at a time: 1,000 selected files took 0.66 s on 2026-11-09, at load 5, on the core suite's disk image. Since 2026-11-23, 100 items or more run as a job with progress and Cancel (`docs/operations.md`). Against the commit before it, at load 11 to 23, the 1,000 files took 728 ms against 1.04 s, which the bench calls no clear difference, and about 1% more instructions (10.6 against 10.5 billion), so the job costs nothing a person would notice. A whole folder is one rename, and a 20,000-entry `node_modules` went to the Trash in 0.45 to 0.5 s against 1.8 s for `rm -rf`, which the `trash` tool's description now tells agents. Only a person empties the Trash, so agents that clean up often grow it, and the description says so rather than changing that rule.
 
 Not decided yet, because they need a measurement this Mac can't make:
 
