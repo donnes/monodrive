@@ -354,6 +354,7 @@ fn finished_filters_become_tokens_the_keys_can_change(cx: &mut TestAppContext) {
     let world = world(Vec::new(), cx);
     let folder = world.dir.path().join("here");
     std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("a.txt"), "").unwrap();
     let (browser, cx) = browse(&folder, cx);
     let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
 
@@ -431,6 +432,15 @@ fn finished_filters_become_tokens_the_keys_can_change(cx: &mut TestAppContext) {
     );
     let stored = in_pane(&browser, cx, |pane, _| pane.current_search().stored());
     assert_eq!(stored, Ok("kind:document notes".into()));
+
+    // Leaving the search from a token, as Back does, gives the keys back to
+    // the window: ↓ steps through the folder rather than opening a token.
+    press(cx, "cmd-left backspace");
+    assert_eq!(on_chip(&browser, cx), Some(0));
+    on_pane(&browser, cx, |pane, cx| pane.show_folder(cx));
+    cx.run_until_parked();
+    press(cx, "down");
+    assert_eq!(shown(&browser, cx).1, names(&["a.txt"]));
 }
 
 /// Protects a line standing for its file: pressing a line under a file that

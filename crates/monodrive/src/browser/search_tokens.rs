@@ -233,7 +233,8 @@ impl Browser {
     /// The tokens before the words. The keys reach them with ← or ⌫ at the
     /// start of the words, or a press. With none it takes no room, but stays
     /// drawn, so keys still reach the window when the last one goes while
-    /// they're on it, as when Back leaves the search.
+    /// they're on it, as when Back leaves the search, and only a token the
+    /// keys are on takes them.
     pub(super) fn search_chips(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let pane = self.pane().read(cx);
         let empty = pane.filters.terms.is_empty();
@@ -289,7 +290,7 @@ impl Browser {
             strip
         };
         div()
-            .key_context("Chips")
+            .when(selected.is_some(), |d| d.key_context("Chips"))
             .when(empty, |d| d.absolute())
             .min_w_0()
             .flex()
