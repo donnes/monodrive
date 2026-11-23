@@ -260,6 +260,15 @@ pub fn raised() -> Hsla {
     if is_light() { knob() } else { content(0.2) }
 }
 
+/// A letter blurred past reading: a soft blob of text ink.
+pub fn blurred_letter() -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(0.), content(1.))
+            .spread_radius(px(2.5))
+            .blur_radius(px(4.)),
+    ]
+}
+
 /// The keyboard focus ring: the accent, just outside the control's shape.
 pub fn focus_ring() -> Vec<BoxShadow> {
     vec![BoxShadow::new(px(0.), px(0.), accent().opacity(0.8)).spread_radius(px(2.5))]

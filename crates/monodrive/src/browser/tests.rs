@@ -242,6 +242,25 @@ fn the_preview_takes_the_panes_list_and_gives_it_back(cx: &mut TestAppContext) {
     assert!(!drawn(cx, "preview"));
 }
 
+#[gpui::test]
+fn an_env_file_opens_with_its_values_blurred(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::write(project.join("y.env"), "KEY=secret\n").unwrap();
+    std::fs::write(project.join("z.env"), "KEY=secret\n").unwrap();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down");
+    assert_eq!(shown(&browser, cx).1, ["z.env"]);
+    press(cx, "space");
+    assert!(drawn(cx, "preview-secret"));
+    let reveal = cx.debug_bounds("preview-reveal").unwrap().center();
+    cx.simulate_click(reveal, with(""));
+    assert!(!drawn(cx, "preview-secret"));
+    // The next file is blurred again.
+    press(cx, "up");
+    assert_eq!(shown(&browser, cx).1, ["y.env"]);
+    assert!(drawn(cx, "preview-secret"));
+}
+
 /// A preview's real path: the keys and mouse through the real `Browser`, a real
 /// recipe flattened and saved through a real owner, and one Undo.
 #[gpui::test]

@@ -32,6 +32,7 @@ use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSRect, NSString, NSURL};
 use objc2_quick_look_ui::QLPreviewView;
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -94,6 +95,8 @@ enum Body {
     Text {
         lines: Arc<Vec<Line>>,
         cut: bool,
+        /// An env file's values, by line, blurred until revealed.
+        secrets: Option<Secrets>,
     },
     Markdown {
         blocks: Arc<Vec<Block>>,
@@ -116,6 +119,7 @@ enum Body {
 }
 
 type SystemView = (Host<QLPreviewView>, PathBuf);
+type Secrets = Arc<Vec<Option<Range<usize>>>>;
 
 pub struct PreviewView {
     pub(crate) path: PathBuf,
@@ -125,6 +129,8 @@ pub struct PreviewView {
     generation: u64,
     body: Body,
     show_source: bool,
+    /// An env file's values show as written, until another file opens.
+    revealed: bool,
     zoom: Zoom,
     /// Actual Size was asked for, and waits on the full decode to know it.
     want_actual: bool,
@@ -179,6 +185,7 @@ impl PreviewView {
             generation: 0,
             body: Body::Loading,
             show_source: false,
+            revealed: false,
             zoom: Zoom::default(),
             want_actual: false,
             frame: Rc::new(Cell::new(Bounds::default())),
@@ -289,6 +296,7 @@ impl PreviewView {
         self.position = position;
         self.loading_ticks = 40;
         self.show_source = false;
+        self.revealed = false;
         self.zoom = Zoom::default();
         self.want_actual = false;
         self.panning = None;
@@ -455,6 +463,23 @@ impl PreviewView {
                         .debug_selector(|| "preview-source".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.show_source = !this.show_source;
+                            cx.notify();
+                        })),
+                )
+            }
+            Body::Text {
+                secrets: Some(_), ..
+            } => {
+                let label = if self.revealed {
+                    "Hide Values"
+                } else {
+                    "Reveal Values"
+                };
+                Some(
+                    text_button("preview-reveal", label, ButtonLook::Ghost)
+                        .debug_selector(|| "preview-reveal".into())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.revealed = !this.revealed;
                             cx.notify();
                         })),
                 )
@@ -1188,13 +1213,19 @@ fn read(path: &Path, light: bool, side: u32) -> Body {
         }
         Kind::Zip => zip_rows(path),
         Kind::Text => match preview::read_text(path) {
-            Ok(file) => {
-                let lines = highlighted(&file.text, path, light);
-                Body::Text {
-                    lines: Arc::new(lines),
-                    cut: file.cut,
-                }
-            }
+            Ok(file) => Body::Text {
+                lines: Arc::new(highlighted(&file.text, path, light)),
+                cut: file.cut,
+                secrets: None,
+            },
+            Err(why) => Body::Notice(why),
+        },
+        Kind::Env => match preview::read_text(path) {
+            Ok(file) => Body::Text {
+                lines: Arc::new(plain_lines(&file.text)),
+                cut: file.cut,
+                secrets: Some(Arc::new(preview::env_values(&file.text))),
+            },
             Err(why) => Body::Notice(why),
         },
         Kind::Markdown => match preview::read_text(path) {
@@ -1306,12 +1337,27 @@ fn highlighted(text: &str, path: &Path, light: bool) -> Vec<Line> {
         .collect()
 }
 
-fn text_rows(lines: Arc<Vec<Line>>, scroll: &UniformListScrollHandle) -> gpui::AnyElement {
+/// `hidden` blurs those parts of the lines.
+fn text_rows(
+    lines: Arc<Vec<Line>>,
+    hidden: Option<Secrets>,
+    scroll: &UniformListScrollHandle,
+) -> gpui::AnyElement {
     let digits = lines.len().max(1).ilog10() as usize + 1;
     uniform_list("preview-lines", lines.len(), move |range, _, _| {
         range
             .map(|ix| {
                 let line = &lines[ix];
+                let text = match hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone()) {
+                    Some(secret) => div()
+                        .flex()
+                        .child(line.text[..secret.start].to_string())
+                        .child(blurred())
+                        .into_any_element(),
+                    None => StyledText::new(line.text.clone())
+                        .with_highlights(line.spans.clone())
+                        .into_any_element(),
+                };
                 div()
                     .h(px(theme::ROW_HEIGHT - 8.))
                     .flex()
@@ -1323,7 +1369,7 @@ fn text_rows(lines: Arc<Vec<Line>>, scroll: &UniformListScrollHandle) -> gpui::A
                             .text_color(content(0.65))
                             .child(format!("{:>digits$}", ix + 1)),
                     )
-                    .child(StyledText::new(line.text.clone()).with_highlights(line.spans.clone()))
+                    .child(text)
             })
             .collect()
     })
@@ -1333,6 +1379,33 @@ fn text_rows(lines: Arc<Vec<Line>>, scroll: &UniformListScrollHandle) -> gpui::A
     .font_family(theme::MONO_FONT)
     .text_size(px(theme::TEXT_SMALL))
     .into_any_element()
+}
+
+/// Blurred letters where a value would be. Values are never drawn, and they
+/// all blur to this one length, so the blur gives nothing away.
+fn blurred() -> impl IntoElement {
+    const STAND_IN: &str = "sk_live9fQe2wLm-4xTrgB.vKa";
+    div()
+        .debug_selector(|| "preview-secret".into())
+        .h_full()
+        .flex()
+        .items_end()
+        .pb(px(10.5))
+        .children(STAND_IN.chars().map(|letter| {
+            let (height, lift) = match letter {
+                'A'..='Z' | '0'..='9' | 'b' | 'd' | 'f' | 'h' | 'k' | 'l' | 't' => (4., 0.),
+                'g' | 'j' | 'p' | 'q' | 'y' => (4., -3.),
+                'a'..='z' => (1., 0.),
+                _ => (0., 0.),
+            };
+            div()
+                .flex_shrink_0()
+                .w_0()
+                .mx(px(4.))
+                .mb(px(lift))
+                .h(px(height))
+                .when(height > 0., |d| d.shadow(theme::blurred_letter()))
+        }))
 }
 
 fn inline_text(id: (&'static str, usize), inline: &Inline) -> gpui::AnyElement {
@@ -1490,9 +1563,14 @@ impl Render for PreviewView {
             Body::Loading => div().size_full().into_any_element(),
             Body::Notice(why) => notice(why.clone()),
             Body::NotDownloaded => self.not_downloaded(cx),
-            Body::Text { lines, cut } => {
+            Body::Text {
+                lines,
+                cut,
+                secrets,
+            } => {
                 let cut = *cut;
-                let rows = text_rows(lines.clone(), &self.scroll);
+                let hidden = secrets.clone().filter(|_| !self.revealed);
+                let rows = text_rows(lines.clone(), hidden, &self.scroll);
                 div()
                     .debug_selector(|| "preview-text".into())
                     .size_full()
@@ -1515,7 +1593,7 @@ impl Render for PreviewView {
             }
             Body::Markdown { blocks, source } => {
                 if self.show_source || self.blocks.is_none() {
-                    text_rows(source.clone(), &self.scroll)
+                    text_rows(source.clone(), None, &self.scroll)
                 } else {
                     let blocks = blocks.clone();
                     let state = self

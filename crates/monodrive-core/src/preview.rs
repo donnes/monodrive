@@ -5,6 +5,7 @@
 use crate::cloud::{self, Availability};
 use crate::sizes::needs_consent;
 use std::io::Read;
+use std::ops::Range;
 use std::path::Path;
 
 /// How much of a text file a preview reads.
@@ -21,6 +22,8 @@ pub enum Kind {
     Markdown,
     Html,
     Text,
+    /// Text whose values are secrets: `.env`, `.env.local`, `prod.env`.
+    Env,
     Zip,
     /// Contents that aren't on this Mac. Reading would download them.
     NotDownloaded,
@@ -73,6 +76,12 @@ pub fn classify(path: &Path) -> Kind {
     if let Some(kind) = before_reading(Availability::of(&meta), meta.is_dir()) {
         return kind;
     }
+    if path
+        .file_name()
+        .is_some_and(|name| is_env(&name.to_string_lossy()))
+    {
+        return Kind::Env;
+    }
     let extension = path
         .extension()
         .map(|ext| ext.to_string_lossy().to_lowercase())
@@ -86,6 +95,80 @@ pub fn classify(path: &Path) -> Kind {
         "makefile" | "dockerfile" | "license" | "readme" | "gemfile" => Kind::Text,
         extension => by_extension(extension),
     }
+}
+
+fn is_env(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name == ".env" || name.starts_with(".env.") || name.ends_with(".env")
+}
+
+/// Where each line of an env file holds a value, by `str::lines`: after the
+/// `=` of an assignment, commented out or not, and every line of a quoted value
+/// that runs on past its own. A commented one ends with its line.
+pub fn env_values(text: &str) -> Vec<Option<Range<usize>>> {
+    let mut open: Option<char> = None;
+    text.lines()
+        .map(|line| {
+            if let Some(quote) = open {
+                if closes(line, quote) {
+                    open = None;
+                }
+                return trimmed(line, 0);
+            }
+            let (start, commented) = assignment(line)?;
+            let value = line[start..].trim_start();
+            if let Some(quote) = value
+                .chars()
+                .next()
+                .filter(|c| matches!(c, '"' | '\'' | '`'))
+                && !closes(&value[1..], quote)
+                && !commented
+            {
+                open = Some(quote);
+            }
+            trimmed(line, start)
+        })
+        .collect()
+}
+
+/// Where the value starts in `KEY=value`, `export KEY=value` or `# KEY=value`,
+/// and whether it's commented out.
+fn assignment(line: &str) -> Option<(usize, bool)> {
+    let bare = line.trim_start_matches('\u{feff}').trim_start();
+    let body = bare.trim_start_matches('#').trim_start();
+    let body = body
+        .strip_prefix("export")
+        .filter(|rest| rest.starts_with([' ', '\t']))
+        .unwrap_or(body)
+        .trim_start();
+    let (key, value) = body.split_once('=')?;
+    let key = key.trim_end();
+    let named = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    named.then(|| (line.len() - value.len(), bare.starts_with('#')))
+}
+
+/// `line` from `start`, without the space around it, unless that's nothing.
+fn trimmed(line: &str, start: usize) -> Option<Range<usize>> {
+    let rest = &line[start..];
+    let from = start + (rest.len() - rest.trim_start().len());
+    let to = line.trim_end().len();
+    (from < to).then_some(from..to)
+}
+
+/// Whether `text` holds an unescaped `quote`.
+fn closes(text: &str, quote: char) -> bool {
+    let mut escaped = false;
+    for c in text.chars() {
+        match c {
+            '\\' if !escaped => escaped = true,
+            c if c == quote && !escaped => return true,
+            _ => escaped = false,
+        }
+    }
+    false
 }
 
 /// The start of a text file, and whether there was more.
@@ -137,6 +220,10 @@ mod tests {
         assert_eq!(kind("a.rs"), Kind::Text);
         assert_eq!(kind(".gitignore"), Kind::Text);
         assert_eq!(kind("Makefile"), Kind::Text);
+        assert_eq!(kind(".env"), Kind::Env);
+        assert_eq!(kind(".env.local"), Kind::Env);
+        assert_eq!(kind("prod.ENV"), Kind::Env);
+        assert_eq!(kind(".envrc"), Kind::System);
         assert_eq!(kind("a.pdf"), Kind::System);
         assert_eq!(kind("a.unknown"), Kind::System);
         let app = dir.path().join("Kit.app");
@@ -163,6 +250,46 @@ mod tests {
             Some(Kind::System)
         );
         assert_eq!(before_reading(Availability::Local, false), None);
+    }
+
+    #[test]
+    fn env_values_cover_every_secret_and_nothing_else() {
+        let text = "\u{feff}# UNFINISHED=\"x
+FIRST=1
+# Database
+DB_URL=postgres://me:pw@host/db
+export\tTOKEN = 'abc' # old
+#OLD_KEY=sk-123
+# UNFINISHED=\"x
+EMPTY=
+# Set this to a=b
+KEY=\"-----BEGIN
+middle \\\" still
+end\"
+AFTER=1";
+        let values: Vec<_> = text
+            .lines()
+            .zip(env_values(text))
+            .map(|(line, range)| range.map(|range| &line[range]))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                Some("\"x"),
+                Some("1"),
+                None,
+                Some("postgres://me:pw@host/db"),
+                Some("'abc' # old"),
+                Some("sk-123"),
+                Some("\"x"),
+                None,
+                None,
+                Some("\"-----BEGIN"),
+                Some("middle \\\" still"),
+                Some("end\""),
+                Some("1"),
+            ]
+        );
     }
 
     #[test]
