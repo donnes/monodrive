@@ -675,7 +675,7 @@ impl fmt::Display for Term {
                 let names: Vec<&str> = kinds.iter().map(|kind| kind.name()).collect();
                 write!(f, "kind:{}", names.join(","))
             }
-            Term::Ext(exts) => write!(f, "ext:{}", exts.join(",")),
+            Term::Ext(exts) => quoted(f, "ext:", &exts.join(",")),
             Term::Size(size) => write!(f, "size:{size}"),
             Term::Modified(modified) => write!(f, "modified:{modified}"),
             Term::In(path) => quoted(f, "in:", &path.to_string_lossy()),

@@ -2034,7 +2034,7 @@ impl Browser {
                 .debug_selector(|| "search-menu-button".into())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_searches(window, cx))),
             )
-            .children(self.search_chips(window, cx))
+            .child(self.search_chips(window, cx))
             .child(
                 div()
                     .flex_1()

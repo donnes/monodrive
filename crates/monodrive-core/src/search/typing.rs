@@ -178,14 +178,35 @@ pub struct Lifted {
     pub caret: usize,
 }
 
-/// Takes the finished filters out of `text` into `filters`: every one but
-/// what the caret is in or ends, while adding it leaves a query fsearch can
-/// answer. Each goes with a space beside it. `None` when none is finished.
+/// Takes the finished filters out of `text` into `filters`: every one a
+/// space follows, but what the caret is in or ends, while adding it leaves a
+/// query fsearch can answer. Each goes with a space beside it. `None` when
+/// none is finished.
 pub fn lift(filters: &Query, text: &str, caret: usize) -> Option<Lifted> {
+    lift_where(filters, text, caret, |range| {
+        (range.start <= caret && caret <= range.end) || !text[range.end..].starts_with(' ')
+    })
+}
+
+/// A kept search's text as the window shows it: its filters as tokens, and
+/// the words left to type.
+pub fn split(text: &str) -> (Query, String) {
+    match lift_where(&Query::default(), text, usize::MAX, |_| false) {
+        Some(lifted) => (lifted.filters, lifted.text.trim().to_string()),
+        None => (Query::default(), text.trim().to_string()),
+    }
+}
+
+fn lift_where(
+    filters: &Query,
+    text: &str,
+    caret: usize,
+    stays: impl Fn(&Range<usize>) -> bool,
+) -> Option<Lifted> {
     let mut query = filters.clone();
     let mut cut = Vec::new();
     for (range, word) in spans(text) {
-        if range.start <= caret && caret <= range.end {
+        if stays(&range) {
             continue;
         }
         let Ok(found) = term(&word) else { continue };
@@ -222,15 +243,6 @@ pub fn lift(filters: &Query, text: &str, caret: usize) -> Option<Lifted> {
         text: kept,
         caret: moved,
     })
-}
-
-/// A kept search's text as the window shows it: its filters as tokens, and
-/// the words left to type.
-pub fn split(text: &str) -> (Query, String) {
-    match lift(&Query::default(), text, usize::MAX) {
-        Some(lifted) => (lifted.filters, lifted.text.trim().to_string()),
-        None => (Query::default(), text.trim().to_string()),
-    }
 }
 
 const MONTHS: [&str; 12] = [
@@ -345,9 +357,10 @@ pub struct Completions {
     pub items: Vec<Completion>,
 }
 
-/// The values that could finish the filter the caret is typing. Only a
-/// known key's value is offered, so typing a name never opens a list.
-pub fn complete(text: &str, caret: usize) -> Completions {
+/// The values that could finish the filter the caret is typing, beside the
+/// `filters` already tokens. Only a known key's value is offered, so typing
+/// a name never opens a list.
+pub fn complete(filters: &Query, text: &str, caret: usize) -> Completions {
     if !text.is_char_boundary(caret) {
         return Completions::default();
     }
@@ -364,7 +377,7 @@ pub fn complete(text: &str, caret: usize) -> Completions {
         .flatten()
         .and_then(|(key, value)| Some((Filter::of(key)?, value.to_lowercase())))
         .map(|(filter, value)| match filter {
-            Filter::Kind => kinds(&value),
+            Filter::Kind => kinds(filters, &value),
             Filter::Size => presets(filter, &SIZES, &value),
             Filter::Modified => presets(filter, &DATES, &value),
         })
@@ -372,11 +385,19 @@ pub fn complete(text: &str, caret: usize) -> Completions {
     Completions { range, items }
 }
 
-/// Kinds that could follow those already listed, which an app, folder, file
-/// or link can't.
-fn kinds(value: &str) -> Vec<Completion> {
+/// Kinds that could join those listed and those the tokens have, which an
+/// app, folder, file or link can't.
+fn kinds(filters: &Query, value: &str) -> Vec<Completion> {
     let (listed, last) = value.rsplit_once(',').unwrap_or(("", value));
-    let had: Vec<Kind> = listed.split(',').filter_map(Kind::parse).collect();
+    let tokens = filters.terms.iter().flat_map(|term| match term {
+        Term::Kind(kinds) => kinds.as_slice(),
+        _ => &[],
+    });
+    let had: Vec<Kind> = listed
+        .split(',')
+        .filter_map(Kind::parse)
+        .chain(tokens.copied())
+        .collect();
     if had.iter().any(|kind| kind.alone()) {
         return Vec::new();
     }
@@ -455,7 +476,7 @@ mod tests {
     use super::*;
 
     fn offered(text: &str) -> Vec<String> {
-        complete(text, text.len())
+        complete(&Query::default(), text, text.len())
             .items
             .into_iter()
             .map(|item| item.text)
@@ -484,11 +505,13 @@ mod tests {
             lifted("report kind:image ", 18),
             Some(("kind:image".into(), "report ".into(), 7))
         );
-        // Before the caret and after it, each with a space beside it.
+        // Before the caret and after it, each with a space beside it, but
+        // only once a space has followed it.
         assert_eq!(
-            lifted("size:>1gb a b modified:7d", 11),
-            Some(("size:>1gb modified:7d".into(), "a b".into(), 1))
+            lifted("size:>1gb a b modified:7d c", 11),
+            Some(("size:>1gb modified:7d".into(), "a b c".into(), 1))
         );
+        assert_eq!(lifted("notes kind:doc", 0), None);
         // A bad filter and one fsearch can't add stay words.
         assert_eq!(
             lift(
@@ -580,11 +603,17 @@ mod tests {
         assert_eq!(offered("modified:today"), Vec::<String>::new());
         // A phrase in quotes is words, whatever it says.
         let text = "contains:\"daily kind:i\"";
-        assert_eq!(complete(text, text.len() - 1).items, Vec::new());
+        assert_eq!(
+            complete(&Query::default(), text, text.len() - 1).items,
+            Vec::new()
+        );
         // The caret's own word, not the one after it.
         let text = "kind:v report";
-        assert_eq!(complete(text, 6).items[0].text, "kind:video");
-        assert_eq!(complete(text, 6).range, 0..6);
+        assert_eq!(
+            complete(&Query::default(), text, 6).items[0].text,
+            "kind:video"
+        );
+        assert_eq!(complete(&Query::default(), text, 6).range, 0..6);
     }
 
     #[test]
@@ -598,7 +627,16 @@ mod tests {
             ["kind:image,audio", "kind:image,archive"]
         );
         assert_eq!(offered("kind:folder,"), Vec::<String>::new());
-        let labels: Vec<_> = complete("kind:i", 6)
+        // The kinds the tokens have count too.
+        let had = |tokens: &str, text: &str| -> Vec<String> {
+            let tokens = Query::parse(tokens).unwrap();
+            let list = complete(&tokens, text, text.len());
+            list.items.into_iter().map(|item| item.text).collect()
+        };
+        assert_eq!(had("kind:image", "kind:i"), Vec::<String>::new());
+        assert_eq!(had("kind:image", "kind:a"), ["kind:audio", "kind:archive"]);
+        assert_eq!(had("kind:folder", "kind:"), Vec::<String>::new());
+        let labels: Vec<_> = complete(&Query::default(), "kind:i", 6)
             .items
             .iter()
             .map(|i| i.label)
@@ -609,14 +647,14 @@ mod tests {
     #[test]
     fn accepting_replaces_the_token_and_moves_past_it() {
         let text = "invoice kind:d report";
-        let list = complete(text, 14);
+        let list = complete(&Query::default(), text, 14);
         assert_eq!(
             list.accept(text, 0),
             Some(("invoice kind:document report".to_string(), 22))
         );
         let text = "invoice size:";
         assert_eq!(
-            complete(text, text.len()).accept(text, 2),
+            complete(&Query::default(), text, text.len()).accept(text, 2),
             Some(("invoice size:>1gb ".to_string(), 18))
         );
     }

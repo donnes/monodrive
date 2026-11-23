@@ -230,13 +230,13 @@ impl Pane {
 }
 
 impl Browser {
-    /// The tokens before the words, while there are any. The keys reach them
-    /// with ← or ⌫ at the start of the words, or a press.
-    pub(super) fn search_chips(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+    /// The tokens before the words. The keys reach them with ← or ⌫ at the
+    /// start of the words, or a press. With none it takes no room, but stays
+    /// drawn, so keys still reach the window when the last one goes while
+    /// they're on it, as when Back leaves the search.
+    pub(super) fn search_chips(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let pane = self.pane().read(cx);
-        if pane.filters.terms.is_empty() {
-            return None;
-        }
+        let empty = pane.filters.terms.is_empty();
         let on_chips = pane.chips_focus.is_focused(window);
         let selected = pane.chip.filter(|_| on_chips);
         let mut menu = selected
@@ -288,32 +288,31 @@ impl Browser {
         } else {
             strip
         };
-        Some(
-            div()
-                .key_context("Chips")
-                .min_w_0()
-                .flex()
-                .on_action(cx.listener(|this, _: &PreviousChip, window, cx| {
-                    this.pane()
-                        .update(cx, |pane, cx| pane.step_chip(false, window, cx))
-                }))
-                .on_action(cx.listener(|this, _: &NextChip, window, cx| {
-                    this.pane()
-                        .update(cx, |pane, cx| pane.step_chip(true, window, cx))
-                }))
-                .on_action(cx.listener(|this, _: &RemoveChip, window, cx| {
-                    this.pane()
-                        .update(cx, |pane, cx| pane.remove_chip(window, cx))
-                }))
-                .on_action(cx.listener(|this, _: &OpenChip, _, cx| {
-                    this.pane().update(cx, |pane, cx| pane.open_chip(cx))
-                }))
-                .on_action(cx.listener(|this, _: &LeaveChips, window, cx| {
-                    this.pane()
-                        .update(cx, |pane, cx| pane.leave_chips(false, window, cx))
-                }))
-                .child(strip),
-        )
+        div()
+            .key_context("Chips")
+            .when(empty, |d| d.absolute())
+            .min_w_0()
+            .flex()
+            .on_action(cx.listener(|this, _: &PreviousChip, window, cx| {
+                this.pane()
+                    .update(cx, |pane, cx| pane.step_chip(false, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &NextChip, window, cx| {
+                this.pane()
+                    .update(cx, |pane, cx| pane.step_chip(true, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &RemoveChip, window, cx| {
+                this.pane()
+                    .update(cx, |pane, cx| pane.remove_chip(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &OpenChip, _, cx| {
+                this.pane().update(cx, |pane, cx| pane.open_chip(cx))
+            }))
+            .on_action(cx.listener(|this, _: &LeaveChips, window, cx| {
+                this.pane()
+                    .update(cx, |pane, cx| pane.leave_chips(false, window, cx))
+            }))
+            .child(strip)
     }
 
     /// Typing on a token types after the words.

@@ -223,7 +223,7 @@ impl Pane {
             .collect();
         self.search
             .update(cx, |field, cx| field.set_highlights(marks, cx));
-        let list = search::complete(&text, caret);
+        let list = search::complete(&self.filters, &text, caret);
         self.completing = (!list.items.is_empty()).then_some(Completing {
             list,
             active: 0,
