@@ -22,9 +22,6 @@ pub struct Budget {
     /// Why the budget is where it is, when it isn't obvious.
     #[serde(default)]
     pub why: Option<String>,
-    /// The command that measures it, for what scripts/bench doesn't yet.
-    #[serde(default)]
-    pub measured_by: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
