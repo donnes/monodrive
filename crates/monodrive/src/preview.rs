@@ -5,6 +5,7 @@
 mod html;
 mod markdown;
 mod media;
+mod syntax;
 mod tools;
 mod zoom;
 
@@ -37,13 +38,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
+use syntax::{Line, Spans};
 use zoom::{Zoom, place};
 
-/// Beyond this, text stays plain: highlighting walks the whole file.
-const HIGHLIGHT_LIMIT: usize = 512 * 1024;
 /// Pixels asked for at 100%, as a picture's own size isn't known beforehand.
 const FULL_SIDE: u32 = 8192;
 /// The side a picture decodes at to fill the window: the window's longer side
@@ -76,13 +73,6 @@ impl Asset for Sharp {
             crate::thumbnails::render_image(bitmap).map(Arc::new)
         }
     }
-}
-
-/// A line of text with its colors.
-#[derive(Clone)]
-struct Line {
-    text: SharedString,
-    spans: Vec<(std::ops::Range<usize>, HighlightStyle)>,
 }
 
 enum Body {
@@ -268,11 +258,10 @@ impl PreviewView {
         self.generation += 1;
         let generation = self.generation;
         self.loading = Some((path.clone(), folder, position));
-        let light = theme::is_light();
         let side = fit_side(cx);
         let work = cx
             .background_executor()
-            .spawn(async move { read(&path, light, side) });
+            .spawn(async move { read(&path, side) });
         self._reading = Some(cx.spawn(async move |this, cx| {
             let body = work.await;
             let _ = this.update(cx, |this, cx| {
@@ -1182,7 +1171,7 @@ fn set_item(view: &Retained<QLPreviewView>, path: &Path, folder: bool) {
     unsafe { view.setPreviewItem(Some(&item)) };
 }
 
-fn read(path: &Path, light: bool, side: u32) -> Body {
+fn read(path: &Path, side: u32) -> Body {
     let notice = |why: &str| Body::Notice(why.to_string());
     match preview::classify(path) {
         Kind::NotDownloaded => Body::NotDownloaded,
@@ -1214,7 +1203,7 @@ fn read(path: &Path, light: bool, side: u32) -> Body {
         Kind::Zip => zip_rows(path),
         Kind::Text => match preview::read_text(path) {
             Ok(file) => Body::Text {
-                lines: Arc::new(highlighted(&file.text, path, light)),
+                lines: Arc::new(syntax::file(&file.text, path)),
                 cut: file.cut,
                 secrets: None,
             },
@@ -1222,7 +1211,7 @@ fn read(path: &Path, light: bool, side: u32) -> Body {
         },
         Kind::Env => match preview::read_text(path) {
             Ok(file) => Body::Text {
-                lines: Arc::new(plain_lines(&file.text)),
+                lines: Arc::new(syntax::file(&file.text, path)),
                 cut: file.cut,
                 secrets: Some(Arc::new(preview::env_values(&file.text))),
             },
@@ -1242,7 +1231,7 @@ fn read(path: &Path, light: bool, side: u32) -> Body {
                 });
                 Body::Markdown {
                     blocks: Arc::new(blocks),
-                    source: Arc::new(highlighted(&file.text, path, light)),
+                    source: Arc::new(syntax::file(&file.text, path)),
                 }
             }
             Err(why) => Body::Notice(why),
@@ -1273,66 +1262,16 @@ fn zip_rows(path: &Path) -> Body {
     }
 }
 
-fn plain_lines(text: &str) -> Vec<Line> {
-    text.lines()
-        .map(|line| Line {
-            text: SharedString::from(line.to_string()),
-            spans: Vec::new(),
-        })
-        .collect()
-}
-
-/// The text with colors, when it's small enough and its syntax is known.
-fn highlighted(text: &str, path: &Path, light: bool) -> Vec<Line> {
-    if text.len() > HIGHLIGHT_LIMIT {
-        return plain_lines(text);
-    }
-    static SYNTAXES: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
-    static THEMES: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
-    let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
-    let themes = THEMES.get_or_init(ThemeSet::load_defaults);
-    let extension = path
-        .extension()
-        .map(|ext| ext.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let Some(syntax) = syntaxes.find_syntax_by_extension(&extension) else {
-        return plain_lines(text);
-    };
-    let theme = &themes.themes[if light {
-        "InspiredGitHub"
-    } else {
-        "base16-ocean.dark"
-    }];
-    let mut lines = HighlightLines::new(syntax, theme);
-    syntect::util::LinesWithEndings::from(text)
-        .map(|line| {
-            let mut spans = Vec::new();
-            let mut at = 0;
-            let stripped = line.trim_end_matches(['\n', '\r']);
-            for (style, piece) in lines.highlight_line(line, syntaxes).unwrap_or_default() {
-                let end = (at + piece.len()).min(stripped.len());
-                if at < end {
-                    // design: a syntax theme's colors, not the app's.
-                    let color = gpui::Rgba {
-                        r: f32::from(style.foreground.r) / 255.,
-                        g: f32::from(style.foreground.g) / 255.,
-                        b: f32::from(style.foreground.b) / 255.,
-                        a: 1.,
-                    };
-                    spans.push((
-                        at..end,
-                        HighlightStyle {
-                            color: Some(color.into()),
-                            ..Default::default()
-                        },
-                    ));
-                }
-                at += piece.len();
-            }
-            Line {
-                text: SharedString::from(stripped.to_string()),
-                spans,
-            }
+/// What `spans` say each piece of code is, in the palette's colors.
+fn colors(spans: &Spans) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    spans
+        .iter()
+        .map(|(range, kind)| {
+            let style = HighlightStyle {
+                color: Some(theme::syntax(*kind)),
+                ..Default::default()
+            };
+            (range.clone(), style)
         })
         .collect()
 }
@@ -1355,7 +1294,7 @@ fn text_rows(
                         .child(blurred())
                         .into_any_element(),
                     None => StyledText::new(line.text.clone())
-                        .with_highlights(line.spans.clone())
+                        .with_highlights(colors(&line.spans))
                         .into_any_element(),
                 };
                 div()
@@ -1512,14 +1451,14 @@ fn block(ix: usize, block: &Block) -> gpui::AnyElement {
             )
             .child(div().min_w_0().child(inline_text(id, inline)))
             .into_any_element(),
-        Block::Code(text) => div()
+        Block::Code(text, spans) => div()
             .mb_2()
             .p_2()
             .rounded(px(theme::RADIUS_ROW))
             .bg(content(0.06))
             .font_family(theme::MONO_FONT)
             .text_size(px(theme::TEXT_SMALL))
-            .child(text.clone())
+            .child(StyledText::new(text.clone()).with_highlights(colors(spans)))
             .into_any_element(),
         Block::Image(path) => div()
             .pb_2()
@@ -1707,24 +1646,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn colors_cover_the_line_without_its_newline() {
-        let lines = highlighted("fn a() {}\nlet b = 1;\n", Path::new("a.rs"), false);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text.as_ref(), "fn a() {}");
-        assert!(lines[0].spans.len() > 1, "a known syntax gets colors");
-        assert_eq!(lines[0].spans.last().unwrap().0.end, "fn a() {}".len());
-        // An unknown syntax stays plain.
-        let plain = highlighted("hello", Path::new("a.unknownext"), false);
-        assert!(plain[0].spans.is_empty());
-    }
-
-    #[test]
     fn a_picture_that_cant_be_decoded_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let broken = dir.path().join("broken.png");
         std::fs::write(&broken, b"not a picture").unwrap();
         assert!(matches!(
-            read(&broken, false, 256),
+            read(&broken, 256),
             Body::Notice(why) if why == "This picture can't be shown."
         ));
     }
