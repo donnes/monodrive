@@ -260,12 +260,16 @@ pub fn raised() -> Hsla {
     if is_light() { knob() } else { content(0.2) }
 }
 
-/// The keyboard focus ring: the accent, just outside the control's shape.
-/// Blurs the edges of a fill into a smudge, where text is hidden.
-pub fn smudge() -> Vec<BoxShadow> {
-    vec![BoxShadow::new(px(0.), px(0.), content(0.3)).blur_radius(px(5.))]
+/// A letter blurred past reading: a soft blob of text ink.
+pub fn blurred_letter() -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(0.), content(1.))
+            .spread_radius(px(2.5))
+            .blur_radius(px(4.)),
+    ]
 }
 
+/// The keyboard focus ring: the accent, just outside the control's shape.
 pub fn focus_ring() -> Vec<BoxShadow> {
     vec![BoxShadow::new(px(0.), px(0.), accent().opacity(0.8)).spread_radius(px(2.5))]
 }

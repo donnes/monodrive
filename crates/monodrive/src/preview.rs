@@ -1352,7 +1352,7 @@ fn text_rows(
                     Some(secret) => div()
                         .flex()
                         .child(line.text[..secret.start].to_string())
-                        .child(blurred(line.text[secret].chars().count()))
+                        .child(blurred())
                         .into_any_element(),
                     None => StyledText::new(line.text.clone())
                         .with_highlights(line.spans.clone())
@@ -1381,26 +1381,31 @@ fn text_rows(
     .into_any_element()
 }
 
-/// A smudge the width of `chars` characters, standing in for text that's
-/// never drawn.
-fn blurred(chars: usize) -> impl IntoElement {
+/// Blurred letters where a value would be. Values are never drawn, and they
+/// all blur to this one length, so the blur gives nothing away.
+fn blurred() -> impl IntoElement {
+    const STAND_IN: &str = "sk_live9fQe2wLm-4xTrgB.vKa";
     div()
         .debug_selector(|| "preview-secret".into())
-        .relative()
-        .child(
+        .h_full()
+        .flex()
+        .items_end()
+        .pb(px(10.5))
+        .children(STAND_IN.chars().map(|letter| {
+            let (height, lift) = match letter {
+                'A'..='Z' | '0'..='9' | 'b' | 'd' | 'f' | 'h' | 'k' | 'l' | 't' => (4., 0.),
+                'g' | 'j' | 'p' | 'q' | 'y' => (4., -3.),
+                'a'..='z' => (1., 0.),
+                _ => (0., 0.),
+            };
             div()
-                .text_color(gpui::transparent_black())
-                .child("x".repeat(chars)),
-        )
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .my(px(5.))
-                .rounded_full()
-                .bg(content(0.2))
-                .shadow(theme::smudge()),
-        )
+                .flex_shrink_0()
+                .w_0()
+                .mx(px(4.))
+                .mb(px(lift))
+                .h(px(height))
+                .when(height > 0., |d| d.shadow(theme::blurred_letter()))
+        }))
 }
 
 fn inline_text(id: (&'static str, usize), inline: &Inline) -> gpui::AnyElement {
