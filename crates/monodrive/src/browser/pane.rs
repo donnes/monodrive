@@ -46,11 +46,11 @@ use crate::thumbnails::{self, Thumb};
 use crate::workspace;
 use chrono::{DateTime, Local};
 use gpui::{
-    App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollHandle,
-    ScrollStrategy, ScrollWheelEvent, Subscription, Task, TextOverflow, UniformListScrollHandle,
-    Window, canvas, div, point, prelude::*, px, uniform_list,
+    AnyWindowHandle, App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
+    ScrollHandle, ScrollStrategy, ScrollWheelEvent, Subscription, Task, TextOverflow,
+    UniformListScrollHandle, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
@@ -784,6 +784,15 @@ impl Pane {
     /// Leaves search, if any, and lists the current folder.
     pub(super) fn show_folder(&mut self, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::Moved);
+        // A path typed for the folder being left would lead back to it.
+        if let Some(address) = self.address.take() {
+            let list = self.list_focus.clone();
+            cx.defer(move |cx| {
+                let _ = address
+                    .window
+                    .update(cx, |_, window, cx| window.focus(&list, cx));
+            });
+        }
         self.query.clear();
         self.filters = Query::default();
         (self.chip, self.chip_menu) = (None, None);
@@ -2885,6 +2894,7 @@ impl Pane {
         window.focus(&focus, cx);
         self.address = Some(Address {
             view,
+            window: window.window_handle(),
             _closes: [went, blur],
         });
         cx.notify();
@@ -3654,6 +3664,8 @@ pub(super) fn rename_reason(why: &str, path: &Path) -> String {
 /// A name being edited in place.
 pub(super) struct Address {
     pub(super) view: Entity<GotoView>,
+    /// Where the list takes the keys back when the pane goes elsewhere.
+    window: AnyWindowHandle,
     /// Going, Esc and clicking away close it.
     _closes: [Subscription; 2],
 }

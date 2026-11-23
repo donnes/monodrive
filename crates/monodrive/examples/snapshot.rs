@@ -522,7 +522,8 @@ fn shoot(out: &Path, folder: &Path, made_up: &Path, theme: Theme) -> gpui::Resul
     cx.run_until_parked();
     dispatch(&mut cx, window, &EditPath)?;
     save(&mut cx, window, out, "address")?;
-    type_text(&mut cx, window, &format!("{}/", folder.display()))?;
+    let typed = monodrive_core::paths::abbreviate(folder);
+    type_text(&mut cx, window, &format!("{typed}/"))?;
     save(&mut cx, window, out, "address-completions")?;
     type_text(&mut cx, window, "nowhere/at/all")?;
     dispatch(&mut cx, window, &*go)?;

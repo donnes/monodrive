@@ -1328,8 +1328,13 @@ impl Browser {
     fn remember_focus(&mut self, window: &Window, cx: &App) {
         if !self.sheet_open() {
             // Clicking the gear focuses the window's root first; that isn't
-            // somewhere to come back to.
-            self.focus_before_sheet = window.focused(cx).filter(|f| *f != self.focus);
+            // somewhere to come back to. Neither is the path being typed,
+            // which closes as the sheet takes the keys.
+            let address = self.pane().read(cx).address.as_ref();
+            let address = address.map(|address| address.view.focus_handle(cx));
+            self.focus_before_sheet = window
+                .focused(cx)
+                .filter(|f| *f != self.focus && Some(f) != address.as_ref());
         }
     }
 

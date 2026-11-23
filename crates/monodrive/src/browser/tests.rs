@@ -1621,6 +1621,25 @@ fn a_path_that_isnt_there_says_so_and_stays(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn going_elsewhere_while_typing_a_path_hands_the_keys_to_the_list(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-l cmd-up");
+    assert!(in_pane(&browser, cx, |pane, _| pane.address.is_none()));
+    assert!(keys_on_the_list(&browser, cx));
+}
+
+#[gpui::test]
+fn a_sheet_opened_while_typing_a_path_hands_the_keys_to_the_list_on_closing(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, project) = folder();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "cmd-l cmd-k escape");
+    assert!(keys_on_the_list(&browser, cx));
+}
+
+#[gpui::test]
 fn esc_hands_the_keys_back_to_the_list_and_a_hidden_path_bar_hides_again(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let (browser, cx) = browse(&project, cx);
