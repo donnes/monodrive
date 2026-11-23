@@ -19,3 +19,7 @@ Receiving needs a process that lives as long as the person wants: the ops owner 
 ## macOS
 
 Local Network access belongs to the app that's responsible for the process. For `monodrive mcp` that's whatever started the agent, which may refuse it, so failures that look like it say where to turn it on. The core's server listens on every address, which a Mac's firewall asks about, so tests drive the receiving side through the server's events instead of a socket.
+
+## Other apps' share menus
+
+Send with LocalSend in other apps' share menus is a share extension, `crates/monodrive/share-extension`, that `scripts/bundle` builds with `swiftc` into `Contents/PlugIns` and signs before the app. It can't send itself: macOS runs extensions sandboxed, so it couldn't reach this Mac's identity and would be a second device to peers. It opens its own app with `monodrive://localsend?path=…` instead, and `finder.rs` opens the LocalSend page holding those files, so nothing leaves until a person clicks a device there. macOS opens a URL for a sandboxed caller only in an app that claims its scheme, so the app declares `monodrive`, and any app can open that URL; it only ever holds files on the page. The extension can't read Settings, so it shows while Use LocalSend is off; the page then says LocalSend is off and keeps the files for when it's turned on. It takes files and folders, not text or pictures shared as data. macOS lists it under Extensions › Sharing, where a person may need to switch it on.
