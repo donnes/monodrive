@@ -45,7 +45,12 @@ actions!(
         PreviousCompletion,
         NextCompletion,
         AcceptCompletion,
-        DismissCompletions
+        DismissCompletions,
+        PreviousChip,
+        NextChip,
+        RemoveChip,
+        OpenChip,
+        LeaveChips
     ]
 );
 
@@ -170,7 +175,8 @@ pub(super) struct Completing {
 }
 
 impl Pane {
-    /// Mutes the filters' keys and underlines a bad one, and offers values
+    /// Moves a filter typed and finished out of the text into a token, or
+    /// else mutes the filters' keys, underlines a bad one and offers values
     /// for the filter at the caret. A bad token the caret ends is still being
     /// typed.
     pub(super) fn follow_typing(&mut self, cx: &mut Context<Self>) {
@@ -178,6 +184,16 @@ impl Pane {
             let field = self.search.read(cx);
             (field.text().to_string(), field.cursor())
         };
+        if let Some(lifted) = search::lift(&self.filters, &text, caret) {
+            self.filters = lifted.filters;
+            (self.chip, self.chip_menu, self.completing) = (None, None, None);
+            self.chips_scroll
+                .scroll_to_item(self.filters.terms.len().saturating_sub(1));
+            let at = lifted.caret;
+            self.search
+                .update(cx, |field, cx| field.set_text(&lifted.text, at..at, cx));
+            return;
+        }
         let marks = search::tokens(&text)
             .into_iter()
             .filter_map(|token| {
@@ -267,6 +283,38 @@ impl Pane {
         window.focus(&self.search.focus_handle(cx), cx);
     }
 
+    /// The search as text: the tokens', then the words typed.
+    fn composed(&self, cx: &App) -> String {
+        let words = self.search.read(cx).text().trim();
+        match (self.filters.terms.is_empty(), words.is_empty()) {
+            (true, _) => words.to_string(),
+            (false, true) => self.filters.to_string(),
+            (false, false) => format!("{} {words}", self.filters),
+        }
+    }
+
+    /// Runs the search again if the tokens or the words changed it.
+    pub(super) fn sync_query(&mut self, cx: &mut Context<Self>) {
+        let query = self.composed(cx);
+        if query != self.query {
+            self.query = query;
+            self.reload(cx);
+        }
+        self.update_prompt(cx);
+    }
+
+    /// Shows `text` as tokens and words, without running it.
+    pub(super) fn show_query(&mut self, text: &str, cx: &mut Context<Self>) {
+        let (filters, words) = search::split(text);
+        self.filters = filters;
+        (self.chip, self.chip_menu) = (None, None);
+        let end = words.len();
+        self.search
+            .update(cx, |field, cx| field.set_text(&words, end..end, cx));
+        self.query = self.composed(cx);
+        self.update_prompt(cx);
+    }
+
     /// What's on screen as a search, whether or not anything's typed.
     pub(super) fn current_search(&self) -> Search {
         Search {
@@ -289,7 +337,13 @@ impl Pane {
     pub(super) fn set_search_mode(&mut self, looks: Looks, scope: Where, cx: &mut Context<Self>) {
         self.looks = looks;
         self.search_scope = scope;
+        self.update_prompt(cx);
+    }
+
+    /// Next to tokens the prompt would read as one more.
+    fn update_prompt(&mut self, cx: &mut Context<Self>) {
         let prompt = match (&self.looks, &self.search_scope) {
+            _ if !self.filters.terms.is_empty() => String::new(),
             (Looks::Names, Where::Everywhere) => "Search".to_string(),
             (Looks::Contents, Where::Everywhere) => "Search contents".to_string(),
             (Looks::Names, Where::Folder(folder)) => format!("Search {}", folder_name(folder)),
@@ -346,10 +400,7 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         self.set_search_mode(search.looks, search.scope, cx);
-        self.query = search.text.trim().to_string();
-        let (query, end) = (self.query.clone(), self.query.len());
-        self.search
-            .update(cx, |field, cx| field.set_text(&query, end..end, cx));
+        self.show_query(search.text.trim(), cx);
         self.reload(cx);
         self.focus_search(window, cx);
     }

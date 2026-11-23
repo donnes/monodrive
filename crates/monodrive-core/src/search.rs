@@ -14,7 +14,8 @@ use std::path::PathBuf;
 
 mod typing;
 pub use typing::{
-    Completion, Completions, Filter, Token, TokenKind, complete, start_filter, tokens,
+    Completion, Completions, Filter, Lifted, Token, TokenKind, complete, lift, split, start_filter,
+    toggle_kind, tokens,
 };
 
 /// A parsed search: its words and filters in the order typed.

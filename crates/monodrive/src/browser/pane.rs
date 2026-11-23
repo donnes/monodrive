@@ -47,9 +47,9 @@ use chrono::{DateTime, Local};
 use gpui::{
     App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollStrategy,
-    ScrollWheelEvent, Subscription, Task, TextOverflow, UniformListScrollHandle, Window, canvas,
-    div, point, prelude::*, px, uniform_list,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollHandle,
+    ScrollStrategy, ScrollWheelEvent, Subscription, Task, TextOverflow, UniformListScrollHandle,
+    Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
@@ -57,7 +57,7 @@ use monodrive_core::index::Index;
 use monodrive_core::info;
 use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
 use monodrive_core::places::{self, Availability, Favorite};
-use monodrive_core::search::{Looks, Scope as SearchScope};
+use monodrive_core::search::{Looks, Query, Scope as SearchScope};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -270,8 +270,17 @@ pub struct Pane {
     pub(super) keep_selection: bool,
     /// What a change made, to select once the listing that has it lands.
     select_after: Vec<PathBuf>,
-    /// The trimmed search text; empty while showing the folder.
+    /// The search as text, the tokens' then the words typed; empty while
+    /// showing the folder.
     pub(super) query: String,
+    /// The finished filters, shown as tokens before the words in the field.
+    pub(super) filters: Query,
+    /// The token the keys are on, and the row of its menu while that's open.
+    pub(super) chip: Option<usize>,
+    pub(super) chip_menu: Option<usize>,
+    /// Where the keys go while they're on a token.
+    pub(super) chips_focus: FocusHandle,
+    pub(super) chips_scroll: ScrollHandle,
     /// What a search looks at. Leaving a search goes back to names.
     pub(super) looks: Looks,
     /// Where a search looks. Leaving a search goes back to everywhere.
@@ -351,13 +360,9 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| TextField::new("Search", "Search", cx));
-        cx.subscribe(&search, |this, search, _: &text_field::Changed, cx| {
-            let query = search.read(cx).text().trim().to_string();
-            if query != this.query {
-                this.query = query;
-                this.reload(cx);
-            }
+        cx.subscribe(&search, |this, _, _: &text_field::Changed, cx| {
             this.follow_typing(cx);
+            this.sync_query(cx);
         })
         .detach();
         // Cleanup otherwise runs while drawing, and a closed tab, pane or window
@@ -423,6 +428,11 @@ impl Pane {
             keep_selection: false,
             select_after: Vec::new(),
             query: String::new(),
+            filters: Query::default(),
+            chip: None,
+            chip_menu: None,
+            chips_focus: cx.focus_handle(),
+            chips_scroll: ScrollHandle::new(),
             looks: Looks::default(),
             search_scope: SearchScope::default(),
             matches: Matches::default(),
@@ -738,11 +748,8 @@ impl Pane {
         self.expanded = to.expanded;
         self.selection = to.selection;
         self.keep_selection = true;
-        self.query = to.query;
         self.set_search_mode(to.looks, to.search_scope, cx);
-        let (query, end) = (self.query.clone(), self.query.len());
-        self.search
-            .update(cx, |field, cx| field.set_text(&query, end..end, cx));
+        self.show_query(&to.query, cx);
         cx.emit(PaneEvent::Moved);
         self.reload(cx);
     }
@@ -774,6 +781,8 @@ impl Pane {
     pub(super) fn show_folder(&mut self, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::Moved);
         self.query.clear();
+        self.filters = Query::default();
+        (self.chip, self.chip_menu) = (None, None);
         self.search.update(cx, |field, cx| field.clear(cx));
         self.reset_search_mode(cx);
         self.reload(cx);

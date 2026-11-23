@@ -216,6 +216,11 @@ impl TextField {
         self.select_to(self.content.len(), cx);
     }
 
+    /// Whether the caret is at the very start, with nothing selected.
+    pub fn at_start(&self) -> bool {
+        self.selection == (0..0)
+    }
+
     /// Where the caret is, in bytes.
     pub fn cursor(&self) -> usize {
         if self.reversed {

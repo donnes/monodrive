@@ -15,6 +15,7 @@ mod organize;
 mod overview;
 mod pane;
 pub(crate) mod remote;
+mod search_tokens;
 mod searches;
 mod sidebar;
 mod tabs;
@@ -79,8 +80,8 @@ use monodrive_core::ops::{self, Done, Job, Origin, Request};
 use monodrive_core::places::Favorite;
 use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
 use searches::{
-    AcceptCompletion, DismissCompletions, NextCompletion, PreviousCompletion, SearchMenu,
-    SearchMenuEvent,
+    AcceptCompletion, DismissCompletions, LeaveChips, NextChip, NextCompletion, OpenChip,
+    PreviousChip, PreviousCompletion, RemoveChip, SearchMenu, SearchMenuEvent,
 };
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -312,6 +313,20 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("tab", AcceptCompletion, Some("Completing")),
         KeyBinding::new("enter", AcceptCompletion, Some("Completing")),
         KeyBinding::new("escape", DismissCompletions, Some("Completing")),
+        // On a token, the keys move between them, open its menu or remove it.
+        KeyBinding::new("left", PreviousChip, Some("Chips")),
+        KeyBinding::new("right", NextChip, Some("Chips")),
+        KeyBinding::new("backspace", RemoveChip, Some("Chips")),
+        KeyBinding::new("delete", RemoveChip, Some("Chips")),
+        KeyBinding::new("enter", OpenChip, Some("Chips")),
+        KeyBinding::new("space", OpenChip, Some("Chips")),
+        KeyBinding::new("down", OpenChip, Some("Chips")),
+        KeyBinding::new("escape", LeaveChips, Some("Chips")),
+        KeyBinding::new("up", PreviousCompletion, Some("ChipMenu")),
+        KeyBinding::new("down", NextCompletion, Some("ChipMenu")),
+        KeyBinding::new("enter", AcceptCompletion, Some("ChipMenu")),
+        KeyBinding::new("space", AcceptCompletion, Some("ChipMenu")),
+        KeyBinding::new("escape", DismissCompletions, Some("ChipMenu")),
         KeyBinding::new("enter", CommitRename, Some("Rename")),
         KeyBinding::new("escape", CancelRename, Some("Rename")),
         // The list's arrows would move the selection out from under the

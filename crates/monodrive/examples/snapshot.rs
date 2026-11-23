@@ -57,7 +57,9 @@
 //! `search-menu.png` the search field's menu over it, with made-up saved and
 //! recent searches, and `search-save.png` that menu naming a new one.
 //! `search-filter.png` is the field offering kinds for the filter being
-//! typed, and `search-typo.png` a bad filter marked where it sits.
+//! typed after a finished one became a token, `search-typo.png` a bad filter
+//! marked where it sits beside two tokens, and `search-token-menu.png` the
+//! menu of the token the keys are on.
 //!
 //! `batch-rename.png` is rename in the list with several selected, replacing
 //! text, `batch-rename-number.png` numbering them, `batch-rename-problem.png`
@@ -1764,6 +1766,16 @@ fn shoot_search(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> g
     save(cx, window, out, "search-filter")?;
     type_text(cx, window, "document size:big ")?;
     save(cx, window, out, "search-typo")?;
+    // Onto the last token, and its menu.
+    for name in [
+        "text_field::Home",
+        "text_field::Backspace",
+        "search_field::OpenChip",
+    ] {
+        let action = named(cx, name)?;
+        dispatch(cx, window, &*action)?;
+    }
+    save(cx, window, out, "search-token-menu")?;
     Ok(())
 }
 

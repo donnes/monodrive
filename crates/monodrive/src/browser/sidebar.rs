@@ -26,7 +26,7 @@ use crate::preferences::{
 };
 use crate::session::RemoteAt;
 use crate::session::Shows;
-use crate::text_field::TextField;
+use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, accent, content, icon, icon_button, row_icon_button};
 use crate::traffic_lights;
 use gpui::{
@@ -53,6 +53,8 @@ use std::time::Instant;
 
 /// The sky behind a nightly's sidebar, as drawn in its SVG.
 const NIGHT_SKY_HEIGHT: f32 = 150.;
+/// The least the words keep beside the search field's tokens.
+const TYPING_ROOM: f32 = 56.;
 
 /// What the system does for the sidebar. Views reach it through `Places`, so
 /// their tests list a made-up set of volumes and never mount or eject
@@ -2001,12 +2003,13 @@ impl Browser {
             pane.search_mode_is_plain(),
             !pane.query.is_empty(),
         );
-        let focused = search.focus_handle(cx).is_focused(window);
+        let typing = search.focus_handle(cx).is_focused(window);
+        let focused = typing || pane.chips_focus.is_focused(window);
         let caret = search.read(cx).cursor();
         let completing = pane
             .completing
             .as_ref()
-            .filter(|completing| focused && completing.at == caret)
+            .filter(|completing| typing && completing.at == caret)
             .map(|completing| (completing.list.items.clone(), completing.active));
         theme::field(if focused { accent() } else { content(0.12) })
             .debug_selector(|| "search-field".into())
@@ -2031,10 +2034,28 @@ impl Browser {
                 .debug_selector(|| "search-menu-button".into())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_searches(window, cx))),
             )
+            .children(self.search_chips(window, cx))
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(TYPING_ROOM))
+                    // ← or ⌫ at the start of the words steps onto the tokens.
+                    .capture_action(cx.listener(|this, _: &text_field::Left, window, cx| {
+                        if this
+                            .pane()
+                            .update(cx, |pane, cx| pane.back_into_chips(window, cx))
+                        {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &text_field::Backspace, window, cx| {
+                        if this
+                            .pane()
+                            .update(cx, |pane, cx| pane.back_into_chips(window, cx))
+                        {
+                            cx.stop_propagation();
+                        }
+                    }))
                     .when(completing.is_some(), |d| {
                         d.key_context("Completing")
                             .on_action(cx.listener(|this, _: &PreviousCompletion, _, cx| {
