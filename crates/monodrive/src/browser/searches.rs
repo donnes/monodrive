@@ -19,13 +19,13 @@ use crate::theme::{self, accent, content, danger, icon, on_accent, row_icon_butt
 use gpui::{
     Action, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Role,
-    ScrollHandle, SharedString, Stateful, StyledText, Task, Window, canvas, div, point, prelude::*,
-    px,
+    ScrollHandle, SharedString, Stateful, StyledText, Task, UnderlineStyle, Window, actions,
+    canvas, div, point, prelude::*, px,
 };
 use monodrive_core::index::{Found, Hit, LineMatch};
 use monodrive_core::paths;
 use monodrive_core::places::{RecentSearch, SavedSearch, Store};
-use monodrive_core::search::{Looks, Scope as Where, Search};
+use monodrive_core::search::{self, Completions, Filter, Looks, Scope as Where, Search, TokenKind};
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::Path;
@@ -39,7 +39,23 @@ pub(super) const CONTENT_SETTLE: Duration = Duration::from_millis(120);
 /// run, rather than a step on the way to typing one.
 pub(super) const REMEMBER_AFTER: Duration = Duration::from_secs(2);
 
+actions!(
+    search_field,
+    [
+        PreviousCompletion,
+        NextCompletion,
+        AcceptCompletion,
+        DismissCompletions,
+        PreviousChip,
+        NextChip,
+        RemoveChip,
+        OpenChip,
+        LeaveChips
+    ]
+);
+
 const MENU_WIDTH: f32 = 360.;
+pub(super) const COMPLETIONS_WIDTH: f32 = 280.;
 const MENU_MARGIN: f32 = 8.;
 /// The column of line numbers, under the file's icon and into its name.
 const LINE_NUMBERS: f32 = 40.;
@@ -150,7 +166,155 @@ impl Matches {
     }
 }
 
+/// Values that could finish the filter being typed, and the one under the keys.
+pub(super) struct Completing {
+    pub(super) list: Completions,
+    pub(super) active: usize,
+    /// The caret they're for: moved elsewhere, they don't show.
+    pub(super) at: usize,
+}
+
 impl Pane {
+    /// Moves a filter typed and finished out of the text into a token, or
+    /// else mutes the filters' keys, underlines a bad one and offers values
+    /// for the filter at the caret. A bad token the caret ends is still being
+    /// typed.
+    pub(super) fn follow_typing(&mut self, cx: &mut Context<Self>) {
+        let (text, caret) = {
+            let field = self.search.read(cx);
+            (field.text().to_string(), field.cursor())
+        };
+        if let Some(lifted) = search::lift(&self.filters, &text, caret) {
+            self.filters = lifted.filters;
+            (self.chip, self.chip_menu, self.completing) = (None, None, None);
+            self.chips_scroll
+                .scroll_to_item(self.filters.terms.len().saturating_sub(1));
+            let at = lifted.caret;
+            self.search
+                .update(cx, |field, cx| field.set_text(&lifted.text, at..at, cx));
+            return;
+        }
+        let marks = search::tokens(&text)
+            .into_iter()
+            .filter_map(|token| {
+                let style = match token.kind {
+                    TokenKind::Filter { key } => {
+                        let key = token.range.start..token.range.start + key;
+                        return Some((
+                            key,
+                            HighlightStyle {
+                                color: Some(content(0.65)),
+                                ..HighlightStyle::default()
+                            },
+                        ));
+                    }
+                    TokenKind::Invalid(_) if token.range.end != caret => HighlightStyle {
+                        underline: Some(UnderlineStyle {
+                            color: Some(danger()),
+                            thickness: px(1.),
+                            wavy: true,
+                        }),
+                        ..HighlightStyle::default()
+                    },
+                    _ => return None,
+                };
+                Some((token.range, style))
+            })
+            .collect();
+        self.search
+            .update(cx, |field, cx| field.set_highlights(marks, cx));
+        let list = search::complete(&self.filters, &text, caret);
+        self.completing = (!list.items.is_empty()).then_some(Completing {
+            list,
+            active: 0,
+            at: caret,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn step_completion(&mut self, down: bool, cx: &mut Context<Self>) {
+        if let Some(completing) = &mut self.completing {
+            let len = completing.list.items.len();
+            completing.active = if down {
+                (completing.active + 1) % len
+            } else {
+                (completing.active + len - 1) % len
+            };
+            cx.notify();
+        }
+    }
+
+    /// Puts value `ix`, or the one under the keys, in place of what's typed.
+    pub(super) fn accept_completion(
+        &mut self,
+        ix: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(completing) = self.completing.take() else {
+            return;
+        };
+        let text = self.search.read(cx).text().to_string();
+        if let Some((text, caret)) = completing
+            .list
+            .accept(&text, ix.unwrap_or(completing.active))
+        {
+            self.search
+                .update(cx, |field, cx| field.set_text(&text, caret..caret, cx));
+        }
+        window.focus(&self.search.focus_handle(cx), cx);
+    }
+
+    pub(super) fn dismiss_completions(&mut self, cx: &mut Context<Self>) {
+        self.completing = None;
+        cx.notify();
+    }
+
+    /// A filter from the field's menu: its key typed, for a value to be picked.
+    pub(super) fn start_filter(
+        &mut self,
+        filter: Filter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, caret) = search::start_filter(self.search.read(cx).text(), filter);
+        self.search
+            .update(cx, |field, cx| field.set_text(&text, caret..caret, cx));
+        window.focus(&self.search.focus_handle(cx), cx);
+    }
+
+    /// The search as text: the tokens', then the words typed.
+    fn composed(&self, cx: &App) -> String {
+        let words = self.search.read(cx).text().trim();
+        match (self.filters.terms.is_empty(), words.is_empty()) {
+            (true, _) => words.to_string(),
+            (false, true) => self.filters.to_string(),
+            (false, false) => format!("{} {words}", self.filters),
+        }
+    }
+
+    /// Runs the search again if the tokens or the words changed it.
+    pub(super) fn sync_query(&mut self, cx: &mut Context<Self>) {
+        let query = self.composed(cx);
+        if query != self.query {
+            self.query = query;
+            self.reload(cx);
+        }
+        self.update_prompt(cx);
+    }
+
+    /// Shows `text` as tokens and words, without running it.
+    pub(super) fn show_query(&mut self, text: &str, cx: &mut Context<Self>) {
+        let (filters, words) = search::split(text);
+        self.filters = filters;
+        (self.chip, self.chip_menu) = (None, None);
+        let end = words.len();
+        self.search
+            .update(cx, |field, cx| field.set_text(&words, end..end, cx));
+        self.query = self.composed(cx);
+        self.update_prompt(cx);
+    }
+
     /// What's on screen as a search, whether or not anything's typed.
     pub(super) fn current_search(&self) -> Search {
         Search {
@@ -173,7 +337,13 @@ impl Pane {
     pub(super) fn set_search_mode(&mut self, looks: Looks, scope: Where, cx: &mut Context<Self>) {
         self.looks = looks;
         self.search_scope = scope;
+        self.update_prompt(cx);
+    }
+
+    /// Next to tokens the prompt would read as one more.
+    fn update_prompt(&mut self, cx: &mut Context<Self>) {
         let prompt = match (&self.looks, &self.search_scope) {
+            _ if !self.filters.terms.is_empty() => String::new(),
             (Looks::Names, Where::Everywhere) => "Search".to_string(),
             (Looks::Contents, Where::Everywhere) => "Search contents".to_string(),
             (Looks::Names, Where::Folder(folder)) => format!("Search {}", folder_name(folder)),
@@ -230,10 +400,7 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         self.set_search_mode(search.looks, search.scope, cx);
-        self.query = search.text.trim().to_string();
-        let (query, end) = (self.query.clone(), self.query.len());
-        self.search
-            .update(cx, |field, cx| field.set_text(&query, end..end, cx));
+        self.show_query(search.text.trim(), cx);
         self.reload(cx);
         self.focus_search(window, cx);
     }
@@ -390,6 +557,7 @@ pub(super) enum SearchMenuEvent {
     Dismissed,
     ToggleContents,
     ToggleThisFolder,
+    StartFilter(Filter),
     Run(Search),
 }
 
@@ -398,6 +566,7 @@ pub(super) enum SearchMenuEvent {
 enum Item {
     Looks(Looks),
     ThisFolder,
+    Filter(Filter),
     Saved(usize),
     Save,
     Recent(usize),
@@ -554,6 +723,7 @@ impl SearchMenu {
             Item::Looks(Looks::Contents),
             Item::ThisFolder,
         ];
+        items.extend(Filter::ALL.map(Item::Filter));
         if self.store.is_some() {
             items.extend((0..self.kept.saved.len()).map(Item::Saved));
             if self.can_save() {
@@ -595,6 +765,7 @@ impl SearchMenu {
             }
             Item::Looks(_) => cx.emit(SearchMenuEvent::ToggleContents),
             Item::ThisFolder => cx.emit(SearchMenuEvent::ToggleThisFolder),
+            Item::Filter(filter) => cx.emit(SearchMenuEvent::StartFilter(filter)),
             Item::Saved(ix) => {
                 if let Some(saved) = self.kept.saved.get(ix) {
                     let search = Search::from_stored(&saved.query, saved.scope.clone());
@@ -874,13 +1045,13 @@ impl SearchMenu {
 
     fn command_row(
         &self,
-        id: &'static str,
+        (id, ix): (&'static str, usize),
         title: &'static str,
         item: Item,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let on = self.active == Some(item);
-        self.slot(id, 0, item, cx).child(
+        self.slot(id, ix, item, cx).child(
             theme::row(on)
                 .child(theme::lead(None::<Div>))
                 .child(div().flex_1().truncate().child(title)),
@@ -975,6 +1146,15 @@ impl Render for SearchMenu {
             )
             .into_any_element(),
         ));
+        rows.push((None, theme::section_label("Filter").into_any_element()));
+        for (ix, filter) in Filter::ALL.into_iter().enumerate() {
+            let item = Item::Filter(filter);
+            rows.push((
+                Some(item),
+                self.command_row(("search-filter", ix), filter.title(), item, cx)
+                    .into_any_element(),
+            ));
+        }
         if self.store.is_some() {
             let renaming = self.naming.as_ref().and_then(|n| n.renaming.clone());
             if !self.kept.saved.is_empty() || self.can_save() || self.naming.is_some() {
@@ -995,7 +1175,7 @@ impl Render for SearchMenu {
                 }
                 _ if self.can_save() => rows.push((
                     Some(Item::Save),
-                    self.command_row("save-search", "Save Search…", Item::Save, cx)
+                    self.command_row(("save-search", 0), "Save Search…", Item::Save, cx)
                         .into_any_element(),
                 )),
                 _ => {}
@@ -1011,7 +1191,7 @@ impl Render for SearchMenu {
                 rows.push((
                     Some(Item::ClearRecents),
                     self.command_row(
-                        "clear-recent-searches",
+                        ("clear-recent-searches", 0),
                         "Clear Recent Searches",
                         Item::ClearRecents,
                         cx,

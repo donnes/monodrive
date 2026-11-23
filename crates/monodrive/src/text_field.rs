@@ -7,10 +7,10 @@ use crate::theme::content;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, InspectorElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, Role, ScrollWheelEvent, ShapedLine, SharedString, Style,
-    TextAlign, TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions,
-    div, fill, point, prelude::*, px, relative, size,
+    GlobalElementId, HighlightStyle, InspectorElementId, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, Role, ScrollWheelEvent, ShapedLine,
+    SharedString, Style, TextAlign, TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -106,6 +106,9 @@ pub struct TextField {
     /// Scrolling follows the caret only when the caret moved, so the wheel can
     /// look away from it.
     drawn_cursor: usize,
+    /// Styled spans of the text, in order and apart. Any edit drops them,
+    /// since their offsets were for the text before it.
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
 }
 
 impl EventEmitter<Changed> for TextField {}
@@ -139,6 +142,7 @@ impl TextField {
             lines: Vec::new(),
             scroll_y: px(0.),
             drawn_cursor: 0,
+            highlights: Vec::new(),
         }
     }
 
@@ -158,6 +162,16 @@ impl TextField {
         &self.content
     }
 
+    /// Styles spans of the text until it next changes.
+    pub fn set_highlights(
+        &mut self,
+        highlights: Vec<(Range<usize>, HighlightStyle)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.highlights = highlights;
+        cx.notify();
+    }
+
     pub fn set_placeholder(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.placeholder = text.into();
         cx.notify();
@@ -166,6 +180,7 @@ impl TextField {
     /// Sets the text with `selected` selected, as an edit starts.
     pub fn set_text(&mut self, text: &str, selected: Range<usize>, cx: &mut Context<Self>) {
         self.content = SharedString::from(text.to_owned());
+        self.highlights.clear();
         self.selection = self.clip(selected.start)..self.clip(selected.end);
         self.reversed = false;
         self.marked = None;
@@ -178,6 +193,7 @@ impl TextField {
             return;
         }
         self.content = SharedString::default();
+        self.highlights.clear();
         self.selection = 0..0;
         self.reversed = false;
         self.marked = None;
@@ -200,7 +216,13 @@ impl TextField {
         self.select_to(self.content.len(), cx);
     }
 
-    fn cursor(&self) -> usize {
+    /// Whether the caret is at the very start, with nothing selected.
+    pub fn at_start(&self) -> bool {
+        self.selection == (0..0)
+    }
+
+    /// Where the caret is, in bytes.
+    pub fn cursor(&self) -> usize {
         if self.reversed {
             self.selection.start
         } else {
@@ -515,6 +537,7 @@ impl TextField {
         // A single line turns pasted newlines into spaces.
         let newline = if self.rows.is_some() { "\n" } else { " " };
         let text = text.replace("\r\n", newline).replace(['\r', '\n'], newline);
+        self.highlights.clear();
         self.content = format!(
             "{}{text}{}",
             &self.content[..range.start],
@@ -536,8 +559,8 @@ impl TextField {
             underline: None,
             strikethrough: None,
         };
-        match self.marked.as_ref().filter(|_| !empty) {
-            Some(marked) => [0..marked.start, marked.clone(), marked.end..text.len()]
+        if let Some(marked) = self.marked.as_ref().filter(|_| !empty) {
+            return [0..marked.start, marked.clone(), marked.end..text.len()]
                 .into_iter()
                 .filter(|range| !range.is_empty())
                 .map(|range| TextRun {
@@ -549,9 +572,45 @@ impl TextField {
                     }),
                     ..run.clone()
                 })
-                .collect(),
-            None => vec![run],
+                .collect();
         }
+        if empty || self.highlights.is_empty() {
+            return vec![run];
+        }
+        let mut runs = Vec::new();
+        let mut at = 0;
+        for (range, highlight) in &self.highlights {
+            if range.start < at || range.end > text.len() {
+                continue;
+            }
+            if range.start > at {
+                runs.push(TextRun {
+                    len: range.start - at,
+                    ..run.clone()
+                });
+            }
+            let mut font = run.font.clone();
+            if let Some(weight) = highlight.font_weight {
+                font.weight = weight;
+            }
+            runs.push(TextRun {
+                len: range.len(),
+                font,
+                color: highlight.color.unwrap_or(run.color),
+                background_color: highlight.background_color,
+                underline: highlight.underline,
+                ..run.clone()
+            });
+            at = range.end;
+        }
+        if at < text.len() {
+            runs.push(TextRun {
+                len: text.len() - at,
+                ..run
+            });
+        }
+        runs.retain(|run| run.len > 0);
+        runs
     }
 }
 

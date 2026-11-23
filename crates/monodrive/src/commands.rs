@@ -718,10 +718,13 @@ fn valid(keys: &str) -> bool {
 /// Contexts drawn inside others, whose keys therefore compete: the list,
 /// sidebar and search field inside the browser, the name being edited in the
 /// list, the field inside the palette, Go to Folder and Connect to Server.
-const NESTED: [(&str, &str); 8] = [
+const NESTED: [(&str, &str); 11] = [
     ("Browser", "FileList"),
     ("Browser", "Sidebar"),
     ("Browser", "Search"),
+    ("Browser", "Completing"),
+    ("Browser", "Chips"),
+    ("Browser", "ChipMenu"),
     ("Browser", "TextField"),
     ("FileList", "Rename"),
     ("Palette", "TextField"),

@@ -7,7 +7,10 @@
 use super::drag::{Spot, Target, offers};
 use super::pane::{Stop, format_bytes};
 use super::remote;
-use super::searches;
+use super::searches::{
+    self, AcceptCompletion, COMPLETIONS_WIDTH, DismissCompletions, NextCompletion,
+    PreviousCompletion,
+};
 use super::{
     Browser, FocusList, FocusSearch, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
     GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, MovePlaceDown,
@@ -23,13 +26,14 @@ use crate::preferences::{
 };
 use crate::session::RemoteAt;
 use crate::session::Shows;
-use crate::text_field::TextField;
+use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, accent, content, icon, icon_button, row_icon_button};
 use crate::traffic_lights;
 use gpui::{
-    Action, AnyElement, App, Context, CursorStyle, ElementId, Entity, Focusable, FontWeight,
-    Global, ImageSource, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels,
-    Point, Render, Resource, Role, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
+    AccessibleAction, Action, AnyElement, App, Context, CursorStyle, ElementId, Entity, Focusable,
+    FontWeight, Global, ImageSource, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
+    ObjectFit, Pixels, Point, Render, Resource, Role, Stateful, Subscription, Task, Window, div,
+    img, prelude::*, px,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::Entry;
@@ -37,7 +41,7 @@ use monodrive_core::index::{Caps, Found, Index};
 use monodrive_core::ops::{self, Origin};
 use monodrive_core::places::{Availability, Place, Store};
 use monodrive_core::remote::{Connections, Source};
-use monodrive_core::search::{Looks, Search};
+use monodrive_core::search::{Completion, Looks, Search};
 use monodrive_core::servers::{self, Cancel, Prompt};
 use monodrive_core::updates::Channel;
 use monodrive_core::volumes::{self, Volume};
@@ -49,6 +53,8 @@ use std::time::Instant;
 
 /// The sky behind a nightly's sidebar, as drawn in its SVG.
 const NIGHT_SKY_HEIGHT: f32 = 150.;
+/// The least the words keep beside the search field's tokens.
+const TYPING_ROOM: f32 = 56.;
 
 /// What the system does for the sidebar. Views reach it through `Places`, so
 /// their tests list a made-up set of volumes and never mount or eject
@@ -1997,7 +2003,14 @@ impl Browser {
             pane.search_mode_is_plain(),
             !pane.query.is_empty(),
         );
-        let focused = search.focus_handle(cx).is_focused(window);
+        let typing = search.focus_handle(cx).is_focused(window);
+        let focused = typing || pane.chips_focus.is_focused(window);
+        let caret = search.read(cx).cursor();
+        let completing = pane
+            .completing
+            .as_ref()
+            .filter(|completing| typing && completing.at == caret)
+            .map(|completing| (completing.list.items.clone(), completing.active));
         theme::field(if focused { accent() } else { content(0.12) })
             .debug_selector(|| "search-field".into())
             .key_context("Search")
@@ -2021,7 +2034,52 @@ impl Browser {
                 .debug_selector(|| "search-menu-button".into())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_searches(window, cx))),
             )
-            .child(div().flex_1().min_w_0().child(search))
+            .child(self.search_chips(window, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(TYPING_ROOM))
+                    // ← or ⌫ at the start of the words steps onto the tokens.
+                    .capture_action(cx.listener(|this, _: &text_field::Left, window, cx| {
+                        if this
+                            .pane()
+                            .update(cx, |pane, cx| pane.back_into_chips(window, cx))
+                        {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &text_field::Backspace, window, cx| {
+                        if this
+                            .pane()
+                            .update(cx, |pane, cx| pane.back_into_chips(window, cx))
+                        {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .when(completing.is_some(), |d| {
+                        d.key_context("Completing")
+                            .on_action(cx.listener(|this, _: &PreviousCompletion, _, cx| {
+                                this.pane()
+                                    .update(cx, |pane, cx| pane.step_completion(false, cx))
+                            }))
+                            .on_action(cx.listener(|this, _: &NextCompletion, _, cx| {
+                                this.pane()
+                                    .update(cx, |pane, cx| pane.step_completion(true, cx))
+                            }))
+                            .on_action(cx.listener(|this, _: &AcceptCompletion, window, cx| {
+                                this.pane()
+                                    .update(cx, |pane, cx| pane.accept_completion(None, window, cx))
+                            }))
+                            .on_action(cx.listener(|this, _: &DismissCompletions, _, cx| {
+                                this.pane()
+                                    .update(cx, |pane, cx| pane.dismiss_completions(cx))
+                            }))
+                    })
+                    .child(search),
+            )
+            .when_some(completing, |d, (items, active)| {
+                d.child(self.completions(items, active, cx))
+            })
             .when(typed, |d| {
                 d.child(
                     theme::tip_below(
@@ -2049,6 +2107,79 @@ impl Browser {
                     )
                 },
             )
+    }
+
+    /// The values that could finish the filter being typed, under the field.
+    /// A press takes one at once, before the field could lose the keys.
+    fn completions(
+        &self,
+        items: Vec<Completion>,
+        active: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rows = items.into_iter().enumerate().map(|(ix, item)| {
+            let on = ix == active;
+            let pane = self.pane().clone();
+            theme::row_slot(("search-completion", ix))
+                .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+                    pane.update(cx, |pane, cx| pane.accept_completion(Some(ix), window, cx))
+                })
+                .debug_selector(move || format!("search-completion-{ix}"))
+                .role(Role::MenuItem)
+                .aria_label(item.text.clone())
+                .aria_selected(on)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.pane()
+                            .update(cx, |pane, cx| pane.accept_completion(Some(ix), window, cx));
+                    }),
+                )
+                .child(
+                    theme::row(on)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(theme::MONO_FONT)
+                                .text_size(px(theme::TEXT_SMALL))
+                                .child(item.text),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(theme::TEXT_CAPTION))
+                                .text_color(theme::row_muted(on))
+                                .child(item.label),
+                        ),
+                )
+        });
+        div().absolute().left_0().top(gpui::relative(1.)).child(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::TopLeft)
+                    .offset(gpui::point(px(-1.), px(4.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        theme::floating(theme::Elevation::Popover)
+                            .id("search-completions")
+                            .debug_selector(|| "search-completions".into())
+                            .role(Role::Menu)
+                            .aria_label("Completions")
+                            .w(px(COMPLETIONS_WIDTH))
+                            .child(
+                                theme::inset_rows(div())
+                                    .relative()
+                                    .flex()
+                                    .flex_col()
+                                    .children(rows),
+                            ),
+                    ),
+            )
+            .with_priority(1),
+        )
     }
 
     /// Opens or closes the sidebar. It sits after the traffic lights, open or

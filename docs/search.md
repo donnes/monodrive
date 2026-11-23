@@ -1,6 +1,6 @@
 # Search
 
-The window, `find_files`, `grep`'s `filters` and saved searches all read one language, parsed by `monodrive-core`'s `search::Query`. A query prints back as canonical text (`type:doc` becomes `kind:document`, `size:>1MB` becomes `size:>1mb`), so chips can rebuild the search field, and saved searches store that text.
+The window, `find_files`, `grep`'s `filters` and saved searches all read one language, parsed by `monodrive-core`'s `search::Query`. A query prints back as canonical text (`type:doc` becomes `kind:document`, `size:>1MB` becomes `size:>1mb`), and saved searches store that text.
 
 ## Filters
 

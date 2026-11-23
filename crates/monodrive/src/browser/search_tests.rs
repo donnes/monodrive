@@ -266,10 +266,10 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     };
     assert_eq!(world.store.recent_searches(), Ok(vec![recent.clone()]));
 
-    // Names, Contents, This Folder, then Save Search…
+    // Names, Contents, This Folder, the three filters, then Save Search…
     press(cx, "cmd-shift-s");
     assert!(menu_open(&browser, cx));
-    press(cx, "down down down down enter");
+    press(cx, "down down down down down down down enter");
     cx.simulate_input("Todos");
     press(cx, "enter");
     let saved = SavedSearch {
@@ -284,7 +284,7 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     // Out of the search, the saved one brings it back as it was.
     press(cx, "escape");
     assert_eq!(typed(&browser, cx), "");
-    press(cx, "cmd-shift-s down down down down enter");
+    press(cx, "cmd-shift-s down down down down down down down enter");
     land(cx);
     assert!(!menu_open(&browser, cx));
     assert_eq!(typed(&browser, cx), "todo");
@@ -292,7 +292,7 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     assert_eq!(shown(&browser, cx).0, ["a.rs"]);
 
     // R renames, and Esc in the name leaves the menu open and the name as it was.
-    press(cx, "cmd-shift-s down down down down r");
+    press(cx, "cmd-shift-s down down down down down down down r");
     press(cx, "escape");
     assert!(menu_open(&browser, cx));
     assert_eq!(world.store.searches(), Ok(vec![saved.clone()]));
@@ -315,6 +315,132 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     assert!(menu_open(&browser, cx));
     press(cx, "escape");
     assert!(!menu_open(&browser, cx));
+}
+
+fn offered(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Vec<String> {
+    in_pane(browser, cx, |pane, _| {
+        pane.completing
+            .as_ref()
+            .map_or_else(Vec::new, |completing| {
+                completing
+                    .list
+                    .items
+                    .iter()
+                    .map(|item| item.text.clone())
+                    .collect()
+            })
+    })
+}
+
+/// The tokens as their text, and the search they and the words make.
+fn tokens(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> (Vec<String>, String) {
+    in_pane(browser, cx, |pane, _| {
+        let tokens = pane.filters.terms.iter().map(ToString::to_string).collect();
+        (tokens, pane.query.clone())
+    })
+}
+
+fn on_chip(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Option<usize> {
+    in_pane(browser, cx, |pane, _| pane.chip)
+}
+
+/// Protects filters as tokens from the keys: values show under the field
+/// while the caret ends a key, taking one makes a token while the words stay
+/// typed, ← or ⌫ at the start of the words steps onto the tokens, where ↩
+/// opens a token's menu and ⌫ removes it, Edit as Text gives it back as text,
+/// and Esc leaves the search with its tokens.
+#[gpui::test]
+fn finished_filters_become_tokens_the_keys_can_change(cx: &mut TestAppContext) {
+    let world = world(Vec::new(), cx);
+    let folder = world.dir.path().join("here");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("a.txt"), "").unwrap();
+    let (browser, cx) = browse(&folder, cx);
+    let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+    press(cx, "cmd-f");
+    cx.simulate_input("report kind:");
+    cx.run_until_parked();
+    assert_eq!(offered(&browser, cx)[..2], ["kind:image", "kind:video"]);
+    assert!(cx.debug_bounds("search-completions").is_some());
+    // They're for the caret: moved off the filter, the list goes and the
+    // keys are the field's again.
+    press(cx, "left");
+    assert!(cx.debug_bounds("search-completions").is_none());
+    press(cx, "right");
+    assert!(cx.debug_bounds("search-completions").is_some());
+    press(cx, "down tab");
+    assert_eq!(typed(&browser, cx), "report ");
+    assert_eq!(
+        tokens(&browser, cx),
+        (names(&["kind:video"]), "kind:video report".into())
+    );
+    assert!(cx.debug_bounds("search-chip-0").is_some());
+
+    // The menu's Kind types the key, and the kind taken widens the token.
+    press(cx, "cmd-shift-s down down down down enter");
+    assert!(!menu_open(&browser, cx));
+    assert_eq!(typed(&browser, cx), "report kind:");
+    press(cx, "enter");
+    assert_eq!(typed(&browser, cx), "report ");
+    assert_eq!(tokens(&browser, cx).0, names(&["kind:video,image"]));
+
+    // ⌫ at the start of the words steps onto the token without deleting.
+    press(cx, "cmd-left backspace");
+    assert_eq!(on_chip(&browser, cx), Some(0));
+    assert_eq!(typed(&browser, cx), "report ");
+    // ↩ opens its menu on the first kind it has; ↩ there turns one off.
+    press(cx, "enter");
+    assert!(cx.debug_bounds("search-chip-menu").is_some());
+    press(cx, "down enter");
+    assert_eq!(tokens(&browser, cx).0, names(&["kind:image"]));
+    press(cx, "escape");
+    assert!(cx.debug_bounds("search-chip-menu").is_none());
+    assert_eq!(on_chip(&browser, cx), Some(0));
+    press(cx, "backspace");
+    assert_eq!(tokens(&browser, cx), (Vec::new(), "report".into()));
+    assert_eq!(on_chip(&browser, cx), None);
+
+    // Typed at the start, a finished filter lifts out there too.
+    cx.simulate_input("size:>1gb ");
+    cx.run_until_parked();
+    assert_eq!(typed(&browser, cx), "report ");
+    assert_eq!(tokens(&browser, cx).0, names(&["size:>1gb"]));
+    // Edit as Text, two rows past the size it has, gives the text back.
+    press(cx, "backspace enter down down enter");
+    assert_eq!(typed(&browser, cx), "size:>1gb report ");
+    assert_eq!(
+        tokens(&browser, cx),
+        (Vec::new(), "size:>1gb report".into())
+    );
+
+    press(cx, "escape");
+    assert_eq!(typed(&browser, cx), "");
+    assert_eq!(tokens(&browser, cx), (Vec::new(), String::new()));
+
+    // A kept search comes back as tokens and words, and keeps the same text.
+    let kept = Search {
+        text: "notes kind:doc".into(),
+        looks: Looks::Names,
+        scope: Where::Everywhere,
+    };
+    run(&browser, kept, cx);
+    assert_eq!(typed(&browser, cx), "notes");
+    assert_eq!(
+        tokens(&browser, cx),
+        (names(&["kind:document"]), "kind:document notes".into())
+    );
+    let stored = in_pane(&browser, cx, |pane, _| pane.current_search().stored());
+    assert_eq!(stored, Ok("kind:document notes".into()));
+
+    // Leaving the search from a token, as Back does, gives the keys back to
+    // the window: ↓ steps through the folder rather than opening a token.
+    press(cx, "cmd-left backspace");
+    assert_eq!(on_chip(&browser, cx), Some(0));
+    on_pane(&browser, cx, |pane, cx| pane.show_folder(cx));
+    cx.run_until_parked();
+    press(cx, "down");
+    assert_eq!(shown(&browser, cx).1, names(&["a.txt"]));
 }
 
 /// Protects a line standing for its file: pressing a line under a file that
@@ -383,9 +509,10 @@ fn the_keys_scroll_the_menu_to_the_row_they_land_on(cx: &mut TestAppContext) {
         });
         row.top() >= shown.top() && row.bottom() <= shown.bottom()
     };
-    // Names, Contents and This Folder, then down to the last saved search.
+    // Names, Contents, This Folder and the filters, then down to the last
+    // saved search.
     assert!(!in_view("saved-search-39", cx));
-    for _ in 0..43 {
+    for _ in 0..46 {
         press(cx, "down");
     }
     assert!(in_view("saved-search-39", cx));
