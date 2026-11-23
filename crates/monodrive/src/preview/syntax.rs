@@ -88,8 +88,7 @@ fn alias(name: &str) -> &str {
     }
 }
 
-/// A file's lines, colored when its name, extension or first line says what
-/// it is.
+/// A file's lines, colored when its name or extension says what it is.
 pub fn file(text: &str, path: &Path) -> Vec<Line> {
     let set = syntaxes();
     let name = path
@@ -102,8 +101,16 @@ pub fn file(text: &str, path: &Path) -> Vec<Line> {
         .unwrap_or_default();
     let syntax = set
         .find_syntax_by_extension(&name)
-        .or_else(|| set.find_syntax_by_extension(alias(&extension)))
-        .or_else(|| set.find_syntax_by_first_line(text));
+        .or_else(|| set.find_syntax_by_extension(alias(&extension)));
+    lines(text, syntax)
+}
+
+/// An env file's lines, whatever follows `.env` in its name.
+pub fn env(text: &str) -> Vec<Line> {
+    lines(text, syntaxes().find_syntax_by_name("DotENV"))
+}
+
+fn lines(text: &str, syntax: Option<&SyntaxReference>) -> Vec<Line> {
     let mut lines = Vec::new();
     each_line(text, syntax, |_, line, spans| {
         lines.push(Line {
@@ -118,7 +125,7 @@ pub fn file(text: &str, path: &Path) -> Vec<Line> {
 /// the opening backticks, such as `rust` or `ts title="a.ts"`.
 pub fn fence(text: &str, info: &str) -> Spans {
     let tag = info
-        .split([' ', ',', '{'])
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '{'))
         .next()
         .unwrap_or_default()
         .to_lowercase();
@@ -232,14 +239,14 @@ mod tests {
     }
 
     #[test]
-    fn a_syntax_comes_from_the_name_the_extension_or_the_first_line() {
+    fn a_syntax_comes_from_the_name_or_the_extension() {
         assert_eq!(
             kinds_in("FROM alpine", "Dockerfile")[0],
             (0..4, Syntax::Keyword)
         );
         assert_eq!(kinds_in("const a = 1", "a.tsx")[0], (0..5, Syntax::Keyword));
         assert_eq!(kinds_in("// a", "a.jsonc")[0], (0..4, Syntax::Comment));
-        assert_eq!(kinds_in("#!/bin/sh\n", "run")[0].1, Syntax::Comment);
+        assert_eq!(env("export A=1")[0].spans[0], (0..6, Syntax::Keyword));
         assert!(kinds_in("const a = 1", "a.unknownext").is_empty());
     }
 }

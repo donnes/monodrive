@@ -1211,7 +1211,7 @@ fn read(path: &Path, side: u32) -> Body {
         },
         Kind::Env => match preview::read_text(path) {
             Ok(file) => Body::Text {
-                lines: Arc::new(syntax::file(&file.text, path)),
+                lines: Arc::new(syntax::env(&file.text)),
                 cut: file.cut,
                 secrets: Some(Arc::new(preview::env_values(&file.text))),
             },
@@ -1288,11 +1288,22 @@ fn text_rows(
             .map(|ix| {
                 let line = &lines[ix];
                 let text = match hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone()) {
-                    Some(secret) => div()
-                        .flex()
-                        .child(line.text[..secret.start].to_string())
-                        .child(blurred())
-                        .into_any_element(),
+                    Some(secret) => {
+                        let shown: Spans = line
+                            .spans
+                            .iter()
+                            .filter(|(range, _)| range.start < secret.start)
+                            .map(|(range, kind)| (range.start..range.end.min(secret.start), *kind))
+                            .collect();
+                        div()
+                            .flex()
+                            .child(
+                                StyledText::new(line.text[..secret.start].to_string())
+                                    .with_highlights(colors(&shown)),
+                            )
+                            .child(blurred())
+                            .into_any_element()
+                    }
                     None => StyledText::new(line.text.clone())
                         .with_highlights(colors(&line.spans))
                         .into_any_element(),
