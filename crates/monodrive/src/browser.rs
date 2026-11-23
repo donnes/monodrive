@@ -1474,7 +1474,8 @@ impl Browser {
     }
 
     /// Check for Updates…: asks now, and shows what it finds in the updates
-    /// popover, above the sidebar's foot.
+    /// popover, above the sidebar's foot, in place of Settings or any other
+    /// sheet.
     fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(shared) = cx.try_global::<updates::Shared>() {
             shared.0.clone().update(cx, |updates, cx| updates.check(cx));
@@ -2387,13 +2388,13 @@ impl Render for Browser {
                         },
                     ))
                 })
-                .on_action(cx.listener(|this, _: &ShowCopiesAndMoves, window, cx| {
-                    this.toggle_jobs(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
-                    this.check_for_updates(window, cx)
-                }))
+                .on_action(cx.listener(
+                    |this, _: &ShowCopiesAndMoves, window, cx| this.toggle_jobs(window, cx),
+                ))
             })
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                this.check_for_updates(window, cx)
+            }))
             // Said, as a folder with nothing hidden looks the same either way.
             .on_action(cx.listener(|this, _: &ToggleHiddenFiles, _, cx| {
                 preferences::update(cx, |p| p.show_hidden = !p.show_hidden);
