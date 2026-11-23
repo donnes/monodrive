@@ -1597,6 +1597,10 @@
             },
             "type": "array"
           },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
+          },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
             "type": "string"
@@ -1717,6 +1721,10 @@
             },
             "type": "array"
           },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
+          },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
             "type": "string"
@@ -1827,6 +1835,10 @@
             },
             "type": "array"
           },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
+          },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
             "type": "string"
@@ -1936,6 +1948,10 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
           },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
@@ -2161,6 +2177,10 @@
             },
             "type": "array"
           },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
+          },
           "plan": {
             "description": "A dry run's plan.",
             "items": {
@@ -2317,6 +2337,10 @@
             },
             "type": "array"
           },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
+          },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
             "type": "string"
@@ -2432,6 +2456,10 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
           },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
@@ -2556,6 +2584,10 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
           },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
@@ -2733,6 +2765,7 @@
               "download",
               "upload",
               "command",
+              "trash",
               "empty_trash"
             ],
             "type": "string"
@@ -2931,6 +2964,7 @@
               "download",
               "upload",
               "command",
+              "trash",
               "empty_trash"
             ],
             "type": "string"
@@ -3114,6 +3148,7 @@
               "download",
               "upload",
               "command",
+              "trash",
               "empty_trash"
             ],
             "type": "string"
@@ -3318,6 +3353,7 @@
               "download",
               "upload",
               "command",
+              "trash",
               "empty_trash"
             ],
             "type": "string"
@@ -3480,6 +3516,10 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
           },
           "plan": {
             "description": "A dry run's plan.",
@@ -3853,6 +3893,7 @@
                     "download",
                     "upload",
                     "command",
+                    "trash",
                     "empty_trash"
                   ],
                   "type": "string"
@@ -4133,6 +4174,7 @@
               "download",
               "upload",
               "command",
+              "trash",
               "empty_trash"
             ],
             "type": "string"
@@ -4711,6 +4753,10 @@
             },
             "type": "array"
           },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
+          },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
             "type": "string"
@@ -4927,6 +4973,10 @@
             },
             "type": "array"
           },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
+          },
           "title": {
             "description": "\"Rename\", or \"Undo Rename\".",
             "type": "string"
@@ -5048,6 +5098,10 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
           },
           "plan": {
             "description": "A dry run's plan.",
@@ -6604,6 +6658,10 @@
             },
             "type": "array"
           },
+          "job": {
+            "description": "The job still moving the items left: job_status follows it.",
+            "type": "string"
+          },
           "plan": {
             "description": "A dry run's plan.",
             "properties": {
@@ -7146,6 +7204,7 @@
               "download",
               "upload",
               "command",
+              "trash",
               "empty_trash"
             ],
             "type": "string"

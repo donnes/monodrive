@@ -319,6 +319,9 @@ pub struct Outcome {
     pub items: Vec<Item>,
     /// The owner stopped partway; the results come from checking the disk.
     pub interrupted: bool,
+    /// The request was queued as job `op`, whose items report as it goes.
+    #[serde(default)]
+    pub job: bool,
 }
 
 impl Outcome {
@@ -464,7 +467,7 @@ impl Step {
         let there = match self.spot(!self.applied) {
             Spot::Path(path) => Some(path.clone()).filter(|path| disk::id(path) == Some(self.id)),
             Spot::Trash(Some(path)) if disk::id(path) == Some(self.id) => Some(path.clone()),
-            Spot::Trash(_) => disk::find_in_trash(self.id, &original),
+            Spot::Trash(_) => disk::find_in_trash(self.id, &original, |_| false),
         };
         let there = there.ok_or_else(|| {
             format!(
@@ -582,6 +585,9 @@ struct Undoable {
 }
 
 const JOURNAL: &str = "journal.jsonl";
+/// A Move to Trash of this many items runs as a job, with progress and
+/// Cancel. Fewer take well under a tenth of a second, so they answer at once.
+pub(crate) const TRASH_JOB_AT: usize = 100;
 /// Past this many finished operations, opening the journal trims it to the
 /// most recent `KEEP`. Undo reaches back that far at most.
 const TRIM_AT: usize = 1000;
@@ -745,6 +751,7 @@ impl Engine {
                     title: submission.request.title().to_string(),
                     items: Vec::new(),
                     interrupted: false,
+                    job: true,
                 };
                 self.finished.insert(
                     submission.id.clone(),
@@ -772,6 +779,7 @@ impl Engine {
                     title: submission.request.title().to_string(),
                     items: Vec::new(),
                     interrupted: false,
+                    job: true,
                 };
                 self.finished
                     .insert(submission.id, (submission.request, accepted));
@@ -860,6 +868,7 @@ impl Engine {
                 title,
                 items,
                 interrupted: true,
+                job: false,
             },
             steps,
         }
@@ -925,6 +934,7 @@ impl Engine {
             | Request::Upload { .. }
             | Request::EmptyTrash { .. }
             | Request::Retry { .. } => self.queue(submission),
+            Request::Trash { ref paths } if paths.len() >= TRASH_JOB_AT => self.queue(submission),
             Request::Cancel { job } => self.cancel(job),
             Request::RenameMany { .. } => self.rename_many(submission),
             _ => self.run(submission),
@@ -1245,6 +1255,7 @@ impl Engine {
             title,
             items,
             interrupted: false,
+            job: false,
         };
         let record = Record::End {
             op,
@@ -1307,8 +1318,10 @@ fn existing(path: &Path) -> Result<(FileId, Stamp), String> {
     disk::stamp(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn plan_trash(path: &Path) -> Result<Plan, String> {
-    let (id, stamp) = existing(path)?;
+/// Refuses what Monodrive never moves to the Trash: a relative path, the disk
+/// and the home folder.
+fn trashable(path: &Path) -> Result<(), String> {
+    absolute(path)?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if path.parent().is_none() || home.as_deref() == Some(path) {
         return Err(format!(
@@ -1316,6 +1329,12 @@ fn plan_trash(path: &Path) -> Result<Plan, String> {
             path.display()
         ));
     }
+    Ok(())
+}
+
+fn plan_trash(path: &Path) -> Result<Plan, String> {
+    trashable(path)?;
+    let (id, stamp) = existing(path)?;
     Ok(Plan::Move(Step {
         id,
         undone: Spot::Path(path.to_path_buf()),
@@ -1858,6 +1877,7 @@ pub fn agent_changes(paths: &Paths, since: u64, limit: usize) -> Vec<AgentChange
                     Request::Move { paths, .. } => ("Move", paths.len()),
                     Request::Compress { paths } => ("Compress", paths.len()),
                     Request::Extract { .. } => ("Extract", 1),
+                    Request::Trash { paths } => ("Move to Trash", paths.len()),
                     _ => continue,
                 };
                 if let Some(client) = client(&submission).filter(|_| at >= since) {

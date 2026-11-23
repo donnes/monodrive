@@ -247,7 +247,12 @@ impl Server {
         request_id: Option<&str>,
     ) -> Result<Reply<contract::Change>, ToolError> {
         let outcome = self.submit(request, request_id)?;
-        let change = contract::Change::of(&outcome);
+        // Many items to the Trash run as a job; the reply waits for it.
+        let change = if outcome.job {
+            contract::Change::of_job(&self.wait(outcome.op, MOST_WAIT)?)
+        } else {
+            contract::Change::of(&outcome)
+        };
         if change.failed > 0 && change.failed == change.items.len() {
             let first = &change.items[0];
             let why = change.text();
@@ -305,6 +310,8 @@ impl Server {
             if told.recv_timeout(left).is_err() {
                 return self.wait(id, 0);
             }
+            // A job writes the journal once per item; one look covers them all.
+            while told.try_recv().is_ok() {}
         }
     }
 

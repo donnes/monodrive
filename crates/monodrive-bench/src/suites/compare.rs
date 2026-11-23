@@ -116,14 +116,11 @@ fn copies(fixture: &Path, jobs: &mut Jobs, out: &mut Vec<Measured>) -> Result<()
         Ok(())
     };
     let (sample, done) = measure::here(|| {
-        jobs.run(
-            Request::Copy {
-                paths: vec![tree.clone()],
-                into: into.clone(),
-                conflict: Default::default(),
-            },
-            true,
-        )
+        jobs.run(Request::Copy {
+            paths: vec![tree.clone()],
+            into: into.clone(),
+            conflict: Default::default(),
+        })
     });
     done?;
     check(sample, "Monodrive", out)?;
@@ -192,12 +189,9 @@ fn trash(fixture: &Path, jobs: &mut Jobs, out: &mut Vec<Measured>) -> Result<(),
     clone_into(&volume.join("master"), &removed)?;
     let entries = walk_count(&trashed).map_err(io(&trashed))?;
     let (sample, done) = measure::here(|| {
-        jobs.run(
-            Request::Trash {
-                paths: vec![trashed.clone()],
-            },
-            false,
-        )
+        jobs.run(Request::Trash {
+            paths: vec![trashed.clone()],
+        })
     });
     let landed = done?;
     out.push(measured(

@@ -1757,6 +1757,8 @@ impl Browser {
         self.toast(jobs::report(&job), false, undo, cx);
         if job.tasks.iter().any(|task| task.done == Some(Done::Erased)) {
             feedback::sound(Sound::EmptyTrash, cx);
+        } else if jobs::trashes(&job) && job.undoable {
+            feedback::sound(Sound::MoveToTrash, cx);
         }
         // A job's bytes may have moved between volumes.
         self.load_volumes(cx);

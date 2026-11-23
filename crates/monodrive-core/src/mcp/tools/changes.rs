@@ -230,6 +230,7 @@ fn one_change(title: &str, path: String, to: String) -> Reply<Change> {
         }],
         failed: 0,
         interrupted: false,
+        job: None,
     };
     Reply::new(change.text(), change)
 }

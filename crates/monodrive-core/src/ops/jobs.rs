@@ -1,18 +1,21 @@
-//! Copy, move, compress, extract, remote copy and Empty Trash jobs. The owner queues them and runs at
-//! most `RUNNING` at once, each on its own thread, one item at a time, so its
-//! socket keeps answering while they work. Every change an item makes is a
-//! `Step`, written to the journal before and after it happens, so undo
-//! reverses a job and a crash leaves it settled from the disk rather than
-//! repeated. An erased item has no step: nothing brings it back.
+//! Copy, move, compress, extract, remote copy, Move to Trash and Empty Trash
+//! jobs. The owner queues them and runs at most `RUNNING` at once, each on its
+//! own thread, one item at a time, so its socket keeps answering while they
+//! work. Every change an item makes is a `Step`, written to the journal before
+//! and after it happens, so undo reverses a job and a crash leaves it settled
+//! from the disk rather than repeated. A Move to Trash's steps are named by
+//! its `Job` record instead, and an erased item has no step: nothing brings it
+//! back.
 
 use super::{
     Engine, FileId, Origin, Outcome, Record, Request, Spot, Stamp, Step, Submission, TrashItem,
-    disk, existing,
+    disk, existing, trashable,
 };
 use crate::archives::{self, Archive};
 use crate::cloud;
 use crate::remote::{Connections, Connector, RemotePath};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -93,12 +96,13 @@ pub enum Transfer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: u64,
-    /// "Copy", "Move", "Compress", "Extract", "Download", "Upload" or
-    /// "Empty Trash".
+    /// "Copy", "Move", "Compress", "Extract", "Download", "Upload", "Move
+    /// to Trash" or "Empty Trash".
     pub title: String,
     pub origin: Origin,
-    /// Where its items go: the archive's folder for Compress, and the Trash
-    /// its items leave for Empty Trash.
+    /// Where its items go: the archive's folder for Compress, the home
+    /// folder's Trash for Move to Trash, and the Trash its items leave for
+    /// Empty Trash.
     pub into: PathBuf,
     pub state: State,
     pub tasks: Vec<Task>,
@@ -162,6 +166,8 @@ pub(super) enum Kind {
     Extract,
     Download,
     Upload,
+    /// Move to Trash: each source goes to its volume's Trash.
+    Trash,
     /// Empty Trash: each source is erased for good, and nothing is made.
     Erase,
 }
@@ -170,7 +176,9 @@ impl Kind {
     /// What an item is made as, before it's put in place.
     fn made(self) -> &'static str {
         match self {
-            Kind::Copy | Kind::Move | Kind::Download | Kind::Upload | Kind::Erase => "copy",
+            Kind::Copy | Kind::Move | Kind::Download | Kind::Upload | Kind::Trash | Kind::Erase => {
+                "copy"
+            }
             Kind::Compress => "archive",
             Kind::Extract => "extraction",
         }
@@ -187,9 +195,10 @@ pub(super) struct Spec {
     sources: Vec<PathBuf>,
     /// Which item each source was when the job was accepted, so a source
     /// replaced while the job waits is refused rather than moved. For an
-    /// extraction, each is the archive's.
+    /// extraction, each is the archive's. `None` for a Move to Trash's
+    /// source that wasn't there.
     #[serde(default)]
-    ids: Vec<FileId>,
+    ids: Vec<Option<FileId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     archive: Option<PathBuf>,
     /// The server's side of a remote copy: for a download each source, and
@@ -210,13 +219,17 @@ impl Spec {
         }
         // Only the item, not a stamp: walking a big folder here would hold
         // the engine while the owner waits.
-        let ids = |paths: &[PathBuf]| -> Result<Vec<FileId>, String> {
+        let ids = |paths: &[PathBuf]| -> Result<Vec<Option<FileId>>, String> {
             if paths.is_empty() {
                 return Err("Name at least one item.".into());
             }
             paths
                 .iter()
-                .map(|path| disk::lookup(path).map_err(|e| format!("{}: {e}", path.display())))
+                .map(|path| {
+                    disk::lookup(path)
+                        .map(Some)
+                        .map_err(|e| format!("{}: {e}", path.display()))
+                })
                 .collect()
         };
         match request {
@@ -337,10 +350,35 @@ impl Spec {
             into: trash.to_path_buf(),
             conflict: Conflict::Stop,
             sources: items.iter().map(|item| item.path.clone()).collect(),
-            ids: items.iter().map(|item| item.id).collect(),
+            ids: items.iter().map(|item| Some(item.id)).collect(),
             archive: None,
             remote: Vec::new(),
         }
+    }
+
+    /// A Move to Trash of `paths`, each found now. Refused only when none
+    /// can go, so each of the others says why when its turn comes.
+    fn trash(paths: &[PathBuf], trash: &Path) -> Result<Self, String> {
+        let found: Vec<Result<FileId, String>> = paths
+            .iter()
+            .map(|path| {
+                trashable(path)?;
+                disk::lookup(path).map_err(|e| format!("{}: {e}", path.display()))
+            })
+            .collect();
+        if found.iter().all(Result::is_err) {
+            let refused: Vec<String> = found.into_iter().filter_map(Result::err).collect();
+            return Err(refused.join("\n"));
+        }
+        Ok(Self {
+            kind: Kind::Trash,
+            into: trash.to_path_buf(),
+            conflict: Conflict::Stop,
+            sources: paths.to_vec(),
+            ids: found.into_iter().map(Result::ok).collect(),
+            archive: None,
+            remote: Vec::new(),
+        })
     }
 
     /// The entry name an extraction's source stands for.
@@ -443,7 +481,7 @@ impl Entry {
                 .enumerate()
                 .map(|(i, source)| Work {
                     source: source.clone(),
-                    id: spec.ids.get(i).copied(),
+                    id: spec.ids.get(i).copied().flatten(),
                     ..Work::default()
                 })
                 .collect(),
@@ -507,6 +545,7 @@ impl Entry {
             Kind::Extract => "Extract",
             Kind::Download => "Download",
             Kind::Upload => "Upload",
+            Kind::Trash => "Move to Trash",
             Kind::Erase => "Empty Trash",
         }
     }
@@ -605,10 +644,11 @@ impl Shared {
         Ok(())
     }
 
-    /// Journals an erased item without waiting for the disk, which would
-    /// take longer than erasing it. A crash may lose it: continuing the job
-    /// then finds it gone from the Trash and skips it.
-    fn note_erased(&self, op: u64, index: usize, work: &Work) -> Result<(), String> {
+    /// Journals a trashed or erased item without waiting for the disk, which
+    /// would take longer than moving or erasing it. A crash may lose it:
+    /// settling finds a trashed item in the Trash by its identity, and
+    /// continuing an Empty Trash finds an erased one gone and skips it.
+    fn note(&self, op: u64, index: usize, work: &Work) -> Result<(), String> {
         let record = Record::Work {
             op,
             index,
@@ -686,8 +726,9 @@ pub(super) fn run(shared: &Shared, op: u64) {
             let bytes = match spec.kind {
                 Kind::Copy | Kind::Move | Kind::Upload => tally(&source),
                 // Only the server can say, so the item asks when it starts.
-                // Weighing a Trash would walk every file an erase walks.
-                Kind::Download | Kind::Erase => 0,
+                // Weighing what goes to or leaves the Trash would walk every
+                // file in it, and moving it is one rename.
+                Kind::Download | Kind::Trash | Kind::Erase => 0,
                 Kind::Compress => spec.sources.iter().map(|source| tally(source)).sum(),
                 Kind::Extract => archive
                     .as_ref()
@@ -759,7 +800,7 @@ pub(super) fn next(shared: &Shared, op: u64) -> bool {
         Next::Stop(why) | Next::Interrupt(why) => Done::Failed(why),
     });
     let _ = match spec.kind {
-        Kind::Erase => shared.note_erased(op, index, &item.work),
+        Kind::Trash | Kind::Erase => shared.note(op, index, &item.work),
         _ => shared.record(op, index, &item.work),
     };
     if let Some(state) = stop {
@@ -836,8 +877,33 @@ impl Item<'_> {
             Kind::Extract => self.extract(cancel, copied),
             Kind::Download => self.download(cancel, copied),
             Kind::Upload => self.upload(cancel, copied),
+            Kind::Trash => self.trash(),
             Kind::Erase => self.erase(),
         }
+    }
+
+    /// Moves the item to its volume's Trash, only while it's the item the
+    /// job found when it was accepted. The `Job` record already names it, so
+    /// nothing is journaled first: after a crash the item is looked for by
+    /// identity where it was and in the Trash.
+    fn trash(&mut self) -> Next {
+        let source = self.work.source.clone();
+        let found = trashable(&source).and_then(|()| existing(&source));
+        let (id, stamp) = match found {
+            Ok(found) => found,
+            Err(why) => return Next::Done(Done::Failed(why)),
+        };
+        if self.work.id != Some(id) {
+            return Next::Done(Done::Failed(replaced(&source)));
+        }
+        let mut step = trashing(&source, id, stamp);
+        Next::Done(match step.place(&source, true) {
+            Ok(landed) => {
+                self.work.steps.push(step);
+                Done::To(landed)
+            }
+            Err(why) => Done::Failed(why),
+        })
     }
 
     /// Erases the item for good, once it's claimed under a hidden name, so
@@ -985,7 +1051,7 @@ impl Item<'_> {
         let spec = self.spec;
         for (source, accepted) in spec.sources.iter().zip(&spec.ids) {
             match disk::lookup(source) {
-                Ok(id) if id == *accepted => {}
+                Ok(id) if Some(id) == *accepted => {}
                 Ok(_) => return fail(replaced(source)),
                 Err(e) => return fail(format!("{}: {e}", source.display())),
             }
@@ -1259,6 +1325,51 @@ impl Item<'_> {
     }
 }
 
+/// The step that moves the item `id` at `source` to the Trash.
+fn trashing(source: &Path, id: FileId, stamp: Stamp) -> Step {
+    Step {
+        id,
+        undone: Spot::Path(source.to_path_buf()),
+        done: Spot::Trash(None),
+        applied: false,
+        stamp,
+        keep: None,
+    }
+}
+
+/// A Move to Trash item a crash may have cut short before its record
+/// reached the disk: in the Trash, found by its identity, or nowhere Monodrive
+/// can find. `None` while it's still where it was, so continuing the job
+/// moves it. An entry in `claimed`, which another of the job's items took,
+/// isn't this one's, as when a path is named twice or two hard links went.
+fn settle_trashed(work: &Work, claimed: &mut HashSet<PathBuf>) -> Option<Work> {
+    let id = work.id?;
+    if disk::id(&work.source) == Some(id) {
+        return None;
+    }
+    let found = disk::find_in_trash(id, &work.source, |there| claimed.contains(there))
+        .inspect(|there| {
+            claimed.insert(there.clone());
+        })
+        .and_then(|there| Some((disk::stamp(&there).ok()?.1, there)));
+    let mut work = work.clone();
+    work.done = Some(match found {
+        Some((stamp, there)) => {
+            work.steps = vec![Step {
+                done: Spot::Trash(Some(there.clone())),
+                applied: true,
+                ..trashing(&work.source, id, stamp)
+            }];
+            Done::To(there)
+        }
+        None => Done::Failed(format!(
+            "{}: Monodrive stopped partway and can't find where this went.",
+            work.source.display()
+        )),
+    });
+    Some(work)
+}
+
 /// `why`, after sending the unfinished item at `temp`, if it's there, to the
 /// Trash.
 fn unfinished(why: String, temp: &Path, kind: Kind) -> String {
@@ -1330,6 +1441,7 @@ impl Engine {
                 submission: submission.clone(),
                 spec: match request {
                     Request::EmptyTrash { items } => self.erase_spec(items)?,
+                    Request::Trash { paths } => Spec::trash(paths, &self.paths.trash)?,
                     request => Spec::new(request)?,
                 },
                 at: now(),
@@ -1390,6 +1502,7 @@ impl Engine {
             title: "Cancel".into(),
             items: Vec::new(),
             interrupted: false,
+            job: false,
         })
     }
 
@@ -1418,7 +1531,27 @@ impl Engine {
     pub(super) fn settle_jobs(&self) -> Vec<Record> {
         let mut records = Vec::new();
         for job in self.jobs.iter().filter(|job| job.state.active()) {
+            let mut claimed: HashSet<PathBuf> = job
+                .work
+                .iter()
+                .filter_map(|work| match &work.done {
+                    Some(Done::To(to)) => Some(to.clone()),
+                    _ => None,
+                })
+                .collect();
             for (index, work) in job.work.iter().enumerate() {
+                if job.spec.kind == Kind::Trash {
+                    if work.done.is_none()
+                        && let Some(work) = settle_trashed(work, &mut claimed)
+                    {
+                        records.push(Record::Work {
+                            op: job.id,
+                            index,
+                            work,
+                        });
+                    }
+                    continue;
+                }
                 if work.done.is_some()
                     || (work.to.is_none() && work.steps.is_empty() && work.left.is_none())
                 {

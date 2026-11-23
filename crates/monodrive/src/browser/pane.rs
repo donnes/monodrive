@@ -2337,6 +2337,11 @@ impl Pane {
             Ok(done) => done,
             Err(e) => return self.toast(e, true, None, cx),
         };
+        // Many items to the Trash: Activity follows the job, and its end
+        // says how it went.
+        if outcome.job {
+            return cx.emit(PaneEvent::Follow(outcome.op));
+        }
         if let Some(why) = outcome.failures().next() {
             // A copy of what isn't downloaded is refused: offer to download it.
             let download = cloud::refused(why).map(|path| Offer::Download("Download", vec![path]));
