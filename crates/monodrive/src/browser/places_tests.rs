@@ -1639,6 +1639,16 @@ fn the_palette_over_another_sheet_still_knows_what_would_run(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn check_for_updates_from_settings_shows_the_updates(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    let world = world(vec![startup()], cx);
+    let (browser, cx) = open(&world, &project, cx);
+    press(cx, "cmd-,");
+    cx.dispatch_action(CheckForUpdates);
+    assert!(browser.read_with(cx, |b, _| matches!(b.sheet, Some(Sheet::Updates))));
+}
+
+#[gpui::test]
 fn a_page_opens_filters_and_goes_back(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     let world = world(vec![startup()], cx);
