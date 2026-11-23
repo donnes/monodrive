@@ -467,7 +467,7 @@ impl Step {
         let there = match self.spot(!self.applied) {
             Spot::Path(path) => Some(path.clone()).filter(|path| disk::id(path) == Some(self.id)),
             Spot::Trash(Some(path)) if disk::id(path) == Some(self.id) => Some(path.clone()),
-            Spot::Trash(_) => disk::find_in_trash(self.id, &original),
+            Spot::Trash(_) => disk::find_in_trash(self.id, &original, |_| false),
         };
         let there = there.ok_or_else(|| {
             format!(

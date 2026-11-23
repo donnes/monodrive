@@ -522,8 +522,13 @@ fn test_trash(path: &Path) -> Option<Result<PathBuf, String>> {
 }
 
 /// Looks through the Trash of the volume `original` was on for the item
-/// `id`: after a crash, the only record of where it went.
-pub fn find_in_trash(id: FileId, original: &Path) -> Option<PathBuf> {
+/// `id`, passing over what `taken` says another item already is: after a
+/// crash, the only record of where it went. Hard links share an `id`.
+pub fn find_in_trash(
+    id: FileId,
+    original: &Path,
+    taken: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(|home| Path::new(&home).join(".Trash"));
     // SAFETY: geteuid has no preconditions.
     let uid = unsafe { libc::geteuid() };
@@ -538,7 +543,7 @@ pub fn find_in_trash(id: FileId, original: &Path) -> Option<PathBuf> {
                 .ok()?
                 .filter_map(Result::ok)
                 .map(|item| item.path())
-                .find(|path| self::id(path) == Some(id))
+                .find(|path| self::id(path) == Some(id) && !taken(path))
         })
 }
 

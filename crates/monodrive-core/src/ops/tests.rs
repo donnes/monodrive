@@ -839,21 +839,33 @@ fn a_trash_job_cut_short_by_a_crash_is_settled_from_the_disk_and_undoes_whole() 
     let (dir, files, engine) = engine();
     let (own_trash, items) = trash_fixture(dir.path(), &files, TRASH_JOB_AT);
     let shared = jobs::Shared::new(engine, None);
-    // The same file named twice: only one of them went.
+    // The same file named twice, of which only one went, and a hard link to
+    // another, which share an identity.
+    let linked = files.join("linked.txt");
+    std::fs::hard_link(&items[2], &linked).unwrap();
     let mut asked = items.clone();
-    asked.push(items[1].clone());
+    asked.extend([items[1].clone(), linked.clone()]);
     let op = run(&mut shared.lock(), trash(&asked)).unwrap().op;
     assert!(jobs::next(&shared, op));
-    // The owner goes once the next item is in the Trash, before its record
-    // reaches the journal.
+    // The owner goes once the next items are in the Trash, before their
+    // records reach the journal.
     let landed = disk::trash(&items[1]).unwrap();
+    let both = [
+        disk::trash(&items[2]).unwrap(),
+        disk::trash(&linked).unwrap(),
+    ];
     drop(shared);
     let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
     let interrupted = status(&shared, op);
     assert_eq!(interrupted.state, State::Interrupted);
     assert!(matches!(&interrupted.tasks[0].done, Some(Done::To(to)) if to.starts_with(&own_trash)));
     assert_eq!(interrupted.tasks[1].done, Some(Done::To(landed)));
-    assert_eq!(interrupted.tasks[2].done, None);
+    let mut found: Vec<Option<Done>> = [2, TRASH_JOB_AT + 1]
+        .map(|i| interrupted.tasks[i].done.clone())
+        .into();
+    found.sort_by_key(|done| format!("{done:?}"));
+    assert_eq!(found, both.map(|to| Some(Done::To(to))));
+    assert_eq!(interrupted.tasks[3].done, None);
     assert!(
         matches!(&interrupted.tasks[TRASH_JOB_AT].done, Some(Done::Failed(why)) if why.contains("can't find")),
         "{:?}",
@@ -866,13 +878,13 @@ fn a_trash_job_cut_short_by_a_crash_is_settled_from_the_disk_and_undoes_whole() 
     // Each run is its own step back: the continued one, then the first.
     assert_eq!(
         run(&mut shared.lock(), Request::Undo).unwrap().items.len(),
-        TRASH_JOB_AT - 2
+        TRASH_JOB_AT - 3
     );
     assert_eq!(
         run(&mut shared.lock(), Request::Undo).unwrap().items.len(),
-        2
+        4
     );
-    assert!(items.iter().all(|path| path.exists()));
+    assert!(items.iter().chain([&linked]).all(|path| path.exists()));
     assert_eq!(std::fs::read_dir(&own_trash).unwrap().count(), 0);
 }
 

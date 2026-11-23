@@ -1341,14 +1341,16 @@ fn trashing(source: &Path, id: FileId, stamp: Stamp) -> Step {
 /// reached the disk: in the Trash, found by its identity, or nowhere Monodrive
 /// can find. `None` while it's still where it was, so continuing the job
 /// moves it. An entry in `claimed`, which another of the job's items took,
-/// isn't this one's, as when a path is named twice.
+/// isn't this one's, as when a path is named twice or two hard links went.
 fn settle_trashed(work: &Work, claimed: &mut HashSet<PathBuf>) -> Option<Work> {
     let id = work.id?;
     if disk::id(&work.source) == Some(id) {
         return None;
     }
-    let found = disk::find_in_trash(id, &work.source)
-        .filter(|there| claimed.insert(there.clone()))
+    let found = disk::find_in_trash(id, &work.source, |there| claimed.contains(there))
+        .inspect(|there| {
+            claimed.insert(there.clone());
+        })
         .and_then(|there| Some((disk::stamp(&there).ok()?.1, there)));
     let mut work = work.clone();
     work.done = Some(match found {
