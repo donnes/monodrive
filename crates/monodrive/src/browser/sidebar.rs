@@ -30,9 +30,10 @@ use crate::text_field::TextField;
 use crate::theme::{self, ButtonLook, accent, content, icon, icon_button, row_icon_button};
 use crate::traffic_lights;
 use gpui::{
-    Action, AnyElement, App, Context, CursorStyle, ElementId, Entity, Focusable, FontWeight,
-    Global, ImageSource, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, ObjectFit, Pixels,
-    Point, Render, Resource, Role, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
+    AccessibleAction, Action, AnyElement, App, Context, CursorStyle, ElementId, Entity, Focusable,
+    FontWeight, Global, ImageSource, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
+    ObjectFit, Pixels, Point, Render, Resource, Role, Stateful, Subscription, Task, Window, div,
+    img, prelude::*, px,
 };
 use monodrive_core::cloud::{self, CloudFolder};
 use monodrive_core::entries::Entry;
@@ -2001,10 +2002,11 @@ impl Browser {
             !pane.query.is_empty(),
         );
         let focused = search.focus_handle(cx).is_focused(window);
+        let caret = search.read(cx).cursor();
         let completing = pane
             .completing
             .as_ref()
-            .filter(|_| focused)
+            .filter(|completing| focused && completing.at == caret)
             .map(|completing| (completing.list.items.clone(), completing.active));
         theme::field(if focused { accent() } else { content(0.12) })
             .debug_selector(|| "search-field".into())
@@ -2096,7 +2098,11 @@ impl Browser {
     ) -> impl IntoElement {
         let rows = items.into_iter().enumerate().map(|(ix, item)| {
             let on = ix == active;
+            let pane = self.pane().clone();
             theme::row_slot(("search-completion", ix))
+                .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+                    pane.update(cx, |pane, cx| pane.accept_completion(Some(ix), window, cx))
+                })
                 .debug_selector(move || format!("search-completion-{ix}"))
                 .role(Role::MenuItem)
                 .aria_label(item.text.clone())

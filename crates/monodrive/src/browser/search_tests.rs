@@ -333,7 +333,7 @@ fn offered(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Vec<String>
 }
 
 /// Protects finishing a filter from the keys: the values show under the field
-/// once a key is typed, ↓ with Tab or ↩ puts one in place of what's typed
+/// while the caret ends a key, ↓ with Tab or ↩ puts one in place of what's typed
 /// rather than opening a hit, the menu's Filter rows type a key, and Esc
 /// closes the list before it leaves the search.
 #[gpui::test]
@@ -347,6 +347,12 @@ fn the_field_offers_values_for_the_filter_being_typed(cx: &mut TestAppContext) {
     cx.simulate_input("report kind:");
     cx.run_until_parked();
     assert_eq!(offered(&browser, cx)[..2], ["kind:image", "kind:video"]);
+    assert!(cx.debug_bounds("search-completions").is_some());
+    // They're for the caret: moved off the filter, the list goes and the
+    // keys are the field's again.
+    press(cx, "left");
+    assert!(cx.debug_bounds("search-completions").is_none());
+    press(cx, "right");
     assert!(cx.debug_bounds("search-completions").is_some());
     press(cx, "down tab");
     assert_eq!(typed(&browser, cx), "report kind:video ");

@@ -111,13 +111,20 @@ pub struct Completions {
 /// The values that could finish the filter the caret is typing. Only a
 /// known key's value is offered, so typing a name never opens a list.
 pub fn complete(text: &str, caret: usize) -> Completions {
-    if caret > text.len() || !text.is_char_boundary(caret) {
+    if !text.is_char_boundary(caret) {
         return Completions::default();
     }
-    let start = text[..caret].rfind(' ').map_or(0, |at| at + 1);
-    let end = text[caret..].find(' ').map_or(text.len(), |at| caret + at);
-    let items = text[start..caret]
-        .split_once(':')
+    let Some((range, _)) = spans(text)
+        .into_iter()
+        .find(|(range, _)| range.start < caret && caret <= range.end)
+    else {
+        return Completions::default();
+    };
+    // Inside quotes it's a phrase, whatever it says.
+    let typed = &text[range.start..caret];
+    let items = (!typed.contains('"'))
+        .then(|| typed.split_once(':'))
+        .flatten()
         .and_then(|(key, value)| Some((Filter::of(key)?, value.to_lowercase())))
         .map(|(filter, value)| match filter {
             Filter::Kind => kinds(&value),
@@ -125,10 +132,7 @@ pub fn complete(text: &str, caret: usize) -> Completions {
             Filter::Modified => presets(filter, &DATES, &value),
         })
         .unwrap_or_default();
-    Completions {
-        range: start..end,
-        items,
-    }
+    Completions { range, items }
 }
 
 /// Kinds that could follow those already listed, which an app, folder, file
@@ -183,23 +187,20 @@ impl Completions {
 /// date already there, or else at the end.
 pub fn start_filter(text: &str, filter: Filter) -> (String, usize) {
     let key = format!("{}:", filter.key());
-    let found = tokens(text).into_iter().find(|token| {
-        text[token.range.clone()]
-            .split_once(':')
-            .and_then(|(key, _)| Filter::of(key))
-            == Some(filter)
+    let found = spans(text).into_iter().find(|(_, word)| {
+        word.split_once(':').and_then(|(key, _)| Filter::of(key)) == Some(filter)
     });
     match found {
-        Some(token) => {
+        Some((range, word)) => {
             let widens = filter == Filter::Kind
                 && matches!(
-                    term(&text[token.range.clone()]),
+                    term(&word),
                     Ok(Term::Kind(kinds)) if !kinds.iter().any(|kind| kind.alone())
                 );
             let (at, put) = if widens {
-                (token.range.end..token.range.end, ",")
+                (range.end..range.end, ",")
             } else {
-                (token.range.clone(), key.as_str())
+                (range, key.as_str())
             };
             let caret = at.start + put.len();
             let mut edited = text.to_string();
@@ -263,6 +264,9 @@ mod tests {
         assert_eq!(offered("mtime:y"), ["modified:yesterday"]);
         // What's typed in full is done, so ↩ opens the best hit again.
         assert_eq!(offered("modified:today"), Vec::<String>::new());
+        // A phrase in quotes is words, whatever it says.
+        let text = "contains:\"daily kind:i\"";
+        assert_eq!(complete(text, text.len() - 1).items, Vec::new());
         // The caret's own word, not the one after it.
         let text = "kind:v report";
         assert_eq!(complete(text, 6).items[0].text, "kind:video");
@@ -320,6 +324,10 @@ mod tests {
         );
         assert_eq!(
             start_filter("a size:>1gb b", Filter::Size),
+            ("a size: b".into(), 7)
+        );
+        assert_eq!(
+            start_filter("a \"size:>1gb\" b", Filter::Size),
             ("a size: b".into(), 7)
         );
     }

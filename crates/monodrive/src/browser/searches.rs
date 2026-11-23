@@ -165,6 +165,8 @@ impl Matches {
 pub(super) struct Completing {
     pub(super) list: Completions,
     pub(super) active: usize,
+    /// The caret they're for: moved elsewhere, they don't show.
+    pub(super) at: usize,
 }
 
 impl Pane {
@@ -206,7 +208,11 @@ impl Pane {
         self.search
             .update(cx, |field, cx| field.set_highlights(marks, cx));
         let list = search::complete(&text, caret);
-        self.completing = (!list.items.is_empty()).then_some(Completing { list, active: 0 });
+        self.completing = (!list.items.is_empty()).then_some(Completing {
+            list,
+            active: 0,
+            at: caret,
+        });
         cx.notify();
     }
 
