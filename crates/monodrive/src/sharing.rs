@@ -92,8 +92,8 @@ fn items(paths: &[PathBuf]) -> Retained<NSArray<AnyObject>> {
     NSArray::from_retained_slice(&items)
 }
 
-/// The share menu on screen, and what adds Monodrive's own entries to it,
-/// which the picker doesn't keep.
+/// The share menu on screen, and what sorts its entries, which the picker
+/// doesn't keep.
 type Shown = (
     Retained<NSSharingServicePicker>,
     Option<Retained<MonodriveEntries>>,
@@ -105,6 +105,8 @@ thread_local! {
 }
 
 const LOCALSEND: &str = "LocalSend";
+/// How `scripts/bundle` titles the share extension, with " (Dev)" on a dev build.
+const SHARE_EXTENSION: &str = "Send with LocalSend";
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `MonodriveEntries`
@@ -112,14 +114,15 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "MonodriveShareEntries"]
-    #[ivars = Retained<NSSharingService>]
+    #[ivars = Option<Retained<NSSharingService>>]
     struct MonodriveEntries;
 
     unsafe impl NSObjectProtocol for MonodriveEntries {}
 
     unsafe impl NSSharingServicePickerDelegate for MonodriveEntries {
-        /// macOS's services, then LocalSend. The LocalSend app's own entry,
-        /// if it's installed, gives way to this one.
+        /// macOS's services, then LocalSend while it's on. The LocalSend
+        /// app's own entry, if it's installed, and this app's share extension
+        /// give way to it, and stay out while it's off.
         #[unsafe(method_id(sharingServicePicker:sharingServicesForItems:proposedSharingServices:))]
         fn services(
             &self,
@@ -130,34 +133,39 @@ define_class!(
             let mut services: Vec<Retained<NSSharingService>> = proposed
                 .to_vec()
                 .into_iter()
-                .filter(|service| service.title().to_string() != LOCALSEND)
+                .filter(|service| {
+                    let title = service.title().to_string();
+                    title != LOCALSEND && !title.starts_with(SHARE_EXTENSION)
+                })
                 .collect();
-            services.push(self.ivars().clone());
+            services.extend(self.ivars().clone());
             NSArray::from_retained_slice(&services)
         }
     }
 );
 
+fn entries(localsend: Option<Box<dyn Fn()>>, main: MainThreadMarker) -> Retained<MonodriveEntries> {
+    let entries = MonodriveEntries::alloc(main).set_ivars(localsend.and_then(localsend_entry));
+    // SAFETY: NSObject's plain init.
+    unsafe { msg_send![super(entries), init] }
+}
+
 /// LocalSend in the share menu, running `chosen` when picked.
-fn localsend_entry(
-    chosen: Box<dyn Fn()>,
-    main: MainThreadMarker,
-) -> Option<Retained<MonodriveEntries>> {
+fn localsend_entry(chosen: Box<dyn Fn()>) -> Option<Retained<NSSharingService>> {
     let glyph = crate::assets::Assets.load("localsend").ok().flatten()?;
     let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&glyph))?;
     image.setSize(NSSize::new(16., 16.));
     image.setTemplate(true);
     let handler = RcBlock::new(chosen);
-    let service = NSSharingService::initWithTitle_image_alternateImage_handler(
-        NSSharingService::alloc(),
-        &NSString::from_str(LOCALSEND),
-        &image,
-        None,
-        &handler,
-    );
-    let entries = MonodriveEntries::alloc(main).set_ivars(service);
-    // SAFETY: NSObject's plain init.
-    Some(unsafe { msg_send![super(entries), init] })
+    Some(
+        NSSharingService::initWithTitle_image_alternateImage_handler(
+            NSSharingService::alloc(),
+            &NSString::from_str(LOCALSEND),
+            &image,
+            None,
+            &handler,
+        ),
+    )
 }
 
 /// Share…: macOS's share menu on `paths`, AirDrop, Messages, Mail and the
@@ -194,9 +202,7 @@ pub fn share(
     let picker = unsafe {
         NSSharingServicePicker::initWithItems(NSSharingServicePicker::alloc(), &items(paths))
     };
-    let entries = localsend
-        .zip(MainThreadMarker::new())
-        .and_then(|(chosen, main)| localsend_entry(chosen, main));
+    let entries = MainThreadMarker::new().map(|main| entries(localsend, main));
     if let Some(entries) = &entries {
         picker.setDelegate(Some(ProtocolObject::from_ref(&**entries)));
     }

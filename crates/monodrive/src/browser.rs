@@ -1665,6 +1665,17 @@ impl Browser {
             .update(cx, |pane, cx| pane.go_to(to.folder, to.select, window, cx));
     }
 
+    /// Opens the LocalSend page holding what another app's share menu sent.
+    pub(crate) fn send_with_localsend(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane()
+            .update(cx, |pane, cx| pane.send_with_localsend(paths, window, cx));
+    }
+
     /// Opens the palette on what would run now, which is read off the frame
     /// drawn last. Another sheet closes first, and the palette waits for it.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {

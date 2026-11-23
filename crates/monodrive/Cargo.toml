@@ -12,6 +12,8 @@ gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["font-kit", "runtime_shaders"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 unicode-segmentation = "1"
+# Reads the URL the share extension opens the app with.
+url = "2"
 # Pins the traffic lights to Monocode's spacing, sets the app's icon, draws Finder's icons, puts
 # files on the pasteboard, hands them to Finder and Terminal, previews
 # them with Quick Look, and taps the trackpad.

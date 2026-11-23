@@ -5,7 +5,7 @@ Status: done. Sending to and receiving from real phones and the LocalSend app ne
 Decisions made while building it:
 
 - Opt-in: Settings › General › Use LocalSend, off by default. Off, nothing of it shows or runs, no key is made, and MCP sessions don't offer its tools (the server reads the saved switch for each request).
-- Share… lists LocalSend after macOS's services, in place of the LocalSend app's own entry; picking it opens the page holding what was shared. Other apps' share menus would need a Share Extension, which isn't built.
+- Share… lists LocalSend after macOS's services, in place of the LocalSend app's own entry; picking it opens the page holding what was shared. Other apps' share menus get Send with LocalSend from a share extension that hands the files to the window: see `docs/localsend.md`.
 - The sidebar row sits after AirDrop, where Locations' Edit doesn't move it, and shows LocalSend's logo traced as a glyph.
 
 ## Goal
