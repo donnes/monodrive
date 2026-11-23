@@ -56,6 +56,8 @@
 //! `search-contents.png` is a content search with its matching lines,
 //! `search-menu.png` the search field's menu over it, with made-up saved and
 //! recent searches, and `search-save.png` that menu naming a new one.
+//! `search-filter.png` is the field offering kinds for the filter being
+//! typed, and `search-typo.png` a bad filter marked where it sits.
 //!
 //! `batch-rename.png` is rename in the list with several selected, replacing
 //! text, `batch-rename-number.png` numbering them, `batch-rename-problem.png`
@@ -1746,7 +1748,7 @@ fn shoot_search(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> g
     save(cx, window, out, "search-contents")?;
     dispatch(cx, window, &ShowSearches)?;
     let down = named(cx, "context_menu::Down")?;
-    for _ in 0..4 {
+    for _ in 0..7 {
         dispatch(cx, window, &*down)?;
     }
     save(cx, window, out, "search-menu")?;
@@ -1754,6 +1756,14 @@ fn shoot_search(cx: &mut Cx, out: &Path, folder: &Path, base: &Preferences) -> g
     dispatch(cx, window, &*dismiss)?;
     dispatch(cx, window, &SaveSearch)?;
     save(cx, window, out, "search-save")?;
+    dispatch(cx, window, &*dismiss)?;
+    dispatch(cx, window, &*dismiss)?;
+    // Back to names, with what's typed selected to type over.
+    dispatch(cx, window, &SearchContents)?;
+    type_text(cx, window, "invoice modified:30d kind:")?;
+    save(cx, window, out, "search-filter")?;
+    type_text(cx, window, "document size:big ")?;
+    save(cx, window, out, "search-typo")?;
     Ok(())
 }
 

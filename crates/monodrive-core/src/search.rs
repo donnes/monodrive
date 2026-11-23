@@ -1,7 +1,7 @@
 //! The search language the window and `monodrive mcp` share: words for
 //! fsearch's name matching plus typed filters, such as
 //! `report kind:document size:>1mb modified:7d in:~/Work`. A `Query` prints
-//! back as the text it parsed from, so chips can rebuild the search field.
+//! back as the text it parsed from, so a kept search reads back as typed.
 //! `index` runs one; docs/search.md has the rules. A `Search` is one as the
 //! window runs it: what's typed, whether it looks at names or inside files,
 //! and where.
@@ -9,7 +9,13 @@
 use crate::expand_home;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::ops::Range;
 use std::path::PathBuf;
+
+mod typing;
+pub use typing::{
+    Completion, Completions, Filter, Token, TokenKind, complete, start_filter, tokens,
+};
 
 /// A parsed search: its words and filters in the order typed.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -362,20 +368,35 @@ fn term(word: &str) -> Result<Term, String> {
 /// The words of `text` as fsearch splits them: at spaces, except inside
 /// double quotes, which are dropped.
 fn words(text: &str) -> Vec<String> {
-    let (mut out, mut word, mut quoted) = (Vec::new(), String::new(), false);
-    for c in text.chars() {
+    spans(text).into_iter().map(|(_, word)| word).collect()
+}
+
+/// `words`, each with the bytes of `text` it came from, quotes included.
+fn spans(text: &str) -> Vec<(Range<usize>, String)> {
+    let (mut out, mut word, mut start, mut quoted) = (Vec::new(), String::new(), None, false);
+    for (at, c) in text.char_indices() {
         match c {
-            '"' => quoted = !quoted,
             ' ' if !quoted => {
-                if !word.is_empty() {
-                    out.push(std::mem::take(&mut word));
+                if let Some(start) = start.take()
+                    && !word.is_empty()
+                {
+                    out.push((start..at, std::mem::take(&mut word)));
                 }
             }
-            _ => word.push(c),
+            '"' => {
+                quoted = !quoted;
+                start.get_or_insert(at);
+            }
+            _ => {
+                word.push(c);
+                start.get_or_insert(at);
+            }
         }
     }
-    if !word.is_empty() {
-        out.push(word);
+    if let Some(start) = start
+        && !word.is_empty()
+    {
+        out.push((start..text.len(), word));
     }
     out
 }
@@ -408,6 +429,23 @@ impl Kind {
             Kind::Folder => "folder",
             Kind::File => "file",
             Kind::Link => "link",
+        }
+    }
+
+    /// What it is, in the plural, as a person would say it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Image => "Images",
+            Kind::Video => "Videos",
+            Kind::Audio => "Audio",
+            Kind::Document => "Documents",
+            Kind::Code => "Code",
+            Kind::Archive => "Archives",
+            Kind::Font => "Fonts",
+            Kind::App => "Apps",
+            Kind::Folder => "Folders",
+            Kind::File => "Files",
+            Kind::Link => "Links",
         }
     }
 

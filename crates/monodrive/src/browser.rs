@@ -78,7 +78,10 @@ use monodrive_core::index::{Index, Progress, Status};
 use monodrive_core::ops::{self, Done, Job, Origin, Request};
 use monodrive_core::places::Favorite;
 use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
-use searches::{SearchMenu, SearchMenuEvent};
+use searches::{
+    AcceptCompletion, DismissCompletions, NextCompletion, PreviousCompletion, SearchMenu,
+    SearchMenuEvent,
+};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -301,8 +304,14 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", PlacePrevious, Some("Sidebar")),
         KeyBinding::new("down", PlaceNext, Some("Sidebar")),
         KeyBinding::new("enter", OpenPlace, Some("Sidebar")),
-        // Return in the search field opens the best hit.
+        // Return in the search field opens the best hit, unless it's
+        // finishing a filter.
         KeyBinding::new("enter", OpenSelected, Some("Search")),
+        KeyBinding::new("up", PreviousCompletion, Some("Completing")),
+        KeyBinding::new("down", NextCompletion, Some("Completing")),
+        KeyBinding::new("tab", AcceptCompletion, Some("Completing")),
+        KeyBinding::new("enter", AcceptCompletion, Some("Completing")),
+        KeyBinding::new("escape", DismissCompletions, Some("Completing")),
         KeyBinding::new("enter", CommitRename, Some("Rename")),
         KeyBinding::new("escape", CancelRename, Some("Rename")),
         // The list's arrows would move the selection out from under the
@@ -1403,6 +1412,7 @@ impl Browser {
                     SearchMenuEvent::Dismissed => {}
                     SearchMenuEvent::ToggleContents => pane.toggle_contents(window, cx),
                     SearchMenuEvent::ToggleThisFolder => pane.toggle_this_folder(window, cx),
+                    SearchMenuEvent::StartFilter(filter) => pane.start_filter(*filter, window, cx),
                     SearchMenuEvent::Run(search) => pane.run_search(search.clone(), window, cx),
                 });
             },

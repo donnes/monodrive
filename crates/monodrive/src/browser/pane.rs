@@ -12,7 +12,7 @@ use super::localsend::LocalSendPage;
 use super::organize::Review;
 use super::overview::OverviewPage;
 use super::remote::RemotePage;
-use super::searches::{CONTENT_SETTLE, Matches};
+use super::searches::{CONTENT_SETTLE, Completing, Matches};
 use super::worktrees::WorktreesPage;
 use super::{
     Back, CancelRename, ClearRecents, CommitRename, Compress, CopyPath, DeselectAll, Download,
@@ -278,6 +278,8 @@ pub struct Pane {
     pub(super) search_scope: SearchScope,
     /// A content search's matching lines, and the rows that show them.
     pub(super) matches: Matches,
+    /// Values that could finish the filter being typed, while the field shows them.
+    pub(super) completing: Option<Completing>,
     /// How tall a row was last drawn.
     list_row_height: f32,
     /// Keeps the results on screen as a recent search, once they've stayed.
@@ -355,6 +357,7 @@ impl Pane {
                 this.query = query;
                 this.reload(cx);
             }
+            this.follow_typing(cx);
         })
         .detach();
         // Cleanup otherwise runs while drawing, and a closed tab, pane or window
@@ -423,6 +426,7 @@ impl Pane {
             looks: Looks::default(),
             search_scope: SearchScope::default(),
             matches: Matches::default(),
+            completing: None,
             list_row_height: 0.,
             remember: Task::ready(()),
             selection: Selection::default(),

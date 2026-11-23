@@ -7,7 +7,10 @@
 use super::drag::{Spot, Target, offers};
 use super::pane::{Stop, format_bytes};
 use super::remote;
-use super::searches;
+use super::searches::{
+    self, AcceptCompletion, COMPLETIONS_WIDTH, DismissCompletions, NextCompletion,
+    PreviousCompletion,
+};
 use super::{
     Browser, FocusList, FocusSearch, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
     GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, MovePlaceDown,
@@ -37,7 +40,7 @@ use monodrive_core::index::{Caps, Found, Index};
 use monodrive_core::ops::{self, Origin};
 use monodrive_core::places::{Availability, Place, Store};
 use monodrive_core::remote::{Connections, Source};
-use monodrive_core::search::{Looks, Search};
+use monodrive_core::search::{Completion, Looks, Search};
 use monodrive_core::servers::{self, Cancel, Prompt};
 use monodrive_core::updates::Channel;
 use monodrive_core::volumes::{self, Volume};
@@ -1998,6 +2001,11 @@ impl Browser {
             !pane.query.is_empty(),
         );
         let focused = search.focus_handle(cx).is_focused(window);
+        let completing = pane
+            .completing
+            .as_ref()
+            .filter(|_| focused)
+            .map(|completing| (completing.list.items.clone(), completing.active));
         theme::field(if focused { accent() } else { content(0.12) })
             .debug_selector(|| "search-field".into())
             .key_context("Search")
@@ -2021,7 +2029,34 @@ impl Browser {
                 .debug_selector(|| "search-menu-button".into())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_searches(window, cx))),
             )
-            .child(div().flex_1().min_w_0().child(search))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .when(completing.is_some(), |d| {
+                        d.key_context("Completing")
+                            .on_action(cx.listener(|this, _: &PreviousCompletion, _, cx| {
+                                this.pane()
+                                    .update(cx, |pane, cx| pane.step_completion(false, cx))
+                            }))
+                            .on_action(cx.listener(|this, _: &NextCompletion, _, cx| {
+                                this.pane()
+                                    .update(cx, |pane, cx| pane.step_completion(true, cx))
+                            }))
+                            .on_action(cx.listener(|this, _: &AcceptCompletion, window, cx| {
+                                this.pane()
+                                    .update(cx, |pane, cx| pane.accept_completion(None, window, cx))
+                            }))
+                            .on_action(cx.listener(|this, _: &DismissCompletions, _, cx| {
+                                this.pane()
+                                    .update(cx, |pane, cx| pane.dismiss_completions(cx))
+                            }))
+                    })
+                    .child(search),
+            )
+            .when_some(completing, |d, (items, active)| {
+                d.child(self.completions(items, active, cx))
+            })
             .when(typed, |d| {
                 d.child(
                     theme::tip_below(
@@ -2049,6 +2084,75 @@ impl Browser {
                     )
                 },
             )
+    }
+
+    /// The values that could finish the filter being typed, under the field.
+    /// A press takes one at once, before the field could lose the keys.
+    fn completions(
+        &self,
+        items: Vec<Completion>,
+        active: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rows = items.into_iter().enumerate().map(|(ix, item)| {
+            let on = ix == active;
+            theme::row_slot(("search-completion", ix))
+                .debug_selector(move || format!("search-completion-{ix}"))
+                .role(Role::MenuItem)
+                .aria_label(item.text.clone())
+                .aria_selected(on)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.pane()
+                            .update(cx, |pane, cx| pane.accept_completion(Some(ix), window, cx));
+                    }),
+                )
+                .child(
+                    theme::row(on)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(theme::MONO_FONT)
+                                .text_size(px(theme::TEXT_SMALL))
+                                .child(item.text),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(theme::TEXT_CAPTION))
+                                .text_color(theme::row_muted(on))
+                                .child(item.label),
+                        ),
+                )
+        });
+        div().absolute().left_0().top(gpui::relative(1.)).child(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::TopLeft)
+                    .offset(gpui::point(px(-1.), px(4.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        theme::floating(theme::Elevation::Popover)
+                            .id("search-completions")
+                            .debug_selector(|| "search-completions".into())
+                            .role(Role::Menu)
+                            .aria_label("Completions")
+                            .w(px(COMPLETIONS_WIDTH))
+                            .child(
+                                theme::inset_rows(div())
+                                    .relative()
+                                    .flex()
+                                    .flex_col()
+                                    .children(rows),
+                            ),
+                    ),
+            )
+            .with_priority(1),
+        )
     }
 
     /// Opens or closes the sidebar. It sits after the traffic lights, open or

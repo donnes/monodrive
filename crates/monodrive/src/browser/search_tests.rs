@@ -266,10 +266,10 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     };
     assert_eq!(world.store.recent_searches(), Ok(vec![recent.clone()]));
 
-    // Names, Contents, This Folder, then Save Search…
+    // Names, Contents, This Folder, the three filters, then Save Search…
     press(cx, "cmd-shift-s");
     assert!(menu_open(&browser, cx));
-    press(cx, "down down down down enter");
+    press(cx, "down down down down down down down enter");
     cx.simulate_input("Todos");
     press(cx, "enter");
     let saved = SavedSearch {
@@ -284,7 +284,7 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     // Out of the search, the saved one brings it back as it was.
     press(cx, "escape");
     assert_eq!(typed(&browser, cx), "");
-    press(cx, "cmd-shift-s down down down down enter");
+    press(cx, "cmd-shift-s down down down down down down down enter");
     land(cx);
     assert!(!menu_open(&browser, cx));
     assert_eq!(typed(&browser, cx), "todo");
@@ -292,7 +292,7 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     assert_eq!(shown(&browser, cx).0, ["a.rs"]);
 
     // R renames, and Esc in the name leaves the menu open and the name as it was.
-    press(cx, "cmd-shift-s down down down down r");
+    press(cx, "cmd-shift-s down down down down down down down r");
     press(cx, "escape");
     assert!(menu_open(&browser, cx));
     assert_eq!(world.store.searches(), Ok(vec![saved.clone()]));
@@ -315,6 +315,59 @@ fn the_menu_saves_runs_renames_removes_and_clears_searches(cx: &mut TestAppConte
     assert!(menu_open(&browser, cx));
     press(cx, "escape");
     assert!(!menu_open(&browser, cx));
+}
+
+fn offered(browser: &Entity<Browser>, cx: &mut VisualTestContext) -> Vec<String> {
+    in_pane(browser, cx, |pane, _| {
+        pane.completing
+            .as_ref()
+            .map_or_else(Vec::new, |completing| {
+                completing
+                    .list
+                    .items
+                    .iter()
+                    .map(|item| item.text.clone())
+                    .collect()
+            })
+    })
+}
+
+/// Protects finishing a filter from the keys: the values show under the field
+/// once a key is typed, ↓ with Tab or ↩ puts one in place of what's typed
+/// rather than opening a hit, the menu's Filter rows type a key, and Esc
+/// closes the list before it leaves the search.
+#[gpui::test]
+fn the_field_offers_values_for_the_filter_being_typed(cx: &mut TestAppContext) {
+    let world = world(Vec::new(), cx);
+    let folder = world.dir.path().join("here");
+    std::fs::create_dir(&folder).unwrap();
+    let (browser, cx) = browse(&folder, cx);
+
+    press(cx, "cmd-f");
+    cx.simulate_input("report kind:");
+    cx.run_until_parked();
+    assert_eq!(offered(&browser, cx)[..2], ["kind:image", "kind:video"]);
+    assert!(cx.debug_bounds("search-completions").is_some());
+    press(cx, "down tab");
+    assert_eq!(typed(&browser, cx), "report kind:video ");
+    assert_eq!(offered(&browser, cx), Vec::<String>::new());
+
+    // Kind widens what's there, and ↩ takes the first that could follow.
+    press(cx, "cmd-shift-s down down down down enter");
+    assert!(!menu_open(&browser, cx));
+    assert_eq!(typed(&browser, cx), "report kind:video, ");
+    assert_eq!(offered(&browser, cx)[0], "kind:video,image");
+    press(cx, "enter");
+    assert_eq!(typed(&browser, cx), "report kind:video,image ");
+
+    cx.simulate_input("size:");
+    cx.run_until_parked();
+    assert_eq!(offered(&browser, cx).len(), 4);
+    press(cx, "escape");
+    assert_eq!(offered(&browser, cx), Vec::<String>::new());
+    assert_eq!(typed(&browser, cx), "report kind:video,image size:");
+    press(cx, "escape");
+    assert_eq!(typed(&browser, cx), "");
 }
 
 /// Protects a line standing for its file: pressing a line under a file that
@@ -383,9 +436,10 @@ fn the_keys_scroll_the_menu_to_the_row_they_land_on(cx: &mut TestAppContext) {
         });
         row.top() >= shown.top() && row.bottom() <= shown.bottom()
     };
-    // Names, Contents and This Folder, then down to the last saved search.
+    // Names, Contents, This Folder and the filters, then down to the last
+    // saved search.
     assert!(!in_view("saved-search-39", cx));
-    for _ in 0..43 {
+    for _ in 0..46 {
         press(cx, "down");
     }
     assert!(in_view("saved-search-39", cx));

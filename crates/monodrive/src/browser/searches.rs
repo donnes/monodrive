@@ -19,13 +19,13 @@ use crate::theme::{self, accent, content, danger, icon, on_accent, row_icon_butt
 use gpui::{
     Action, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Role,
-    ScrollHandle, SharedString, Stateful, StyledText, Task, Window, canvas, div, point, prelude::*,
-    px,
+    ScrollHandle, SharedString, Stateful, StyledText, Task, UnderlineStyle, Window, actions,
+    canvas, div, point, prelude::*, px,
 };
 use monodrive_core::index::{Found, Hit, LineMatch};
 use monodrive_core::paths;
 use monodrive_core::places::{RecentSearch, SavedSearch, Store};
-use monodrive_core::search::{Looks, Scope as Where, Search};
+use monodrive_core::search::{self, Completions, Filter, Looks, Scope as Where, Search, TokenKind};
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::Path;
@@ -39,7 +39,18 @@ pub(super) const CONTENT_SETTLE: Duration = Duration::from_millis(120);
 /// run, rather than a step on the way to typing one.
 pub(super) const REMEMBER_AFTER: Duration = Duration::from_secs(2);
 
+actions!(
+    search_field,
+    [
+        PreviousCompletion,
+        NextCompletion,
+        AcceptCompletion,
+        DismissCompletions
+    ]
+);
+
 const MENU_WIDTH: f32 = 360.;
+pub(super) const COMPLETIONS_WIDTH: f32 = 280.;
 const MENU_MARGIN: f32 = 8.;
 /// The column of line numbers, under the file's icon and into its name.
 const LINE_NUMBERS: f32 = 40.;
@@ -150,7 +161,106 @@ impl Matches {
     }
 }
 
+/// Values that could finish the filter being typed, and the one under the keys.
+pub(super) struct Completing {
+    pub(super) list: Completions,
+    pub(super) active: usize,
+}
+
 impl Pane {
+    /// Mutes the filters' keys and underlines a bad one, and offers values
+    /// for the filter at the caret. A bad token the caret ends is still being
+    /// typed.
+    pub(super) fn follow_typing(&mut self, cx: &mut Context<Self>) {
+        let (text, caret) = {
+            let field = self.search.read(cx);
+            (field.text().to_string(), field.cursor())
+        };
+        let marks = search::tokens(&text)
+            .into_iter()
+            .filter_map(|token| {
+                let style = match token.kind {
+                    TokenKind::Filter { key } => {
+                        let key = token.range.start..token.range.start + key;
+                        return Some((
+                            key,
+                            HighlightStyle {
+                                color: Some(content(0.65)),
+                                ..HighlightStyle::default()
+                            },
+                        ));
+                    }
+                    TokenKind::Invalid(_) if token.range.end != caret => HighlightStyle {
+                        underline: Some(UnderlineStyle {
+                            color: Some(danger()),
+                            thickness: px(1.),
+                            wavy: true,
+                        }),
+                        ..HighlightStyle::default()
+                    },
+                    _ => return None,
+                };
+                Some((token.range, style))
+            })
+            .collect();
+        self.search
+            .update(cx, |field, cx| field.set_highlights(marks, cx));
+        let list = search::complete(&text, caret);
+        self.completing = (!list.items.is_empty()).then_some(Completing { list, active: 0 });
+        cx.notify();
+    }
+
+    pub(super) fn step_completion(&mut self, down: bool, cx: &mut Context<Self>) {
+        if let Some(completing) = &mut self.completing {
+            let len = completing.list.items.len();
+            completing.active = if down {
+                (completing.active + 1) % len
+            } else {
+                (completing.active + len - 1) % len
+            };
+            cx.notify();
+        }
+    }
+
+    /// Puts value `ix`, or the one under the keys, in place of what's typed.
+    pub(super) fn accept_completion(
+        &mut self,
+        ix: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(completing) = self.completing.take() else {
+            return;
+        };
+        let text = self.search.read(cx).text().to_string();
+        if let Some((text, caret)) = completing
+            .list
+            .accept(&text, ix.unwrap_or(completing.active))
+        {
+            self.search
+                .update(cx, |field, cx| field.set_text(&text, caret..caret, cx));
+        }
+        window.focus(&self.search.focus_handle(cx), cx);
+    }
+
+    pub(super) fn dismiss_completions(&mut self, cx: &mut Context<Self>) {
+        self.completing = None;
+        cx.notify();
+    }
+
+    /// A filter from the field's menu: its key typed, for a value to be picked.
+    pub(super) fn start_filter(
+        &mut self,
+        filter: Filter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, caret) = search::start_filter(self.search.read(cx).text(), filter);
+        self.search
+            .update(cx, |field, cx| field.set_text(&text, caret..caret, cx));
+        window.focus(&self.search.focus_handle(cx), cx);
+    }
+
     /// What's on screen as a search, whether or not anything's typed.
     pub(super) fn current_search(&self) -> Search {
         Search {
@@ -390,6 +500,7 @@ pub(super) enum SearchMenuEvent {
     Dismissed,
     ToggleContents,
     ToggleThisFolder,
+    StartFilter(Filter),
     Run(Search),
 }
 
@@ -398,6 +509,7 @@ pub(super) enum SearchMenuEvent {
 enum Item {
     Looks(Looks),
     ThisFolder,
+    Filter(Filter),
     Saved(usize),
     Save,
     Recent(usize),
@@ -554,6 +666,7 @@ impl SearchMenu {
             Item::Looks(Looks::Contents),
             Item::ThisFolder,
         ];
+        items.extend(Filter::ALL.map(Item::Filter));
         if self.store.is_some() {
             items.extend((0..self.kept.saved.len()).map(Item::Saved));
             if self.can_save() {
@@ -595,6 +708,7 @@ impl SearchMenu {
             }
             Item::Looks(_) => cx.emit(SearchMenuEvent::ToggleContents),
             Item::ThisFolder => cx.emit(SearchMenuEvent::ToggleThisFolder),
+            Item::Filter(filter) => cx.emit(SearchMenuEvent::StartFilter(filter)),
             Item::Saved(ix) => {
                 if let Some(saved) = self.kept.saved.get(ix) {
                     let search = Search::from_stored(&saved.query, saved.scope.clone());
@@ -874,13 +988,13 @@ impl SearchMenu {
 
     fn command_row(
         &self,
-        id: &'static str,
+        (id, ix): (&'static str, usize),
         title: &'static str,
         item: Item,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let on = self.active == Some(item);
-        self.slot(id, 0, item, cx).child(
+        self.slot(id, ix, item, cx).child(
             theme::row(on)
                 .child(theme::lead(None::<Div>))
                 .child(div().flex_1().truncate().child(title)),
@@ -975,6 +1089,15 @@ impl Render for SearchMenu {
             )
             .into_any_element(),
         ));
+        rows.push((None, theme::section_label("Filter").into_any_element()));
+        for (ix, filter) in Filter::ALL.into_iter().enumerate() {
+            let item = Item::Filter(filter);
+            rows.push((
+                Some(item),
+                self.command_row(("search-filter", ix), filter.title(), item, cx)
+                    .into_any_element(),
+            ));
+        }
         if self.store.is_some() {
             let renaming = self.naming.as_ref().and_then(|n| n.renaming.clone());
             if !self.kept.saved.is_empty() || self.can_save() || self.naming.is_some() {
@@ -995,7 +1118,7 @@ impl Render for SearchMenu {
                 }
                 _ if self.can_save() => rows.push((
                     Some(Item::Save),
-                    self.command_row("save-search", "Save Search…", Item::Save, cx)
+                    self.command_row(("save-search", 0), "Save Search…", Item::Save, cx)
                         .into_any_element(),
                 )),
                 _ => {}
@@ -1011,7 +1134,7 @@ impl Render for SearchMenu {
                 rows.push((
                     Some(Item::ClearRecents),
                     self.command_row(
-                        "clear-recent-searches",
+                        ("clear-recent-searches", 0),
                         "Clear Recent Searches",
                         Item::ClearRecents,
                         cx,
