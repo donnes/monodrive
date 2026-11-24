@@ -106,16 +106,35 @@ fn provider_name(path: &Path) -> Option<String> {
     })
 }
 
-/// How much is left in the cloud account behind `folder`, in bytes, if its
-/// provider says. Only iCloud Drive does: no File Provider API gives a
-/// quota. It comes from the private `BRFetchQuotaOperation`, as `brctl quota`
-/// reads it, since no public API says, and never gives the account's total.
-/// iCloud Drive's daemon may ask Apple, which takes about 250 ms, so call it
-/// off the UI thread.
-pub fn free_space(folder: &CloudFolder) -> Option<u64> {
-    if !folder.path.ends_with(ICLOUD_DRIVE) {
-        return None;
+impl CloudFolder {
+    /// Whether [`free_space`] asks this folder's provider what's left. Only
+    /// iCloud Drive answers: no File Provider API gives a quota.
+    pub fn reports_free_space(&self) -> bool {
+        self.path.ends_with(ICLOUD_DRIVE)
     }
+}
+
+/// What a folder that [`reports_free_space`](CloudFolder::reports_free_space)
+/// said about its account.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Quota {
+    Free(u64),
+    Failed,
+}
+
+/// How much is left in the cloud account behind `folder`, in bytes, or
+/// `None` for a folder that doesn't report it. iCloud Drive's daemon may ask
+/// Apple, which takes about 250 ms, so call it off the UI thread.
+pub fn free_space(folder: &CloudFolder) -> Option<Quota> {
+    folder
+        .reports_free_space()
+        .then(|| icloud_free_space().map_or(Quota::Failed, Quota::Free))
+}
+
+/// What's left in iCloud Drive, from the private `BRFetchQuotaOperation`
+/// that `brctl quota` reads, since no public API says. It never gives the
+/// account's total.
+fn icloud_free_space() -> Option<u64> {
     // SAFETY: a system framework, which stays loaded.
     let loaded = unsafe {
         libc::dlopen(
@@ -128,9 +147,10 @@ pub fn free_space(folder: &CloudFolder) -> Option<u64> {
     }
     let class = AnyClass::get(c"BRFetchQuotaOperation")?;
     let (sent, answer) = std::sync::mpsc::channel();
-    let finished = RcBlock::new(move |free: *mut NSNumber, _: *mut NSError| {
+    let finished = RcBlock::new(move |free: *mut NSNumber, error: *mut NSError| {
         // SAFETY: the daemon passes a valid number or null.
-        let _ = sent.send(unsafe { free.as_ref() }.map(|free| free.unsignedLongLongValue()));
+        let free = unsafe { free.as_ref() }.filter(|_| error.is_null());
+        let _ = sent.send(free.map(|free| free.unsignedLongLongValue()));
     });
     objc2::rc::autoreleasepool(|_| {
         // SAFETY: an NSOperation subclass, which `new` makes.

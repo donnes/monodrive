@@ -35,7 +35,7 @@ use gpui::{
     ObjectFit, Pixels, Point, Render, Resource, Role, Stateful, Subscription, Task, Window, div,
     img, prelude::*, px,
 };
-use monodrive_core::cloud::{self, CloudFolder};
+use monodrive_core::cloud::{self, CloudFolder, Quota};
 use monodrive_core::entries::Entry;
 use monodrive_core::index::{Caps, Found, Index};
 use monodrive_core::ops::{self, Origin};
@@ -79,7 +79,7 @@ pub trait Drives: Send + Sync {
     fn cloud(&self) -> Vec<CloudFolder>;
     /// What's left in `folder`'s cloud account, if its provider says. Can
     /// wait on the provider, so call it off the UI thread.
-    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64>;
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<Quota>;
     /// What the index finds for `query`, once it has started. Nothing starts
     /// it here. Call it off the UI thread.
     fn find_files(
@@ -126,7 +126,7 @@ impl Drives for System {
         cloud::folders(&home())
     }
 
-    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64> {
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<Quota> {
         cloud::free_space(folder)
     }
 
@@ -200,10 +200,10 @@ pub(super) struct Sidebar {
     /// together, which is also when the window comes forward.
     pub(super) all_volumes: Vec<Volume>,
     pub(super) all_cloud: Vec<CloudFolder>,
-    /// What's left in each cloud folder's account, `None` where its provider
-    /// doesn't say. Asked after the folders are listed, since iCloud Drive
-    /// can take a moment; a folder not answered yet isn't here.
-    cloud_free: HashMap<PathBuf, Option<u64>>,
+    /// What each cloud folder that reports free space said, once it has.
+    /// Asked after the folders are listed, since iCloud Drive can take a
+    /// moment.
+    cloud_free: HashMap<PathBuf, Quota>,
     /// What Locations lists: those Settings doesn't hide, or all of them
     /// while Locations is edited.
     pub(super) volumes: Vec<Volume>,
@@ -540,7 +540,10 @@ impl Browser {
                 .spawn(async move {
                     folders
                         .iter()
-                        .map(|folder| (folder.path.clone(), places.drives.cloud_free(folder)))
+                        .filter_map(|folder| {
+                            let free = places.drives.cloud_free(folder)?;
+                            Some((folder.path.clone(), free))
+                        })
                         .collect()
                 })
                 .await;
@@ -1395,14 +1398,15 @@ impl Browser {
             .sidebar
             .cloud_free
             .get(&folder.path)
-            .map(|free| match free {
-                Some(free) => ("free", format!("{} free", format_bytes(*free))),
-                None => ("unknown", "Storage info unavailable".into()),
+            .map(|quota| match quota {
+                Quota::Free(bytes) => ("free", format!("{} free", format_bytes(*bytes))),
+                Quota::Failed => ("failed", "Couldn’t read free space".into()),
             });
         let described = space.as_ref().map(|(_, text)| text.clone());
+        let reports = folder.reports_free_space();
         let row = self
             .location_frame(ix, selected, hidden, cursor)
-            .h(px(DRIVE_HEIGHT))
+            .h(px(if reports { DRIVE_HEIGHT } else { ROW_HEIGHT }))
             .flex()
             .flex_col()
             .justify_center()
@@ -1421,23 +1425,21 @@ impl Browser {
                     .children(self.eye_button(Row::Cloud(at), ix, hidden, cx)),
             )
             // The line keeps its room until the provider answers.
-            .child(
-                div()
-                    .h(px(12.))
-                    .ml(px(self.under_name()))
-                    .flex()
-                    .items_center()
-                    .text_size(px(theme::TEXT_CAPTION))
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(content(if hidden { 0.3 } else { 0.65 }))
-                    .children(space.map(|(said, text)| {
-                        div()
-                            .debug_selector(move || format!("cloud-{said}-{at}"))
-                            .min_w_0()
-                            .truncate()
-                            .child(text)
-                    })),
-            );
+            .when(reports, |d| {
+                d.child(
+                    self.detail_line()
+                        .text_size(px(theme::TEXT_CAPTION))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(content(if hidden { 0.3 } else { 0.65 }))
+                        .children(space.map(|(said, text)| {
+                            div()
+                                .debug_selector(move || format!("cloud-{said}-{at}"))
+                                .min_w_0()
+                                .truncate()
+                                .child(text)
+                        })),
+                )
+            });
         let target = (folder.path.clone(), name.clone());
         self.location_slot(ix, selected, cx)
             .aria_label(name)
@@ -1599,15 +1601,16 @@ impl Browser {
                     .children(self.eye_button(Row::Volume(vol), ix, hidden, cx)),
             )
             .children(fullness(volume).map(|fullness| {
-                theme::progress_track()
-                    .debug_selector(move || format!("volume-bar-{vol}"))
-                    .ml(px(self.under_name()))
-                    .flex_shrink_0()
-                    .child(
-                        theme::progress_fill(fullness)
-                            .debug_selector(move || format!("volume-used-{vol}"))
-                            .bg(content(if hidden { 0.3 } else { 0.55 })),
-                    )
+                self.detail_line().child(
+                    theme::progress_track()
+                        .debug_selector(move || format!("volume-bar-{vol}"))
+                        .flex_1()
+                        .child(
+                            theme::progress_fill(fullness)
+                                .debug_selector(move || format!("volume-used-{vol}"))
+                                .bg(content(if hidden { 0.3 } else { 0.55 })),
+                        ),
+                )
             }));
         // A drive that can't be written to takes nothing.
         let folder = (!volume.read_only).then(|| (volume.mount.clone(), volume.name.clone()));
@@ -1841,6 +1844,17 @@ impl Browser {
             .occlude()
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_hidden(row, cx)))
         })
+    }
+
+    /// The 12 pt line under a location's name, which holds a drive's
+    /// capacity bar or what's left in a cloud account.
+    fn detail_line(&self) -> gpui::Div {
+        div()
+            .h(px(12.))
+            .ml(px(self.under_name()))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
     }
 
     /// Where a drive's second line starts: under its name.

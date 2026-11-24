@@ -119,7 +119,10 @@ impl Call for ListPlaces {
             .map(|folder| CloudFolder {
                 path: shown(&folder.path),
                 name: folder.name.clone(),
-                free: cloud::free_space(folder),
+                free: match cloud::free_space(folder) {
+                    Some(cloud::Quota::Free(bytes)) => Some(bytes),
+                    _ => None,
+                },
             })
             .collect();
         let mut servers: Vec<Saved> = server

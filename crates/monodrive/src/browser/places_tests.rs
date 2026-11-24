@@ -10,7 +10,7 @@ use crate::palette::{Page, PaletteView};
 use crate::preferences::View;
 use crate::session::{self, PaneState, Session, Shows, StopState};
 use gpui::{Action, Keystroke, Modifiers, Pixels, TestAppContext, VisualTestContext, point};
-use monodrive_core::cloud::CloudFolder;
+use monodrive_core::cloud::{CloudFolder, Quota};
 use monodrive_core::entries::Sort;
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::index::Found;
@@ -35,8 +35,7 @@ pub(super) struct Fake {
     mounted: Mutex<Option<Result<PathBuf, String>>>,
     pub(super) opened: Mutex<Vec<PathBuf>>,
     pub(super) cloud: Mutex<Vec<CloudFolder>>,
-    /// What's left in each cloud folder's account, where its provider says.
-    cloud_free: Mutex<HashMap<PathBuf, u64>>,
+    cloud_free: Mutex<HashMap<PathBuf, Quota>>,
     /// What the index finds, whatever's asked.
     files: Mutex<Vec<Entry>>,
     /// The paths whose device was asked for, in order.
@@ -87,7 +86,7 @@ impl Drives for Fake {
         self.cloud.lock().unwrap().clone()
     }
 
-    fn cloud_free(&self, folder: &CloudFolder) -> Option<u64> {
+    fn cloud_free(&self, folder: &CloudFolder) -> Option<Quota> {
         self.cloud_free.lock().unwrap().get(&folder.path).copied()
     }
 
@@ -384,10 +383,12 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
     let ext = tempfile::tempdir().unwrap();
     let drive = ext.path().canonicalize().unwrap();
     let world = world(vec![startup(), volume("Backup", &drive, "B", 100, 10)], cx);
+    let icloud = project.join("Library/Mobile Documents/com~apple~CloudDocs");
+    std::fs::create_dir_all(&icloud).unwrap();
     *world.fake.cloud.lock().unwrap() = vec![
         CloudFolder {
             name: "iCloud Drive".into(),
-            path: project.join("docs"),
+            path: icloud.clone(),
         },
         CloudFolder {
             name: "ProtonDrive".into(),
@@ -399,13 +400,13 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
         .cloud_free
         .lock()
         .unwrap()
-        .insert(project.join("docs"), 5_000_000_000);
+        .insert(icloud.clone(), Quota::Free(5_000_000_000));
     let owned = own(cx);
     let (browser, cx) = open(&world, &project, cx);
-    // iCloud Drive says what's left; the other provider says nothing.
+    // iCloud Drive says what's left; the other provider has no line for it.
     assert!(on_screen(cx, "cloud-free-0"));
-    assert!(on_screen(cx, "cloud-unknown-1"));
     assert!(!on_screen(cx, "cloud-free-1"));
+    assert!(!on_screen(cx, "cloud-failed-1"));
     let first = favorites(&browser, cx).len() + 2;
     let rows: Vec<_> = (first..first + 4)
         .map(|ix| browser.read_with(cx, |b, _| b.row_at(ix)))
@@ -421,10 +422,21 @@ fn the_startup_disk_leads_locations_with_cloud_folders_then_drives_after_it(
     };
     focus_sidebar(cx);
     press(cx, "up enter");
-    assert_eq!(here(&browser, cx), project.join("docs"));
+    assert_eq!(here(&browser, cx), icloud.clone());
     focus_sidebar(cx);
     press(cx, "down down cmd-e");
     assert_eq!(*world.fake.ejected.lock().unwrap(), vec![drive]);
+
+    world
+        .fake
+        .cloud_free
+        .lock()
+        .unwrap()
+        .insert(icloud.clone(), Quota::Failed);
+    browser.update(cx, |b, cx| b.load_volumes(cx));
+    cx.run_until_parked();
+    assert!(on_screen(cx, "cloud-failed-0"));
+    assert!(!on_screen(cx, "cloud-free-0"));
     release(owned, cx);
 }
 
