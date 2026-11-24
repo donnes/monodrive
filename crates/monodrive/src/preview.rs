@@ -143,6 +143,8 @@ pub struct PreviewView {
     scroll: UniformListScrollHandle,
     /// The Markdown's scrolling, which can't cross threads with `Body`.
     blocks: Option<ListState>,
+    /// The text's or Markdown source's scrolling.
+    lines: Option<ListState>,
     /// The edit row's width, which decides what fits in it.
     row_width: Rc<Cell<f32>>,
     /// The system's view, and the file it's on.
@@ -189,6 +191,7 @@ impl PreviewView {
             held: None,
             scroll: UniformListScrollHandle::new(),
             blocks: None,
+            lines: None,
             row_width: Rc::new(Cell::new(0.)),
             native: Rc::new(RefCell::new(None)),
             player: Rc::new(RefCell::new(None)),
@@ -294,6 +297,12 @@ impl PreviewView {
         self.blocks = match &body {
             Body::Markdown { blocks, .. } => {
                 Some(ListState::new(blocks.len(), ListAlignment::Top, px(400.)))
+            }
+            _ => None,
+        };
+        self.lines = match &body {
+            Body::Text { lines, .. } | Body::Markdown { source: lines, .. } => {
+                Some(ListState::new(lines.len(), ListAlignment::Top, px(400.)))
             }
             _ => None,
         };
@@ -1277,59 +1286,70 @@ fn colors(spans: &Spans) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
         .collect()
 }
 
-/// `hidden` blurs those parts of the lines.
+/// `hidden` blurs those parts of the lines. Long lines wrap at the pane's edge.
 fn text_rows(
     lines: Arc<Vec<Line>>,
     hidden: Option<Secrets>,
-    scroll: &UniformListScrollHandle,
+    state: Option<ListState>,
 ) -> gpui::AnyElement {
+    let Some(state) = state else {
+        return div().into_any_element();
+    };
     let digits = lines.len().max(1).ilog10() as usize + 1;
-    uniform_list("preview-lines", lines.len(), move |range, _, _| {
-        range
-            .map(|ix| {
-                let line = &lines[ix];
-                let text = match hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone()) {
-                    Some(secret) => {
-                        let key = &line.text[..secret.start];
-                        let mut seed = DefaultHasher::new();
-                        (ix, key).hash(&mut seed);
-                        let shown: Spans = line
-                            .spans
-                            .iter()
-                            .filter(|(range, _)| range.start < secret.start)
-                            .map(|(range, kind)| (range.start..range.end.min(secret.start), *kind))
-                            .collect();
-                        div()
-                            .flex()
-                            .child(StyledText::new(key.to_string()).with_highlights(colors(&shown)))
-                            .child(blurred(seed.finish()))
-                            .into_any_element()
-                    }
-                    None => StyledText::new(line.text.clone())
-                        .with_highlights(colors(&line.spans))
-                        .into_any_element(),
-                };
+    let rows = list(state, move |ix, _, _| {
+        let line = &lines[ix];
+        let text =
+            match hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone()) {
+                Some(secret) => {
+                    let key = &line.text[..secret.start];
+                    let mut seed = DefaultHasher::new();
+                    (ix, key).hash(&mut seed);
+                    let shown: Spans = line
+                        .spans
+                        .iter()
+                        .filter(|(range, _)| range.start < secret.start)
+                        .map(|(range, kind)| (range.start..range.end.min(secret.start), *kind))
+                        .collect();
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .child(div().max_w_full().child(
+                            StyledText::new(key.to_string()).with_highlights(colors(&shown)),
+                        ))
+                        .child(
+                            div()
+                                .h(px(theme::ROW_HEIGHT - 8.))
+                                .child(blurred(seed.finish())),
+                        )
+                        .into_any_element()
+                }
+                None => StyledText::new(line.text.clone())
+                    .with_highlights(colors(&line.spans))
+                    .into_any_element(),
+            };
+        div()
+            .w_full()
+            .px_3()
+            .flex()
+            .gap_3()
+            .line_height(px(theme::ROW_HEIGHT - 8.))
+            .child(
                 div()
-                    .h(px(theme::ROW_HEIGHT - 8.))
-                    .flex()
-                    .gap_3()
-                    .whitespace_nowrap()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(content(0.65))
-                            .child(format!("{:>digits$}", ix + 1)),
-                    )
-                    .child(text)
-            })
-            .collect()
+                    .flex_shrink_0()
+                    .text_color(content(0.65))
+                    .child(format!("{:>digits$}", ix + 1)),
+            )
+            .child(div().flex_1().min_w_0().child(text))
+            .into_any_element()
     })
-    .track_scroll(scroll)
     .size_full()
-    .p_3()
-    .font_family(theme::MONO_FONT)
-    .text_size(px(theme::TEXT_SMALL))
-    .into_any_element()
+    .py_3();
+    div()
+        .size_full()
+        .font_family(theme::MONO_FONT)
+        .text_size(px(theme::TEXT_SMALL))
+        .child(rows)
+        .into_any_element()
 }
 
 /// Blurred letters where a value would be, made up from `seed`. Values are
@@ -1531,7 +1551,7 @@ impl Render for PreviewView {
             } => {
                 let cut = *cut;
                 let hidden = secrets.clone().filter(|_| !self.revealed);
-                let rows = text_rows(lines.clone(), hidden, &self.scroll);
+                let rows = text_rows(lines.clone(), hidden, self.lines.clone());
                 div()
                     .debug_selector(|| "preview-text".into())
                     .size_full()
@@ -1554,7 +1574,7 @@ impl Render for PreviewView {
             }
             Body::Markdown { blocks, source } => {
                 if self.show_source || self.blocks.is_none() {
-                    text_rows(source.clone(), None, &self.scroll)
+                    text_rows(source.clone(), None, self.lines.clone())
                 } else {
                     let blocks = blocks.clone();
                     let state = self
