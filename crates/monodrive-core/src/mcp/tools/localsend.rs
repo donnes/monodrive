@@ -143,7 +143,7 @@ impl Call for LocalsendSend {
                 SendError::Declined => Code::PermissionDenied,
                 SendError::Pin { .. } => Code::AuthRequired,
                 SendError::Busy | SendError::TooManyTries => Code::Busy,
-                SendError::Unreachable(_) => Code::Unreachable,
+                SendError::Unreachable(_) | SendError::NoAnswer => Code::Unreachable,
                 SendError::Cancelled | SendError::Failed(_) => Code::Failed,
             };
             let error = ToolError::new(code, e.says(&device.alias));

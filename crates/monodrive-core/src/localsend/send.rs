@@ -11,7 +11,12 @@ use localsend::util::error::ErrorChain;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// How long a send waits for the receiver to accept before giving up, as a
+/// device that slept or left the network never answers.
+const ANSWER_WAIT: Duration = Duration::from_secs(5 * 60);
 
 /// Stops a send, from any thread.
 #[derive(Clone, Default)]
@@ -71,6 +76,8 @@ pub enum SendError {
     /// It's receiving from someone else.
     Busy,
     Unreachable(String),
+    /// It didn't accept or decline within `ANSWER_WAIT`.
+    NoAnswer,
     Cancelled,
     Failed(String),
 }
@@ -86,6 +93,10 @@ impl SendError {
             Self::TooManyTries => format!("{to} refuses after too many wrong PINs. Try later."),
             Self::Busy => format!("{to} is receiving from someone else."),
             Self::Unreachable(why) => format!("{to} didn't answer: {why}"),
+            Self::NoAnswer => format!(
+                "{to} didn't answer within {} minutes.",
+                ANSWER_WAIT.as_secs() / 60
+            ),
             Self::Cancelled => "Cancelled.".into(),
             Self::Failed(why) => why.clone(),
         }
@@ -319,17 +330,18 @@ async fn run(
             .collect(),
     };
     progress(Progress::Waiting);
-    let prepared = client
-        .prepare_upload(
-            protocol,
-            &device.host,
-            device.port,
-            None,
-            payload,
-            pin,
-            cancel.clone(),
-        )
+    let answer = client.prepare_upload(
+        protocol,
+        &device.host,
+        device.port,
+        None,
+        payload,
+        pin,
+        cancel.clone(),
+    );
+    let prepared = tokio::time::timeout(ANSWER_WAIT, answer)
         .await
+        .map_err(|_| SendError::NoAnswer)?
         .map_err(|e| refused(e, pin.is_some()))?;
     // Taking none of the files is how a receiver says it read a message.
     let Some(session) = prepared.response else {
