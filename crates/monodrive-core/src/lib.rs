@@ -4,6 +4,7 @@
 pub mod apps;
 pub mod archives;
 pub mod cloud;
+pub mod disk;
 pub mod edits;
 pub mod entries;
 pub mod index;
@@ -27,6 +28,15 @@ pub mod usage;
 pub mod user_commands;
 pub mod volumes;
 pub mod worktrees;
+
+/// Who asked. An agent is known by the name its MCP client gives, not by
+/// the person behind it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Origin {
+    Window,
+    Agent { client: Option<String> },
+}
 
 /// Nightlies carry a version Cargo.toml can't, which `scripts/release` passes in.
 pub const VERSION: &str = match option_env!("MONODRIVE_VERSION") {

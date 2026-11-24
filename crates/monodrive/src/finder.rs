@@ -4,14 +4,13 @@
 
 mod guard;
 
-use crate::browser::Browser;
-use crate::{frame, pasteboard, workspace};
-use gpui::{App, Global, WindowHandle};
+use crate::{pasteboard, workspace};
+use gpui::{App, Global};
 use monodrive_core::apps;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSPasteboard, NSRegisterServicesProvider};
+use objc2_app_kit::{NSPasteboard, NSRegisterServicesProvider, NSWorkspace};
 use objc2_core_foundation::{
     CFPreferencesCopyValue, CFPreferencesSetValue, CFPreferencesSynchronize, CFString, CFType,
     kCFPreferencesAnyApplication, kCFPreferencesAnyHost, kCFPreferencesCurrentUser,
@@ -113,7 +112,7 @@ impl Status {
 /// it off the UI thread.
 pub fn set(on: bool) -> Status {
     let now = status();
-    let guard = own_id().map(|id| guard::Guard::new(id, bundle_path(), &crate::browser::home()));
+    let guard = own_id().map(|id| guard::Guard::new(id, bundle_path(), &crate::home()));
     let mut failed = None;
     match (write_for(on, &now), &guard) {
         (Some(Write::Take), Some(guard)) => match guard.install(previous_viewer().as_ref()) {
@@ -167,7 +166,7 @@ fn blocker() -> Option<Blocked> {
         return Some(Blocked::DevBuild);
     }
     let bundle = bundle_path();
-    let user_apps = crate::browser::home().join("Applications");
+    let user_apps = crate::home().join("Applications");
     let settled = bundle.starts_with("/Applications") || bundle.starts_with(user_apps);
     (!settled).then_some(Blocked::OutsideApplications)
 }
@@ -223,13 +222,19 @@ fn write_viewer_key(id: Option<&str>) {
     CFPreferencesSynchronize(any_app, user, any_host);
 }
 
+/// Shows `paths` selected in Finder.
+pub fn reveal(paths: &[PathBuf]) {
+    keep_reveals_in_finder();
+    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&workspace::urls(paths));
+}
+
 /// Makes this process's own Reveal in Finder reach Finder while a Monodrive
 /// has the key, as it would otherwise come straight back. Naming Finder
 /// doesn't work: Finder then opens the file. An empty value in this
 /// process's argument domain does a real reveal, after AppKit logs "Finder
 /// replacement not found". Never undone, which is right: once another app
 /// has the key, Reveal in Finder going to Finder is what it says.
-pub fn keep_reveals_in_finder() {
+fn keep_reveals_in_finder() {
     static ONCE: Once = Once::new();
     if !viewer_key().is_some_and(|id| id.starts_with(MONODRIVE_IDS)) {
         return;
@@ -367,9 +372,9 @@ fn sort_out(paths: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
 /// What waits for a browser window, as on a launch that onboarding holds
 /// back: moves, and files to send with LocalSend.
 #[derive(Default)]
-struct Waiting {
-    moves: Vec<Move>,
-    sending: Vec<PathBuf>,
+pub(crate) struct Waiting {
+    pub(crate) moves: Vec<Move>,
+    pub(crate) sending: Vec<PathBuf>,
 }
 impl Global for Waiting {}
 
@@ -387,7 +392,7 @@ pub fn serve(
             if from == Asker::LocalSend {
                 cx.update(|cx| {
                     cx.default_global::<Waiting>().sending = request.paths;
-                    deliver(cx);
+                    crate::deliver(cx);
                 });
                 continue;
             }
@@ -399,40 +404,11 @@ pub fn serve(
                 cx.default_global::<Waiting>()
                     .moves
                     .extend(plan(items, from));
-                deliver(cx);
+                crate::deliver(cx);
             });
         }
     })
     .detach();
-}
-
-/// Lands what's waiting in the window in front, and brings it forward. Call
-/// it again once a window opens.
-pub fn deliver(cx: &mut App) {
-    let front = cx
-        .active_window()
-        .and_then(|window| window.downcast::<Browser>())
-        .or_else(|| cx.windows().iter().find_map(|window| window.downcast()));
-    let Some(front): Option<WindowHandle<Browser>> = front else {
-        return;
-    };
-    let Waiting { moves, sending } = std::mem::take(cx.default_global::<Waiting>());
-    if moves.is_empty() && sending.is_empty() {
-        return;
-    }
-    // A command may be running inside that window's own update.
-    cx.defer(move |cx| {
-        let _ = front.update(cx, |browser, window, cx| {
-            for to in moves {
-                browser.land(to, window, cx);
-            }
-            if !sending.is_empty() {
-                browser.send_with_localsend(sending, window, cx);
-            }
-            window.activate_window();
-        });
-        frame::bring_forward(cx);
-    });
 }
 
 static SERVICE_REQUESTS: OnceLock<async_channel::Sender<Request>> = OnceLock::new();

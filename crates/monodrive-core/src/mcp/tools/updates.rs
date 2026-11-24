@@ -2,7 +2,7 @@
 
 use super::Call;
 use crate::mcp::contract::{Reply, ToolError};
-use crate::mcp::server::Server;
+use crate::mcp::session::Session;
 use crate::updates::{self, Channel};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ pub struct Releases {
 impl Call for CheckUpdates {
     type Out = Releases;
 
-    fn run(self, _: &mut Server) -> Result<Reply<Releases>, ToolError> {
+    fn run(self, _: &mut Session) -> Result<Reply<Releases>, ToolError> {
         let pending = updates::pending(self.channel.unwrap_or_else(updates::saved_channel))?;
         let releases: Vec<Release> = pending
             .iter()

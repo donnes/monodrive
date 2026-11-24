@@ -5,12 +5,10 @@
 //! the window and every MCP server change them and only the window writes
 //! settings.json.
 
-use crate::ops;
-use crate::remote::{self, Source};
+use crate::disk;
 use crate::search::{Query, Scope};
 use crate::user_commands::Definition;
 use crate::volumes::{self, Volume, VolumeId};
-use crate::worktrees::Registration;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,6 +72,42 @@ impl Place {
             Availability::Unavailable(_) => None,
         }
     }
+}
+
+/// A repository the user asked Monodrive to remember.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registration {
+    pub common_dir: PathBuf,
+    /// Its main worktree, or the bare repository, as shown.
+    pub path: PathBuf,
+}
+
+impl Registration {
+    /// Whether the repository is still there, without running git.
+    pub fn resolve(&self) -> Availability {
+        let shown = self.path.display();
+        match std::fs::metadata(&self.common_dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Availability::Unavailable(format!("{shown} no longer exists."))
+            }
+            Err(e) => Availability::Unavailable(format!("{shown}: {e}")),
+            Ok(_) if self.common_dir.join("HEAD").is_file() => {
+                Availability::Available(self.path.clone())
+            }
+            Ok(_) => Availability::Unavailable(format!("{shown} is no longer a Git repository.")),
+        }
+    }
+}
+
+/// A saved server. Forgetting one changes nothing on it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Source {
+    pub id: String,
+    /// A host, `user@host` or an alias in the user's ssh config.
+    pub host: String,
+    /// Where browsing starts; the server's default folder without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
 }
 
 /// A search kept by name. Saving one never runs it.
@@ -508,50 +542,19 @@ impl Store {
         Ok(self.saved()?.remotes)
     }
 
-    pub fn remote(&self, id: &str) -> Result<Source, remote::RemoteError> {
-        self.remotes()
-            .map_err(remote::RemoteError::Failed)?
-            .into_iter()
-            .find(|source| source.id == id)
-            .ok_or_else(|| remote::RemoteError::UnknownSource(id.into()))
-    }
-
-    /// Saves a source for `host` and returns it, without connecting. The same
-    /// host and start already saved is returned as it is; a new one gets `id`,
-    /// which must be free, or a free one made from the host.
-    pub fn add_remote(
+    /// Runs a read, change and write of the saved remote sources.
+    pub(crate) fn change_remotes<T>(
         &self,
-        host: &str,
-        id: Option<&str>,
-        start: Option<&str>,
-    ) -> Result<Source, String> {
-        // Only to check the host and start: its id comes next.
-        let checked = Source::new("new", host, start)?;
+        change: impl FnOnce(&mut Vec<Source>) -> Result<T, String>,
+    ) -> Result<T, String> {
         locked(&self.places, || {
             let mut saved = self.saved()?;
-            let same =
-                |source: &&Source| source.host == checked.host && source.start == checked.start;
-            if let Some(known) = saved.remotes.iter().find(same)
-                && id.is_none_or(|id| id == known.id)
-            {
-                return Ok(known.clone());
+            let before = saved.remotes.clone();
+            let changed = change(&mut saved.remotes)?;
+            if saved.remotes != before {
+                write(&self.places, &saved)?;
             }
-            let taken = |id: &str| saved.remotes.iter().any(|source| source.id == id);
-            let id = match id {
-                Some(id) if taken(id) => return Err(format!("{id} is already a remote source.")),
-                Some(id) => id.to_string(),
-                None => {
-                    let base = remote::id_for(host);
-                    std::iter::once(base.clone())
-                        .chain((2..).map(|n| format!("{base}-{n}")))
-                        .find(|id| !taken(id))
-                        .unwrap_or(base)
-                }
-            };
-            let source = Source::new(&id, host, start)?;
-            saved.remotes.push(source.clone());
-            write(&self.places, &saved)?;
-            Ok(source)
+            Ok(changed)
         })
     }
 
@@ -604,11 +607,11 @@ impl Store {
     /// Calls `changed` on its own thread each time a list here changes,
     /// whoever changed it. Other files in the folder count too, so read the
     /// lists again to see. Dropping it stops the thread.
-    pub fn watch(&self, changed: impl Fn() + Send + 'static) -> std::io::Result<ops::Watch> {
+    pub fn watch(&self, changed: impl Fn() + Send + 'static) -> std::io::Result<disk::Watch> {
         let name = self.places.file_name().unwrap_or_default().to_owned();
         let folder = self.places.parent().unwrap_or(Path::new("/"));
         std::fs::create_dir_all(folder)?;
-        ops::Watch::start(folder, &name, changed)
+        disk::Watch::start(folder, &name, changed)
     }
 
     /// Files opened through Monodrive, newest first. A file that doesn't
@@ -694,7 +697,7 @@ fn locked<T>(file: &Path, change: impl FnOnce() -> Result<T, String>) -> Result<
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(fail)?;
     }
-    let _held = ops::lock(&lock, libc::LOCK_EX).map_err(fail)?;
+    let _held = disk::lock(&lock, libc::LOCK_EX).map_err(fail)?;
     change()
 }
 

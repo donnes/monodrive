@@ -12,11 +12,11 @@ pub(crate) mod fixture;
 #[cfg(test)]
 mod tests;
 
-pub use crate::ops::disk::Meter;
+pub use crate::disk::Meter;
 
+use crate::disk;
 use crate::entries::Kind;
-use crate::ops;
-use crate::places;
+use crate::places::{self, Source, Store};
 use serde::{Deserialize, Serialize};
 use sftp::{Attrs, CHUNK, Handle, OPEN_NEW, OPEN_READ, Pending, Sftp, WINDOW};
 use std::collections::{HashMap, VecDeque};
@@ -153,15 +153,51 @@ impl From<RemoteError> for String {
     }
 }
 
-/// A saved server. Forgetting one changes nothing on it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Source {
-    pub id: String,
-    /// A host, `user@host` or an alias in the user's ssh config.
-    pub host: String,
-    /// Where browsing starts; the server's default folder without one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start: Option<String>,
+impl Store {
+    pub fn remote(&self, id: &str) -> Result<Source, RemoteError> {
+        self.remotes()
+            .map_err(RemoteError::Failed)?
+            .into_iter()
+            .find(|source| source.id == id)
+            .ok_or_else(|| RemoteError::UnknownSource(id.into()))
+    }
+
+    /// Saves a source for `host` and returns it, without connecting. The same
+    /// host and start already saved is returned as it is; a new one gets `id`,
+    /// which must be free, or a free one made from the host.
+    pub fn add_remote(
+        &self,
+        host: &str,
+        id: Option<&str>,
+        start: Option<&str>,
+    ) -> Result<Source, String> {
+        // Only to check the host and start: its id comes next.
+        let checked = Source::new("new", host, start)?;
+        self.change_remotes(|remotes| {
+            let same =
+                |source: &&Source| source.host == checked.host && source.start == checked.start;
+            if let Some(known) = remotes.iter().find(same)
+                && id.is_none_or(|id| id == known.id)
+            {
+                return Ok(known.clone());
+            }
+            let taken = |id: &str| remotes.iter().any(|source| source.id == id);
+            let id = match id {
+                Some(id) if taken(id) => return Err(format!("{id} is already a remote source.")),
+                Some(id) => id.to_string(),
+                None => {
+                    let base = id_for(host);
+                    std::iter::once(base.clone())
+                        .chain((2..).map(|n| format!("{base}-{n}")))
+                        .find(|id| !taken(id))
+                        .unwrap_or(base)
+                }
+            };
+            let source = Source::new(&id, host, start)?;
+            remotes.push(source.clone());
+            Ok(source)
+        })
+    }
 }
 
 impl Source {
@@ -1327,7 +1363,7 @@ impl Previews {
             .map_or(0, |since| since.as_nanos());
         let dir = root.join(format!("{}-{started}", process_id()));
         let lock = dir.with_extension("lock");
-        let held = ops::lock(&lock, libc::LOCK_EX | libc::LOCK_NB).map_err(fail)?;
+        let held = disk::lock(&lock, libc::LOCK_EX | libc::LOCK_NB).map_err(fail)?;
         std::fs::create_dir(&dir).map_err(fail)?;
         Ok(Self {
             inner: Arc::new(Inner {
@@ -1427,7 +1463,7 @@ fn sweep(root: &Path) {
     };
     for lock in items.flatten().map(|item| item.path()) {
         if lock.extension().is_none_or(|ext| ext != "lock")
-            || ops::lock(&lock, libc::LOCK_EX | libc::LOCK_NB).is_err()
+            || disk::lock(&lock, libc::LOCK_EX | libc::LOCK_NB).is_err()
         {
             continue;
         }

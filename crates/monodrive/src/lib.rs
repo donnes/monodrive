@@ -6,13 +6,14 @@ mod app_icon;
 pub mod assets;
 mod background;
 pub mod browser;
-mod commands;
+pub mod commands;
 pub mod connect;
 pub mod downloads;
 mod empty_trash;
 mod feedback;
 pub mod file_icons;
 pub mod finder;
+pub mod format;
 mod frame;
 mod goto;
 mod jobs;
@@ -24,6 +25,7 @@ pub mod native;
 mod native_view;
 mod notify;
 pub mod onboarding;
+mod overview;
 mod palette;
 mod palettes;
 mod pasteboard;
@@ -38,6 +40,7 @@ mod selection;
 pub mod session;
 mod settings;
 pub mod sharing;
+pub mod system;
 mod text_field;
 mod theme;
 mod thumbnails;
@@ -49,12 +52,14 @@ mod workspace;
 use commands::{CloseWindow, Hide, HideOthers, Minimize, NewWindow, Quit, ShowAll, ShowWelcome};
 use gpui::{
     App, Entity, Focusable, Global, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, point, prelude::*, px, size,
+    WindowBounds, WindowHandle, WindowOptions, point, prelude::*, px, size,
 };
+use monodrive_core::index::Index;
+use monodrive_core::ops;
 use preferences::Preferences;
-use session::WindowState;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use session::{Shows, WindowState};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 /// Who hears what the app's one watch on something says: each window.
@@ -87,6 +92,124 @@ struct Shared {
 }
 
 impl Global for Shared {}
+
+/// Builds the keymap: each view's own keys, then the commands' shortcuts.
+pub fn apply_keymap(cx: &mut App) {
+    commands::apply(cx, |cx| {
+        text_field::bind(cx);
+        browser::bind(cx);
+        settings::bind(cx);
+        palette::bind(cx);
+        goto::bind(cx);
+        connect::bind(cx);
+        jobs::bind(cx);
+        updates::bind(cx);
+        empty_trash::bind(cx);
+        localsend_ask::bind(cx);
+        remove_worktree::bind(cx);
+        review_duplicates::bind(cx);
+        menu::bind(cx);
+        onboarding::bind(cx);
+    });
+}
+
+/// The window's connection to the operation owner, shared with background
+/// work. `run` sets it; without it, as in benchmarks, Undo and Redo do
+/// nothing.
+pub struct Operations(pub Arc<Mutex<ops::Client>>);
+impl Global for Operations {}
+
+pub(crate) fn lock(ops: &Mutex<ops::Client>) -> MutexGuard<'_, ops::Client> {
+    ops.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The one index all of the app's windows share. `run` sets it; without it, as
+/// in tests and benchmarks, a window has its own that nothing starts.
+pub struct SharedIndex(pub Arc<OnceLock<Result<Index, String>>>);
+impl Global for SharedIndex {}
+
+/// Whether a browser window is open.
+pub(crate) fn any_window(cx: &App) -> bool {
+    cx.windows()
+        .iter()
+        .any(|window| window.downcast::<browser::Browser>().is_some())
+}
+
+pub(crate) fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "/".into())
+}
+
+/// The folders of apps that a person doesn't keep dotfiles in, for a home
+/// folder at `home`.
+pub fn application_roots(home: &Path) -> Vec<PathBuf> {
+    vec![
+        "/Applications".into(),
+        "/System/Applications".into(),
+        home.join("Applications"),
+    ]
+}
+
+/// Lands what's waiting in the window in front, and brings it forward. Call
+/// it again once a window opens.
+pub(crate) fn deliver(cx: &mut App) {
+    let front = cx
+        .active_window()
+        .and_then(|window| window.downcast::<browser::Browser>())
+        .or_else(|| cx.windows().iter().find_map(|window| window.downcast()));
+    let Some(front): Option<WindowHandle<browser::Browser>> = front else {
+        return;
+    };
+    let finder::Waiting { moves, sending } = std::mem::take(cx.default_global::<finder::Waiting>());
+    if moves.is_empty() && sending.is_empty() {
+        return;
+    }
+    // A command may be running inside that window's own update.
+    cx.defer(move |cx| {
+        let _ = front.update(cx, |browser, window, cx| {
+            for to in moves {
+                browser.land(to, window, cx);
+            }
+            if !sending.is_empty() {
+                browser.send_with_localsend(sending, window, cx);
+            }
+            window.activate_window();
+        });
+        frame::bring_forward(cx);
+    });
+}
+
+/// Sends a press on a notification where it belongs. GPUI takes one handler
+/// for the whole app.
+fn hear_notifications(cx: &mut App) {
+    cx.on_system_notification_response(|response, cx| {
+        let action = response.action_id.as_deref();
+        match response.tag.as_ref() {
+            notify::LOW_DISK => show_page(Shows::Overview, cx),
+            notify::WORKTREES => show_page(Shows::Worktrees, cx),
+            tag => {
+                if !localsend::respond(tag, action, cx) {
+                    frame::bring_forward(cx);
+                }
+            }
+        }
+    });
+}
+
+/// Brings the window in front forward, showing `page`.
+fn show_page(page: Shows, cx: &mut App) {
+    let front = cx
+        .window_stack()
+        .into_iter()
+        .flatten()
+        .chain(cx.windows())
+        .find_map(|window| window.downcast::<browser::Browser>());
+    if let Some(window) = front {
+        let _ = window.update(cx, |browser, window, cx| browser.show(page, window, cx));
+    }
+    frame::bring_forward(cx);
+}
 
 /// What a window opens on.
 enum Opening {
@@ -132,7 +255,7 @@ pub fn run(folder: Option<PathBuf>) {
         cx.set_reduce_motion(
             objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion(),
         );
-        let index: browser::SharedIndex = browser::SharedIndex(Arc::default());
+        let index: SharedIndex = SharedIndex(Arc::default());
         let setup = Arc::new(onboarding::System::new(index.0.clone()));
         cx.set_global(index);
         cx.set_global(browser::DiskChanges::default());
@@ -144,7 +267,7 @@ pub fn run(folder: Option<PathBuf>) {
             let client = monodrive_core::ops::Client::new(paths, frame::owner_exe());
             let heard = jobs.clone();
             job_watch = client.watch(move || heard.say()).ok();
-            cx.set_global(browser::Operations(Arc::new(Mutex::new(client))));
+            cx.set_global(Operations(Arc::new(Mutex::new(client))));
         }
         let mut place_watches = None;
         if let (Some(store), Some(paths)) = (
@@ -156,7 +279,7 @@ pub fn run(folder: Option<PathBuf>) {
                 monodrive_core::volumes::watch(move || heard_volumes.say()).ok(),
                 store.watch(move || heard_lists.say()).ok(),
             ));
-            cx.set_global(browser::Places {
+            cx.set_global(system::Places {
                 previews: monodrive_core::support_dir()
                     .unwrap_or_default()
                     .join("previews"),
@@ -166,8 +289,8 @@ pub fn run(folder: Option<PathBuf>) {
                 )),
                 store,
                 trash: paths.trash,
-                drives: Arc::new(browser::System),
-                applications: browser::application_roots(&browser::home()),
+                drives: Arc::new(system::System),
+                applications: application_roots(&home()),
                 root: "/".into(),
             });
         }
@@ -179,11 +302,11 @@ pub fn run(folder: Option<PathBuf>) {
         });
         cx.set_global(pasteboard::Pasteboard::general());
         cx.set_global(feedback::Feedback::default());
-        commands::apply(cx);
+        apply_keymap(cx);
         // A changed shortcut rebuilds the keymap and the menu bar; Show
         // Hidden Files' checkmark rebuilds the menu bar alone.
         cx.observe_global::<Preferences>(|cx| {
-            commands::apply(cx);
+            apply_keymap(cx);
             commands::refresh_menus(cx);
         })
         .detach();
@@ -194,7 +317,7 @@ pub fn run(folder: Option<PathBuf>) {
         cx.on_action(|_: &NewWindow, cx| {
             // During first launch, the windows onboarding is holding back.
             if !onboarding::open_windows_now(cx) {
-                open_window(Opening::Folder(browser::home()), cx);
+                open_window(Opening::Folder(home()), cx);
             }
             frame::bring_forward(cx);
         });
@@ -203,13 +326,13 @@ pub fn run(folder: Option<PathBuf>) {
         finder::serve(requests, arrived, cx);
         updates::start(cx);
         localsend::start(cx);
-        notify::start(cx);
+        hear_notifications(cx);
         usage::start(cx);
         // Once the first listings are done, so it doesn't compete with them.
         cx.spawn(async |cx| {
             cx.background_executor().timer(MEASURE_AFTER).await;
-            cx.update(browser::measure_overview);
-            cx.update(browser::watch_storage);
+            cx.update(overview::measure_overview);
+            cx.update(overview::watch_storage);
         })
         .detach();
         let explicit = folder.is_some();
@@ -239,7 +362,7 @@ fn open_windows(folder: Option<PathBuf>, wait_for_listing: bool, cx: &mut App) {
             });
             match saved {
                 Some(saved) => saved.windows.into_iter().map(Opening::Restored).collect(),
-                None => vec![Opening::Folder(browser::home())],
+                None => vec![Opening::Folder(home())],
             }
         }
     };
@@ -260,7 +383,7 @@ fn open_windows(folder: Option<PathBuf>, wait_for_listing: bool, cx: &mut App) {
             show_window(view, frame, cx);
         }
         frame::bring_forward(cx);
-        finder::deliver(cx);
+        deliver(cx);
     };
     if wait_for_listing {
         when_listed(views, show, cx);
@@ -315,8 +438,8 @@ fn when_listed(
 /// Opens a main window where the last one was, for when the app has none left
 /// and isn't quitting.
 fn open_main_window(cx: &mut App) {
-    let opening = session::last_closed(cx)
-        .map_or_else(|| Opening::Folder(browser::home()), Opening::Restored);
+    let opening =
+        session::last_closed(cx).map_or_else(|| Opening::Folder(home()), Opening::Restored);
     open_window(opening, cx);
     frame::bring_forward(cx);
 }
@@ -337,7 +460,7 @@ fn window_commands(cx: &mut App) {
     cx.on_action(|_: &CloseWindow, cx| on_front_window(cx, Window::remove_window));
     cx.on_action(|_: &Minimize, cx| on_front_window(cx, |window| window.minimize_window()));
     cx.on_window_closed(|cx, window| {
-        session::forget(window.as_u64(), browser::any_window(cx), cx);
+        session::forget(window.as_u64(), any_window(cx), cx);
         onboarding::closed(window, cx);
         if cx.windows().is_empty() {
             cx.quit();
@@ -350,7 +473,7 @@ fn window_commands(cx: &mut App) {
 fn open_window(opening: Opening, cx: &mut App) {
     let view = browser_for(opening, cx);
     show_window(view, None, cx);
-    finder::deliver(cx);
+    deliver(cx);
 }
 
 /// A browser on `opening`, its listing on the way, with no window yet.

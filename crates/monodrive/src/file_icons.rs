@@ -161,6 +161,19 @@ const SIZES_KEPT: usize = 6;
 const BYTES_KEPT: u64 = 64 * 1024 * 1024;
 
 impl Rasters {
+    /// The sizes `art` is kept at, most recent first.
+    fn sizes_of(&self, art: &Art) -> Vec<u32> {
+        self.sizes
+            .iter()
+            .copied()
+            .filter(|pixels| {
+                self.icons
+                    .get(pixels)
+                    .is_some_and(|icons| icons.contains_key(art))
+            })
+            .collect()
+    }
+
     /// Notes a raster as drawn and returns the ones it pushed out: the
     /// least recently drawn past this size's budget, and every icon at the
     /// sizes no longer kept.
@@ -254,18 +267,7 @@ fn keep(art: Art, side: f32, window: &mut Window, cx: &mut App) -> Raster {
 /// Until a size lands, a kept size of the same icon stands in, so dragging
 /// the size slider doesn't blank the icons.
 fn stand_in(raster: &Raster, cx: &mut App) -> Option<Arc<RenderImage>> {
-    let rasters = cx.global::<Rasters>();
-    let kept: Vec<u32> = rasters
-        .sizes
-        .iter()
-        .copied()
-        .filter(|pixels| {
-            rasters
-                .icons
-                .get(pixels)
-                .is_some_and(|icons| icons.contains_key(&raster.art))
-        })
-        .collect();
+    let kept = cx.global::<Rasters>().sizes_of(&raster.art);
     kept.into_iter().find_map(|pixels| {
         let art = raster.art.clone();
         cx.fetch_asset::<Raster>(&Raster { art, pixels }).flatten()

@@ -1,237 +1,82 @@
 //! The file browser window: a sidebar of places, a folder listing, and
 //! search over the whole-disk index.
 
-mod airdrop;
-mod archive;
-mod batch_rename;
-mod cloud;
-mod columns;
 mod drag;
-mod duplicates;
+mod facts;
 mod inspector;
-mod localsend;
-mod open_with;
-mod organize;
-mod overview;
+mod opening;
 mod pane;
-pub(crate) mod remote;
-mod search_tokens;
-mod searches;
+mod search_field;
+mod sheets;
 mod sidebar;
 mod tabs;
-mod trash;
-mod worktrees;
+mod title_bar;
+mod toasts;
 
-#[cfg(test)]
-mod batch_rename_tests;
-#[cfg(test)]
-mod cloud_tests;
-#[cfg(test)]
-mod drag_tests;
-#[cfg(test)]
-mod duplicates_tests;
-#[cfg(test)]
-mod inspector_tests;
-#[cfg(test)]
-mod places_tests;
-#[cfg(test)]
-mod remote_tests;
-#[cfg(test)]
-mod search_tests;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use duplicates::grouped;
-pub(crate) use overview::{measure_overview, watch_storage};
-pub use pane::format_bytes;
-pub use sidebar::{Drives, Places, System};
-pub(crate) use sidebar::{glyph_of, label_of};
-pub(crate) use trash::recent_entries;
-
 use crate::commands::{self, OpenPalette, Scope};
-use crate::connect::ConnectView;
-use crate::empty_trash::{self, EmptyTrashView};
+use crate::commands::{
+    AddToSidebar, Back, CancelRename, CheckForUpdates, ClearRecentSearches, ClearRecents,
+    ClearSearch, CloseTab, CommitRename, Compress, ConnectToServer, CopyPath, CopyToOtherPane,
+    DeselectAll, Download, Duplicate, EditFavorites, EditLocations, EditPath, EditPreview, Eject,
+    EmptyTrash, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight,
+    Extract, FindDuplicates, FocusList, FocusNext, FocusPrevious, FocusSearch, Forward, GetInfo,
+    GoAirDrop, GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoFavorite1,
+    GoFavorite2, GoFavorite3, GoFavorite4, GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8,
+    GoFavorite9, GoFavorite10, GoHome, GoLocalSend, GoOverview, GoRecents, GoToFolder, GoTrash,
+    GoWorktrees, HideFromSidebar, HideInspector, MoveHere, MovePlaceDown, MovePlaceUp,
+    MoveToOtherPane, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, NewTab, NextTab,
+    OpenInNewTab, OpenInQuickLook, OpenInTerminal, OpenPlace, OpenSelected, OpenSettings,
+    OrganizeFolder, PageDown, PageUp, PlaceNext, PlacePrevious, PreviousTab, PutBack, QuickLook,
+    Redo, RemoveDownload, RemoveFromSidebar, Rename, RenameLocation, ResetZoom, RevealInFinder,
+    ReverseSort, SaveSearch, ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder,
+    SelectFirst, SelectLast, SelectNext, SelectPrevious, SendWithLocalSend, Share, ShowContextMenu,
+    ShowCopiesAndMoves, ShowInEnclosingFolder, ShowPackageContents, ShowSearches, SortByKind,
+    SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar,
+    ToggleSidebar, ToggleSplit, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
+};
 use crate::feedback::{self, Sound};
-use crate::goto::{GotoEvent, GotoView};
+use crate::format::format_bytes;
 use crate::jobs::{self, Jobs, JobsEvent};
 use crate::menu::{ContextMenu, MenuEvent};
-use crate::motion::{self, Slide};
+use crate::motion::Slide;
 use crate::onboarding::{self, IndexGate, Step};
-use crate::palette::{Now, PaletteEvent, PaletteView};
 use crate::preferences::{self, Preferences, SIDEBAR_WIDTHS, WorkspaceStyle};
-use crate::preview::{PreviewView, Saved};
+use crate::preview::PreviewView;
 use crate::quick_look::{self, Preview};
-use crate::remove_worktree::{self, RemoveWorktreeView};
-use crate::review_duplicates::{self, ReviewDuplicatesView};
 use crate::session::{self, TabState, WindowState};
-use crate::settings::{self, SettingsView};
+use crate::system::{Places, Servers};
 use crate::text_field;
-use crate::theme::{self, ButtonLook, Elevation, accent, content, danger};
+use crate::theme::{self, ButtonLook, content};
 use crate::traffic_lights;
 use crate::updates;
+use crate::{Operations, SharedIndex, home, lock};
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, DisplayId, Entity, FocusHandle,
-    Focusable, FontWeight, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window, WindowAppearance,
-    WindowControlArea, actions, canvas, div, prelude::*, px,
+    Focusable, Global, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollHandle, Task, Window, WindowAppearance, canvas, div,
+    prelude::*, px,
 };
 use monodrive_core::index::{Index, Progress, Status};
-use monodrive_core::ops::{self, Done, Job, Origin, Request};
+use monodrive_core::ops::{self, Done, Job};
 use monodrive_core::places::Favorite;
-use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
-use searches::{
+use pane::Offer;
+use pane::searches::{
     AcceptCompletion, DismissCompletions, LeaveChips, NextChip, NextCompletion, OpenChip,
     PreviousChip, PreviousCompletion, RemoveChip, SearchMenu, SearchMenuEvent,
 };
+use pane::{Chrome, Opening, Pane, PaneEvent, Stop};
+use sheets::{AfterSheet, PaletteTarget, Sheet};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tabs::{CARD_GAP, SplitDrag, Tab};
-
-actions!(
-    browser,
-    [
-        Back,
-        Forward,
-        EnclosingFolder,
-        SelectPrevious,
-        SelectNext,
-        SelectFirst,
-        SelectLast,
-        ExtendPrevious,
-        ExtendNext,
-        ExtendLeft,
-        ExtendRight,
-        DeselectAll,
-        ScrollToTop,
-        ScrollToBottom,
-        ExpandFolder,
-        PageUp,
-        PageDown,
-        OpenSelected,
-        FocusSearch,
-        SearchContents,
-        SearchThisFolder,
-        ShowSearches,
-        SaveSearch,
-        ClearRecentSearches,
-        ClearSearch,
-        FocusNext,
-        FocusPrevious,
-        PlacePrevious,
-        PlaceNext,
-        FocusList,
-        OpenPlace,
-        GoHome,
-        GoDesktop,
-        GoDocuments,
-        GoDownloads,
-        GoApplications,
-        GoComputer,
-        OpenSettings,
-        ToggleHiddenFiles,
-        TogglePathBar,
-        GoToFolder,
-        EditPath,
-        CopyPath,
-        ViewAsList,
-        ViewAsGrid,
-        ViewAsColumns,
-        SortByName,
-        SortByModified,
-        SortBySize,
-        SortByKind,
-        ReverseSort,
-        ZoomIn,
-        ZoomOut,
-        ResetZoom,
-        Undo,
-        Redo,
-        ShowCopiesAndMoves,
-        CheckForUpdates,
-        Rename,
-        SuggestNames,
-        OrganizeFolder,
-        FindDuplicates,
-        CommitRename,
-        CancelRename,
-        NewFolder,
-        NewFolderWithSelection,
-        NewFile,
-        Duplicate,
-        Compress,
-        Extract,
-        MoveToTrash,
-        EmptyTrash,
-        MoveHere,
-        ShowPackageContents,
-        ShowInEnclosingFolder,
-        RevealInFinder,
-        OpenInTerminal,
-        Share,
-        SendWithLocalSend,
-        QuickLook,
-        OpenInQuickLook,
-        EditPreview,
-        ShowContextMenu,
-        AddToSidebar,
-        RenameLocation,
-        RemoveFromSidebar,
-        HideFromSidebar,
-        Eject,
-        ClearRecents,
-        PutBack,
-        GoOverview,
-        GoRecents,
-        GoWorktrees,
-        GoAirDrop,
-        GoLocalSend,
-        GoTrash,
-        GoFavorite1,
-        GoFavorite2,
-        GoFavorite3,
-        GoFavorite4,
-        GoFavorite5,
-        GoFavorite6,
-        GoFavorite7,
-        GoFavorite8,
-        GoFavorite9,
-        GoFavorite10,
-        ConnectToServer,
-        EditFavorites,
-        EditLocations,
-        MovePlaceUp,
-        MovePlaceDown,
-        NewTab,
-        CloseTab,
-        NextTab,
-        PreviousTab,
-        OpenInNewTab,
-        ToggleSplit,
-        CopyToOtherPane,
-        MoveToOtherPane,
-        ToggleSidebar,
-        GetInfo,
-        HideInspector,
-        OpenWith,
-        Download,
-        RemoveDownload,
-    ]
-);
-
-/// The window's connection to the operation owner, shared with background
-/// work. `run` sets it; without it, as in benchmarks, Undo and Redo do
-/// nothing.
-pub struct Operations(pub Arc<Mutex<ops::Client>>);
-impl Global for Operations {}
-
-/// The one index all of the app's windows share. `run` sets it; without it, as
-/// in tests and benchmarks, a window has its own that nothing starts.
-pub struct SharedIndex(pub Arc<OnceLock<Result<Index, String>>>);
-impl Global for SharedIndex {}
+use toasts::Toast;
 
 /// The folders one batch of disk changes touched; see `Index::on_change`.
 type Changed = Arc<[(PathBuf, bool)]>;
@@ -265,13 +110,6 @@ impl DiskChanges {
         });
         receive
     }
-}
-
-/// Whether a browser window is open.
-pub(crate) fn any_window(cx: &App) -> bool {
-    cx.windows()
-        .iter()
-        .any(|window| window.downcast::<Browser>().is_some())
 }
 
 pub fn bind(cx: &mut App) {
@@ -350,7 +188,7 @@ const FRAME_SETTLE: Duration = Duration::from_millis(300);
 /// How often the sidebar checks on an index that is still building.
 const INDEX_POLL: Duration = Duration::from_millis(500);
 /// How long a toast stays.
-const TOAST_FOR: Duration = Duration::from_secs(4);
+pub(super) const TOAST_FOR: Duration = Duration::from_secs(4);
 /// How long the pointer rests before the update card follows it.
 const PEEK_DELAY: Duration = Duration::from_millis(200);
 
@@ -378,7 +216,7 @@ pub struct Browser {
     /// The divider between two panes, while it's dragged.
     split_drag: Option<SplitDrag>,
     /// Files being dragged over this window.
-    drag: drag::Drag,
+    drag: pane::drag::Drag,
     /// Started with the window; searches wait on it.
     index: Arc<OnceLock<Result<Index, String>>>,
     /// Saves the window's frame once a move or resize settles.
@@ -446,7 +284,7 @@ pub struct Browser {
     /// shows it.
     look_at: Option<PathBuf>,
     /// A file from a server coming down to open.
-    fetching: Option<remote::Fetching>,
+    fetching: Option<opening::Fetching>,
     /// What the sidebar lists.
     sidebar: sidebar::Sidebar,
     /// The window's frame, as last settled.
@@ -607,9 +445,8 @@ impl Browser {
         // Repaints the ring as the jobs change.
         cx.observe(&jobs, |_, _, cx| cx.notify()).detach();
         // The sidebar's servers say how their connections are doing.
-        cx.default_global::<remote::Servers>();
-        cx.observe_global::<remote::Servers>(|_, cx| cx.notify())
-            .detach();
+        cx.default_global::<Servers>();
+        cx.observe_global::<Servers>(|_, cx| cx.notify()).detach();
         // Whatever moves the selection repaints, so Quick Look follows it here.
         cx.observe_self(|this, cx| this.follow_selection(cx))
             .detach();
@@ -648,7 +485,7 @@ impl Browser {
             tab_scroll: ScrollHandle::new(),
             hovered_tab: None,
             split_drag: None,
-            drag: drag::Drag::default(),
+            drag: pane::drag::Drag::default(),
             index,
             frame_save: Task::ready(()),
             display: None,
@@ -732,6 +569,10 @@ impl Browser {
     }
 
     /// The pane commands act on.
+    pub(super) fn sheet_open(&self) -> bool {
+        self.sheet.is_some()
+    }
+
     fn pane(&self) -> &Entity<Pane> {
         self.tabs[self.active].focused()
     }
@@ -760,11 +601,7 @@ impl Browser {
         let Some(other) = self.tabs[self.active].other() else {
             return;
         };
-        let other = other.read(cx);
-        // The bar is the pane's too, though it's outside the list.
-        if other.list_focus.contains_focused(window, cx)
-            || other.batch.as_ref().is_some_and(|b| b.has_keys(window, cx))
-        {
+        if other.read(cx).has_keys(window, cx) {
             let tab = &mut self.tabs[self.active];
             tab.second_focused = !tab.second_focused;
             cx.defer_in(window, |this, _, cx| this.mirror_pane(cx));
@@ -803,9 +640,9 @@ impl Browser {
             .filter(|other| other.takes_files(cx))
             .map(|other| other.folder().to_path_buf());
         let pane = pane.read(cx);
-        let volume = (pane.showing_folder() && pane.unavailable.is_none())
-            .then(|| monodrive_core::volumes::holding(&self.sidebar.all_volumes, pane.folder()))
-            .flatten();
+        let volume = pane
+            .reachable_folder()
+            .and_then(|folder| monodrive_core::volumes::holding(&self.sidebar.all_volumes, folder));
         Chrome {
             width,
             focused,
@@ -1003,7 +840,7 @@ impl Browser {
     fn search_again(&self, cx: &mut Context<Self>) {
         for pane in self.shown_panes() {
             pane.update(cx, |pane, cx| {
-                if !pane.query.is_empty() {
+                if pane.searching() {
                     pane.reload(cx);
                 }
             });
@@ -1105,155 +942,6 @@ impl Browser {
         }
     }
 
-    /// Space and ⌘Y: the selection's preview in the pane. Once it's open they
-    /// play or pause what it plays, and Esc closes it. Apple's panel still
-    /// closes on them, as it does in Finder.
-    fn preview_or_play(&mut self, cx: &mut Context<Self>) {
-        if let Some((_, view)) = &self.previewing {
-            view.update(cx, |view, cx| view.toggle_playing(cx));
-            return;
-        }
-        if self.close_preview(cx) {
-            return;
-        }
-        let pane = self.pane().read(cx);
-        let Some(preview) = Preview::of(&pane.selection, &pane.entries) else {
-            return;
-        };
-        self.show_in_pane(&preview, cx);
-        self.preview = Some(preview);
-    }
-
-    /// Apple's panel, for what the pane's preview doesn't draw well.
-    fn open_in_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tools_kept_it(cx) {
-            return;
-        }
-        self.close_preview(cx);
-        let pane = self.pane().read(cx);
-        let Some(preview) = Preview::of(&pane.selection, &pane.entries) else {
-            return;
-        };
-        if self.quick_look.is_none() {
-            self.quick_look = quick_look::Panel::new(window);
-        }
-        if let Some(panel) = &self.quick_look {
-            panel.show(&preview, cx);
-        }
-        self.in_panel = true;
-        self.preview = Some(preview);
-    }
-
-    fn show_in_pane(&mut self, preview: &Preview, cx: &mut Context<Self>) {
-        let Some((path, folder)) = preview.items.get(preview.index).cloned() else {
-            return;
-        };
-        let pane = self.pane().clone();
-        let view = match self
-            .previewing
-            .as_ref()
-            .filter(|(on, _)| on.entity_id() == pane.entity_id())
-        {
-            Some((_, view)) => view.clone(),
-            None => {
-                let view = cx.new(|_| PreviewView::new());
-                // Saving reports through the pane's toast, with its Undo.
-                let saved_in = pane.downgrade();
-                cx.subscribe(&view, move |_, _, saved: &Saved, cx| {
-                    let done = saved.0.clone();
-                    let _ = saved_in.update(cx, |pane, cx| pane.settle(done, false, cx));
-                })
-                .detach();
-                // Once changes are saved or discarded, it follows again.
-                cx.observe(&view, |this, _, cx| this.follow_selection(cx))
-                    .detach();
-                pane.update(cx, |pane, cx| {
-                    pane.preview = Some(view.clone());
-                    cx.notify();
-                });
-                self.previewing = Some((pane.downgrade(), view.clone()));
-                view
-            }
-        };
-        let position = (preview.index, preview.items.len());
-        view.update(cx, |view, cx| view.show(&path, folder, position, cx));
-    }
-
-    /// Leaving the preview leaves its tools first, which ask before losing
-    /// changes. Says whether that used the key.
-    fn tools_kept_it(&mut self, cx: &mut Context<Self>) -> bool {
-        self.previewing
-            .as_ref()
-            .is_some_and(|(_, view)| view.update(cx, |view, cx| view.escape(cx)))
-    }
-
-    /// Closes the preview, saying whether it was open.
-    fn close_preview(&mut self, cx: &mut Context<Self>) -> bool {
-        // The panel also closes itself, on Esc or its close button.
-        let in_panel = std::mem::take(&mut self.in_panel);
-        let open = self.preview.take().is_some()
-            && (!in_panel || self.quick_look.as_ref().is_none_or(|panel| panel.is_open()));
-        if in_panel && let Some(panel) = &self.quick_look {
-            panel.close();
-        }
-        if let Some((pane, view)) = self.previewing.take() {
-            view.update(cx, |view, cx| view.release(cx));
-            let _ = pane.update(cx, |pane, cx| {
-                pane.preview = None;
-                cx.notify();
-            });
-        }
-        open
-    }
-
-    /// While a preview is open it shows what's selected now, and closes when
-    /// nothing is, as on going into another folder, or the keys move to the
-    /// other pane.
-    fn follow_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(shown) = &self.preview else {
-            return;
-        };
-        let pane = self.pane().read(cx);
-        let preview = Preview::of(&pane.selection, &pane.entries);
-        let moved_pane = self
-            .previewing
-            .as_ref()
-            .is_some_and(|(on, _)| on.entity_id() != self.pane().entity_id());
-        if preview.as_ref() == Some(shown) && !moved_pane {
-            return;
-        }
-        // Unsaved changes stay on screen wherever the selection or keys go, and
-        // the move lands when they're done with.
-        if self
-            .previewing
-            .as_ref()
-            .is_some_and(|(_, view)| view.read(cx).holding())
-        {
-            if let Some(preview) = preview.filter(|_| !moved_pane) {
-                self.show_in_pane(&preview, cx);
-                self.preview = Some(preview);
-            }
-            return;
-        }
-        // Not if the panel closed itself meanwhile.
-        let open = !self.in_panel || self.quick_look.as_ref().is_none_or(|panel| panel.is_open());
-        match preview.filter(|_| open && !moved_pane) {
-            Some(preview) => {
-                if self.in_panel {
-                    if let Some(panel) = &self.quick_look {
-                        panel.show(&preview, cx);
-                    }
-                } else {
-                    self.show_in_pane(&preview, cx);
-                }
-                self.preview = Some(preview);
-            }
-            None => {
-                self.close_preview(cx);
-            }
-        }
-    }
-
     /// Resizes the window when Default size changes or it lands on another
     /// display, and keeps its frame for Last Used once a move or resize
     /// settles, rather than on every step of a drag.
@@ -1320,21 +1008,16 @@ impl Browser {
         });
     }
 
-    fn sheet_open(&self) -> bool {
-        self.sheet.is_some()
-    }
-
     /// Remembers where focus was before the first sheet opens.
     fn remember_focus(&mut self, window: &Window, cx: &App) {
         if !self.sheet_open() {
             // Clicking the gear focuses the window's root first; that isn't
             // somewhere to come back to. Neither is the path being typed,
             // which closes as the sheet takes the keys.
-            let address = self.pane().read(cx).address.as_ref();
-            let address = address.map(|address| address.view.focus_handle(cx));
+            let pane = self.pane().read(cx);
             self.focus_before_sheet = window
                 .focused(cx)
-                .filter(|f| *f != self.focus && Some(f) != address.as_ref());
+                .filter(|f| *f != self.focus && !pane.types_path_in(f, cx));
         }
     }
 
@@ -1361,48 +1044,6 @@ impl Browser {
         }
         self.pane()
             .update(cx, |pane, cx| pane.type_to_search(event, window, cx));
-    }
-
-    /// Opens or closes a sheet; the jobs popover's list is kept fresh while
-    /// it's open.
-    fn set_sheet(&mut self, sheet: Option<Sheet>, cx: &mut Context<Self>) {
-        let jobs = matches!(sheet, Some(Sheet::Jobs));
-        // A sheet closes a peeked card, which then never hears the pointer
-        // leave.
-        if sheet.is_some() {
-            self.updates_peek.close();
-            self.jobs_peek.close();
-        }
-        self.sheet = sheet;
-        self.jobs.update(cx, |list, cx| list.set_open(jobs, cx));
-        cx.notify();
-    }
-
-    fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_sheet(None, cx);
-        let back = self
-            .focus_before_sheet
-            .take()
-            .unwrap_or_else(|| self.pane().read(cx).list_focus.clone());
-        window.focus(&back, cx);
-        cx.notify();
-    }
-
-    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Sheet::Settings(view)) = &self.sheet {
-            window.focus(&view.focus_handle(cx), cx);
-            return;
-        }
-        self.remember_focus(window, cx);
-        let view = cx.new(SettingsView::new);
-        cx.subscribe_in(
-            &view,
-            window,
-            |this, _, _: &settings::Dismissed, window, cx| this.close_sheet(window, cx),
-        )
-        .detach();
-        window.focus(&view.focus_handle(cx), cx);
-        self.set_sheet(Some(Sheet::Settings(view)), cx);
     }
 
     fn searches_open(&self) -> bool {
@@ -1624,39 +1265,6 @@ impl Browser {
         self.jobs.update(cx, |jobs, cx| jobs.hear(changes, cx));
     }
 
-    fn open_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Sheet::Goto(view)) = &self.sheet {
-            window.focus(&view.focus_handle(cx), cx);
-            return;
-        }
-        self.remember_focus(window, cx);
-        // Not from a location that's unavailable: its path may be another's now.
-        let pane = self.pane().read(cx);
-        let folder = if pane.unavailable.is_some() {
-            home()
-        } else {
-            pane.disk_folder().to_path_buf()
-        };
-        let view = cx.new(|cx| GotoView::new(folder, cx));
-        cx.subscribe_in(&view, window, |this, _, event: &GotoEvent, window, cx| {
-            let destination = match event {
-                GotoEvent::Go(destination) => Some((
-                    destination.folder.clone(),
-                    destination.select.iter().cloned().collect(),
-                )),
-                GotoEvent::Dismissed => None,
-            };
-            this.close_sheet(window, cx);
-            if let Some((folder, select)) = destination {
-                this.pane()
-                    .update(cx, |pane, cx| pane.go_to(folder, select, window, cx));
-            }
-        })
-        .detach();
-        window.focus(&view.focus_handle(cx), cx);
-        self.set_sheet(Some(Sheet::Goto(view)), cx);
-    }
-
     /// Shows what another app asked for, through Show in Finder or Open in
     /// Monodrive.
     pub(crate) fn land(
@@ -1681,116 +1289,6 @@ impl Browser {
     ) {
         self.pane()
             .update(cx, |pane, cx| pane.send_with_localsend(paths, window, cx));
-    }
-
-    /// Opens the palette on what would run now, which is read off the frame
-    /// drawn last. Another sheet closes first, and the palette waits for it.
-    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Sheet::Palette(view)) = &self.sheet {
-            window.focus(&view.focus_handle(cx), cx);
-            return;
-        }
-        if self.sheet_open() {
-            self.close_sheet(window, cx);
-            self.after_sheet = Some(AfterSheet::OpenPalette);
-            return;
-        }
-        self.remember_focus(window, cx);
-        let origin = self
-            .focus_before_sheet
-            .clone()
-            .unwrap_or_else(|| self.pane().read(cx).list_focus.clone());
-        // Quit and the like listen on the app, where only this list finds them.
-        let anywhere = window.available_actions(cx);
-        let available = commands::all()
-            .iter()
-            .map(|command| (command.action)())
-            .filter(|action| {
-                window.is_action_available_in(&**action, &origin)
-                    || anywhere.iter().any(|a| a.name() == action.name())
-            })
-            .map(|action| action.name())
-            .collect();
-        let now = Now {
-            available,
-            scopes: self.pane().update(cx, |pane, _| pane.scopes()),
-            favorites: self.sidebar.places.clone(),
-            volumes: self.sidebar.all_volumes.clone(),
-            servers: self.sidebar.servers.clone(),
-            files: self.pane().read(cx).chosen(),
-            index: self.index.clone(),
-        };
-        self.palette_target = Some(self.target(window, cx));
-        let view = cx.new(|cx| PaletteView::new(now, cx));
-        cx.subscribe_in(&view, window, Self::palette_event).detach();
-        window.focus(&view.focus_handle(cx), cx);
-        self.set_sheet(Some(Sheet::Palette(view)), cx);
-    }
-
-    /// What commands would act on now.
-    fn target(&self, window: &Window, cx: &App) -> PaletteTarget {
-        let pane = self.pane().read(cx);
-        let mut chosen = pane.chosen();
-        chosen.sort();
-        PaletteTarget {
-            folder: pane.folder().to_path_buf(),
-            chosen,
-            sidebar: self
-                .sidebar_focus
-                .is_focused(window)
-                .then(|| self.sidebar_target())
-                .flatten(),
-        }
-    }
-
-    /// Runs a command chosen in the palette, unless it would act on something
-    /// other than what was there when the palette opened: a job that finishes
-    /// meanwhile selects what it made, and that isn't what the person chose for.
-    fn run_from_palette(
-        &mut self,
-        action: Box<dyn gpui::Action>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let opened_on = self.palette_target.take();
-        if commands::acts_on_target(action.name())
-            && opened_on.is_some_and(|target| target != self.target(window, cx))
-        {
-            let said = "The selection changed while the palette was open.";
-            return self.toast(said.into(), true, None, cx);
-        }
-        window.dispatch_action(action, cx);
-    }
-
-    /// What the palette asked for, once it has closed and focus is back.
-    fn palette_event(
-        &mut self,
-        _: &Entity<PaletteView>,
-        event: &PaletteEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_sheet(window, cx);
-        match event {
-            PaletteEvent::Dismissed => {}
-            PaletteEvent::Run(action) => {
-                self.after_sheet = Some(AfterSheet::Run(action.boxed_clone()));
-            }
-            PaletteEvent::Go(folder) => self.pane().update(cx, |pane, cx| {
-                pane.go_to(folder.clone(), Vec::new(), window, cx)
-            }),
-            PaletteEvent::Open(file) => self.pane().update(cx, |pane, cx| pane.open_file(file, cx)),
-            PaletteEvent::Eject(mount) => self.eject(mount.clone(), cx),
-            PaletteEvent::Connect(address) => self.connect_to(address, window, cx),
-            PaletteEvent::OpenServer(id) => self
-                .pane()
-                .update(cx, |pane, cx| pane.open_server(id, window, cx)),
-            PaletteEvent::Disconnect(id) => self.disconnect_server(id, cx),
-            PaletteEvent::OpenWith { files, app } => {
-                self.open_files_with(files.clone(), app.clone(), cx)
-            }
-            PaletteEvent::OtherApp(files) => self.open_files_with_other(files.clone(), cx),
-        }
     }
 
     /// A paste, Move Here or Empty Trash finished: what it made is selected,
@@ -1827,129 +1325,9 @@ impl Browser {
                     return;
                 }
                 // A move also left the folder it came from.
-                let landed = job.into == pane.folder();
-                if landed {
-                    pane.select_on_listing(made.clone());
-                }
-                pane.list(!landed, cx);
+                pane.relist_after_job(&job.into, &made, cx);
             });
         }
-    }
-
-    /// Empty Trash: erases what's in the Trash for good, once a person has
-    /// confirmed how many items that is.
-    fn empty_trash(&mut self, window: &Window, cx: &mut Context<Self>) {
-        with_owner(
-            window,
-            cx,
-            |owner| owner.trash_items(),
-            |this, items, window, cx| match items {
-                Ok(items) if items.is_empty() => {
-                    this.toast("The Trash is empty.".into(), false, None, cx)
-                }
-                Ok(items) => this.ask_empty_trash(items, window, cx),
-                Err(e) => this.toast(e, true, None, cx),
-            },
-        );
-    }
-
-    fn ask_empty_trash(
-        &mut self,
-        items: Vec<ops::TrashItem>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.remember_focus(window, cx);
-        let view = cx.new(|cx| EmptyTrashView::new(items, cx));
-        cx.subscribe_in(
-            &view,
-            window,
-            |this, _, answer: &empty_trash::Answer, window, cx| {
-                let items = match answer {
-                    empty_trash::Answer::Empty(items) => Some(items.clone()),
-                    empty_trash::Answer::Cancel => None,
-                };
-                this.close_sheet(window, cx);
-                if let Some(items) = items {
-                    with_owner(
-                        window,
-                        cx,
-                        move |owner| owner.submit(Origin::Window, Request::EmptyTrash { items }),
-                        |this, queued, _, cx| match queued {
-                            Ok(queued) => {
-                                this.jobs.update(cx, |jobs, cx| jobs.follow(queued.op, cx))
-                            }
-                            Err(e) => this.toast(e, true, None, cx),
-                        },
-                    );
-                }
-            },
-        )
-        .detach();
-        window.focus(&view.focus_handle(cx), cx);
-        self.set_sheet(Some(Sheet::EmptyTrash(view)), cx);
-    }
-
-    /// Asks before a worktree goes, with what the active pane worked out:
-    /// what goes, what's at risk, or why it stays.
-    fn ask_remove_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ask) = self
-            .pane()
-            .update(cx, |pane, _| pane.worktrees.asking.take())
-        else {
-            return;
-        };
-        self.remember_focus(window, cx);
-        let view = cx.new(|cx| RemoveWorktreeView::new(ask, cx));
-        cx.subscribe_in(
-            &view,
-            window,
-            |this, _, answer: &remove_worktree::Answer, window, cx| {
-                let request = match answer {
-                    remove_worktree::Answer::Remove(request) => Some(request.clone()),
-                    remove_worktree::Answer::Cancel => None,
-                };
-                this.close_sheet(window, cx);
-                if let Some(request) = request {
-                    this.pane()
-                        .update(cx, |pane, cx| pane.submit(request, window, cx));
-                }
-            },
-        )
-        .detach();
-        window.focus(&view.focus_handle(cx), cx);
-        self.set_sheet(Some(Sheet::RemoveWorktree(view)), cx);
-    }
-
-    /// Lists the copies Find Duplicates would move, from the active pane,
-    /// before any of them do.
-    fn review_duplicates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(review) = self
-            .pane()
-            .update(cx, |pane, _| pane.duplicates.asking.take())
-        else {
-            return;
-        };
-        self.remember_focus(window, cx);
-        let view = cx.new(|cx| ReviewDuplicatesView::new(review, cx));
-        cx.subscribe_in(
-            &view,
-            window,
-            |this, _, answer: &review_duplicates::Answer, window, cx| {
-                let request = match answer {
-                    review_duplicates::Answer::Trash(request) => Some(request.clone()),
-                    review_duplicates::Answer::Cancel => None,
-                };
-                this.close_sheet(window, cx);
-                if let Some(request) = request {
-                    this.pane()
-                        .update(cx, |pane, cx| pane.trash_duplicates(request, window, cx));
-                }
-            },
-        )
-        .detach();
-        window.focus(&view.focus_handle(cx), cx);
-        self.set_sheet(Some(Sheet::ReviewDuplicates(view)), cx);
     }
 
     /// Follows a drag of the sidebar's edge. Element mouse handlers only fire
@@ -1991,132 +1369,6 @@ impl Browser {
         )
         .absolute()
         .size_0()
-    }
-
-    /// The toast at the bottom of the files, with its Undo.
-    fn toast_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let toast = self.toast.as_ref().filter(|_| self.fetching.is_none())?;
-        if self.transferring(cx) {
-            return None;
-        }
-        // Above the path bar, if it's showing.
-        let bar = if cx.global::<Preferences>().show_path_bar {
-            theme::PATH_BAR_HEIGHT
-        } else {
-            0.
-        };
-        let ink = if toast.failed { danger() } else { content(1.) };
-        let card = theme::floating(Elevation::Popover)
-            .id("toast")
-            .occlude()
-            .max_w(px(520.))
-            .mx_4()
-            .h(px(36.))
-            .pl_3()
-            .pr(px(6.))
-            .flex()
-            .items_center()
-            .gap_2()
-            .when(toast.failed, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(px(theme::RADIUS_CARD - 1.))
-                        .bg(danger().opacity(0.12)),
-                )
-            })
-            .child(
-                div()
-                    .relative()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(theme::TEXT_BODY))
-                    .text_color(ink)
-                    .child(toast.text.clone()),
-            )
-            .when_some(toast.offer.clone(), |d, offer| {
-                let label = match &offer {
-                    Offer::Undo(_) => "Undo",
-                    Offer::Download(label, _) => label,
-                    Offer::Show(_) => "Show",
-                };
-                d.child(
-                    theme::text_button("toast-offer", label, ButtonLook::Ghost)
-                        .debug_selector(|| "toast-offer".into())
-                        .relative()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(accent())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.toast = None;
-                            this.pane().update(cx, |pane, cx| match &offer {
-                                Offer::Undo(op) => {
-                                    pane.submit(Request::UndoOf { op: *op }, window, cx)
-                                }
-                                Offer::Download(_, paths) => pane.download(paths.clone(), cx),
-                                Offer::Show(path) => {
-                                    if let Some(folder) = path.parent() {
-                                        pane.go(folder.to_path_buf(), window, cx);
-                                        pane.select_on_listing(vec![path.clone()]);
-                                    }
-                                }
-                            });
-                        })),
-                )
-            })
-            .when(toast.offer.is_none(), |d| d.pr_3());
-        // The entrance plays when a toast appears, not when a new one takes
-        // the place of one on screen. Both run once and skip with Reduce Motion.
-        let card = if toast.leaving {
-            motion::sink_out(card, "toast-leave")
-        } else {
-            motion::rise_in(card, "toast-enter")
-        };
-        Some(
-            div()
-                .absolute()
-                .bottom(px(16. + bar))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(card),
-        )
-    }
-
-    /// Says `text` at the bottom of the files for `TOAST_FOR`, in red if
-    /// it's a failure, with a button for `offer` if given. It replaces the
-    /// last one.
-    fn toast(&mut self, text: String, failed: bool, offer: Option<Offer>, cx: &mut Context<Self>) {
-        let expire = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_FOR).await;
-            let leaves = this.update(cx, |this, cx| {
-                cx.notify();
-                if cx.reduce_motion() {
-                    this.toast = None;
-                    return false;
-                }
-                if let Some(toast) = this.toast.as_mut() {
-                    toast.leaving = true;
-                }
-                true
-            });
-            if leaves.unwrap_or(false) {
-                cx.background_executor().timer(motion::EXIT).await;
-                let _ = this.update(cx, |this, cx| {
-                    this.toast = None;
-                    cx.notify();
-                });
-            }
-        });
-        self.toast = Some(Toast {
-            text,
-            failed,
-            offer,
-            leaving: false,
-            _expire: expire,
-        });
-        cx.notify();
     }
 }
 
@@ -2199,30 +1451,18 @@ impl Render for Browser {
         let widths = self.pane_widths(window, cx);
         for (pane, width) in widths {
             let chrome = self.chrome_for(&pane, width, cx);
-            pane.update(cx, |pane, cx| {
-                pane.chrome = chrome;
-                let stops = regions && !pane.batch_sending();
-                pane.search.focus_handle(cx).tab_stop(stops);
-                pane.list_focus.clone().tab_stop(stops);
-            });
+            pane.update(cx, |pane, cx| pane.frame(chrome, regions, cx));
         }
         let (lone_folder, renaming, selected) = self.pane().clone().update(cx, |pane, cx| {
             (
                 pane.lone_folder(),
                 // Read fresh, as this runs before the pane draws: the frame that opens
                 // the text field must already leave Space to it.
-                pane.changing_names()
-                    || pane
-                        .preview
-                        .as_ref()
-                        .is_some_and(|view| view.read(cx).typing())
-                    || pane.remote_renaming(),
-                // An archive's entries aren't on the disk to look at or open.
-                (!pane.selection.is_empty() && !pane.showing_archive())
-                    || pane.remote_has_selection(),
+                pane.takes_typing(cx),
+                pane.selects_files(),
             )
         });
-        let has_query = !self.pane().read(cx).query.is_empty();
+        let has_query = self.pane().read(cx).searching();
         let (other_takes, other_on_server) =
             self.tabs[self.active]
                 .other()
@@ -2254,7 +1494,7 @@ impl Render for Browser {
         root
             // While a sheet is open, its commands (from the menu bar too) wait.
             .when(!sheet, |d| {
-                sidebar::favorite_commands(d, cx)
+                Browser::favorite_commands(d, cx)
                     .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
                         window.focus_next(cx);
                         this.sync_sidebar_cursor(window, cx);
@@ -2310,16 +1550,16 @@ impl Render for Browser {
                             this.empty_trash(window, cx)
                         }),
                     )
-                    .on_action(
-                        cx.listener(|this, _: &worktrees::AskRemoveWorktree, window, cx| {
+                    .on_action(cx.listener(
+                        |this, _: &pane::worktrees::AskRemoveWorktree, window, cx| {
                             this.ask_remove_worktree(window, cx)
-                        }),
-                    )
-                    .on_action(
-                        cx.listener(|this, _: &duplicates::ReviewDuplicates, window, cx| {
+                        },
+                    ))
+                    .on_action(cx.listener(
+                        |this, _: &pane::duplicates::ReviewDuplicates, window, cx| {
                             this.review_duplicates(window, cx)
-                        }),
-                    )
+                        },
+                    ))
                     .on_action(cx.listener(|this, _: &ToggleSplit, window, cx| {
                         this.toggle_split(window, cx)
                     }))
@@ -2590,12 +1830,12 @@ struct Peek {
 }
 
 impl Peek {
-    fn hover(
+    fn hover<V: 'static>(
         &mut self,
         card: bool,
         over: bool,
-        of: fn(&mut Browser) -> &mut Peek,
-        cx: &mut Context<Browser>,
+        of: fn(&mut V) -> &mut Peek,
+        cx: &mut Context<V>,
     ) {
         if card {
             self.over_card = over;
@@ -2641,81 +1881,6 @@ struct MenuRequest {
     open_with: bool,
 }
 
-/// What a toast's button does.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Offer {
-    /// Undo of this operation, which the owner refuses once anything else
-    /// has changed files since.
-    Undo(u64),
-    /// Downloads these, under this label: Download, or Try Again.
-    Download(&'static str, Vec<PathBuf>),
-    /// Shows this in its folder, selected.
-    Show(PathBuf),
-}
-
-/// A message after a change.
-struct Toast {
-    text: String,
-    failed: bool,
-    offer: Option<Offer>,
-    /// On its way out, for `motion::EXIT`.
-    leaving: bool,
-    _expire: Task<()>,
-}
-
-/// `why` without the folders it names, which the person can see, and with
-/// the home folder as ~.
-pub(crate) fn short_reason<'a>(why: &str, folders: impl IntoIterator<Item = &'a Path>) -> String {
-    let mut why = why.to_string();
-    for folder in folders {
-        why = why.replace(&format!("{}/", folder.display()), "");
-    }
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => why.replace(&home, "~"),
-        _ => why,
-    }
-}
-
-pub(crate) fn lock(ops: &Mutex<ops::Client>) -> MutexGuard<'_, ops::Client> {
-    ops.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// The sheet over the window, one at a time.
-enum Sheet {
-    Settings(Entity<SettingsView>),
-    Palette(Entity<PaletteView>),
-    Goto(Entity<GotoView>),
-    /// The Activity popover; `jobs` draws it.
-    Jobs,
-    /// The updates popover; `updates` draws it.
-    Updates,
-    /// The search field's menu.
-    Searches(Entity<SearchMenu>),
-    EmptyTrash(Entity<EmptyTrashView>),
-    LocalSendOffer(Entity<crate::localsend_ask::OfferView>),
-    LocalSendPin(Entity<crate::localsend_ask::PinView>),
-    RemoveWorktree(Entity<RemoveWorktreeView>),
-    ReviewDuplicates(Entity<ReviewDuplicatesView>),
-    Connect(Entity<ConnectView>),
-}
-
-/// What a command chosen in the palette would act on.
-#[derive(PartialEq)]
-struct PaletteTarget {
-    folder: PathBuf,
-    /// What's selected, whatever order the rows are in.
-    chosen: Vec<PathBuf>,
-    /// The sidebar's row, while the sidebar has the keys.
-    sidebar: Option<sidebar::RowTarget>,
-}
-
-/// What needs the browser's commands back. A frame with a sheet holds them
-/// off, and running a command or checking what would run reads the drawn frame.
-enum AfterSheet {
-    Run(Box<dyn gpui::Action>),
-    OpenPalette,
-}
-
 /// The file list keeps at least this much of the window.
 const MIN_LIST_WIDTH: f32 = 320.;
 
@@ -2726,36 +1891,4 @@ fn sidebar_width(wanted: f32, window: &Window) -> f32 {
     wanted
         .min(room)
         .clamp(*SIDEBAR_WIDTHS.start(), *SIDEBAR_WIDTHS.end())
-}
-
-/// Blank title bar space that drags the window, and zooms it on double-click,
-/// as AppKit's titlebar would. GPUI owns the titlebar, so buttons inside it
-/// never start a drag.
-pub(crate) fn drag_area() -> gpui::Div {
-    div()
-        .window_control_area(WindowControlArea::Drag)
-        .on_mouse_down(MouseButton::Left, |event, window, cx| {
-            cx.stop_propagation();
-            if event.click_count == 2 {
-                window.titlebar_double_click();
-            } else {
-                window.start_window_move();
-            }
-        })
-}
-
-/// The folders of apps that a person doesn't keep dotfiles in, for a home
-/// folder at `home`.
-pub fn application_roots(home: &Path) -> Vec<PathBuf> {
-    vec![
-        "/Applications".into(),
-        "/System/Applications".into(),
-        home.join("Applications"),
-    ]
-}
-
-pub(crate) fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "/".into())
 }

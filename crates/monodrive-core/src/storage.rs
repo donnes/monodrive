@@ -6,7 +6,8 @@
 //! cleanup is a plan the operation owner checks again before it trashes
 //! anything. docs/storage.md records why the numbers mean what they do.
 
-use crate::ops::{self, FileId, Request, Seen, Stamp, disk};
+use crate::disk::{self, FileId, Stamp};
+use crate::ops::{self, Request, Seen};
 use crate::sizes::{self, Met};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, OsString};
@@ -30,15 +31,13 @@ const CHUNK: usize = 256 * 1024;
 const NOTIFY_ITEMS: u64 = 4096;
 const NOTIFY_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Shared with whoever runs a scan on another thread: set `cancel` to stop
-/// it, and read the counts when `notify` says they've grown.
+/// Shared with whoever runs a scan on another thread: `cancel` stops it,
+/// and the counts are worth reading when `notify` says they've grown.
 #[derive(Default)]
 pub struct Progress {
-    pub cancel: AtomicBool,
-    /// Files and folders the scan has met.
-    pub items: AtomicU64,
-    /// Bytes looking for duplicates has read.
-    pub read: AtomicU64,
+    cancel: AtomicBool,
+    items: AtomicU64,
+    read: AtomicU64,
     notify: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
@@ -52,7 +51,34 @@ impl Progress {
         }
     }
 
-    pub(crate) fn add(&self, counter: &AtomicU64, n: u64, every: u64) {
+    /// Stops the scan at its next look.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Files and folders the scan has met.
+    pub fn items(&self) -> u64 {
+        self.items.load(Ordering::Relaxed)
+    }
+
+    /// Bytes looking for duplicates has read.
+    pub fn read(&self) -> u64 {
+        self.read.load(Ordering::Relaxed)
+    }
+
+    fn met(&self) {
+        self.add(&self.items, 1, NOTIFY_ITEMS);
+    }
+
+    fn reading(&self, bytes: u64) {
+        self.add(&self.read, bytes, NOTIFY_BYTES);
+    }
+
+    fn add(&self, counter: &AtomicU64, n: u64, every: u64) {
         let before = counter.fetch_add(n, Ordering::Relaxed);
         if let Some(notify) = &self.notify
             && (before + n) / every != before / every
@@ -62,7 +88,7 @@ impl Progress {
     }
 
     pub(crate) fn stop(&self, deadline: Option<Instant>) -> Option<Stop> {
-        if self.cancel.load(Ordering::Relaxed) {
+        if self.is_cancelled() {
             Some(Stop::Cancelled)
         } else if deadline.is_some_and(|end| Instant::now() >= end) {
             Some(Stop::Deadline)
@@ -195,7 +221,7 @@ pub fn scan(
     };
     let complete = sizes::walk(&root, &sizes::gated(), false, &mut check, &mut |event| {
         met.set(met.get() + 1);
-        progress.add(&progress.items, 1, NOTIFY_ITEMS);
+        progress.met();
         match event {
             Met::Folder {
                 parent,
@@ -291,7 +317,7 @@ pub fn total(
         stopped.is_some()
     };
     let complete = sizes::walk(folder, &sizes::gated(), true, &mut check, &mut |event| {
-        progress.add(&progress.items, 1, NOTIFY_ITEMS);
+        progress.met();
         match event {
             Met::Folder { placeholder, .. } => total.usage.placeholders += u64::from(placeholder),
             Met::Item {
@@ -639,7 +665,7 @@ fn digest(
                 Err(e) => return Ok(Err(fail(e))),
             };
             hasher.update(&buffer[..n]);
-            progress.add(&progress.read, n as u64, NOTIFY_BYTES);
+            progress.reading(n as u64);
         }
     } else {
         let sample = &mut buffer[..SAMPLE as usize];
@@ -648,7 +674,7 @@ fn digest(
                 return Ok(Err(fail(e)));
             }
             hasher.update(sample);
-            progress.add(&progress.read, SAMPLE, NOTIFY_BYTES);
+            progress.reading(SAMPLE);
         }
     }
     match f.metadata() {

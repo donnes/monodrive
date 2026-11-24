@@ -9,8 +9,9 @@ use crate::format::{Cache, Measured};
 use crate::measure::{self, Sample};
 use crate::rng::Rng;
 use crate::suites::{delete_fixture, walk_count};
+use monodrive_core::Origin;
 use monodrive_core::entries::{Entry, Sort, SortBy, list_dir, sort};
-use monodrive_core::ops::{Client, Origin, Owner, Paths, Request};
+use monodrive_core::ops::{Client, Owner, Paths, Request};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -322,7 +323,7 @@ fn private_bytes(tree: &Path) -> Result<u64, String> {
 pub(super) struct Jobs {
     client: Client,
     changed: mpsc::Receiver<()>,
-    _watch: monodrive_core::ops::Watch,
+    _watch: monodrive_core::disk::Watch,
     _short: crate::suites::ShortPath,
 }
 

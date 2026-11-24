@@ -4,8 +4,8 @@
 //! the window and every MCP server see and cancel the same runs.
 //! docs/commands.md records why.
 
-use crate::ops::Origin;
-use crate::worktrees::{executable, exited};
+use crate::Origin;
+use crate::disk::{executable, exited};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};

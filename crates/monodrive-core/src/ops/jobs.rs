@@ -7,13 +7,16 @@
 //! its `Job` record instead, and an erased item has no step: nothing brings it
 //! back.
 
+mod transfers;
+
 use super::{
-    Engine, FileId, Origin, Outcome, Record, Request, Spot, Stamp, Step, Submission, TrashItem,
-    disk, existing, trashable,
+    Engine, Outcome, Record, Request, Spot, Step, Submission, TrashItem, existing, trashable,
 };
+use crate::Origin;
 use crate::archives::{self, Archive};
 use crate::cloud;
-use crate::remote::{Connections, Connector, RemotePath};
+use crate::disk::{self, FileId, Stamp};
+use crate::remote::{Connection, Connections, Connector, RemoteError, RemotePath};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
@@ -465,6 +468,15 @@ pub(super) struct Entry {
     pub(super) archive: Option<Arc<Archive>>,
 }
 
+/// An item a job thread takes, and the job's switches it watches.
+struct Pending {
+    index: usize,
+    spec: Arc<Spec>,
+    work: Work,
+    cancel: Arc<AtomicBool>,
+    copied: Arc<AtomicU64>,
+}
+
 impl Entry {
     pub(super) fn new(id: u64, origin: Origin, spec: Spec, started: u64) -> Self {
         let work: Vec<Work> = match (spec.kind, spec.sources.as_slice()) {
@@ -523,6 +535,198 @@ impl Entry {
                 };
             }
         }
+    }
+
+    pub(super) fn state(&self) -> State {
+        self.state
+    }
+
+    /// Takes item `index` as the journal recorded it.
+    pub(super) fn record(&mut self, index: usize, work: Work) {
+        if let Some(slot) = self.work.get_mut(index) {
+            *slot = work;
+        }
+    }
+
+    /// Ends the run as `state`. When it was still going, returns what joins
+    /// the undo history: its operation, title and changes.
+    pub(super) fn finish(&mut self, state: State) -> Option<(u64, &'static str, Vec<Step>)> {
+        let ran = self.state.active();
+        self.state = state;
+        self.archive = None;
+        ran.then(|| (self.run, self.title(), self.run_steps()))
+    }
+
+    /// Marks a queued job running and returns its id.
+    fn begin(&mut self) -> u64 {
+        self.state = State::Running;
+        self.id
+    }
+
+    /// The items not done yet, by index, and what each is.
+    fn unfinished(&self) -> Vec<(usize, PathBuf)> {
+        self.work
+            .iter()
+            .enumerate()
+            .filter(|(_, work)| work.done.is_none())
+            .map(|(i, work)| (i, work.source.clone()))
+            .collect()
+    }
+
+    fn weigh(&mut self, sizes: Vec<(usize, u64)>) {
+        for (i, bytes) in sizes {
+            self.work[i].bytes = bytes;
+        }
+    }
+
+    /// The next item to work on, or how the job ended when none is left or
+    /// it was cancelled.
+    fn next(&self) -> Result<Pending, State> {
+        let pending = self.work.iter().position(|work| work.done.is_none());
+        let cancelled = self.cancel.load(Ordering::Relaxed);
+        match pending {
+            Some(index) if !cancelled => {
+                self.copied.store(0, Ordering::Relaxed);
+                Ok(Pending {
+                    index,
+                    spec: self.spec.clone(),
+                    work: self.work[index].clone(),
+                    cancel: self.cancel.clone(),
+                    copied: self.copied.clone(),
+                })
+            }
+            _ => {
+                let failed = self
+                    .work
+                    .iter()
+                    .any(|work| matches!(work.done, Some(Done::Failed(_))));
+                Err(match (cancelled, failed) {
+                    (true, _) => State::Cancelled,
+                    (false, true) => State::Failed,
+                    (false, false) => State::Completed,
+                })
+            }
+        }
+    }
+
+    /// Refuses to continue a job still going, an Empty Trash while another
+    /// empties it, and one with nothing left; else the conflict it stopped
+    /// with.
+    fn continuable(&self, emptying: bool) -> Result<Conflict, String> {
+        let job = self.id;
+        if self.state.active() {
+            return Err(format!("Job {job} is still going."));
+        }
+        if self.erases() && emptying {
+            return Err(ALREADY_EMPTYING.into());
+        }
+        if !self.work.iter().any(Work::untouched) {
+            return Err(format!("Job {job} has nothing left to do."));
+        }
+        Ok(self.spec.conflict)
+    }
+
+    /// Asks the job to stop. True when it's running and stops itself after
+    /// its item; otherwise nothing is on the way and it ends now.
+    fn stop(&mut self) -> Result<bool, String> {
+        if !self.state.active() && self.state != State::Waiting {
+            return Err(format!("Job {} has already stopped.", self.id));
+        }
+        self.cancel.store(true, Ordering::Relaxed);
+        Ok(self.state == State::Running)
+    }
+
+    /// Where each item of a job the last owner didn't finish got to, from
+    /// the disk, and the job's end as interrupted.
+    fn settle(&self) -> Vec<Record> {
+        let mut records = Vec::new();
+        let mut claimed: HashSet<PathBuf> = self
+            .work
+            .iter()
+            .filter_map(|work| match &work.done {
+                Some(Done::To(to)) => Some(to.clone()),
+                _ => None,
+            })
+            .collect();
+        for (index, work) in self.work.iter().enumerate() {
+            if self.spec.kind == Kind::Trash {
+                if work.done.is_none()
+                    && let Some(work) = settle_trashed(work, &mut claimed)
+                {
+                    records.push(Record::Work {
+                        op: self.id,
+                        index,
+                        work,
+                    });
+                }
+                continue;
+            }
+            if work.done.is_some()
+                || (work.to.is_none() && work.steps.is_empty() && work.left.is_none())
+            {
+                continue;
+            }
+            let mut work = work.clone();
+            for step in work.steps.iter_mut().filter(|step| !step.applied) {
+                let _ = step.locate();
+            }
+            work.steps.retain(|step| step.applied);
+            // A copy found in place came from the hidden name; undoing it
+            // sends it to the Trash, as when its placement was recorded.
+            if let Some(temp) = &work.temp {
+                for step in &mut work.steps {
+                    if step.undone == Spot::Path(temp.clone()) {
+                        step.undone = Spot::Trash(None);
+                    }
+                }
+            }
+            let to = work.to.clone().unwrap_or_default();
+            let placed = work
+                .steps
+                .iter()
+                .any(|step| step.done == Spot::Path(to.clone()));
+            let left = work
+                .steps
+                .iter()
+                .any(|step| step.undone == Spot::Path(work.source.clone()));
+            let whole = placed && (self.spec.kind != Kind::Move || left);
+            let mut why = format!(
+                "Monodrive stopped partway through {}; undo reverses what it changed.",
+                work.source.display()
+            );
+            if let Some(temp) = work.temp.as_deref() {
+                why = unfinished(why, temp, self.spec.kind);
+            }
+            if let Some(note) = work.left_note() {
+                why = format!("{why} {note}");
+            }
+            work.done = Some(if whole {
+                Done::To(to)
+            } else {
+                Done::Failed(why)
+            });
+            records.push(Record::Work {
+                op: self.id,
+                index,
+                work,
+            });
+        }
+        records.push(Record::Finish {
+            op: self.id,
+            state: State::Interrupted,
+        });
+        records
+    }
+
+    /// An extraction's archive, once read.
+    fn archive(&self) -> Option<Arc<Archive>> {
+        self.archive.clone()
+    }
+
+    /// Keeps `archive` while the job runs, unless one is kept already, and
+    /// returns the one kept.
+    fn keep_archive(&mut self, archive: Arc<Archive>) -> Arc<Archive> {
+        self.archive.get_or_insert(archive).clone()
     }
 
     /// What this run changed, for the undo history.
@@ -606,7 +810,7 @@ pub(super) struct Shared {
     /// idle.
     wake: Option<UnixStream>,
     /// Remote jobs' connections, kept only while a job uses them.
-    pub(super) remote: Connections,
+    remote: Connections,
 }
 
 impl Shared {
@@ -621,7 +825,7 @@ impl Shared {
         connector: Connector,
     ) -> Arc<Self> {
         Arc::new(Self {
-            remote: Connections::new(engine.paths.places(), connector),
+            remote: Connections::new(engine.places(), connector),
             engine: Mutex::new(engine),
             wake,
         })
@@ -629,6 +833,20 @@ impl Shared {
 
     pub(super) fn lock(&self) -> MutexGuard<'_, Engine> {
         self.engine.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The connection to remote source `id`, which a job's item uses.
+    pub(super) fn connect(&self, id: &str) -> Result<Arc<Connection>, RemoteError> {
+        self.remote.connect(id)
+    }
+
+    /// After a job thread ends: lets go of connections no job uses, and
+    /// wakes the owner so it can exit once idle.
+    pub(super) fn ended(&self) {
+        self.remote.release_idle();
+        if let Some(mut wake) = self.wake.as_ref() {
+            let _ = std::io::Write::write_all(&mut wake, &[0]);
+        }
     }
 
     /// Journals an item as it stands.
@@ -673,29 +891,12 @@ impl Shared {
 /// Starts queued jobs on their own threads while fewer than `RUNNING` run.
 pub(super) fn start(shared: &Arc<Shared>) {
     let mut engine = shared.lock();
-    while engine
-        .jobs
-        .iter()
-        .filter(|job| job.state == State::Running)
-        .count()
-        < RUNNING
-    {
-        let Some(job) = engine
-            .jobs
-            .iter_mut()
-            .find(|job| job.state == State::Queued)
-        else {
-            break;
-        };
-        job.state = State::Running;
-        let (op, shared) = (job.id, shared.clone());
+    while let Some(op) = engine.begin_next() {
+        let shared = shared.clone();
         std::thread::spawn(move || {
             run(&shared, op);
             start(&shared);
-            shared.remote.release_idle();
-            if let Some(mut wake) = shared.wake.as_ref() {
-                let _ = std::io::Write::write_all(&mut wake, &[0]);
-            }
+            shared.ended();
         });
     }
 }
@@ -703,16 +904,11 @@ pub(super) fn start(shared: &Arc<Shared>) {
 /// Works through a job's items until it's done, stopped or cancelled.
 pub(super) fn run(shared: &Shared, op: u64) {
     // The totals, for progress; reading the disk, so outside the lock.
-    let Some((spec, sources)) = shared.lock().job_mut(op).map(|job| {
-        let sources: Vec<(usize, PathBuf)> = job
-            .work
-            .iter()
-            .enumerate()
-            .filter(|(_, work)| work.done.is_none())
-            .map(|(i, work)| (i, work.source.clone()))
-            .collect();
-        (job.spec.clone(), sources)
-    }) else {
+    let Some((spec, sources)) = shared
+        .lock()
+        .job_mut(op)
+        .map(|job| (job.spec.clone(), job.unfinished()))
+    else {
         return;
     };
     let tally = |path: &Path| disk::tally(path).map_or(0, |(_, bytes)| bytes);
@@ -739,47 +935,26 @@ pub(super) fn run(shared: &Shared, op: u64) {
         })
         .collect();
     if let Some(job) = shared.lock().job_mut(op) {
-        for (i, bytes) in sizes {
-            job.work[i].bytes = bytes;
-        }
+        job.weigh(sizes);
     }
     while next(shared, op) {}
 }
 
 /// Runs the job's next item. False once the job has ended.
 pub(super) fn next(shared: &Shared, op: u64) -> bool {
-    let (index, spec, work, cancel, copied) = {
-        let mut engine = shared.lock();
-        let Some(job) = engine.job_mut(op) else {
+    let next = shared.lock().job_mut(op).map(|job| job.next());
+    let Pending {
+        index,
+        spec,
+        work,
+        cancel,
+        copied,
+    } = match next {
+        None => return false,
+        Some(Ok(pending)) => pending,
+        Some(Err(state)) => {
+            shared.finish(op, state);
             return false;
-        };
-        let pending = job.work.iter().position(|work| work.done.is_none());
-        let cancelled = job.cancel.load(Ordering::Relaxed);
-        match pending {
-            Some(index) if !cancelled => {
-                job.copied.store(0, Ordering::Relaxed);
-                (
-                    index,
-                    job.spec.clone(),
-                    job.work[index].clone(),
-                    job.cancel.clone(),
-                    job.copied.clone(),
-                )
-            }
-            _ => {
-                let failed = job
-                    .work
-                    .iter()
-                    .any(|work| matches!(work.done, Some(Done::Failed(_))));
-                drop(engine);
-                let state = match (cancelled, failed) {
-                    (true, _) => State::Cancelled,
-                    (false, true) => State::Failed,
-                    (false, false) => State::Completed,
-                };
-                shared.finish(op, state);
-                return false;
-            }
         }
     };
     let mut item = Item {
@@ -830,20 +1005,16 @@ pub(super) struct Item<'a> {
 
 /// An extraction's archive, read once and kept while the job runs.
 fn opened(shared: &Shared, op: u64, spec: &Spec) -> Result<Arc<Archive>, String> {
-    if let Some(open) = shared
-        .lock()
-        .job_mut(op)
-        .and_then(|job| job.archive.clone())
-    {
+    if let Some(open) = shared.lock().job_mut(op).and_then(|job| job.archive()) {
         return Ok(open);
     }
     let open = Arc::new(Archive::open(
         spec.archive.as_deref().unwrap_or(Path::new("")),
     )?);
-    if let Some(job) = shared.lock().job_mut(op) {
-        job.archive = Some(open.clone());
-    }
-    Ok(open)
+    Ok(match shared.lock().job_mut(op) {
+        Some(job) => job.keep_archive(open),
+        None => open,
+    })
 }
 
 /// The item at `path` and every folder holding it, by identity, so neither
@@ -1011,7 +1182,7 @@ impl Item<'_> {
                 to.display()
             ))),
             Conflict::KeepBoth => {
-                let Some(free) = numbered(&to) else {
+                let Some(free) = disk::numbered(&to) else {
                     return Err(Next::Done(Done::Failed(format!(
                         "{}: no free name for it.",
                         to.display()
@@ -1075,7 +1246,7 @@ impl Item<'_> {
         };
         let mut to = spec.into.join(name);
         if disk::id(&to).is_some() {
-            let Some(free) = numbered(&to) else {
+            let Some(free) = disk::numbered(&to) else {
                 return fail(format!("{}: no free name for it.", to.display()));
             };
             to = free;
@@ -1386,28 +1557,10 @@ fn unfinished(why: String, temp: &Path, kind: Kind) -> String {
     }
 }
 
-fn now() -> u64 {
+pub(super) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
-}
-
-/// `path` as "name 2.ext", "name 3.ext" and on: the first that's free.
-pub(super) fn numbered(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name()?.to_str()?;
-    (2..).find_map(|n: u32| {
-        let free = path.with_file_name(numbered_name(name, n));
-        disk::id(&free).is_none().then_some(free)
-    })
-}
-
-/// `name` as "name 2.ext".
-pub(crate) fn numbered_name(name: &str, n: u32) -> String {
-    let (stem, ext) = match name.rfind('.') {
-        Some(dot) if dot > 0 => name.split_at(dot),
-        _ => (name, ""),
-    };
-    format!("{stem} {n}{ext}")
 }
 
 impl Engine {
@@ -1418,21 +1571,15 @@ impl Engine {
         let emptying = self.emptying();
         let record = match &submission.request {
             Request::Retry { job, conflict } => {
-                let old = self.job_mut(*job).ok_or_else(|| format!("No job {job}."))?;
-                if old.state.active() {
-                    return Err(format!("Job {job} is still going."));
-                }
-                if old.erases() && emptying {
-                    return Err(ALREADY_EMPTYING.into());
-                }
-                if !old.work.iter().any(Work::untouched) {
-                    return Err(format!("Job {job} has nothing left to do."));
-                }
+                let stopped_with = self
+                    .job_mut(*job)
+                    .ok_or_else(|| format!("No job {job}."))?
+                    .continuable(emptying)?;
                 Record::Continue {
                     op,
                     submission: submission.clone(),
                     job: *job,
-                    conflict: conflict.unwrap_or(old.spec.conflict),
+                    conflict: conflict.unwrap_or(stopped_with),
                     at: now(),
                 }
             }
@@ -1474,22 +1621,38 @@ impl Engine {
         Err(kept.join("\n"))
     }
 
+    /// Marks the oldest queued job running and returns it, while fewer than
+    /// `RUNNING` run.
+    fn begin_next(&mut self) -> Option<u64> {
+        let running = self
+            .jobs
+            .iter()
+            .filter(|job| job.state() == State::Running)
+            .count();
+        if running >= RUNNING {
+            return None;
+        }
+        self.jobs
+            .iter_mut()
+            .find(|job| job.state() == State::Queued)
+            .map(Entry::begin)
+    }
+
     /// Whether an Empty Trash is queued or running.
     fn emptying(&self) -> bool {
         self.jobs
             .iter()
-            .any(|job| job.erases() && job.state.active())
+            .any(|job| job.erases() && job.state().active())
     }
 
     pub(super) fn cancel(&mut self, job: u64) -> Result<Outcome, String> {
-        let entry = self.job_mut(job).ok_or_else(|| format!("No job {job}."))?;
-        if !entry.state.active() && entry.state != State::Waiting {
-            return Err(format!("Job {job} has already stopped."));
-        }
-        entry.cancel.store(true, Ordering::Relaxed);
+        let running = self
+            .job_mut(job)
+            .ok_or_else(|| format!("No job {job}."))?
+            .stop()?;
         // A running job stops itself after its item; one queued or waiting
         // at a conflict has nothing on the way.
-        if entry.state != State::Running {
+        if !running {
             let record = Record::Finish {
                 op: job,
                 state: State::Cancelled,
@@ -1513,8 +1676,9 @@ impl Engine {
             .iter()
             .rev()
             .filter(|job| {
-                shown += usize::from(!job.state.active());
-                job.state.active() || shown <= SHOWN
+                let active = job.state().active();
+                shown += usize::from(!active);
+                active || shown <= SHOWN
             })
             .map(Entry::public)
             .collect()
@@ -1522,91 +1686,17 @@ impl Engine {
 
     /// Jobs still going.
     pub(super) fn busy(&self) -> bool {
-        self.jobs.iter().any(|job| job.state.active())
+        self.jobs.iter().any(|job| job.state().active())
     }
 
     /// For each job the last owner didn't finish, where each of its items
     /// got to, from the disk. Nothing is repeated, and an unfinished hidden
     /// copy, archive or extraction goes to the Trash.
     pub(super) fn settle_jobs(&self) -> Vec<Record> {
-        let mut records = Vec::new();
-        for job in self.jobs.iter().filter(|job| job.state.active()) {
-            let mut claimed: HashSet<PathBuf> = job
-                .work
-                .iter()
-                .filter_map(|work| match &work.done {
-                    Some(Done::To(to)) => Some(to.clone()),
-                    _ => None,
-                })
-                .collect();
-            for (index, work) in job.work.iter().enumerate() {
-                if job.spec.kind == Kind::Trash {
-                    if work.done.is_none()
-                        && let Some(work) = settle_trashed(work, &mut claimed)
-                    {
-                        records.push(Record::Work {
-                            op: job.id,
-                            index,
-                            work,
-                        });
-                    }
-                    continue;
-                }
-                if work.done.is_some()
-                    || (work.to.is_none() && work.steps.is_empty() && work.left.is_none())
-                {
-                    continue;
-                }
-                let mut work = work.clone();
-                for step in work.steps.iter_mut().filter(|step| !step.applied) {
-                    let _ = step.locate();
-                }
-                work.steps.retain(|step| step.applied);
-                // A copy found in place came from the hidden name; undoing it
-                // sends it to the Trash, as when its placement was recorded.
-                if let Some(temp) = &work.temp {
-                    for step in &mut work.steps {
-                        if step.undone == Spot::Path(temp.clone()) {
-                            step.undone = Spot::Trash(None);
-                        }
-                    }
-                }
-                let to = work.to.clone().unwrap_or_default();
-                let placed = work
-                    .steps
-                    .iter()
-                    .any(|step| step.done == Spot::Path(to.clone()));
-                let left = work
-                    .steps
-                    .iter()
-                    .any(|step| step.undone == Spot::Path(work.source.clone()));
-                let whole = placed && (job.spec.kind != Kind::Move || left);
-                let mut why = format!(
-                    "Monodrive stopped partway through {}; undo reverses what it changed.",
-                    work.source.display()
-                );
-                if let Some(temp) = work.temp.as_deref() {
-                    why = unfinished(why, temp, job.spec.kind);
-                }
-                if let Some(note) = work.left_note() {
-                    why = format!("{why} {note}");
-                }
-                work.done = Some(if whole {
-                    Done::To(to)
-                } else {
-                    Done::Failed(why)
-                });
-                records.push(Record::Work {
-                    op: job.id,
-                    index,
-                    work,
-                });
-            }
-            records.push(Record::Finish {
-                op: job.id,
-                state: State::Interrupted,
-            });
-        }
-        records
+        self.jobs
+            .iter()
+            .filter(|job| job.state().active())
+            .flat_map(Entry::settle)
+            .collect()
     }
 }

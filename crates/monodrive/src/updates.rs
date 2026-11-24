@@ -5,7 +5,7 @@
 //! counts down to the restart that runs it. One `Updates` serves every window. Only a
 //! signed release checks, so debug builds and tests never reach the network.
 
-use crate::browser::CheckForUpdates;
+use crate::commands::CheckForUpdates;
 use crate::menu;
 use crate::preferences::Preferences;
 use crate::theme::{self, ButtonLook, accent, circle_button, content, danger, text_button};
@@ -73,32 +73,42 @@ pub fn start(cx: &mut App) {
     let channel = cx.global::<Preferences>().update_channel;
     let updates = cx.new(|cx: &mut Context<Updates>| {
         let mut updates = Updates::new(channel, Vec::new(), None);
-        updates._timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(FIRST_CHECK).await;
-            loop {
-                if this.update(cx, |this, cx| this.check(cx)).is_err() {
-                    return;
-                }
-                cx.background_executor().timer(CHECK).await;
-            }
-        }));
+        updates.check_every(CHECK, cx);
         updates
     });
     cx.observe_global::<Preferences>({
         let updates = updates.clone();
         move |cx| {
             let channel = cx.global::<Preferences>().update_channel;
-            updates.update(cx, |updates, cx| {
-                if updates.channel != channel {
-                    updates.channel = channel;
-                    updates.pending.clear();
-                    updates.check(cx);
-                }
-            });
+            updates.update(cx, |updates, cx| updates.follow(channel, cx));
         }
     })
     .detach();
     cx.set_global(Shared(updates));
+}
+
+impl Updates {
+    /// Checks soon after launch, then every `every`.
+    fn check_every(&mut self, every: Duration, cx: &mut Context<Self>) {
+        self._timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FIRST_CHECK).await;
+            loop {
+                if this.update(cx, |this, cx| this.check(cx)).is_err() {
+                    return;
+                }
+                cx.background_executor().timer(every).await;
+            }
+        }));
+    }
+
+    /// Checks again when the channel changes, forgetting what the other one offered.
+    fn follow(&mut self, channel: Channel, cx: &mut Context<Self>) {
+        if self.channel != channel {
+            self.channel = channel;
+            self.pending.clear();
+            self.check(cx);
+        }
+    }
 }
 
 /// The sidebar's control left of Settings: a refresh icon that checks for

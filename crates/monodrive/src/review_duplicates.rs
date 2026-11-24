@@ -88,10 +88,7 @@ fn path_row(path: &Path, trashed: bool) -> impl IntoElement {
                 .font_family(theme::MONO_FONT)
                 .text_size(px(theme::TEXT_SMALL))
                 .text_color(ink)
-                .child(crate::browser::short_reason(
-                    &path.display().to_string(),
-                    [],
-                )),
+                .child(crate::format::short_reason(&path.display().to_string(), [])),
         )
         .when(!trashed, |d| {
             d.child(
@@ -145,7 +142,7 @@ impl Render for ReviewDuplicatesView {
                     .text_color(content(0.65))
                     .child(format!(
                         "Frees at least {} once the Trash is emptied. A copy that changed since it was read stays. ⌘Z puts them back.",
-                        crate::browser::format_bytes(cleanup.frees)
+                        crate::format::format_bytes(cleanup.frees)
                     )),
             )
             .child(

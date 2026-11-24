@@ -358,7 +358,6 @@ impl Render for GotoView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands;
     use gpui::{TestAppContext, VisualTestContext};
 
     fn open<'a>(
@@ -367,7 +366,7 @@ mod tests {
     ) -> (Entity<GotoView>, &'a mut VisualTestContext) {
         cx.update(|cx| {
             cx.set_global(Preferences::default());
-            commands::apply(cx);
+            crate::apply_keymap(cx);
         });
         let folder = folder.to_path_buf();
         let (view, cx) = cx.add_window_view(|_, cx| GotoView::new(folder, cx));

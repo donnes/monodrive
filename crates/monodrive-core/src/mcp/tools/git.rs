@@ -1,9 +1,9 @@
 //! Git repositories and worktrees: list_worktrees, worktree_status,
 //! list_repos, register_repo and forget_repo. None fetches or takes a lock.
 
-use super::{Call, Preview, local_one, short_timeout};
+use super::{Call, local_one, short_timeout};
 use crate::mcp::contract::{Planned, Reply, ToolError, shown};
-use crate::mcp::server::Server;
+use crate::mcp::session::{Preview, Session};
 use crate::ops::Request;
 use crate::places::Availability;
 use crate::worktrees::{self, Git, Worktree};
@@ -52,16 +52,16 @@ pub struct Trees {
 impl Call for ListWorktrees {
     type Out = Trees;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Trees>, ToolError> {
-        let git = server.git()?;
+    fn run(self, session: &mut Session) -> Result<Reply<Trees>, ToolError> {
+        let git = session.git()?;
         let (repositories, problems) = match &self.path {
             Some(path) => {
                 let inventory = worktrees::list(&git, &local_one(path, "list_worktrees")?)?;
                 (vec![inventory], Vec::new())
             }
             None => {
-                let places = server.places.clone();
-                let found = match server.index() {
+                let places = session.places.clone();
+                let found = match session.index() {
                     Ok(index) => {
                         worktrees::scan(&git, &places, |query, limit| index.find(query, limit))
                     }
@@ -150,14 +150,14 @@ pub struct AtRisk {
 impl Call for RemoveWorktree {
     type Out = Planned<AtRisk>;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Self::Out>, ToolError> {
         let request_id = self.request_id.as_deref();
         if let Some(token) = &self.confirm {
-            let Preview::Worktree(request) = server.kept(token, request_id)? else {
+            let Preview::Worktree(request) = session.kept(token, request_id)? else {
                 return Err(ToolError::invalid("That token is another tool's plan."));
             };
-            let done = server.change(request, request_id)?;
-            server.spent(token, request_id);
+            let done = session.change(request, request_id)?;
+            session.spent(token, request_id);
             return Ok(done.ran());
         }
         let path = self.path.as_deref().ok_or_else(|| {
@@ -168,7 +168,7 @@ impl Call for RemoveWorktree {
             Some(repo) => local_one(repo, "remove_worktree")?,
             None => path.clone(),
         };
-        let git = server.git()?;
+        let git = session.git()?;
         let removal = worktrees::removal(&git, &repo, &path)?;
         let request = Request::RemoveWorktree {
             repo,
@@ -178,7 +178,7 @@ impl Call for RemoveWorktree {
         };
         // Nothing only it holds: it goes, and undo brings it back.
         if removal.risk.is_empty() && !self.dry_run {
-            return server.change(request, request_id).map(Reply::ran);
+            return session.change(request, request_id).map(Reply::ran);
         }
         let risk = &removal.risk;
         let plan = AtRisk {
@@ -192,7 +192,7 @@ impl Call for RemoveWorktree {
             branch: removal.worktree.branch.clone(),
         };
         let mut text = risk_text(&removal);
-        let token = server.keep(Preview::Worktree(request));
+        let token = session.keep(Preview::Worktree(request));
         text.push_str(&format!(
             "Confirm with token {token} within 10 minutes to move it to the Trash. undo brings it back.\n"
         ));
@@ -322,10 +322,10 @@ pub struct TreeStatus {
 impl Call for WorktreeStatus {
     type Out = TreeStatus;
 
-    fn run(self, server: &mut Server) -> Result<Reply<TreeStatus>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<TreeStatus>, ToolError> {
         let git = Git {
             timeout: Duration::from_secs(self.timeout_seconds),
-            ..server.git()?
+            ..session.git()?
         };
         let status = worktrees::status(&git, &local_one(&self.path, "worktree_status")?)?;
         let text = status_text(&status);
@@ -404,8 +404,8 @@ pub struct Repos {
 impl Call for ListRepos {
     type Out = Repos;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Repos>, ToolError> {
-        let repos: Vec<Repo> = server
+    fn run(self, session: &mut Session) -> Result<Reply<Repos>, ToolError> {
+        let repos: Vec<Repo> = session
             .places
             .repositories()?
             .iter()
@@ -449,10 +449,10 @@ pub struct Registered {
 impl Call for RegisterRepo {
     type Out = Registered;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Registered>, ToolError> {
-        let git = server.git()?;
+    fn run(self, session: &mut Session) -> Result<Reply<Registered>, ToolError> {
+        let git = session.git()?;
         let dir = local_one(&self.path, "register_repo")?;
-        let repo = worktrees::register(&git, &server.places, &dir)?;
+        let repo = worktrees::register(&git, &session.places, &dir)?;
         Ok(Reply::new(
             format!("{}\n", repo.path.display()),
             Registered {
@@ -471,8 +471,8 @@ pub struct ForgetRepo {
 impl Call for ForgetRepo {
     type Out = Registered;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Registered>, ToolError> {
-        let repo = server
+    fn run(self, session: &mut Session) -> Result<Reply<Registered>, ToolError> {
+        let repo = session
             .places
             .forget_repository(&local_one(&self.path, "forget_repo")?)?;
         Ok(Reply::new(

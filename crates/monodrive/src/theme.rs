@@ -5,9 +5,9 @@
 use crate::palettes::{self, Syntax};
 use crate::preferences::{Preferences, Theme};
 use gpui::{
-    Bounds, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, PathBuilder, Pixels, Role,
-    SharedString, Stateful, Svg, Window, WindowBackgroundAppearance, canvas, div, point,
-    prelude::*, px, rgb, svg,
+    Bounds, BoxShadow, Context, Div, ElementId, FontWeight, Hsla, MouseButton, PathBuilder, Pixels,
+    Role, SharedString, Stateful, Svg, Window, WindowBackgroundAppearance, WindowControlArea,
+    canvas, div, point, prelude::*, px, rgb, svg,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -760,6 +760,22 @@ fn tip_on(button: Stateful<Div>, label: &'static str, below: bool) -> Stateful<D
         .tooltip(move |_, cx| {
             let over = over.get();
             cx.new(|_| Tip { label, over, below }).into()
+        })
+}
+
+/// Blank title bar space that drags the window, and zooms it on double-click,
+/// as AppKit's titlebar would. GPUI owns the titlebar, so buttons inside it
+/// never start a drag.
+pub(crate) fn drag_area() -> Div {
+    div()
+        .window_control_area(WindowControlArea::Drag)
+        .on_mouse_down(MouseButton::Left, |event, window, cx| {
+            cx.stop_propagation();
+            if event.click_count == 2 {
+                window.titlebar_double_click();
+            } else {
+                window.start_window_move();
+            }
         })
 }
 

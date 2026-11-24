@@ -112,22 +112,6 @@ pub fn server(typed: &str) -> Result<Server, String> {
     })
 }
 
-/// `url` without any password, as macOS's remount address could hold one
-/// for a share someone else mounted.
-pub fn without_password(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.into();
-    };
-    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    match authority.rsplit_once('@') {
-        Some((user, host)) => {
-            let user = user.split(':').next().unwrap_or_default();
-            format!("{scheme}://{user}@{host}{path}")
-        }
-        None => url.into(),
-    }
-}
-
 /// The mounted volume that's the share at `address`. macOS's remount address
 /// may add the account, and shares and hosts ignore case.
 pub fn mounted<'a>(address: &str, volumes: &'a [Volume]) -> Option<&'a Volume> {
@@ -439,19 +423,6 @@ mod tests {
         assert!(!refused("sftp://me:secret@box").contains("secret"));
         assert!(refused("sftp://box:2222/srv").contains("Port"));
         assert!(refused("sftp:///srv").contains("doesn't name a server"));
-    }
-
-    #[test]
-    fn a_remount_address_loses_any_password_and_nothing_else() {
-        assert_eq!(
-            without_password("smb://me:secret@nas.local/media/"),
-            "smb://me@nas.local/media/"
-        );
-        assert_eq!(
-            without_password("smb://me@nas.local/media"),
-            "smb://me@nas.local/media"
-        );
-        assert_eq!(without_password("smb://nas/a@b"), "smb://nas/a@b");
     }
 
     /// An attempt in flight, as `start` leaves it, and its waiter.

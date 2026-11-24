@@ -7,35 +7,145 @@
 //! be rebound. Cut, Copy, Paste and Select All are commands, one action each
 //! as in AppKit: a text field acts on its text, the file list on its files.
 
-use crate::browser::{
-    AddToSidebar, Back, CheckForUpdates, ClearRecentSearches, ClearRecents, CloseTab, Compress,
-    ConnectToServer, CopyPath, CopyToOtherPane, DeselectAll, Download, Duplicate, EditFavorites,
-    EditLocations, EditPath, EditPreview, Eject, EmptyTrash, EnclosingFolder, Extract,
-    FindDuplicates, FocusSearch, Forward, GetInfo, GoAirDrop, GoApplications, GoComputer,
-    GoDesktop, GoDocuments, GoDownloads, GoFavorite1, GoFavorite2, GoFavorite3, GoFavorite4,
-    GoFavorite5, GoFavorite6, GoFavorite7, GoFavorite8, GoFavorite9, GoFavorite10, GoHome,
-    GoLocalSend, GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, HideFromSidebar,
-    HideInspector, MoveHere, MoveToOtherPane, MoveToTrash, NewFile, NewFolder,
-    NewFolderWithSelection, NewTab, NextTab, OpenInNewTab, OpenInQuickLook, OpenInTerminal,
-    OpenSelected, OpenSettings, OpenWith, OrganizeFolder, PreviousTab, PutBack, QuickLook, Redo,
-    RemoveDownload, RemoveFromSidebar, Rename, RenameLocation, ResetZoom, RevealInFinder,
-    ReverseSort, SaveSearch, SearchContents, SearchThisFolder, SendWithLocalSend, Share,
-    ShowCopiesAndMoves, ShowInEnclosingFolder, ShowPackageContents, ShowSearches, SortByKind,
-    SortByModified, SortByName, SortBySize, SuggestNames, ToggleHiddenFiles, TogglePathBar,
-    ToggleSidebar, ToggleSplit, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, ZoomIn, ZoomOut,
-};
-use crate::preferences::Preferences;
-use crate::{
-    browser, connect, empty_trash, goto, jobs, localsend_ask, menu, onboarding, palette,
-    remove_worktree, review_duplicates, settings, text_field, updates,
-};
+use crate::preferences::{Preferences, Shortcuts};
+use crate::text_field;
 use gpui::{
     Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Menu, MenuItem,
     OsAction, actions,
 };
 use monodrive_core::entries::SortBy;
-use std::collections::HashMap;
 use std::rc::Rc;
+
+actions!(
+    browser,
+    [
+        Back,
+        Forward,
+        EnclosingFolder,
+        SelectPrevious,
+        SelectNext,
+        SelectFirst,
+        SelectLast,
+        ExtendPrevious,
+        ExtendNext,
+        ExtendLeft,
+        ExtendRight,
+        DeselectAll,
+        ScrollToTop,
+        ScrollToBottom,
+        ExpandFolder,
+        PageUp,
+        PageDown,
+        OpenSelected,
+        FocusSearch,
+        SearchContents,
+        SearchThisFolder,
+        ShowSearches,
+        SaveSearch,
+        ClearRecentSearches,
+        ClearSearch,
+        FocusNext,
+        FocusPrevious,
+        PlacePrevious,
+        PlaceNext,
+        FocusList,
+        OpenPlace,
+        GoHome,
+        GoDesktop,
+        GoDocuments,
+        GoDownloads,
+        GoApplications,
+        GoComputer,
+        OpenSettings,
+        ToggleHiddenFiles,
+        TogglePathBar,
+        GoToFolder,
+        EditPath,
+        CopyPath,
+        ViewAsList,
+        ViewAsGrid,
+        ViewAsColumns,
+        SortByName,
+        SortByModified,
+        SortBySize,
+        SortByKind,
+        ReverseSort,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
+        Undo,
+        Redo,
+        ShowCopiesAndMoves,
+        CheckForUpdates,
+        Rename,
+        SuggestNames,
+        OrganizeFolder,
+        FindDuplicates,
+        CommitRename,
+        CancelRename,
+        NewFolder,
+        NewFolderWithSelection,
+        NewFile,
+        Duplicate,
+        Compress,
+        Extract,
+        MoveToTrash,
+        EmptyTrash,
+        MoveHere,
+        ShowPackageContents,
+        ShowInEnclosingFolder,
+        RevealInFinder,
+        OpenInTerminal,
+        Share,
+        SendWithLocalSend,
+        QuickLook,
+        OpenInQuickLook,
+        EditPreview,
+        ShowContextMenu,
+        AddToSidebar,
+        RenameLocation,
+        RemoveFromSidebar,
+        HideFromSidebar,
+        Eject,
+        ClearRecents,
+        PutBack,
+        GoOverview,
+        GoRecents,
+        GoWorktrees,
+        GoAirDrop,
+        GoLocalSend,
+        GoTrash,
+        GoFavorite1,
+        GoFavorite2,
+        GoFavorite3,
+        GoFavorite4,
+        GoFavorite5,
+        GoFavorite6,
+        GoFavorite7,
+        GoFavorite8,
+        GoFavorite9,
+        GoFavorite10,
+        ConnectToServer,
+        EditFavorites,
+        EditLocations,
+        MovePlaceUp,
+        MovePlaceDown,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        OpenInNewTab,
+        ToggleSplit,
+        CopyToOtherPane,
+        MoveToOtherPane,
+        ToggleSidebar,
+        GetInfo,
+        HideInspector,
+        OpenWith,
+        Download,
+        RemoveDownload,
+    ]
+);
 
 actions!(
     monodrive,
@@ -69,9 +179,6 @@ const FAVORITES: [(&str, &[&str], MakeAction); 10] = [
     ("Favorite 9", &["cmd-9"], || Box::new(GoFavorite9)),
     ("Favorite 10", &["cmd-0"], || Box::new(GoFavorite10)),
 ];
-
-/// User overrides by command id: a shortcut, or `None` to turn it off.
-pub type Shortcuts = HashMap<String, Option<String>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
@@ -908,10 +1015,10 @@ pub(crate) fn hidden(command: &Command, prefs: &Preferences) -> bool {
 struct Applied(Shortcuts);
 impl Global for Applied {}
 
-/// Builds the keymap from each view's own keys and every command's effective
-/// shortcuts, then the menu bar, which copies shortcuts when it's built.
-/// Does nothing when the overrides haven't changed.
-pub fn apply(cx: &mut App) {
+/// Builds the keymap from `view_keys`, each view's own keys, and every
+/// command's effective shortcuts, then the menu bar, which copies shortcuts
+/// when it's built. Does nothing when the overrides haven't changed.
+pub fn apply(cx: &mut App, view_keys: fn(&mut App)) {
     let overrides = cx.global::<Preferences>().shortcuts.clone();
     if cx
         .try_global::<Applied>()
@@ -920,20 +1027,7 @@ pub fn apply(cx: &mut App) {
         return;
     }
     cx.clear_key_bindings();
-    text_field::bind(cx);
-    browser::bind(cx);
-    settings::bind(cx);
-    palette::bind(cx);
-    goto::bind(cx);
-    connect::bind(cx);
-    jobs::bind(cx);
-    updates::bind(cx);
-    empty_trash::bind(cx);
-    localsend_ask::bind(cx);
-    remove_worktree::bind(cx);
-    review_duplicates::bind(cx);
-    menu::bind(cx);
-    onboarding::bind(cx);
+    view_keys(cx);
     let mut bindings = Vec::new();
     for command in all() {
         let predicate = command

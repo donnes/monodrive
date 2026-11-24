@@ -171,7 +171,7 @@ impl Identity {
 fn publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let staging = path.with_extension(format!("json.{}", std::process::id()));
     write_private(&staging, bytes)?;
-    crate::ops::disk::rename_new(&staging, path).inspect_err(|_| {
+    crate::disk::rename_new(&staging, path).inspect_err(|_| {
         #[expect(
             clippy::disallowed_methods,
             reason = "our own copy of the key, which never took the identity's name"

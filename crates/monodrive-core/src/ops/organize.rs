@@ -4,8 +4,8 @@
 //! Folders, links and hidden files stay put, so a repository is never taken
 //! apart, and a destination is always one validated name inside the folder.
 
-use super::disk::{self, FileId, Stamp};
 use super::{Make, Plan, check_name, plan_into_new, plan_new};
+use crate::disk::{self, FileId, Stamp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::CString;

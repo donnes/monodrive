@@ -12,14 +12,15 @@
 //! folders in Home and the system's folders. Each byte counts once, under the
 //! innermost of those folders that holds it.
 
+use crate::Origin;
 use crate::cloud::CloudFolder;
 use crate::entries::Entry;
-use crate::ops::{self, Origin, Outcome, Request};
+use crate::ops::{self, Outcome, Request};
 use crate::places;
-use crate::remote::Source;
+use crate::places::Source;
 use crate::servers;
 use crate::storage::{self, Report, Stop, Usage};
-use crate::volumes::{Volume, VolumeId, holding};
+use crate::volumes::{self, Volume, VolumeId, holding};
 use crate::worktrees::{self, Git};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -498,6 +499,83 @@ impl Saved {
             .map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    fn total(&self, folder: &Path) -> Option<Measured> {
+        self.totals.get(folder).copied()
+    }
+
+    /// Volume `key`'s last scan, its rows where it's mounted now: it may
+    /// mount somewhere else, and another drive may have taken the old path,
+    /// which its rows would otherwise open and trash.
+    fn scan_at(&self, key: &VolumeKey, mount: &Path) -> Option<Scan> {
+        let mut scan = self.scans.iter().find(|scan| scan.volume == *key)?.clone();
+        for row in &mut scan.rows {
+            row.path = mount.join(&row.name);
+        }
+        Some(scan)
+    }
+
+    /// The last scans of volumes other than `matched`.
+    fn scans_besides(&self, matched: &[VolumeKey]) -> Vec<Scan> {
+        self.scans
+            .iter()
+            .filter(|scan| !matched.contains(&scan.volume))
+            .cloned()
+            .collect()
+    }
+
+    fn projects(&self) -> &[PathBuf] {
+        &self.projects
+    }
+
+    fn tagged(&self) -> &[PathBuf] {
+        &self.tagged
+    }
+
+    /// The clean worktrees last found that are still there, in places
+    /// `wanted` says.
+    fn worktrees_where(&self, wanted: impl Fn(&Path) -> bool) -> Vec<&CleanWorktree> {
+        self.worktrees
+            .iter()
+            .filter(|worktree| wanted(&worktree.path) && worktree.path.is_dir())
+            .collect()
+    }
+
+    fn into_worktrees(self) -> Vec<CleanWorktree> {
+        self.worktrees
+    }
+
+    fn measured(&mut self, folder: &Path, size: Measured) {
+        self.totals.insert(folder.to_path_buf(), size);
+    }
+
+    fn forget_total(&mut self, folder: &Path) {
+        self.totals.remove(folder);
+    }
+
+    /// Keeps `scan` as its volume's last.
+    fn scanned(&mut self, scan: Scan) {
+        self.scans.retain(|old| old.volume != scan.volume);
+        self.scans.push(scan);
+    }
+
+    fn forget_scan_row(&mut self, path: &Path) {
+        for scan in &mut self.scans {
+            scan.rows.retain(|row| row.path != path);
+        }
+    }
+
+    /// Adds what the index newly found.
+    fn found(&mut self, projects: Vec<PathBuf>, tagged: Vec<PathBuf>) {
+        self.projects.extend(projects);
+        self.tagged.extend(tagged);
+    }
+
+    /// Keeps what Git last said could go, in path order.
+    fn checked_worktrees(&mut self, mut clean: Vec<CleanWorktree>) {
+        clean.sort_by(|a, b| a.path.cmp(&b.path));
+        self.worktrees = clean;
+    }
+
     /// The window and each agent's server change the file, so the lock covers
     /// the read as well as the write, and goes with the file it's held on.
     fn change(path: &Path, change: impl FnOnce(&mut Self)) -> Result<(), String> {
@@ -677,7 +755,7 @@ pub fn read(
     now: u64,
 ) -> Overview {
     let saved = Saved::read(&env.saved());
-    let total = |path: &Path| saved.totals.get(path).copied();
+    let total = |path: &Path| saved.total(path);
     let mut due = Vec::new();
     let mut wanted = |path: &Path, size: Option<Measured>| {
         if size.is_none_or(|size| now.saturating_sub(size.at) >= REMEASURE) {
@@ -736,7 +814,7 @@ pub fn read(
     let projects: Vec<PathBuf> = registered
         .into_iter()
         .map(|repo| repo.path)
-        .chain(saved.projects.iter().cloned())
+        .chain(saved.projects().iter().cloned())
         .filter(|path| !tooling.iter().any(|tool| path.starts_with(tool)))
         .filter(|path| here(path) && path.join(".git").exists() && seen.insert(path.clone()))
         .collect();
@@ -836,17 +914,13 @@ pub fn read(
     // Worth measuring only when suggestions would show.
     let mut suggestions = Vec::new();
     if headline.as_ref().is_some_and(|headline| headline.low) {
-        let clean: Vec<&CleanWorktree> = saved
-            .worktrees
-            .iter()
-            .filter(|worktree| here(&worktree.path) && worktree.path.is_dir())
-            .collect();
+        let clean = saved.worktrees_where(here);
         // Removing a worktree frees its build too.
         let in_clean = |dir: &Path| clean.iter().any(|worktree| dir.starts_with(&worktree.path));
         let caches = TOOL_CACHES.iter().map(|(_, at)| env.home.join(at));
         let targets = projects.iter().map(|project| project.join("target"));
         let mut seen = HashSet::new();
-        for dir in caches.chain(targets).chain(saved.tagged.iter().cloned()) {
+        for dir in caches.chain(targets).chain(saved.tagged().iter().cloned()) {
             if !here(&dir) || in_clean(&dir) || !seen.insert(dir.clone()) {
                 continue;
             }
@@ -879,19 +953,7 @@ pub fn read(
     let mut matched = Vec::new();
     for volume in volumes.iter().filter(|volume| !volume.startup) {
         let key = VolumeKey::of(volume);
-        // It may mount somewhere else now, and another drive may have taken
-        // the old path, which is what its rows would otherwise open and trash.
-        let scan = saved
-            .scans
-            .iter()
-            .find(|scan| scan.volume == key)
-            .map(|scan| {
-                let mut scan = scan.clone();
-                for row in &mut scan.rows {
-                    row.path = volume.mount.join(&row.name);
-                }
-                scan
-            });
+        let scan = saved.scan_at(&key, &volume.mount);
         if scan.is_some() {
             matched.push(key);
         }
@@ -909,23 +971,23 @@ pub fn read(
             takes_trash: !volume.network && !volume.read_only,
         });
     }
-    for scan in saved.scans.iter().filter(|s| !matched.contains(&s.volume)) {
+    for scan in saved.scans_besides(&matched) {
         locations.push(Location {
             name: scan.name.clone(),
             kind: LocationKind::Disconnected,
             mount: None,
             capacity: None,
             connected: false,
-            scan: Some(scan.clone()),
+            scan: Some(scan),
             takes_trash: false,
         });
     }
     for address in env.store.servers().unwrap_or_default() {
         if servers::mounted(&address, volumes).is_none() {
             locations.push(Location {
-                name: servers::without_password(&address),
+                name: volumes::without_password(&address),
                 kind: LocationKind::Share {
-                    address: Some(servers::without_password(&address)),
+                    address: Some(volumes::without_password(&address)),
                 },
                 mount: None,
                 capacity: None,
@@ -995,21 +1057,15 @@ pub fn clean_worktrees(
     now: u64,
 ) -> (Option<Suggestion>, Vec<PathBuf>) {
     let saved = Saved::read(&env.saved());
-    let total = |path: &Path| saved.totals.get(path).copied();
+    let total = |path: &Path| saved.total(path);
     let mut due = Vec::new();
     let mut wanted = |path: &Path, size: Option<Measured>| {
         if size.is_none_or(|size| now.saturating_sub(size.at) >= REMEASURE) {
             due.push(path.to_path_buf());
         }
     };
-    let clean: Vec<&CleanWorktree> = saved
-        .worktrees
-        .iter()
-        .filter(|worktree| {
-            holding(volumes, &worktree.path).is_none_or(|volume| volume.startup)
-                && worktree.path.is_dir()
-        })
-        .collect();
+    let clean =
+        saved.worktrees_where(|path| holding(volumes, path).is_none_or(|volume| volume.startup));
     let suggestion = worktrees_suggestion(&clean, total, &mut wanted);
     (suggestion, due)
 }
@@ -1174,9 +1230,7 @@ pub fn measure(
         total.stopped.is_none() && !total.unreadable,
         now,
     );
-    let _ = Saved::change(&env.saved(), |saved| {
-        saved.totals.insert(folder.to_path_buf(), size);
-    });
+    let _ = Saved::change(&env.saved(), |saved| saved.measured(folder, size));
     Some(size)
 }
 
@@ -1185,28 +1239,19 @@ pub fn measure(
 pub fn record_scan(env: &Env, volume: &Volume, report: &Report, now: u64) -> Result<Scan, String> {
     let scan = scan_of(volume, report, now);
     let kept = scan.clone();
-    Saved::change(&env.saved(), move |saved| {
-        saved.scans.retain(|old| old.volume != scan.volume);
-        saved.scans.push(scan);
-    })?;
+    Saved::change(&env.saved(), move |saved| saved.scanned(scan))?;
     Ok(kept)
 }
 
 /// Drops the total saved for `folder`, which something just changed, so it's
 /// measured again.
 pub fn forget(env: &Env, folder: &Path) {
-    let _ = Saved::change(&env.saved(), |saved| {
-        saved.totals.remove(folder);
-    });
+    let _ = Saved::change(&env.saved(), |saved| saved.forget_total(folder));
 }
 
 /// Leaves a folder that went to the Trash out of its drive's last scan.
 pub fn forget_scan_row(env: &Env, path: &Path) -> Result<(), String> {
-    Saved::change(&env.saved(), |saved| {
-        for scan in &mut saved.scans {
-            scan.rows.retain(|row| row.path != path);
-        }
-    })
+    Saved::change(&env.saved(), |saved| saved.forget_scan_row(path))
 }
 
 /// If `folder` is where a volume other than the startup disk is mounted, that
@@ -1258,21 +1303,18 @@ pub fn discover(
     };
     let tagged: Vec<PathBuf> = found("CACHEDIR.TAG")?
         .into_iter()
-        .filter(|dir| build_output(dir).is_some() && !saved.tagged.contains(dir))
+        .filter(|dir| build_output(dir).is_some() && !saved.tagged().contains(dir))
         .collect();
     let projects: Vec<PathBuf> = found(".git")?
         .into_iter()
-        .filter(|dir| !hidden_or_tool_folder(dir) && !saved.projects.contains(dir))
+        .filter(|dir| !hidden_or_tool_folder(dir) && !saved.projects().contains(dir))
         .filter(|dir| git.is_some_and(|git| is_main_checkout(git, dir)))
         .take(MAX_FOUND)
         .collect();
     if projects.is_empty() && tagged.is_empty() {
         return Ok(());
     }
-    Saved::change(&env.saved(), |saved| {
-        saved.projects.extend(projects);
-        saved.tagged.extend(tagged);
-    })
+    Saved::change(&env.saved(), |saved| saved.found(projects, tagged))
 }
 
 /// Asks Git which linked worktrees could go to the Trash with nothing lost,
@@ -1300,12 +1342,12 @@ pub fn check_worktrees(
             candidates.push((worktree.path.clone(), repo.common_dir.clone(), name.clone()));
         }
     }
-    for old in Saved::read(&env.saved()).worktrees {
+    for old in Saved::read(&env.saved()).into_worktrees() {
         if !candidates.iter().any(|(path, ..)| *path == old.path) {
             candidates.push((old.path, old.common_dir, old.repository));
         }
     }
-    let mut clean: Vec<CleanWorktree> = candidates
+    let clean: Vec<CleanWorktree> = candidates
         .into_iter()
         .filter(|(path, common_dir, _)| {
             worktrees::removal(git, common_dir, path)
@@ -1317,8 +1359,7 @@ pub fn check_worktrees(
             repository,
         })
         .collect();
-    clean.sort_by(|a, b| a.path.cmp(&b.path));
-    Saved::change(&env.saved(), |saved| saved.worktrees = clean)
+    Saved::change(&env.saved(), |saved| saved.checked_worktrees(clean))
 }
 
 /// A repository's own checkout: Git knows it, and it isn't a linked worktree.

@@ -3,7 +3,7 @@
 
 use super::Call;
 use crate::mcp::contract::{Code, JobId, JobView, Reply, ToolError};
-use crate::mcp::server::Server;
+use crate::mcp::session::Session;
 use crate::ops::{Conflict, Request};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,10 +29,10 @@ pub struct Jobs {
 impl Call for JobStatus {
     type Out = Jobs;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Jobs>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Jobs>, ToolError> {
         match self.job.as_deref().map(JobId::parse).transpose()? {
             Some(JobId::Job(id)) => {
-                let reply = server.job_reply(id, self.wait_seconds)?;
+                let reply = session.job_reply(id, self.wait_seconds)?;
                 Ok(Reply::new(
                     reply.text,
                     Jobs {
@@ -41,8 +41,7 @@ impl Call for JobStatus {
                 ))
             }
             Some(JobId::Run(id)) => {
-                let run = server
-                    .ops
+                let run = session
                     .runs()?
                     .into_iter()
                     .find(|run| run.id == id)
@@ -51,13 +50,12 @@ impl Call for JobStatus {
                 Ok(Reply::new(view.text(), Jobs { jobs: vec![view] }))
             }
             None => {
-                let mut jobs: Vec<JobView> = server
-                    .ops
+                let mut jobs: Vec<JobView> = session
                     .jobs()?
                     .iter()
                     .map(|job| JobView::of_job(job, |_| None))
                     .collect();
-                jobs.extend(server.ops.runs()?.iter().map(JobView::of_run));
+                jobs.extend(session.runs()?.iter().map(JobView::of_run));
                 let text: String = jobs.iter().map(|job| job.summary() + "\n").collect();
                 Ok(Reply::new(text, Jobs { jobs }))
             }
@@ -79,14 +77,14 @@ pub struct Cancelled {
 impl Call for CancelJob {
     type Out = Cancelled;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Cancelled>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Cancelled>, ToolError> {
         let text = match JobId::parse(&self.job)? {
             JobId::Job(job) => {
-                server.submit(Request::Cancel { job }, None)?;
+                session.submit(Request::Cancel { job }, None)?;
                 format!("Cancelling job {job}; it keeps the items it finished.\n")
             }
             JobId::Run(run) => {
-                server.ops.cancel_run(run)?;
+                session.cancel_run(run)?;
                 format!(
                     "Cancelling job {}. Commands aren't undoable: what it changed stays.\n",
                     self.job
@@ -112,7 +110,7 @@ pub struct ContinueJob {
 impl Call for ContinueJob {
     type Out = JobView;
 
-    fn run(self, server: &mut Server) -> Result<Reply<JobView>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<JobView>, ToolError> {
         let JobId::Job(job) = JobId::parse(&self.job)? else {
             return Err(ToolError::new(
                 Code::UnsupportedOnSource,
@@ -124,7 +122,7 @@ impl Call for ContinueJob {
             conflict: self.conflict,
         };
         // A continued job keeps its id.
-        server.submit(request, self.request_id.as_deref())?;
-        server.job_reply(job, self.wait_seconds)
+        session.submit(request, self.request_id.as_deref())?;
+        session.job_reply(job, self.wait_seconds)
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
-use crate::browser::{Browser, SharedIndex};
+use crate::SharedIndex;
+use crate::browser::Browser;
 use crate::preferences::View;
 use crate::session::{self, PaneState, StopState, TabState, WindowState};
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
@@ -104,7 +105,7 @@ fn launch_only(fake: &Arc<Fake>, folder: bool, cx: &mut TestAppContext) -> Rc<Ce
         if !cx.has_global::<Preferences>() {
             cx.set_global(Preferences::default());
             cx.set_global(SharedIndex(Arc::default()));
-            commands::apply(cx);
+            crate::apply_keymap(cx);
             crate::window_commands(cx);
         }
         launch(

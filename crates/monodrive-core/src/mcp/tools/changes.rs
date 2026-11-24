@@ -2,12 +2,12 @@
 //! redo, rename, create_folder, create_file, duplicate, copy, move, the
 //! archive jobs, and asking the cloud to download or free items.
 
-use super::{Call, Preview, Where, local, local_one, locate};
+use super::{Call, Where, local, local_one, locate};
 use crate::cloud::{self, Asked};
 use crate::mcp::contract::{
     Change, Changed, Code, JobView, Method, Planned, Reply, ToolError, shown,
 };
-use crate::mcp::server::Server;
+use crate::mcp::session::{Preview, Session};
 use crate::ops::{self, Conflict, Request, rename};
 use crate::remote::{self, RemotePath};
 use schemars::JsonSchema;
@@ -27,9 +27,9 @@ pub struct Trash {
 impl Call for Trash {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
         let paths = local(&self.paths, "trash")?;
-        server.change(Request::Trash { paths }, self.request_id.as_deref())
+        session.change(Request::Trash { paths }, self.request_id.as_deref())
     }
 }
 
@@ -44,9 +44,9 @@ pub struct PutBack {
 impl Call for PutBack {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
         let paths = local(&self.paths, "put_back")?;
-        server.change(Request::PutBack { paths }, self.request_id.as_deref())
+        session.change(Request::PutBack { paths }, self.request_id.as_deref())
     }
 }
 
@@ -59,8 +59,8 @@ pub struct Undo {
 impl Call for Undo {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
-        server.change(Request::Undo, self.request_id.as_deref())
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
+        session.change(Request::Undo, self.request_id.as_deref())
     }
 }
 
@@ -73,8 +73,8 @@ pub struct Redo {
 impl Call for Redo {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
-        server.change(Request::Redo, self.request_id.as_deref())
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
+        session.change(Request::Redo, self.request_id.as_deref())
     }
 }
 
@@ -111,7 +111,7 @@ pub struct Row {
 impl Call for Rename {
     type Out = Planned<Vec<Row>>;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Self::Out>, ToolError> {
         let request_id = self.request_id.as_deref();
         if let Some(token) = &self.confirm {
             let Preview::Rename {
@@ -119,7 +119,7 @@ impl Call for Rename {
                 rule,
                 fingerprint,
                 skip_problems,
-            } = server.kept(token, self.request_id.as_deref())?
+            } = session.kept(token, self.request_id.as_deref())?
             else {
                 return Err(ToolError::invalid("That token is another tool's plan."));
             };
@@ -129,8 +129,8 @@ impl Call for Rename {
                 preview: Some(fingerprint),
                 skip_problems,
             };
-            let done = server.change(request, request_id)?;
-            server.spent(token, self.request_id.as_deref());
+            let done = session.change(request, request_id)?;
+            session.spent(token, self.request_id.as_deref());
             return Ok(done.ran());
         }
         let rule = match (self.name, self.rule) {
@@ -147,11 +147,11 @@ impl Call for Rename {
                             "A server's rename has no dry run: it renames at once, with no undo.",
                         ));
                     }
-                    return remote_rename(server, &qualified, &name).map(Reply::ran);
+                    return remote_rename(session, &qualified, &name).map(Reply::ran);
                 }
                 if !self.dry_run {
                     let path = local_one(path, "rename")?;
-                    return server
+                    return session
                         .change(Request::Rename { path, name }, request_id)
                         .map(Reply::ran);
                 }
@@ -168,7 +168,7 @@ impl Call for Rename {
                 preview: None,
                 skip_problems: self.skip_problems,
             };
-            return server.change(request, request_id).map(Reply::ran);
+            return session.change(request, request_id).map(Reply::ran);
         }
         let plan = rename::Plan::new(&paths, &rule);
         let mut text = String::new();
@@ -196,7 +196,7 @@ impl Call for Rename {
                 }
             })
             .collect();
-        let token = server.keep(Preview::Rename {
+        let token = session.keep(Preview::Rename {
             paths,
             rule,
             fingerprint: plan.fingerprint(),
@@ -208,9 +208,13 @@ impl Call for Rename {
 }
 
 /// SFTP renames have no undo history: they happen at once.
-fn remote_rename(server: &Server, qualified: &str, name: &str) -> Result<Reply<Change>, ToolError> {
-    server.can_change()?;
-    let (open, at) = server.remote_at(qualified)?;
+fn remote_rename(
+    session: &Session,
+    qualified: &str,
+    name: &str,
+) -> Result<Reply<Change>, ToolError> {
+    session.can_change()?;
+    let (open, at) = session.remote_at(qualified)?;
     let to = at
         .parent()
         .ok_or_else(|| ToolError::invalid(format!("{at} has no name to change.")))?
@@ -248,7 +252,7 @@ pub struct CreateFolder {
 impl Call for CreateFolder {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
         if let Where::Remote(qualified) = locate(&self.path) {
             if !self.with.is_empty() {
                 return Err(ToolError::new(
@@ -256,8 +260,8 @@ impl Call for CreateFolder {
                     "with only works on this Mac's files.",
                 ));
             }
-            server.can_change()?;
-            let (open, at) = server.remote_at(&qualified)?;
+            session.can_change()?;
+            let (open, at) = session.remote_at(&qualified)?;
             open.mkdir(&at)?;
             return Ok(one_change("New Folder", at.to_string(), at.to_string()));
         }
@@ -270,7 +274,7 @@ impl Call for CreateFolder {
                 items: local(&self.with, "create_folder")?,
             }
         };
-        server.change(request, self.request_id.as_deref())
+        session.change(request, self.request_id.as_deref())
     }
 }
 
@@ -284,9 +288,9 @@ pub struct CreateFile {
 impl Call for CreateFile {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
         let path = local_one(&self.path, "create_file")?;
-        server.change(Request::NewFile { path }, self.request_id.as_deref())
+        session.change(Request::NewFile { path }, self.request_id.as_deref())
     }
 }
 
@@ -324,7 +328,7 @@ pub struct Duplicate {
 impl Call for Duplicate {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
         let paths = local(&self.paths, "duplicate")?;
         let beside = |path: &PathBuf| path.parent().unwrap_or(path).to_path_buf();
         let folders: Vec<PathBuf> = paths.iter().map(beside).collect();
@@ -336,7 +340,7 @@ impl Call for Duplicate {
                     .zip(folders.iter().map(PathBuf::as_path)),
             )?;
         }
-        let mut reply = server.change(
+        let mut reply = session.change(
             Request::Duplicate {
                 paths: paths.clone(),
             },
@@ -379,7 +383,7 @@ pub struct Copy {
 impl Call for Copy {
     type Out = JobView;
 
-    fn run(self, server: &mut Server) -> Result<Reply<JobView>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<JobView>, ToolError> {
         let remote = |path: &str| matches!(locate(path), Where::Remote(_));
         let to_server = remote(&self.into);
         let from_server = self.paths.iter().any(|path| remote(path));
@@ -423,7 +427,7 @@ impl Call for Copy {
                 ));
             }
         };
-        let mut reply = server.queue(request, self.request_id.as_deref(), self.wait_seconds)?;
+        let mut reply = session.queue(request, self.request_id.as_deref(), self.wait_seconds)?;
         if to_server {
             reply.text.push_str(remote::NO_UNDO);
             reply.text.push('\n');
@@ -448,13 +452,13 @@ pub struct Move {
 impl Call for Move {
     type Out = JobView;
 
-    fn run(self, server: &mut Server) -> Result<Reply<JobView>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<JobView>, ToolError> {
         let request = Request::Move {
             paths: local(&self.paths, "move")?,
             into: local_one(&self.into, "move")?,
             conflict: self.conflict,
         };
-        server.queue(request, self.request_id.as_deref(), self.wait_seconds)
+        session.queue(request, self.request_id.as_deref(), self.wait_seconds)
     }
 }
 
@@ -471,11 +475,11 @@ pub struct ArchiveCreate {
 impl Call for ArchiveCreate {
     type Out = JobView;
 
-    fn run(self, server: &mut Server) -> Result<Reply<JobView>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<JobView>, ToolError> {
         let request = Request::Compress {
             paths: local(&self.paths, "archive_create")?,
         };
-        server.queue(request, self.request_id.as_deref(), self.wait_seconds)
+        session.queue(request, self.request_id.as_deref(), self.wait_seconds)
     }
 }
 
@@ -499,14 +503,14 @@ pub struct ArchiveExtract {
 impl Call for ArchiveExtract {
     type Out = JobView;
 
-    fn run(self, server: &mut Server) -> Result<Reply<JobView>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<JobView>, ToolError> {
         let request = Request::Extract {
             archive: local_one(&self.path, "archive_extract")?,
             entries: self.entries,
             into: local_one(&self.into, "archive_extract")?,
             conflict: self.conflict,
         };
-        server.queue(request, self.request_id.as_deref(), self.wait_seconds)
+        session.queue(request, self.request_id.as_deref(), self.wait_seconds)
     }
 }
 
@@ -541,9 +545,9 @@ pub struct Askings {
 impl Call for Download {
     type Out = Askings;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Askings>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Askings>, ToolError> {
         ask_cloud(
-            server,
+            session,
             &self.paths,
             cloud::download,
             "downloading; stat shows when it's done",
@@ -555,9 +559,9 @@ impl Call for Download {
 impl Call for RemoveDownload {
     type Out = Askings;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Askings>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Askings>, ToolError> {
         ask_cloud(
-            server,
+            session,
             &self.paths,
             cloud::remove_download,
             "removing the download; download brings it back",
@@ -569,18 +573,13 @@ impl Call for RemoveDownload {
 /// Asks macOS to download or free each path, a line each saying what it
 /// came to.
 fn ask_cloud(
-    server: &Server,
+    session: &Session,
     paths: &[String],
     ask: fn(&Path) -> Result<Asked, String>,
     requested: &str,
     unneeded: &str,
 ) -> Result<Reply<Askings>, ToolError> {
-    if !server.ops.agents_change_files() {
-        return Err(ToolError::new(
-            Code::AgentsDisabled,
-            "Agents can't download or remove downloads: Let agents change files is off in Monodrive's Agents settings.",
-        ));
-    }
+    session.may("download or remove downloads")?;
     let mut lines = Vec::new();
     let mut items = Vec::new();
     for path in local(paths, "download")? {

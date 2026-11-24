@@ -14,10 +14,8 @@ mod space;
 mod updates;
 
 use super::contract::{Code, Hints, Profile, Reply, ToolError, input_schema, output_schema};
-use super::server::Server;
+use super::session::Session;
 use crate::expand_home;
-use crate::ops::{organize, rename};
-use crate::storage::Cleanup;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -27,7 +25,7 @@ use std::path::PathBuf;
 /// A tool's arguments, which run it.
 trait Call: DeserializeOwned + JsonSchema {
     type Out: Serialize + JsonSchema;
-    fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError>;
+    fn run(self, session: &mut Session) -> Result<Reply<Self::Out>, ToolError>;
 }
 
 /// A tool agents can call, as `tools/list` describes it and Settings lists it.
@@ -38,7 +36,7 @@ pub struct Tool {
     pub hints: Hints,
     input: fn() -> Value,
     output: fn() -> Value,
-    call: fn(&mut Server, Value) -> Result<Answer, ToolError>,
+    call: fn(&mut Session, Value) -> Result<Answer, ToolError>,
 }
 
 pub(super) struct Answer {
@@ -61,8 +59,8 @@ impl Tool {
         self.name.starts_with("localsend_")
     }
 
-    pub(super) fn run(&self, server: &mut Server, arguments: Value) -> Result<Answer, ToolError> {
-        (self.call)(server, arguments)
+    pub(super) fn run(&self, session: &mut Session, arguments: Value) -> Result<Answer, ToolError> {
+        (self.call)(session, arguments)
     }
 }
 
@@ -85,10 +83,10 @@ const fn tool<C: Call>(
 
 /// Arguments that don't decode are the agent's to fix, so they're a tool
 /// error it reads, not a protocol error.
-fn call<C: Call>(server: &mut Server, arguments: Value) -> Result<Answer, ToolError> {
+fn call<C: Call>(session: &mut Session, arguments: Value) -> Result<Answer, ToolError> {
     let args: C =
         serde_json::from_value(arguments).map_err(|e| ToolError::invalid(e.to_string()))?;
-    let reply = args.run(server)?;
+    let reply = args.run(session)?;
     let data = serde_json::to_value(reply.data)
         .map_err(|e| ToolError::new(Code::Internal, e.to_string()))?;
     Ok(Answer {
@@ -144,24 +142,6 @@ pub(super) fn answer(answered: Result<Answer, ToolError>) -> Value {
             "isError": true,
         }),
     }
-}
-
-/// A plan a dry run showed, kept for the confirm that runs exactly it.
-#[derive(Clone)]
-pub(super) enum Preview {
-    Rename {
-        paths: Vec<PathBuf>,
-        rule: rename::Rule,
-        fingerprint: rename::Fingerprint,
-        skip_problems: bool,
-    },
-    Cleanup(Cleanup),
-    Organize(Vec<organize::Group>),
-    Command {
-        name: String,
-        paths: Vec<PathBuf>,
-    },
-    Worktree(crate::ops::Request),
 }
 
 /// Where a path argument points.

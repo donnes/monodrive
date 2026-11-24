@@ -2,8 +2,9 @@
 //! of jobs, changes and lists, and the schemas `tools/list` publishes.
 //! `docs/mcp.md` says which of these may change without a new version.
 
+use crate::Origin;
 use crate::entries;
-use crate::ops::{self, Done, Job, Origin};
+use crate::ops::{self, Done, Job};
 use crate::remote::RemoteError;
 use crate::user_commands::{Ended, Run, RunState};
 use schemars::JsonSchema;
