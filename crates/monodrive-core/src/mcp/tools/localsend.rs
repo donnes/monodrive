@@ -1,9 +1,9 @@
 //! localsend_devices and localsend_send: devices nearby running LocalSend,
-//! and sending them files. Agents don't receive: a person answers each
+//! and sending them files or text. Agents don't receive: a person answers each
 //! incoming transfer in the window.
 
 use super::{Call, local};
-use crate::localsend::{self, Cancel, Device, SendError};
+use crate::localsend::{self, Cancel, Device, Outgoing, SendError};
 use crate::mcp::contract::{Code, Reply, ToolError};
 use crate::mcp::server::Server;
 use schemars::JsonSchema;
@@ -81,7 +81,9 @@ pub struct LocalsendSend {
     /// A device's fingerprint, as localsend_devices listed it in this session.
     fingerprint: String,
     /// Files or folders on this Mac.
-    paths: Vec<String>,
+    paths: Option<Vec<String>>,
+    /// Text to send instead of paths, which the receiver shows as a message.
+    text: Option<String>,
     /// The PIN the receiver asks for, if it asks.
     pin: Option<String>,
 }
@@ -115,12 +117,21 @@ impl Call for LocalsendSend {
                     ),
                 )
             })?;
-        let paths = local(&self.paths, "localsend_send")?;
+        let outgoing = match (self.paths, self.text) {
+            (Some(paths), None) => Outgoing::Files(local(&paths, "localsend_send")?),
+            (None, Some(text)) => Outgoing::Text(text),
+            _ => {
+                return Err(ToolError::new(
+                    Code::InvalidArgument,
+                    "Pass either paths or text.",
+                ));
+            }
+        };
         let identity = server.localsend()?;
         let sent = localsend::send(
             &identity,
             &device,
-            &paths,
+            &outgoing,
             self.pin.as_deref(),
             |_| {},
             &Cancel::new(),
@@ -145,14 +156,18 @@ impl Call for LocalsendSend {
             0 => String::new(),
             n => format!(", {n} declined"),
         };
-        Ok(Reply::new(
-            format!(
+        let text = match outgoing {
+            Outgoing::Text(_) => format!("Sent the text to {}.\n", device.alias),
+            Outgoing::Files(_) | Outgoing::Bytes { .. } => format!(
                 "Sent {} file{} ({} bytes) to {}{declined}.\n",
                 sent.files,
                 if sent.files == 1 { "" } else { "s" },
                 sent.bytes,
                 device.alias
             ),
+        };
+        Ok(Reply::new(
+            text,
             Sent {
                 to: device.alias,
                 files: sent.files,

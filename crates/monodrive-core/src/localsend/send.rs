@@ -1,5 +1,6 @@
-//! Sending files to a device: offer them, then upload what it accepts, one
-//! file at a time. Every request is pinned to the device's certificate.
+//! Sending files or text to a device: offer them, then upload what it
+//! accepts, one file at a time. Every request is pinned to the device's
+//! certificate.
 
 use super::{Device, Identity, PORT, runtime, unreachable};
 use futures_util::StreamExt;
@@ -26,6 +27,17 @@ impl Cancel {
     }
 }
 
+/// What a send carries.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outgoing {
+    /// Files and folders on this Mac.
+    Files(Vec<PathBuf>),
+    /// A message, which the receiver shows to copy rather than saving it.
+    Text(String),
+    /// A file that's only in memory, such as a picture on the clipboard.
+    Bytes { name: String, bytes: Vec<u8> },
+}
+
 /// How a send is going.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Progress {
@@ -46,7 +58,7 @@ pub struct Sent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SendError {
-    /// Nothing under the paths is a file.
+    /// Nothing under the paths is a file, or the text is empty.
     Nothing,
     NotFound(PathBuf),
     Declined,
@@ -66,7 +78,7 @@ pub enum SendError {
 impl SendError {
     pub fn says(&self, to: &str) -> String {
         match self {
-            Self::Nothing => "There's no file to send.".into(),
+            Self::Nothing => "There's nothing to send.".into(),
             Self::NotFound(path) => format!("{} doesn't exist.", path.display()),
             Self::Declined => format!("{to} declined."),
             Self::Pin { wrong: false } => format!("{to} asks for a PIN."),
@@ -80,16 +92,16 @@ impl SendError {
     }
 }
 
-/// Sends `paths` to `device` and waits until it's done.
+/// Sends `outgoing` to `device` and waits until it's done.
 pub fn send(
     identity: &Identity,
     device: &Device,
-    paths: &[PathBuf],
+    outgoing: &Outgoing,
     pin: Option<&str>,
     progress: impl Fn(Progress) + Send + Sync + 'static,
     cancel: &Cancel,
 ) -> Result<Sent, SendError> {
-    let files = offer(paths)?;
+    let files = offer(outgoing)?;
     runtime().block_on(run(
         identity,
         device,
@@ -112,7 +124,7 @@ pub enum Update {
 pub fn spawn_send(
     identity: Arc<Identity>,
     device: Device,
-    paths: Vec<PathBuf>,
+    outgoing: Outgoing,
     pin: Option<String>,
     cancel: Cancel,
     update: impl Fn(Update) + Send + Sync + 'static,
@@ -120,7 +132,7 @@ pub fn spawn_send(
     let update = Arc::new(update);
     runtime().spawn(async move {
         let tell = update.clone();
-        let result = match offer(&paths) {
+        let result = match offer(&outgoing) {
             Ok(files) => {
                 run(
                     &identity,
@@ -138,15 +150,54 @@ pub fn spawn_send(
     });
 }
 
-/// A file to send, and where it is.
+/// A file to send, and where its bytes are.
 struct Offered {
     dto: FileDto,
-    path: PathBuf,
+    source: Source,
+}
+
+enum Source {
+    Path(PathBuf),
+    Bytes(Vec<u8>),
+}
+
+/// What `outgoing` offers. Text goes as LocalSend's app sends a message:
+/// one text file whose preview holds all of it.
+fn offer(outgoing: &Outgoing) -> Result<Vec<Offered>, SendError> {
+    match outgoing {
+        Outgoing::Files(paths) => offer_files(paths),
+        Outgoing::Text(text) if text.is_empty() => Err(SendError::Nothing),
+        Outgoing::Text(text) => Ok(vec![Offered {
+            dto: FileDto {
+                id: "0".into(),
+                file_name: "message.txt".into(),
+                size: text.len() as u64,
+                file_type: "text/plain".into(),
+                sha256: None,
+                preview: Some(text.clone()),
+                metadata: None,
+            },
+            source: Source::Bytes(text.clone().into_bytes()),
+        }]),
+        Outgoing::Bytes { bytes, .. } if bytes.is_empty() => Err(SendError::Nothing),
+        Outgoing::Bytes { name, bytes } => Ok(vec![Offered {
+            dto: FileDto {
+                id: "0".into(),
+                file_type: mime(name).into(),
+                file_name: name.clone(),
+                size: bytes.len() as u64,
+                sha256: None,
+                preview: None,
+                metadata: None,
+            },
+            source: Source::Bytes(bytes.clone()),
+        }]),
+    }
 }
 
 /// Each file under `paths`, a folder's named by its path from the folder,
 /// as LocalSend's app and CLI send them. Links and special files stay.
-fn offer(paths: &[PathBuf]) -> Result<Vec<Offered>, SendError> {
+fn offer_files(paths: &[PathBuf]) -> Result<Vec<Offered>, SendError> {
     let mut files = Vec::new();
     for path in paths {
         let meta = path
@@ -185,7 +236,7 @@ fn walk(
                 preview: None,
                 metadata: FileMetadata::from_fs_metadata(meta),
             },
-            path: path.to_path_buf(),
+            source: Source::Path(path.to_path_buf()),
         });
     } else if meta.is_dir() {
         let mut children: Vec<_> = std::fs::read_dir(path)?.collect::<Result<_, _>>()?;
@@ -252,6 +303,10 @@ async fn run(
         .map_err(SendError::Failed)?;
     let protocol = device.protocol();
     let offered = files.len();
+    let message = match files.as_slice() {
+        [file] if file.dto.preview.is_some() => Some(file.dto.size),
+        _ => None,
+    };
     let mut files: HashMap<String, Offered> = files
         .into_iter()
         .map(|file| (file.dto.id.clone(), file))
@@ -276,8 +331,16 @@ async fn run(
         )
         .await
         .map_err(|e| refused(e, pin.is_some()))?;
+    // Taking none of the files is how a receiver says it read a message.
     let Some(session) = prepared.response else {
-        return Err(SendError::Declined);
+        return match message {
+            Some(bytes) => Ok(Sent {
+                files: 1,
+                bytes,
+                declined: 0,
+            }),
+            None => Err(SendError::Declined),
+        };
     };
     let mut accepted: Vec<(Offered, String)> = session
         .files
@@ -304,7 +367,7 @@ async fn run(
                 &session.session_id,
                 &file.dto.id,
                 &token,
-                body(file.path.clone(), move |bytes| {
+                body(&file.source, move |bytes| {
                     tell(Progress::Sending {
                         sent: before + bytes,
                         total,
@@ -336,7 +399,14 @@ async fn run(
 }
 
 /// A file streamed as an upload's body, saying how many bytes went.
-fn body(path: PathBuf, sent: impl Fn(u64) + Send + 'static) -> localsend::reqwest::Body {
+fn body(source: &Source, sent: impl Fn(u64) + Send + 'static) -> localsend::reqwest::Body {
+    let path = match source {
+        Source::Path(path) => path.clone(),
+        Source::Bytes(bytes) => {
+            sent(bytes.len() as u64);
+            return bytes.clone().into();
+        }
+    };
     let mut total = 0u64;
     localsend::reqwest::Body::wrap_stream(FileContent::Path(path).into_stream().map(move |chunk| {
         let chunk = chunk?;

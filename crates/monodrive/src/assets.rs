@@ -33,6 +33,7 @@ icons!(
     "chevron-down-hi",
     "chevron-left",
     "chevron-right",
+    "clipboard",
     "clock",
     "cloud",
     "cloud-alert",

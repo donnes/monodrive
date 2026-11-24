@@ -2,11 +2,14 @@
 //! so Finder, Mail and Terminal paste what Monodrive copies, and the other
 //! way round. GPUI's clipboard reads paths but can't write them.
 
-use gpui::Global;
+use gpui::{Global, Image, ImageFormat};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardWriting};
-use objc2_foundation::{NSArray, NSString, NSURL};
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSPasteboard,
+    NSPasteboardTypeFileURL, NSPasteboardWriting,
+};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSString, NSURL};
 use std::path::PathBuf;
 
 /// The pasteboard Copy and Paste use. `run` sets the general one; without
@@ -56,4 +59,54 @@ pub fn files_on(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
 pub fn path_of(url: &NSString) -> Option<PathBuf> {
     let url = NSURL::URLWithString(url)?;
     Some(PathBuf::from(url.filePathURL()?.path()?.to_string()))
+}
+
+/// A copied picture as a phone's gallery takes it, with its extension:
+/// TIFF and BMP, which macOS's apps copy, become PNG.
+pub fn shareable(image: Image) -> (&'static str, Vec<u8>) {
+    match image.format {
+        ImageFormat::Tiff | ImageFormat::Bmp => match png(&image.bytes) {
+            Some(png) => ("png", png),
+            None => (image.format.extension(), image.bytes),
+        },
+        format => (format.extension(), image.bytes),
+    }
+}
+
+fn png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let image = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(bytes))?;
+    let options = NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+    // SAFETY: the properties are the dictionary type AppKit declares.
+    let png =
+        unsafe { image.representationUsingType_properties(NSBitmapImageFileType::PNG, &options) }?;
+    Some(png.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_copied_tiff_goes_as_png() {
+        let tiff = vec![
+            73, 73, 42, 0, 8, 0, 0, 0, 9, 0, 0, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3, 0, 1, 0,
+            0, 0, 1, 0, 0, 0, 2, 1, 3, 0, 1, 0, 0, 0, 8, 0, 0, 0, 3, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0,
+            0, 6, 1, 3, 0, 1, 0, 0, 0, 2, 0, 0, 0, 17, 1, 4, 0, 1, 0, 0, 0, 122, 0, 0, 0, 21, 1, 3,
+            0, 1, 0, 0, 0, 3, 0, 0, 0, 22, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 23, 1, 4, 0, 1, 0, 0,
+            0, 3, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0,
+        ];
+        let image = |format, bytes| Image {
+            format,
+            bytes,
+            id: 0,
+        };
+
+        let (extension, bytes) = shareable(image(ImageFormat::Tiff, tiff));
+        assert_eq!(extension, "png");
+        assert!(bytes.starts_with(b"\x89PNG"));
+        assert_eq!(
+            shareable(image(ImageFormat::Jpeg, b"jpeg".to_vec())),
+            ("jpg", b"jpeg".to_vec())
+        );
+    }
 }

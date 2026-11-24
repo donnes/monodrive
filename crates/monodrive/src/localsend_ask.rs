@@ -3,7 +3,7 @@
 //! before it takes what this Mac sends.
 
 use crate::browser::format_bytes;
-use crate::localsend::{self, LocalSend, count};
+use crate::localsend::{self, LocalSend, count, described};
 use crate::palette;
 use crate::text_field::TextField;
 use crate::theme::{self, ButtonLook, content, danger, text_button};
@@ -11,7 +11,7 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Window,
     actions, div, prelude::*, px,
 };
-use monodrive_core::localsend::{Device, Offer};
+use monodrive_core::localsend::{Device, Offer, Outgoing};
 use std::path::PathBuf;
 
 actions!(localsend_ask, [Decline, Accept]);
@@ -204,7 +204,7 @@ fn message(text: &str) -> impl IntoElement {
 pub struct PinView {
     field: Entity<TextField>,
     device: Device,
-    paths: Vec<PathBuf>,
+    outgoing: Outgoing,
     wrong: bool,
 }
 
@@ -217,13 +217,13 @@ impl Focusable for PinView {
 }
 
 impl PinView {
-    pub fn new(device: Device, paths: Vec<PathBuf>, wrong: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(device: Device, outgoing: Outgoing, wrong: bool, cx: &mut Context<Self>) -> Self {
         let placeholder = format!("PIN for {}", device.alias);
         let field = cx.new(|cx| TextField::new("PIN", placeholder, cx));
         Self {
             field,
             device,
-            paths,
+            outgoing,
             wrong,
         }
     }
@@ -233,9 +233,9 @@ impl PinView {
         if pin.is_empty() {
             return;
         }
-        let (device, paths) = (self.device.clone(), std::mem::take(&mut self.paths));
+        let (device, outgoing) = (self.device.clone(), self.outgoing.clone());
         localsend::get(cx).update(cx, |localsend, cx| {
-            localsend.send(device, paths, Some(pin), cx)
+            localsend.send(device, outgoing, Some(pin), cx)
         });
         cx.emit(Done);
     }
@@ -253,7 +253,7 @@ impl Render for PinView {
                 format!(
                     "{} asks for a PIN before it takes {}.",
                     self.device.alias,
-                    count(self.paths.len(), "item")
+                    described(&self.outgoing)
                 ),
                 content(0.65),
             )
