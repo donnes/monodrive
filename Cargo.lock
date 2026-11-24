@@ -1838,7 +1838,7 @@ dependencies = [
 [[package]]
 name = "fsearch"
 version = "0.2.2"
-source = "git+https://github.com/noahdunnagan/fsearch?rev=4bc11cef48db33c45cff6578037cadb3a22bdd91#4bc11cef48db33c45cff6578037cadb3a22bdd91"
+source = "git+https://github.com/donnes/fsearch?rev=5b622e669c19975901a828cdc5d563350cece5cb#5b622e669c19975901a828cdc5d563350cece5cb"
 dependencies = [
  "libc",
  "memchr",

@@ -28,7 +28,7 @@ deny = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = ["https://github.com/noahdunnagan/fsearch", "https://github.com/localsend/localsend"]
+allow-git = ["https://github.com/donnes/fsearch", "https://github.com/localsend/localsend"]
 
 [advisories]
 # Vulnerabilities fail; an unmaintained crate deep in GPUI's graph doesn't,
