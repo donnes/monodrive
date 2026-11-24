@@ -20,6 +20,7 @@ Someone moving through files fast, mostly from the keyboard, who chose this over
 | List, menu and sidebar rows; every highlight behind content, including the grid's icon and name | 8 pt | `RADIUS_ROW` |
 | Cards, sheets, popovers, toasts, the content pane, Settings plates, code boxes | 14 pt | `RADIUS_CARD` |
 | Thumbnails and color swatches, which are pictures and not controls | 4 pt | `RADIUS_THUMB` |
+| Checkboxes' boxes, which sit inside a text button | 4 pt | `RADIUS_THUMB` |
 | The marquee, which matches Finder's | Square | none |
 
 Shapes inside shapes are concentric: an inner radius is the outer one less the gap between them. Rows in a card sit `CARD_INSET`, 6 pt, inside its edge on every side, so their 8 pt corners run parallel to its 14 pt ones. That holds for every rounded surface with rows: menus, popovers, the palette and quick sheets, Settings' page list, and the pane's list and columns. Inside a 1 pt border that's `CARD_PADDING`, and `inset_rows` counts the last `row_slot`'s gap toward the bottom. Text in a card that isn't in a row, such as its header, footer or a section title, starts where its rows' text does, 14 pt in, with `CARD_TEXT_PADDING`. In a menu or list where some rows have an icon or a check, every row keeps that column, so every title starts on one line.
@@ -279,6 +280,7 @@ All in `theme.rs`, except motion, which `motion.rs` holds and Motion describes. 
 - `pane_bar(height)`: a bar at a pane's top or bottom.
 - `field(border)`: a text field's outline.
 - `switch(on)`: a switch's look, without its role or handlers.
+- `checkbox(on)`: a checkbox's 14 pt box, without its role, label or handlers. It goes inside a ghost `button` whose label follows it, as the preview's Prettify does.
 - `row_slot(id)`: where a stacked row's role and handlers go, gap included. `row(active)`: the row inside it, in a menu, picker or popover. `row_muted(active)` is its secondary ink. `destructive_row(active)` and `destructive_ink(active)` are the same for a command marked `destructive`.
 - `drop_outline()`: what a drop would land on, over it; the caller gives it the shape's radius. `insertion_line()`: where a drop would land between stacked rows, in the gap under the row above.
 - `floating(elevation)`: a floating surface. Its contents need `relative()`.

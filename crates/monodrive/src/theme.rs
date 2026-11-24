@@ -558,6 +558,25 @@ pub fn row_icon_button(
         .child(icon(path, 12.).text_color(ink))
 }
 
+/// A checkbox's box: its handlers, role and label belong to whoever uses it.
+pub fn checkbox(on: bool) -> Div {
+    div()
+        .flex_shrink_0()
+        .size(px(14.))
+        .rounded(px(RADIUS_THUMB))
+        .flex()
+        .items_center()
+        .justify_center()
+        .map(|d| {
+            if on {
+                d.bg(accent())
+                    .child(icon("check-hi", 12.).text_color(on_accent()))
+            } else {
+                d.border_1().border_color(content(0.3))
+            }
+        })
+}
+
 /// A switch's look: its handlers and role belong to whoever uses it.
 pub fn switch(on: bool) -> Div {
     div()

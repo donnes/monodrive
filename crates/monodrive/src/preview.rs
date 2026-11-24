@@ -17,8 +17,9 @@ use crate::native_view::Host;
 use crate::theme::{self, ButtonLook, content, danger, text_button};
 use gpui::{
     App, Asset, Bounds, Context, FontWeight, HighlightStyle, InteractiveText, ListAlignment,
-    ListState, MouseButton, Pixels, RenderImage, SharedString, StyledText, Subscription, Task,
-    UniformListScrollHandle, Window, canvas, div, list, prelude::*, px, uniform_list,
+    ListState, MouseButton, Pixels, RenderImage, Role, SharedString, StyledText, Subscription,
+    Task, Toggled, UniformListScrollHandle, Window, canvas, div, list, prelude::*, px,
+    uniform_list,
 };
 use html::Page;
 use markdown::{Block, Inline};
@@ -88,6 +89,8 @@ enum Body {
         cut: bool,
         /// An env file's values, by line, blurred until revealed.
         secrets: Option<Secrets>,
+        /// JSON or XML one value or tag per line, when that differs.
+        pretty: Option<Arc<Vec<Line>>>,
     },
     Markdown {
         blocks: Arc<Vec<Block>>,
@@ -122,6 +125,7 @@ pub struct PreviewView {
     show_source: bool,
     /// An env file's values show as written, until another file opens.
     revealed: bool,
+    prettified: bool,
     zoom: Zoom,
     /// Actual Size was asked for, and waits on the full decode to know it.
     want_actual: bool,
@@ -179,6 +183,7 @@ impl PreviewView {
             body: Body::Loading,
             show_source: false,
             revealed: false,
+            prettified: false,
             zoom: Zoom::default(),
             want_actual: false,
             frame: Rc::new(Cell::new(Bounds::default())),
@@ -290,6 +295,7 @@ impl PreviewView {
         self.loading_ticks = 40;
         self.show_source = false;
         self.revealed = false;
+        self.prettified = false;
         self.zoom = Zoom::default();
         self.want_actual = false;
         self.panning = None;
@@ -479,6 +485,29 @@ impl PreviewView {
                         .debug_selector(|| "preview-reveal".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.revealed = !this.revealed;
+                            cx.notify();
+                        })),
+                )
+            }
+            Body::Text {
+                lines,
+                pretty: Some(pretty),
+                ..
+            } => {
+                let on = self.prettified;
+                let (original, pretty) = (lines.len(), pretty.len());
+                Some(
+                    theme::button("preview-prettify", ButtonLook::Ghost)
+                        .role(Role::CheckBox)
+                        .aria_label("Prettify")
+                        .aria_toggled(if on { Toggled::True } else { Toggled::False })
+                        .debug_selector(|| "preview-prettify".into())
+                        .child(theme::checkbox(on))
+                        .child("Prettify")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.prettified = !this.prettified;
+                            let shown = if this.prettified { pretty } else { original };
+                            this.lines = Some(ListState::new(shown, ListAlignment::Top, px(400.)));
                             cx.notify();
                         })),
                 )
@@ -1214,6 +1243,8 @@ fn read(path: &Path, side: u32) -> Body {
         Kind::Text => match preview::read_text(path) {
             Ok(file) => Body::Text {
                 lines: Arc::new(syntax::file(&file.text, path)),
+                pretty: preview::prettified(&file, path)
+                    .map(|pretty| Arc::new(syntax::file(&pretty, path))),
                 cut: file.cut,
                 secrets: None,
             },
@@ -1224,6 +1255,7 @@ fn read(path: &Path, side: u32) -> Body {
                 lines: Arc::new(syntax::env(&file.text)),
                 cut: file.cut,
                 secrets: Some(Arc::new(preview::env_values(&file.text))),
+                pretty: None,
             },
             Err(why) => Body::Notice(why),
         },
@@ -1548,10 +1580,15 @@ impl Render for PreviewView {
                 lines,
                 cut,
                 secrets,
+                pretty,
             } => {
                 let cut = *cut;
                 let hidden = secrets.clone().filter(|_| !self.revealed);
-                let rows = text_rows(lines.clone(), hidden, self.lines.clone());
+                let lines = match pretty {
+                    Some(pretty) if self.prettified => pretty.clone(),
+                    _ => lines.clone(),
+                };
+                let rows = text_rows(lines, hidden, self.lines.clone());
                 div()
                     .debug_selector(|| "preview-text".into())
                     .size_full()
