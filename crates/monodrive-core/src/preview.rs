@@ -197,6 +197,127 @@ pub fn read_text(path: &Path) -> Result<TextFile, String> {
     })
 }
 
+/// Past this, formatted text isn't offered: deep nesting can indent a small
+/// file into gigabytes.
+const PRETTY_LIMIT: usize = 2 * TEXT_LIMIT as usize;
+
+/// A JSON or XML file laid out one value or tag per line, when that differs
+/// from the file. A file cut at `TEXT_LIMIT` doesn't parse, so it has none.
+pub fn prettified(file: &TextFile, path: &Path) -> Option<String> {
+    if file.cut {
+        return None;
+    }
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let pretty = match extension.as_str() {
+        "json" => pretty_json(&file.text)?,
+        "xml" => pretty_xml(&file.text)?,
+        _ => return None,
+    };
+    (pretty != file.text.trim_end()).then_some(pretty)
+}
+
+/// Reindents rather than reserializes, so numbers and key order stay as written.
+fn pretty_json(text: &str) -> Option<String> {
+    serde_json::from_str::<serde::de::IgnoredAny>(text).ok()?;
+    let mut out = String::with_capacity(text.len() * 2);
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.extend(std::iter::repeat_n("  ", depth));
+    };
+    let mut depth = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                out.push('"');
+                while let Some(c) = chars.next() {
+                    out.push(c);
+                    match c {
+                        '\\' => out.extend(chars.next()),
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '{' | '[' => {
+                out.push(c);
+                while chars.next_if(char::is_ascii_whitespace).is_some() {}
+                match chars.next_if(|c| matches!(c, '}' | ']')) {
+                    Some(close) => out.push(close),
+                    None => {
+                        depth += 1;
+                        newline(&mut out, depth);
+                    }
+                }
+            }
+            '}' | ']' => {
+                depth -= 1;
+                newline(&mut out, depth);
+                out.push(c);
+            }
+            ',' => {
+                out.push(',');
+                newline(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            c if c.is_ascii_whitespace() => {}
+            c => out.push(c),
+        }
+        if out.len() > PRETTY_LIMIT {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+fn pretty_xml(text: &str) -> Option<String> {
+    use quick_xml::events::BytesText;
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(text);
+    let mut writer = quick_xml::Writer::new_with_indent(Vec::new(), b' ', 2);
+    // The reader splits text at each `&amp;`, so a run is trimmed as a whole.
+    let mut run = String::new();
+    // The reader takes an unclosed tag or a second root, so this checks for
+    // one whole document itself.
+    let (mut depth, mut roots) = (0usize, 0);
+    loop {
+        let event = reader.read_event().ok()?;
+        match &event {
+            Event::Text(text) => run.push_str(text),
+            Event::GeneralRef(name) => run.push_str(&format!("&{};", &**name)),
+            _ => {
+                let trimmed = run.trim();
+                if !trimmed.is_empty() {
+                    if depth == 0 {
+                        return None;
+                    }
+                    writer
+                        .write_event(Event::Text(BytesText::from_escaped(trimmed)))
+                        .ok()?;
+                }
+                run.clear();
+                match &event {
+                    Event::Eof => break,
+                    Event::CData(_) if depth == 0 => return None,
+                    Event::Start(_) => {
+                        roots += usize::from(depth == 0);
+                        depth += 1;
+                    }
+                    Event::Empty(_) => roots += usize::from(depth == 0),
+                    Event::End(_) => depth = depth.checked_sub(1)?,
+                    _ => {}
+                }
+                writer.write_event(event).ok()?;
+                if writer.get_ref().len() > PRETTY_LIMIT {
+                    return None;
+                }
+            }
+        }
+    }
+    (depth == 0 && roots == 1).then_some(())?;
+    String::from_utf8(writer.into_inner()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +411,62 @@ AFTER=1";
                 Some("1"),
             ]
         );
+    }
+
+    #[test]
+    fn only_json_and_xml_that_change_get_prettified() {
+        let pretty = |name: &str, text: &str| {
+            let file = TextFile {
+                text: text.into(),
+                cut: false,
+            };
+            prettified(&file, Path::new(name))
+        };
+        assert_eq!(
+            pretty(
+                "a.JSON",
+                r#"{"z":1.0e10,"a":[18446744073709551616,{}, []],"s":"a\"],{:"}"#
+            )
+            .as_deref(),
+            Some(
+                r#"{
+  "z": 1.0e10,
+  "a": [
+    18446744073709551616,
+    {},
+    []
+  ],
+  "s": "a\"],{:"
+}"#
+            )
+        );
+        assert_eq!(pretty("a.json", "{\n  \"a\": 1\n}\n"), None);
+        assert_eq!(pretty("a.json", "{\"a\":"), None);
+        assert_eq!(pretty("a.txt", "{\"a\":1}"), None);
+        assert_eq!(
+            pretty(
+                "a.xml",
+                "<?xml version=\"1.0\"?><a x=\"1\"><!-- c --><b>t &amp; u</b><c/></a>"
+            )
+            .as_deref(),
+            Some(
+                "<?xml version=\"1.0\"?>\n<a x=\"1\">\n  <!-- c -->\n  <b>t &amp; u</b>\n  <c/>\n</a>"
+            )
+        );
+        assert_eq!(pretty("a.xml", "<a><b></a>"), None);
+        assert_eq!(pretty("a.xml", "<a><b/>"), None);
+        assert_eq!(pretty("a.xml", "<a/><b/>"), None);
+        assert_eq!(pretty("a.xml", "  loose  "), None);
+        let deep = 3000;
+        let json = format!("{}0{}", "[".repeat(deep), "]".repeat(deep));
+        assert_eq!(pretty("a.json", &json), None);
+        let xml = format!("{}{}", "<a>".repeat(deep), "</a>".repeat(deep));
+        assert_eq!(pretty("a.xml", &xml), None);
+        let cut = TextFile {
+            text: "{\"a\":1}".into(),
+            cut: true,
+        };
+        assert_eq!(prettified(&cut, Path::new("a.json")), None);
     }
 
     #[test]
