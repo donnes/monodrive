@@ -1,0 +1,11 @@
+# Deliberate exceptions for `deslop-please --allow .deslop-please.allow`.
+# Anything it finds that isn't listed here fails the run.
+field-leak monodrive::native_view::Host::view
+field-leak monodrive_core::localsend::receive::Inbox::save_to
+field-leak monodrive_core::mcp::session::Session::client
+field-leak monodrive_core::mcp::session::Session::places
+field-leak monodrive_core::mcp::session::Session::remote
+shallow-module monodrive::browser::sidebar
+shallow-module monodrive::preview::tools
+wide-directory crates/monodrive-core/src/
+wide-directory crates/monodrive/src/
