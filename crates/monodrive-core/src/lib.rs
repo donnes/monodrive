@@ -49,14 +49,15 @@ pub const VERSION: &str = match option_env!("MONODRIVE_VERSION") {
 /// operation owner and index, so it can run beside the installed app.
 pub const DEV: bool = option_env!("MONODRIVE_VERSION").is_none();
 
+const NAME: &str = if DEV { "Monodrive (Dev)" } else { "Monodrive" };
+
 /// `~/Library/Application Support/Monodrive`, or `Monodrive (Dev)` in a dev build.
 pub fn support_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
-    let name = if DEV { "Monodrive (Dev)" } else { "Monodrive" };
     Some(
         std::path::PathBuf::from(home)
             .join("Library/Application Support")
-            .join(name),
+            .join(NAME),
     )
 }
 
@@ -91,6 +92,42 @@ pub fn seed_dev_support() {
         library.join("FSearch/index.bin"),
         support.join("FSearch/index.bin"),
     );
+}
+
+/// Sends stderr that would go to `/dev/null`, as an app opened from Finder's
+/// does, to `~/Library/Logs/Monodrive/monodrive.log`, where Console finds it.
+/// fsearch reports there each time it relists the disk, and why.
+pub fn log_to_file() {
+    use std::os::fd::{AsFd, AsRawFd};
+    use std::os::unix::fs::MetadataExt;
+    const KEEP: u64 = 4 << 20;
+    let discarded = std::fs::metadata("/dev/null").is_ok_and(|null| {
+        std::io::stderr()
+            .as_fd()
+            .try_clone_to_owned()
+            .and_then(|fd| std::fs::File::from(fd).metadata())
+            .is_ok_and(|err| (err.dev(), err.ino()) == (null.dev(), null.ino()))
+    });
+    let (true, Some(home)) = (discarded, std::env::var_os("HOME")) else {
+        return;
+    };
+    let dir = std::path::Path::new(&home).join("Library/Logs").join(NAME);
+    let log = dir.join("monodrive.log");
+    if std::fs::metadata(&log).is_ok_and(|m| m.len() > KEEP) {
+        let _ = std::fs::rename(&log, dir.join("monodrive.old.log"));
+    }
+    let opened = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+    });
+    // Nowhere to report a failure: stderr is /dev/null.
+    if let Ok(file) = opened {
+        // SAFETY: both descriptors are open; dup2 leaves stderr on the file
+        // after `file` closes its own.
+        unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
+    }
 }
 
 /// `~` and `~/rest` resolved against `$HOME`; other paths unchanged.
