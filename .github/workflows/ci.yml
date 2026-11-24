@@ -45,7 +45,7 @@ jobs:
     needs: changes
     # Pushes to main skip `changes` and always run.
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
-    runs-on: macos-latest
+    runs-on: namespace-profile-donnes
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -69,7 +69,7 @@ jobs:
     name: Benchmarks
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
-    runs-on: macos-latest
+    runs-on: namespace-profile-donnes
     timeout-minutes: 60
     permissions:
       contents: read
