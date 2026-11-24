@@ -667,8 +667,8 @@ pub const TOOLS: [Tool; 56] = [
         "localsend_send",
         All,
         Hints::ADD.net(),
-        "Send files or folders to a LocalSend device by a fingerprint localsend_devices listed in \
-        this session, and wait until they arrive. LocalSend can take files from its favorites \
+        "Send files, folders or text to a LocalSend device by a fingerprint localsend_devices \
+        listed in this session, and wait until they arrive. LocalSend can take files from its favorites \
         without asking anyone, so send only what the user asked to, to the device they named.",
     ),
     tool::<updates::CheckUpdates>(

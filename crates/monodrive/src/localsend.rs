@@ -10,7 +10,7 @@ use crate::preferences::Preferences;
 use gpui::{App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Global};
 use monodrive_core::localsend::{
     self as core, Cancel, Device, Ended, Event, Identity, Message, Messages, Nearby, Offer,
-    Progress, Receiver, SendError, Update,
+    Outgoing, Progress, Receiver, SendError, Update,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -53,10 +53,10 @@ pub struct Said {
     pub show: Option<PathBuf>,
 }
 
-/// A device that wants a PIN before it takes these.
+/// A device that wants a PIN before it takes this.
 pub struct PinWanted {
     pub device: Device,
-    pub paths: Vec<PathBuf>,
+    pub outgoing: Outgoing,
     pub wrong: bool,
 }
 
@@ -527,11 +527,11 @@ impl LocalSend {
         cx.notify();
     }
 
-    /// Sends `paths` to `device`, saying how it went.
+    /// Sends `outgoing` to `device`, saying how it went.
     pub fn send(
         &mut self,
         device: Device,
-        paths: Vec<PathBuf>,
+        outgoing: Outgoing,
         pin: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -555,7 +555,7 @@ impl LocalSend {
             core::spawn_send(
                 identity,
                 device.clone(),
-                paths.clone(),
+                outgoing.clone(),
                 pin.clone(),
                 cancel,
                 move |update| {
@@ -565,7 +565,7 @@ impl LocalSend {
             cx.spawn(async move |this, cx| {
                 while let Ok(update) = heard.recv().await {
                     let sent = this.update(cx, |this, cx| {
-                        this.sending(key, &device, &paths, pin.is_some(), update, cx)
+                        this.sending(key, &device, &outgoing, pin.is_some(), update, cx)
                     });
                     if sent.is_err() {
                         break;
@@ -580,7 +580,7 @@ impl LocalSend {
         &mut self,
         key: u64,
         device: &Device,
-        paths: &[PathBuf],
+        outgoing: &Outgoing,
         gave_pin: bool,
         update: Update,
         cx: &mut Context<Self>,
@@ -599,13 +599,7 @@ impl LocalSend {
                 let to = &device.alias;
                 match result {
                     Ok(sent) => {
-                        let what = match paths {
-                            [one] => one
-                                .file_name()
-                                .map(|name| format!("\"{}\"", name.to_string_lossy()))
-                                .unwrap_or_default(),
-                            items => count(items.len(), "item"),
-                        };
+                        let what = described(outgoing);
                         let declined = match sent.declined {
                             0 => String::new(),
                             n => format!("; it declined {}", count(n, "file")),
@@ -617,7 +611,7 @@ impl LocalSend {
                     Err(SendError::Pin { wrong }) => {
                         self.pin_wanted = Some(PinWanted {
                             device: device.clone(),
-                            paths: paths.to_vec(),
+                            outgoing: outgoing.clone(),
                             wrong: wrong || gave_pin,
                         })
                     }
@@ -724,6 +718,21 @@ fn stop_retired(retiring: &Mutex<Vec<Receiver>>) {
 }
 
 /// "1 item", "3 items".
+/// What a send carries, as a toast or a question names it.
+pub fn described(outgoing: &Outgoing) -> String {
+    match outgoing {
+        Outgoing::Files(paths) => match paths.as_slice() {
+            [one] => one
+                .file_name()
+                .map(|name| format!("\"{}\"", name.to_string_lossy()))
+                .unwrap_or_default(),
+            items => count(items.len(), "item"),
+        },
+        Outgoing::Text(_) => "the text".into(),
+        Outgoing::Bytes { name, .. } => format!("\"{name}\""),
+    }
+}
+
 pub fn count(n: usize, what: &str) -> String {
     match n {
         1 => format!("1 {what}"),

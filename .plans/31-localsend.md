@@ -35,6 +35,8 @@ Since 1.18 the app answers announcements over HTTP only, so without receiving th
 
 The device is named by fingerprint, and every request is pinned to it, so nothing reaches another certificate. Folders go as their files, named by their path from the folder (`Photos/2026/a.jpg`), which the app and the CLI do too. Links and special files are skipped. `prepare-upload` with an optional PIN, then one upload at a time with progress and cancel. 204 means the receiver took nothing, 401 a PIN, 403 declined, 409 busy, 429 too many PIN tries.
 
+Text goes as the LocalSend app sends a message: one `text/plain` file whose preview holds all of it. A receiver that reads it answers 204, which counts as sent; one that takes the file gets the text uploaded. A click on a device opens a menu of Choose Files… and Send Clipboard, which sends the clipboard's files, or else its text, or else its picture; ⌘V does the same while it's open, and elsewhere on the page holds the clipboard for the device clicked next. A picture goes as a file named `Clipboard <date> at <time>`, TIFF and BMP turned into PNG so phones' galleries take it; `localsend_send` takes `text` in place of `paths`.
+
 ## Receiving
 
 Off by default; Settings and the LocalSend page turn it on. Only the window receives: it lives as long as the user wants it, while the ops owner exits when idle and an MCP server ends with its session.

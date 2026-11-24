@@ -7413,11 +7413,14 @@
           "pin": {
             "description": "The PIN the receiver asks for, if it asks.",
             "type": "string"
+          },
+          "text": {
+            "description": "Text to send instead of paths, which the receiver shows as a message.",
+            "type": "string"
           }
         },
         "required": [
-          "fingerprint",
-          "paths"
+          "fingerprint"
         ],
         "type": "object"
       },

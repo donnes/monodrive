@@ -404,6 +404,8 @@ fn a_plain_http_claim_never_replaces_a_device_met_over_https() {
 #[derive(Default)]
 struct Got {
     offered: Vec<String>,
+    /// Each offered file's type and preview, by name.
+    shown: HashMap<String, (String, Option<String>)>,
     pin: Option<String>,
     uploads: HashMap<String, Vec<u8>>,
 }
@@ -491,6 +493,16 @@ async fn serve(stream: tokio::net::TcpStream, status: u16, got: Arc<Mutex<Got>>)
                     .map(|f| f.file_name.clone())
                     .collect();
                 got.offered.sort();
+                got.shown = request
+                    .files
+                    .values()
+                    .map(|f| {
+                        (
+                            f.file_name.clone(),
+                            (f.file_type.clone(), f.preview.clone()),
+                        )
+                    })
+                    .collect();
                 names = request
                     .files
                     .iter()
@@ -503,7 +515,11 @@ async fn serve(stream: tokio::net::TcpStream, status: u16, got: Arc<Mutex<Got>>)
                         .map(|id| (id.clone(), format!("t{id}")))
                         .collect(),
                 };
-                (status, serde_json::to_string(&reply).unwrap())
+                let reply = match status {
+                    204 => String::new(),
+                    _ => serde_json::to_string(&reply).unwrap(),
+                };
+                (status, reply)
             }
             "/api/localsend/v2/upload" => {
                 let id = param("fileId").unwrap();
@@ -545,7 +561,7 @@ fn a_send_offers_each_file_a_folder_by_its_path_and_uploads_them() {
     let sent = send(
         &me(),
         &device,
-        &[photos, dir.path().join("notes.txt")],
+        &Outgoing::Files(vec![photos, dir.path().join("notes.txt")]),
         None,
         move |progress| saying.lock().unwrap().push(progress),
         &Cancel::new(),
@@ -584,7 +600,7 @@ fn a_send_says_what_the_receiver_refused() {
         let result = send(
             &identity,
             &device,
-            std::slice::from_ref(&file),
+            &Outgoing::Files(vec![file.clone()]),
             pin,
             |_| {},
             &Cancel::new(),
@@ -604,11 +620,97 @@ fn a_send_says_what_the_receiver_refused() {
         send(
             &identity,
             &device,
-            &[dir.path().join("gone")],
+            &Outgoing::Files(vec![dir.path().join("gone")]),
             None,
             |_| {},
             &Cancel::new()
         ),
         Err(SendError::NotFound(dir.path().join("gone")))
+    );
+}
+
+#[test]
+fn text_goes_as_a_message_that_a_receiver_reads_or_takes_as_a_file() {
+    let identity = me();
+    let text = "wifi: hunter2\nsee you at 6";
+    let message = Outgoing::Text(text.into());
+    let sent = Sent {
+        files: 1,
+        bytes: text.len() as u64,
+        declined: 0,
+    };
+
+    let (read, got) = receiver(204);
+    assert_eq!(
+        send(&identity, &read, &message, None, |_| {}, &Cancel::new()),
+        Ok(sent.clone())
+    );
+    let got = got.lock().unwrap();
+    assert_eq!(
+        got.shown.values().collect::<Vec<_>>(),
+        [&("text/plain".to_string(), Some(text.to_string()))]
+    );
+    assert!(got.uploads.is_empty());
+
+    let (saves, got) = receiver(200);
+    assert_eq!(
+        send(&identity, &saves, &message, None, |_| {}, &Cancel::new()),
+        Ok(sent)
+    );
+    assert_eq!(
+        got.lock().unwrap().uploads.values().collect::<Vec<_>>(),
+        [&text.as_bytes().to_vec()]
+    );
+
+    let (declines, _) = receiver(403);
+    assert_eq!(
+        send(&identity, &declines, &message, None, |_| {}, &Cancel::new()),
+        Err(SendError::Declined)
+    );
+    assert_eq!(
+        send(
+            &identity,
+            &declines,
+            &Outgoing::Text(String::new()),
+            None,
+            |_| {},
+            &Cancel::new()
+        ),
+        Err(SendError::Nothing)
+    );
+}
+
+#[test]
+fn bytes_go_as_a_file_by_their_name_and_type() {
+    let identity = me();
+    let picture = Outgoing::Bytes {
+        name: "Clipboard.png".into(),
+        bytes: b"png".to_vec(),
+    };
+
+    let (saves, got) = receiver(200);
+    assert_eq!(
+        send(&identity, &saves, &picture, None, |_| {}, &Cancel::new()),
+        Ok(Sent {
+            files: 1,
+            bytes: 3,
+            declined: 0
+        })
+    );
+    let got = got.lock().unwrap();
+    assert_eq!(got.shown["Clipboard.png"], ("image/png".to_string(), None));
+    assert_eq!(got.uploads["Clipboard.png"], b"png");
+
+    let (takes_nothing, _) = receiver(204);
+    assert_eq!(
+        send(
+            &identity,
+            &takes_nothing,
+            &picture,
+            None,
+            |_| {},
+            &Cancel::new()
+        ),
+        Err(SendError::Declined)
     );
 }

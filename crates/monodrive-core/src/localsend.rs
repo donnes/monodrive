@@ -14,7 +14,7 @@ mod tests;
 pub use messages::{KEPT, Message, Messages};
 pub use nearby::{Nearby, look, merged};
 pub use receive::{Ended, Event, Offer, Receiver};
-pub use send::{Cancel, Progress, SendError, Sent, Update, send, spawn_send};
+pub use send::{Cancel, Outgoing, Progress, SendError, Sent, Update, send, spawn_send};
 
 use localsend::discovery::DeviceIdentity;
 use localsend::http::client::LsHttpClientV2;

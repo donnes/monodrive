@@ -4196,8 +4196,7 @@ impl Pane {
             self.localsend.history = false;
             return cx.notify();
         }
-        if self.showing_localsend() && !self.localsend.sending.is_empty() {
-            self.localsend.sending.clear();
+        if self.showing_localsend() && self.localsend.sending.take().is_some() {
             return cx.notify();
         }
         if self.query.is_empty() {
@@ -4584,6 +4583,7 @@ impl Pane {
             thumbnails::release(&thumb, image, Some(&mut *window), cx);
         }
         let can_make_here = self.takes_files(cx);
+        let pastes_to_localsend = self.showing_localsend() && cx.global::<Preferences>().localsend;
         // Nothing in an archive changes, and its rows aren't files to copy.
         let writable = !self.showing_archive();
         div()
@@ -4638,6 +4638,11 @@ impl Pane {
                 .on_action(
                     cx.listener(|this, _: &MoveHere, window, cx| this.paste(true, window, cx)),
                 )
+            })
+            .when(pastes_to_localsend, |d| {
+                d.on_action(cx.listener(|this, _: &text_field::Paste, window, cx| {
+                    this.paste_into_localsend(window, cx)
+                }))
             })
             // Only here, so the menu bar's items are off and can't change the
             // selection's files while the keys are somewhere else, such as the

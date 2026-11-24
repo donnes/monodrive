@@ -25,7 +25,7 @@ use gpui::{
     prelude::*, px,
 };
 use monodrive_core::entries::{Entry, Kind};
-use monodrive_core::localsend::Device;
+use monodrive_core::localsend::{Device, Outgoing};
 use monodrive_core::remote::RemotePath;
 use objc2_app_kit::{NSEvent, NSEventModifierFlags};
 use std::cell::RefCell;
@@ -1286,8 +1286,9 @@ impl Browser {
             }
             Some(Decision::LocalSend { paths, device }) => {
                 feedback::haptic(Haptic::Generic, cx);
-                crate::localsend::get(cx)
-                    .update(cx, |localsend, cx| localsend.send(*device, paths, None, cx));
+                crate::localsend::get(cx).update(cx, |localsend, cx| {
+                    localsend.send(*device, Outgoing::Files(paths), None, cx)
+                });
             }
             Some(Decision::ChooseDevice(paths)) => {
                 feedback::haptic(Haptic::Generic, cx);
