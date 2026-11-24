@@ -17,8 +17,9 @@ use crate::native_view::Host;
 use crate::theme::{self, ButtonLook, content, danger, text_button};
 use gpui::{
     App, Asset, Bounds, Context, FontWeight, HighlightStyle, InteractiveText, ListAlignment,
-    ListState, MouseButton, Pixels, RenderImage, SharedString, StyledText, Subscription, Task,
-    UniformListScrollHandle, Window, canvas, div, list, prelude::*, px, uniform_list,
+    ListState, MouseButton, Pixels, RenderImage, Role, SharedString, StyledText, Subscription,
+    Task, Toggled, UniformListScrollHandle, Window, canvas, div, list, prelude::*, px,
+    uniform_list,
 };
 use html::Page;
 use markdown::{Block, Inline};
@@ -493,15 +494,16 @@ impl PreviewView {
                 pretty: Some(pretty),
                 ..
             } => {
-                let label = if self.prettified {
-                    "Original"
-                } else {
-                    "Prettify"
-                };
+                let on = self.prettified;
                 let (original, pretty) = (lines.len(), pretty.len());
                 Some(
-                    text_button("preview-prettify", label, ButtonLook::Ghost)
+                    theme::button("preview-prettify", ButtonLook::Ghost)
+                        .role(Role::CheckBox)
+                        .aria_label("Prettify")
+                        .aria_toggled(if on { Toggled::True } else { Toggled::False })
                         .debug_selector(|| "preview-prettify".into())
+                        .child(theme::checkbox(on))
+                        .child("Prettify")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.prettified = !this.prettified;
                             let shown = if this.prettified { pretty } else { original };
