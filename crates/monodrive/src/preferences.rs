@@ -2,12 +2,16 @@
 //! Monodrive's support folder.
 
 use crate::background::{Effect, Scope};
+use crate::workspace::Terminal;
 use gpui::{App, Global, Task};
 use monodrive_core::volumes::{Volume, VolumeId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// User overrides by command id: a shortcut, or `None` to turn it off.
+pub type Shortcuts = std::collections::HashMap<String, Option<String>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,43 +80,6 @@ pub const GRID_ICON_SIZES: std::ops::RangeInclusive<u32> = 48..=160;
 pub enum WorkspaceStyle {
     Rounded,
     Boxy,
-}
-
-/// The terminal Open in Terminal uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Terminal {
-    Terminal,
-    Iterm,
-    Ghostty,
-    Warp,
-}
-
-impl Terminal {
-    pub const ALL: [Terminal; 4] = [
-        Terminal::Terminal,
-        Terminal::Iterm,
-        Terminal::Ghostty,
-        Terminal::Warp,
-    ];
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            Terminal::Terminal => "Terminal",
-            Terminal::Iterm => "iTerm",
-            Terminal::Ghostty => "Ghostty",
-            Terminal::Warp => "Warp",
-        }
-    }
-
-    pub fn bundle_id(&self) -> &'static str {
-        match self {
-            Terminal::Terminal => "com.apple.Terminal",
-            Terminal::Iterm => "com.googlecode.iterm2",
-            Terminal::Ghostty => "com.mitchellh.ghostty",
-            Terminal::Warp => "dev.warp.Warp-Stable",
-        }
-    }
 }
 
 /// A drive or cloud folder taken out of the sidebar's Locations. It stays
@@ -206,7 +173,7 @@ pub struct Preferences {
     pub show_inspector: bool,
     pub terminal: Terminal,
     /// Shortcuts changed on the Keyboard page, by command id.
-    pub shortcuts: crate::commands::Shortcuts,
+    pub shortcuts: Shortcuts,
     /// How folders are listed.
     pub sort: monodrive_core::entries::Sort,
     pub window_size: WindowSize,
@@ -309,7 +276,7 @@ impl Default for Preferences {
             show_sidebar: true,
             collapsed: Collapsed::default(),
             show_inspector: false,
-            terminal: Terminal::Terminal,
+            terminal: Terminal::Apple,
             shortcuts: Default::default(),
             sort: Default::default(),
             window_size: WindowSize::Reasonable,
@@ -399,7 +366,7 @@ impl Preferences {
     pub fn localsend_save_to(&self) -> PathBuf {
         self.localsend_folder
             .clone()
-            .unwrap_or_else(|| crate::browser::home().join("Downloads"))
+            .unwrap_or_else(|| crate::home().join("Downloads"))
     }
 
     /// Everything on the Appearance page. What other pages own, and the
@@ -581,7 +548,13 @@ mod tests {
         assert!(older.show_sidebar);
         assert!(!older.show_inspector);
         assert_eq!(older.collapsed, Collapsed::default());
-        assert_eq!(older.terminal, Terminal::Terminal);
+        assert_eq!(older.terminal, Terminal::Apple);
+        assert_eq!(
+            serde_json::to_string(&Terminal::Apple).unwrap(),
+            r#""terminal""#
+        );
+        let apple: Terminal = serde_json::from_str(r#""terminal""#).unwrap();
+        assert_eq!(apple, Terminal::Apple);
     }
 
     #[test]

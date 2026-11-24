@@ -10,7 +10,7 @@ use crate::info::{self, Info};
 use crate::mcp::contract::{
     Code, Kind, Page, Reply, ToolError, more_line, shown, suffix, utc, utc_seconds,
 };
-use crate::mcp::server::Server;
+use crate::mcp::session::Session;
 use crate::remote::{self, RemoteEntry};
 use crate::search::{Query, Scope};
 use crate::thumbnails;
@@ -75,10 +75,10 @@ pub struct FindFiles {
 impl Call for FindFiles {
     type Out = Hits;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Hits>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Hits>, ToolError> {
         let page = Page::new(self.cursor.as_deref(), self.limit)?;
         let query = Query::parse(&self.query).map_err(ToolError::invalid)?;
-        let hits = server
+        let hits = session
             .index()?
             .search(&query, &Scope::Everywhere, page.wanted())?;
         let (hits, next) = page.take(hits);
@@ -142,7 +142,7 @@ pub struct Lines {
 impl Call for Grep {
     type Out = Lines;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Lines>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Lines>, ToolError> {
         let page = Page::new(self.cursor.as_deref(), self.limit)?;
         let scope = match &self.path {
             Some(path) => Scope::Folder(local_one(path, "grep")?),
@@ -153,7 +153,7 @@ impl Call for Grep {
             files: page.wanted(),
             ..Caps::default()
         };
-        let found = server
+        let found = session
             .index()?
             .grep(&self.pattern, self.mode, &filters, &scope, caps)?;
         let (files, next) = page.take(found.files);
@@ -215,10 +215,10 @@ pub struct ListDir {
 impl Call for ListDir {
     type Out = Listing;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Listing>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Listing>, ToolError> {
         let page = Page::new(self.cursor.as_deref(), self.limit)?;
         let (path, items, next, note) = match locate(&self.path) {
-            Where::Remote(path) => remote_list(server, &path, &page)?,
+            Where::Remote(path) => remote_list(session, &path, &page)?,
             Where::Archive { archive, inside } => archive_list(&archive, &inside, &page)?,
             Where::Local(folder) if is_zip(&folder) => archive_list(&folder, "", &page)?,
             Where::Local(folder) => {
@@ -229,7 +229,7 @@ impl Call for ListDir {
                 };
                 let list = entries::list_dir(&folder, self.show_hidden, order)
                     .map_err(|e| ToolError::from(e).at(self.path.clone()))?;
-                let partly = cloud::partly_downloaded(&list);
+                let partly = entries::partly_downloaded(&list);
                 let (list, next) = page.take(list);
                 let items = list
                     .into_iter()
@@ -300,8 +300,8 @@ fn availability(availability: cloud::Availability) -> Option<String> {
 /// note for the text.
 type Listed = (String, Vec<Item>, Option<String>, String);
 
-fn remote_list(server: &Server, path: &str, page: &Page) -> Result<Listed, ToolError> {
-    let (open, at) = server.remote_at(path)?;
+fn remote_list(session: &Session, path: &str, page: &Page) -> Result<Listed, ToolError> {
+    let (open, at) = session.remote_at(path)?;
     let listed = open.list(&at, page.offset, page.limit)?;
     let next = listed
         .more
@@ -359,11 +359,11 @@ fn archive_list(archive: &Path, inside: &str, page: &Page) -> Result<Listed, Too
         });
     }
     let (items, next) = page.take(items);
-    let note = if opened.total > opened.entries.len() as u64 {
+    let note = if opened.total > opened.listed() as u64 {
         format!(
             "(the archive lists {} entries; Monodrive read the first {})\n",
             opened.total,
-            opened.entries.len()
+            opened.listed()
         )
     } else {
         String::new()
@@ -431,7 +431,7 @@ pub struct Abouts {
 impl Call for Stat {
     type Out = Abouts;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Abouts>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Abouts>, ToolError> {
         let mut blocks = Vec::new();
         let mut items = Vec::new();
         let mut first_error = None;
@@ -440,7 +440,7 @@ impl Call for Stat {
                 Where::Local(at) => info::info(&at)
                     .map(|about| (stat_text(&about), local_about(&about)))
                     .map_err(ToolError::from),
-                Where::Remote(qualified) => server
+                Where::Remote(qualified) => session
                     .remote_at(&qualified)
                     .and_then(|(open, at)| open.metadata(&at))
                     .map(|entry| (remote_text(&entry), remote_about(&entry)))
@@ -634,11 +634,11 @@ pub struct Chunk {
 impl Call for ReadFile {
     type Out = Chunk;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Chunk>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Chunk>, ToolError> {
         let limit = self.limit.min(remote::MOST_READ);
         let (path, data, size) = match locate(&self.path) {
             Where::Remote(qualified) => {
-                let (open, at) = server.remote_at(&qualified)?;
+                let (open, at) = session.remote_at(&qualified)?;
                 let (data, size) = open.read(&at, self.offset, limit)?;
                 (at.to_string(), data, size)
             }
@@ -723,7 +723,7 @@ pub struct Picture {
 impl Call for Thumbnail {
     type Out = Picture;
 
-    fn run(self, _: &mut Server) -> Result<Reply<Picture>, ToolError> {
+    fn run(self, _: &mut Session) -> Result<Reply<Picture>, ToolError> {
         let path = local_one(&self.path, "thumbnail")?;
         let jpeg = thumbnails::generate(&path, self.side.clamp(16, 1024), &|| false)
             .and_then(|bitmap| thumbnails::jpeg(&bitmap))
@@ -764,8 +764,8 @@ pub struct IndexState {
 impl Call for IndexStatus {
     type Out = IndexState;
 
-    fn run(self, server: &mut Server) -> Result<Reply<IndexState>, ToolError> {
-        let status: Status = server.status()?;
+    fn run(self, session: &mut Session) -> Result<Reply<IndexState>, ToolError> {
+        let status: Status = session.status()?;
         let mut text = format!("{}\n", status.progress);
         if status.full_disk_access == Some(false) {
             text.push_str("No Full Disk Access: consent-gated folders are skipped.\n");

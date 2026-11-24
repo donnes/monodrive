@@ -4,6 +4,7 @@
 //! shows the same; `monodrive_core::localsend` does the work.
 
 use crate::feedback::{self, Sound};
+use crate::format::count;
 use crate::frame;
 use crate::notify::{self, Kind};
 use crate::preferences::Preferences;
@@ -717,7 +718,6 @@ fn stop_retired(retiring: &Mutex<Vec<Receiver>>) {
     }
 }
 
-/// "1 item", "3 items".
 /// What a send carries, as a toast or a question names it.
 pub fn described(outgoing: &Outgoing) -> String {
     match outgoing {
@@ -730,12 +730,5 @@ pub fn described(outgoing: &Outgoing) -> String {
         },
         Outgoing::Text(_) => "the text".into(),
         Outgoing::Bytes { name, .. } => format!("\"{name}\""),
-    }
-}
-
-pub fn count(n: usize, what: &str) -> String {
-    match n {
-        1 => format!("1 {what}"),
-        n => format!("{n} {what}s"),
     }
 }

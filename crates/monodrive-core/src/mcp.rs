@@ -1,11 +1,12 @@
 //! `monodrive mcp`: a Model Context Protocol server on stdin and stdout.
-//! `server` speaks the protocol, `contract` holds the shapes every reply
-//! shares, and each module in `tools` decodes a tool's arguments, calls one
-//! service and replies. What agents may rely on is in `docs/mcp.md`, and
+//! `server` speaks the protocol, `session` holds what a session's tools
+//! share, `contract` holds the shapes every reply shares, and each module in
+//! `tools` decodes a tool's arguments, calls one service and replies. What agents may rely on is in `docs/mcp.md`, and
 //! `contract/v1.json` holds it so a test can tell a break from an addition.
 
 mod contract;
 mod server;
+mod session;
 mod tools;
 
 pub use contract::Profile;

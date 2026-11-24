@@ -3,7 +3,8 @@
 //! keys. `BatchMode` means ssh never prompts: what would need a prompt fails,
 //! and `diagnose` reports it.
 
-use super::{Connector, RemoteError, Source, Transport};
+use super::{Connector, RemoteError, Transport};
+use crate::places::Source;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::unix::process::CommandExt;

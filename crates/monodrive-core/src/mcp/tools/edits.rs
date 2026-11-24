@@ -1,10 +1,10 @@
 //! Editing and sorting files: edit_image, edit_video, organize and
 //! suggest_names.
 
-use super::{Call, Preview, local, local_one};
+use super::{Call, local, local_one};
 use crate::edits;
 use crate::mcp::contract::{Change, Planned, Reply, ToolError, shown};
-use crate::mcp::server::Server;
+use crate::mcp::session::{Preview, Session};
 use crate::naming;
 use crate::ops::{self, Request, organize};
 use schemars::JsonSchema;
@@ -25,12 +25,12 @@ pub struct EditImage {
 impl Call for EditImage {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
         let path = local_one(&self.path, "edit_image")?;
         let extension = edits::picture_extension(&path);
         let steps = self.steps;
         save_edit(
-            server,
+            session,
             &path,
             &extension,
             self.replace,
@@ -53,12 +53,12 @@ pub struct EditVideo {
 impl Call for EditVideo {
     type Out = Change;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Change>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Change>, ToolError> {
         let path = local_one(&self.path, "edit_video")?;
         let extension = edits::video_extension(&path);
         let steps = self.steps;
         save_edit(
-            server,
+            session,
             &path,
             &extension,
             self.replace,
@@ -71,14 +71,14 @@ impl Call for EditVideo {
 /// Writes the edit under a hidden name, then has the owner put it in place.
 /// Refused first if agents may not change files, so nothing's written.
 fn save_edit(
-    server: &mut Server,
+    session: &mut Session,
     source: &Path,
     extension: &str,
     replace: bool,
     request_id: Option<&str>,
     write: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<Reply<Change>, ToolError> {
-    server.can_change()?;
+    session.can_change()?;
     let opened = ops::Opened::read(source)?;
     let folder = source
         .parent()
@@ -92,7 +92,7 @@ fn save_edit(
             } else {
                 ops::SaveTo::Copy
             };
-            server.change(
+            session.change(
                 Request::SaveEdit {
                     source: opened,
                     prepared: prepared.clone(),
@@ -136,14 +136,14 @@ pub struct OrganizePlan {
 impl Call for Organize {
     type Out = Planned<OrganizePlan>;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Self::Out>, ToolError> {
         if let Some(token) = &self.confirm {
-            let Preview::Organize(groups) = server.kept(token, self.request_id.as_deref())? else {
+            let Preview::Organize(groups) = session.kept(token, self.request_id.as_deref())? else {
                 return Err(ToolError::invalid("That token is another tool's plan."));
             };
             // Kept if the owner refuses it, so it can be confirmed again.
-            let done = server.change(Request::Organize { groups }, self.request_id.as_deref())?;
-            server.spent(token, self.request_id.as_deref());
+            let done = session.change(Request::Organize { groups }, self.request_id.as_deref())?;
+            session.spent(token, self.request_id.as_deref());
             return Ok(done.ran());
         }
         let (Some(path), true) = (&self.path, self.dry_run) else {
@@ -177,7 +177,7 @@ impl Call for Organize {
             return Ok(Reply::new(text, plan).planned(None));
         }
         let _ = writeln!(text, "left where they are: {}", proposal.unplaced);
-        let token = server.keep(Preview::Organize(proposal.groups));
+        let token = session.keep(Preview::Organize(proposal.groups));
         let _ = writeln!(text, "token: {token}");
         Ok(Reply::new(text, plan).planned(Some(token)))
     }
@@ -209,7 +209,7 @@ pub struct Suggestions {
 impl Call for SuggestNames {
     type Out = Suggestions;
 
-    fn run(self, _: &mut Server) -> Result<Reply<Suggestions>, ToolError> {
+    fn run(self, _: &mut Session) -> Result<Reply<Suggestions>, ToolError> {
         let mut text = String::new();
         let items = local(&self.paths, "suggest_names")?
             .iter()

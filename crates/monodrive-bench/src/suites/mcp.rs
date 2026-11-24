@@ -229,6 +229,11 @@ impl Server {
             .map_err(|e| e.to_string())
     }
 
+    /// Ends a server that went wrong partway, which may not be reading stdin.
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
+
     /// Closes stdin, which ends the server, and waits for it.
     fn stop(self) -> Result<(), String> {
         let Server {
@@ -472,7 +477,7 @@ pub fn round(fixture: &Path) -> Result<Vec<Measured>, String> {
         match server.ask("initialize", initialize) {
             Ok(_) => Ok(server),
             Err(error) => {
-                let _ = server.child.kill();
+                server.kill();
                 Err(error)
             }
         }
@@ -488,7 +493,7 @@ pub fn round(fixture: &Path) -> Result<Vec<Measured>, String> {
         .notify("notifications/initialized")
         .and_then(|()| session(&mut server, fixture, &work, &mut out));
     if done.is_err() {
-        let _ = server.child.kill();
+        server.kill();
     }
     let stopped = server.stop();
     drop(short);

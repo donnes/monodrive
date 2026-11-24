@@ -5,19 +5,17 @@
 //! they share one journal, one list of jobs and one undo history.
 //! docs/operations.md records why.
 
-pub(crate) mod disk;
+mod eject;
 mod jobs;
 pub mod organize;
 mod owner;
 pub mod rename;
-mod transfers;
 
-pub use disk::{FileId, Stamp};
-pub(crate) use jobs::numbered_name;
 pub use jobs::{Conflict, Done, Job, State, Task, Transfer};
-pub(crate) use owner::lock;
-pub use owner::{Client, Owner, Watch, run_owner};
+pub use owner::{Client, Owner, run_owner};
 
+use crate::Origin;
+use crate::disk::{self, FileId, Stamp};
 use crate::places;
 use crate::remote::RemotePath;
 use crate::worktrees;
@@ -291,15 +289,6 @@ pub enum SaveTo {
     Replace,
     /// A name that must be free.
     As { path: PathBuf },
-}
-
-/// Who asked. An agent is known by the name its MCP client gives, not by
-/// the person behind it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Origin {
-    Window,
-    Agent { client: Option<String> },
 }
 
 /// One request as sent to the owner. Sending the same `id` again returns
@@ -611,6 +600,11 @@ struct Engine {
 }
 
 impl Engine {
+    /// The lists saved beside the app's settings.
+    fn places(&self) -> places::Store {
+        self.paths.places()
+    }
+
     /// Reads the journal, settles operations a crash left unfinished, and
     /// trims it once it's long.
     fn open(paths: Paths) -> Result<Self, String> {
@@ -788,19 +782,18 @@ impl Engine {
                 }
             }
             Record::Work { op, index, work } => {
-                if let Some(slot) = self.job_mut(op).and_then(|job| job.work.get_mut(index)) {
-                    *slot = work;
+                if let Some(job) = self.job_mut(op) {
+                    job.record(index, work);
                 }
             }
             Record::Finish { op, state } => {
-                let Some(job) = self.job_mut(op) else { return };
                 // A waiting job's run already joined the history when it
                 // stopped; cancelling it adds nothing.
-                let ran = job.state.active();
-                job.state = state;
-                job.archive = None;
-                let (op, title, steps) = (job.run, job.title(), job.run_steps());
-                if ran && !steps.is_empty() {
+                let Some((op, title, steps)) = self.job_mut(op).and_then(|job| job.finish(state))
+                else {
+                    return;
+                };
+                if !steps.is_empty() {
                     self.history.truncate(self.history.len() - self.undone);
                     self.undone = 0;
                     self.history.push(Undoable { op, title, steps });
@@ -1239,7 +1232,7 @@ impl Engine {
             steps,
             creates,
             temps,
-            at: crate::overview::now(),
+            at: jobs::now(),
         };
         self.write(&record)?;
         self.fold(&record);
@@ -1655,7 +1648,7 @@ fn edited_name(path: &Path, extension: Option<&std::ffi::OsStr>) -> Option<PathB
         name.push('.');
         name.push_str(&extension.to_string_lossy());
     }
-    Some(free_name(&path.with_file_name(name)))
+    Some(disk::free_name(&path.with_file_name(name)))
 }
 
 fn plan_save_edit(
@@ -1923,15 +1916,6 @@ pub fn trash_items(trash: &Path) -> Result<Vec<TrashItem>, String> {
     Ok(items)
 }
 
-/// `path` if nothing's there, else Finder's next free name for it:
-/// "untitled folder 2", "untitled folder 3" and on.
-pub fn free_name(path: &Path) -> PathBuf {
-    match disk::id(path) {
-        None => path.to_path_buf(),
-        Some(_) => jobs::numbered(path).unwrap_or_else(|| path.to_path_buf()),
-    }
-}
-
 /// Finder's name for a copy: "name copy.ext", then "name copy 2.ext" and
 /// on, never a name that's taken. A copy of a copy counts on from it.
 fn copy_name(path: &Path) -> Option<PathBuf> {
@@ -1957,9 +1941,6 @@ fn copy_name(path: &Path) -> Option<PathBuf> {
     })
 }
 
-/// The Agents setting, read from the app's settings for each request so a
-/// change applies at once. A missing or unreadable file means the default,
-/// on, as the app reads it.
 /// Whether a copy of `from` into the folder `into` clones: both on one APFS
 /// volume, where `copyfile` shares blocks instead of writing them.
 pub fn clones(from: &Path, into: &Path) -> bool {
@@ -1981,6 +1962,9 @@ pub fn clones(from: &Path, into: &Path) -> bool {
     apfs && device(from).is_some() && device(from) == device(into)
 }
 
+/// The Agents setting, read from the app's settings for each request so a
+/// change applies at once. A missing or unreadable file means the default,
+/// on, as the app reads it.
 fn agents_change_files(paths: &Paths) -> bool {
     /// `Preferences::agents_change_files` in the app.
     #[derive(Deserialize)]
@@ -2000,5 +1984,9 @@ fn agents_change_files(paths: &Paths) -> bool {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod archive_tests;
+#[cfg(test)]
+mod rename_tests;
 #[cfg(test)]
 mod transfer_tests;

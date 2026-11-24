@@ -1,4 +1,5 @@
 use super::*;
+use crate::places::Availability;
 use std::os::unix::fs::PermissionsExt;
 
 /// Runs the fixture's own git in `dir` and returns what it printed.

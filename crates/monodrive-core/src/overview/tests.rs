@@ -98,10 +98,10 @@ fn a_low_disk_ranks_at_most_three_suggestions_by_what_they_free() {
             unshared: 1,
             ..size(900, NOW)
         };
-        saved.totals.insert(brew.clone(), shared);
-        saved.totals.insert(pip.clone(), size(300, NOW));
-        saved.totals.insert(yarn.clone(), size(200, NOW));
-        saved.totals.insert(pods.clone(), size(100, NOW));
+        saved.measured(&brew, shared);
+        saved.measured(&pip, size(300, NOW));
+        saved.measured(&yarn, size(200, NOW));
+        saved.measured(&pods, size(100, NOW));
     });
 
     let low = read(&env, &[startup(1_000, 199)]);
@@ -229,14 +229,14 @@ fn a_project_on_a_scanned_drive_joins_its_copy_as_one_row() {
     )
     .unwrap();
     env.store
-        .register_repository(worktrees::Registration {
+        .register_repository(places::Registration {
             common_dir: project.join(".git"),
             path: project.clone(),
         })
         .unwrap();
     let backup = drive("backup", "Backup");
     save(&env, |saved| {
-        saved.scans.push(Scan {
+        saved.scanned(Scan {
             volume: VolumeKey::of(&backup),
             name: backup.name.clone(),
             total: size(500, NOW),
@@ -278,7 +278,7 @@ fn a_gone_drive_keeps_its_dated_totals_and_nothing_can_act_on_them() {
     let env = env(&dir);
     let backup = drive("backup", "Backup");
     save(&env, |saved| {
-        saved.scans.push(Scan {
+        saved.scanned(Scan {
             volume: VolumeKey::of(&backup),
             name: "Backup".into(),
             total: size(500, NOW - 3 * 86_400),
@@ -335,8 +335,8 @@ fn what_is_due_is_what_has_no_total_or_an_old_one() {
         std::fs::create_dir(dir).unwrap();
     }
     save(&env, |saved| {
-        saved.totals.insert(fresh.clone(), size(1, NOW - 60));
-        saved.totals.insert(old.clone(), size(1, NOW - REMEASURE));
+        saved.measured(&fresh, size(1, NOW - 60));
+        saved.measured(&old, size(1, NOW - REMEASURE));
     });
     let due = read(&env, &[startup(1_000, 900)]).due;
     assert!(!due.contains(&fresh));
@@ -352,7 +352,7 @@ fn the_rest_of_the_disk_is_measured_where_it_goes_and_each_folder_once() {
     let documents = home.join("Documents");
     let project = cargo_project(&documents, "app");
     env.store
-        .register_repository(worktrees::Registration {
+        .register_repository(places::Registration {
             common_dir: project.join(".git"),
             path: project.clone(),
         })
@@ -373,7 +373,7 @@ fn the_rest_of_the_disk_is_measured_where_it_goes_and_each_folder_once() {
     std::os::unix::fs::symlink(&documents, home.join(".link")).unwrap();
     let brew = env.root.join("opt/homebrew");
     std::fs::create_dir_all(brew.join(".git")).unwrap();
-    save(&env, |saved| saved.projects.push(brew.clone()));
+    save(&env, |saved| saved.found(vec![brew.clone()], Vec::new()));
     let disk = Volume {
         system: Some(50),
         ..startup(1_000, 250)
@@ -413,10 +413,10 @@ fn the_rest_of_the_disk_is_measured_where_it_goes_and_each_folder_once() {
 
     save(&env, |saved| {
         for (folder, bytes) in folders.iter().zip([100, 80, 70, 10, 60, 40, 30]) {
-            saved.totals.insert(folder.clone(), size(bytes, NOW));
+            saved.measured(folder, size(bytes, NOW));
         }
-        saved.totals.insert(documents.clone(), size(300, NOW));
-        saved.totals.insert(brew.clone(), size(20, NOW));
+        saved.measured(&documents, size(300, NOW));
+        saved.measured(&brew, size(20, NOW));
     });
     assert_eq!(
         read(&env, std::slice::from_ref(&disk)).everything_else(),
@@ -424,7 +424,7 @@ fn the_rest_of_the_disk_is_measured_where_it_goes_and_each_folder_once() {
         "it waits for every total"
     );
     save(&env, |saved| {
-        saved.totals.insert(project.clone(), size(200, NOW));
+        saved.measured(&project, size(200, NOW));
     });
     let about = read(&env, &[disk]);
     assert_eq!(
@@ -505,16 +505,14 @@ fn measuring_saves_the_total_and_a_cancelled_walk_saves_nothing() {
     std::fs::write(folder.join("a"), vec![1; 8192]).unwrap();
 
     let cancelled = storage::Progress::default();
-    cancelled
-        .cancel
-        .store(true, std::sync::atomic::Ordering::Relaxed);
+    cancelled.cancel();
     assert_eq!(measure(&env, &folder, &cancelled, None, NOW), None);
-    assert!(Saved::read(&env.saved()).totals.is_empty());
+    assert_eq!(Saved::read(&env.saved()).total(&folder), None);
 
     let size = measure(&env, &folder, &storage::Progress::default(), None, NOW).unwrap();
     assert!(size.complete);
     assert!(size.on_disk >= 8192);
-    assert_eq!(Saved::read(&env.saved()).totals.get(&folder), Some(&size));
+    assert_eq!(Saved::read(&env.saved()).total(&folder), Some(size));
 }
 
 #[test]
@@ -537,7 +535,7 @@ fn a_scan_keeps_totals_and_top_folders_and_no_file_list() {
 
     // Scanning again replaces the last scan, and the mount shows it.
     record_scan(&env, &drive("d", "Drive"), &report, NOW + 1).unwrap();
-    assert_eq!(Saved::read(&env.saved()).scans.len(), 1);
+    assert_eq!(Saved::read(&env.saved()).scans_besides(&[]).len(), 1);
 }
 
 #[test]
@@ -571,8 +569,8 @@ fn discovery_keeps_only_what_git_or_the_tag_confirms() {
     })
     .unwrap();
     let saved = Saved::read(&env.saved());
-    assert!(saved.projects.is_empty());
-    assert_eq!(saved.tagged, [project.join("target")]);
+    assert!(saved.projects().is_empty());
+    assert_eq!(saved.tagged(), [project.join("target")]);
     assert!(hidden_or_tool_folder(Path::new("/h/.cargo/git/x")));
     assert!(hidden_or_tool_folder(Path::new("/h/app/node_modules/x")));
     assert!(!hidden_or_tool_folder(Path::new("/h/Work/app")));
@@ -586,14 +584,14 @@ fn a_trash_total_from_before_the_trash_changed_says_nothing() {
     let now = now();
     // The folder's own time is whole seconds, and it changed before this.
     save(&env, |saved| {
-        saved.totals.insert(env.trash.clone(), size(500, now + 1));
+        saved.measured(&env.trash, size(500, now + 1));
     });
     let disk = [startup(1_000, 100)];
     let read = |at| super::read(&env, &disk, &[], &no_sftp, at);
     assert_eq!(read(now + 1).headline.unwrap().free_after_trash(), 600);
 
     save(&env, |saved| {
-        saved.totals.insert(env.trash.clone(), size(500, now - 100));
+        saved.measured(&env.trash, size(500, now - 100));
     });
     let about = read(now);
     assert_eq!(about.headline.unwrap().free_after_trash(), 100);
@@ -607,7 +605,7 @@ fn a_repository_on_another_drive_waits_for_that_drives_scan() {
     let mount = env.home.join("Drive");
     let project = cargo_project(&mount, "far");
     env.store
-        .register_repository(worktrees::Registration {
+        .register_repository(places::Registration {
             common_dir: project.join(".git"),
             path: project.clone(),
         })
@@ -631,7 +629,7 @@ fn a_scans_rows_follow_the_drive_to_where_it_mounts_now() {
     let env = env(&dir);
     let backup = drive("backup", "Backup");
     save(&env, |saved| {
-        saved.scans.push(Scan {
+        saved.scanned(Scan {
             volume: VolumeKey::of(&backup),
             name: "Backup".into(),
             total: size(500, NOW),
@@ -661,7 +659,7 @@ fn changes_from_two_threads_both_land() {
             let env = &env;
             threads.spawn(move || {
                 save(env, |saved| {
-                    saved.totals.insert(format!("/f{n}").into(), size(n, NOW));
+                    saved.measured(format!("/f{n}").as_ref(), size(n, NOW));
                 });
             });
         }
@@ -679,7 +677,7 @@ fn clean_worktrees_are_one_suggestion_ranked_by_what_they_free_together() {
     for main in [&app, &lib] {
         repo(main);
         env.store
-            .register_repository(worktrees::Registration {
+            .register_repository(places::Registration {
                 common_dir: main.join(".git"),
                 path: main.clone(),
             })
@@ -713,7 +711,7 @@ fn clean_worktrees_are_one_suggestion_ranked_by_what_they_free_together() {
     // Without the index, the registered repositories are still asked about.
     check_worktrees(&env, &git, |_, _| Err("The index isn't running.".into())).unwrap();
     let saved: Vec<PathBuf> = Saved::read(&env.saved())
-        .worktrees
+        .into_worktrees()
         .into_iter()
         .map(|worktree| worktree.path)
         .collect();
@@ -725,11 +723,11 @@ fn clean_worktrees_are_one_suggestion_ranked_by_what_they_free_together() {
         std::fs::create_dir_all(cache).unwrap();
     }
     save(&env, |saved| {
-        saved.tagged.push(built.clone());
-        saved.totals.insert(built.clone(), size(450, NOW));
-        saved.totals.insert(pip.clone(), size(500, NOW));
-        saved.totals.insert(yarn.clone(), size(400, NOW));
-        saved.totals.insert(clean.clone(), size(300, NOW));
+        saved.found(Vec::new(), vec![built.clone()]);
+        saved.measured(&built, size(450, NOW));
+        saved.measured(&pip, size(500, NOW));
+        saved.measured(&yarn, size(400, NOW));
+        saved.measured(&clean, size(300, NOW));
     });
 
     // One measured of two: at least what it has, and it says how far it got.
@@ -751,7 +749,7 @@ fn clean_worktrees_are_one_suggestion_ranked_by_what_they_free_together() {
     // Together they beat any one cache, though neither does alone. The build
     // inside a clean worktree goes with it, so it isn't counted twice.
     save(&env, |saved| {
-        saved.totals.insert(other.clone(), size(300, NOW - 7_200));
+        saved.measured(&other, size(300, NOW - 7_200));
     });
     let low = read(&env, &[startup(10_000, 1_000)]);
     let titles: Vec<String> = low.suggestions.iter().map(Suggestion::title).collect();
@@ -778,7 +776,7 @@ fn clean_worktrees_are_one_suggestion_ranked_by_what_they_free_together() {
     // Asked again, one that changed since drops out, index or not.
     std::fs::write(other.join("new"), "").unwrap();
     check_worktrees(&env, &git, |_, _| Ok(Vec::new())).unwrap();
-    let saved = Saved::read(&env.saved()).worktrees;
+    let saved = Saved::read(&env.saved()).into_worktrees();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].path, clean);
 }

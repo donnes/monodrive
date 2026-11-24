@@ -5,7 +5,6 @@
 //! Nothing here reads contents; downloading and removing a download ask
 //! macOS through NSFileManager. docs/cloud.md records what reads what.
 
-use crate::entries::{Entry, Kind};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
@@ -16,7 +15,6 @@ use objc2_foundation::{
     NSURLUbiquitousItemHasUnresolvedConflictsKey, NSURLUbiquitousItemIsUploadedKey,
 };
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::os::macos::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -240,28 +238,6 @@ pub fn fully_downloaded(path: &Path) -> Option<bool> {
         let downloaded: Bool = unsafe { msg_send![&item, isRecursivelyDownloaded] };
         Some(downloaded.as_bool())
     })
-}
-
-/// The folders in `listed` that hold something not downloaded, for the badge
-/// Finder gives them. Placeholder folders aren't asked, since their flag says
-/// so already, and only folders whose parent is in the cloud are, so a
-/// listing anywhere else costs one quick answer of `None`.
-pub fn partly_downloaded(listed: &[Entry]) -> HashSet<PathBuf> {
-    let mut parents: HashMap<&Path, bool> = HashMap::new();
-    listed
-        .iter()
-        .filter(|entry| entry.kind == Kind::Dir && entry.availability.is_local())
-        .filter(|entry| {
-            let Some(parent) = entry.path.parent() else {
-                return false;
-            };
-            *parents
-                .entry(parent)
-                .or_insert_with(|| fully_downloaded(parent).is_some())
-                && fully_downloaded(&entry.path) == Some(false)
-        })
-        .map(|entry| entry.path.clone())
-        .collect()
 }
 
 const NOT_DOWNLOADED: &str = " isn't downloaded. Download it first.";
@@ -583,8 +559,6 @@ mod tests {
         // Outside the cloud, fileproviderd has nothing to say about a folder.
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         assert_eq!(fully_downloaded(dir.path()), None);
-        let listed = crate::entries::list_dir(dir.path(), false, Default::default()).unwrap();
-        assert_eq!(partly_downloaded(&listed), HashSet::new());
         assert!(!needs_download(&dir.path().join("a.txt")));
         assert!(!needs_download(&dir.path().join("sub")));
         // What's here is done; what's gone fails, rather than waiting forever.

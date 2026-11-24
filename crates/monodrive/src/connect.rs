@@ -5,8 +5,8 @@
 //! sidebar. An sftp:// or ssh:// server connects with the user's ssh keys and
 //! opens in the pane, and is saved only once it has connected.
 
-use crate::browser::Places;
 use crate::palette;
+use crate::system::Places;
 use crate::text_field::{self, TextField};
 use crate::theme::{
     self, ButtonLook, content, danger, on_accent, row, row_icon_button, text_button,
@@ -15,7 +15,7 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, MouseButton, Role,
     Task, Window, actions, div, prelude::*, px,
 };
-use monodrive_core::remote::Source;
+use monodrive_core::places::Source;
 use monodrive_core::servers::{self, Cancel, Server};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -96,6 +96,14 @@ impl ConnectView {
         }
     }
 
+    /// Connects to `address` as if it were typed.
+    pub(crate) fn connect_to(&mut self, address: &str, cx: &mut Context<Self>) {
+        let end = address.len();
+        self.field
+            .update(cx, |field, cx| field.set_text(address, end..end, cx));
+        self.connect(cx);
+    }
+
     fn fill(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(address) = self.saved.get(ix) else {
             return;
@@ -136,7 +144,7 @@ impl ConnectView {
             .find(|(saved, _)| *saved == address)
             .map(|(_, id)| id.clone());
         if let Some(id) = &remote {
-            crate::browser::remote::disconnect(id, cx);
+            crate::system::disconnect(id, cx);
         }
         let forgotten = cx.background_executor().spawn(async move {
             match remote {

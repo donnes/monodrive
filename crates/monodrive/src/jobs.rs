@@ -7,19 +7,21 @@
 //! job. The window asks the owner about once a second, only while a job is
 //! going or the popover is open.
 
-use crate::browser::{Operations, format_bytes, grouped, lock, short_reason};
 use crate::downloads::{self, State as DownloadState};
+use crate::format::{format_bytes, grouped, short_reason};
 use crate::menu;
 use crate::theme::{
     self, ButtonLook, accent, circle_button, content, danger, icon, progress_fill, progress_track,
     row_icon_button, text_button,
 };
+use crate::{Operations, lock};
 use gpui::{
     AnyElement, App, Context, ElementId, EventEmitter, Hsla, KeyBinding, Role, ScrollStrategy,
     Subscription, Task, UniformListScrollHandle, actions, div, prelude::*, px, uniform_list,
 };
+use monodrive_core::Origin;
 use monodrive_core::cloud;
-use monodrive_core::ops::{self, Conflict, Done, Job, Origin, Request, State, Transfer};
+use monodrive_core::ops::{self, Conflict, Done, Job, Request, State, Transfer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;

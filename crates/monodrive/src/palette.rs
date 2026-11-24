@@ -5,12 +5,16 @@
 //! the browser last read, so it opens at once, and reads the rest in the
 //! background.
 
-use crate::browser::remote::{Link, Servers};
-use crate::browser::{self, Eject, OpenWith, Places, format_bytes};
+use crate::commands::Eject;
+use crate::commands::OpenWith;
 use crate::commands::{self, Command, Scope};
+use crate::format::format_bytes;
 use crate::menu;
 use crate::native::{Offered, native, offered};
 use crate::preferences::Preferences;
+use crate::system::Link;
+use crate::system::Places;
+use crate::system::Servers;
 use crate::text_field::{self, TextField};
 use crate::theme::{self, ButtonLook, Elevation, content, icon, row_icon_button};
 use crate::workspace;
@@ -23,8 +27,8 @@ use monodrive_core::cloud::CloudFolder;
 use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::index::Index;
 use monodrive_core::paths;
+use monodrive_core::places::Source;
 use monodrive_core::places::{Availability, Place};
-use monodrive_core::remote::Source;
 use monodrive_core::servers;
 use monodrive_core::volumes::Volume;
 use std::collections::{HashMap, HashSet};
@@ -335,7 +339,7 @@ impl PaletteView {
             places
                 .store
                 .recents()
-                .map(|recents| browser::recent_entries(recents).0)
+                .map(|recents| crate::system::recent_entries(recents).0)
         });
         [
             cx.spawn(async move |this, cx| {
@@ -1188,7 +1192,7 @@ fn path_of(row: &Row) -> Option<&Path> {
 
 /// Whether a command in the Go menu goes to `path`.
 fn has_go_command(path: &Path) -> bool {
-    let home = browser::home();
+    let home = crate::home();
     path == home
         || path == Path::new("/")
         || path == Path::new("/Applications")
@@ -1316,8 +1320,8 @@ fn favorite_row(place: &Place) -> Row {
     let path = &place.favorite.path;
     let row = Row::new(
         "",
-        browser::glyph_of(path),
-        browser::label_of(path),
+        crate::system::glyph_of(path),
+        crate::system::label_of(path),
         Target::Folder(place.at().unwrap_or(path).to_path_buf()),
     );
     match &place.availability {
@@ -1396,7 +1400,7 @@ mod tests {
     fn rows_that_arrive_late_leave_the_keys_on_the_same_row(cx: &mut TestAppContext) {
         cx.update(|cx| {
             cx.set_global(Preferences::default());
-            commands::apply(cx);
+            crate::apply_keymap(cx);
         });
         let now = Now {
             available: HashSet::new(),

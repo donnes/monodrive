@@ -1,6 +1,6 @@
 # Remote sources
 
-A remote source is a saved SSH server that Monodrive browses and copies to and from over SFTP. Nothing is installed on the server. `remote` holds sources, connections and browsing; `ops/transfers.rs` holds the copies. The window and the MCP tools share both.
+A remote source is a saved SSH server that Monodrive browses and copies to and from over SFTP. Nothing is installed on the server. `places` saves the sources, `remote` holds connections and browsing, and `ops/jobs/transfers.rs` holds the copies. The window and the MCP tools share both.
 
 ## Connecting
 

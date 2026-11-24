@@ -2,8 +2,9 @@
 //! device offers (↩ accepts, Esc declines), and the PIN a device asks for
 //! before it takes what this Mac sends.
 
-use crate::browser::format_bytes;
-use crate::localsend::{self, LocalSend, count, described};
+use crate::format::count;
+use crate::format::format_bytes;
+use crate::localsend::{self, LocalSend, described};
 use crate::palette;
 use crate::text_field::TextField;
 use crate::theme::{self, ButtonLook, content, danger, text_button};

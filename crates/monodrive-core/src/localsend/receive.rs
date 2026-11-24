@@ -4,7 +4,7 @@
 //! free name only once whole, so a partial file never sits under a real one.
 
 use super::{Device, Identity, Kind, PORT, RECEIVING_ON, runtime, tidy};
-use crate::ops::{disk, numbered_name};
+use crate::disk;
 use localsend::discovery::{self, DiscoveredDevice, DiscoveryConfig, DiscoveryEvent};
 use localsend::http::dto_v2::RegisterDtoV2;
 use localsend::http::server::common::save::FileUploadTarget;
@@ -147,6 +147,12 @@ pub(super) struct Inbox {
 }
 
 impl Inbox {
+    fn save_to(&self, folder: PathBuf) {
+        if let Ok(mut save_to) = self.save_to.lock() {
+            *save_to = folder;
+        }
+    }
+
     pub(super) fn new(
         fingerprint: String,
         save_to: PathBuf,
@@ -603,7 +609,7 @@ fn free(path: PathBuf, taken: &mut HashSet<PathBuf>) -> PathBuf {
         path
     } else {
         (2..)
-            .map(|n| path.with_file_name(numbered_name(&name, n)))
+            .map(|n| path.with_file_name(disk::numbered_name(&name, n)))
             .find(|path| open(path, taken))
             .unwrap_or(path)
     };
@@ -625,7 +631,7 @@ fn place(planned: &Planned, temp: &Path) -> Result<PathBuf, String> {
         if e.kind() != std::io::ErrorKind::AlreadyExists {
             return Err(fail(e));
         }
-        to = crate::ops::free_name(&to);
+        to = disk::free_name(&to);
         disk::rename_new(temp, &to).map_err(fail)?;
     }
     Ok(if planned.top == planned.to {
@@ -811,9 +817,7 @@ impl Receiver {
 
     /// Where the next accepted offer goes.
     pub fn save_to(&self, folder: PathBuf) {
-        if let Ok(mut save_to) = self.inbox.save_to.lock() {
-            *save_to = folder;
-        }
+        self.inbox.save_to(folder);
     }
 
     /// Stops transfer `id`: what's arrived stays, the rest goes to the Trash.

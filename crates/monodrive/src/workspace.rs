@@ -9,24 +9,17 @@ use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_uniform_type_identifiers::{
     UTType, UTTypeApplicationBundle, UTTypeDirectory, UTTypePackage,
 };
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::preferences::Terminal;
-
-fn urls(paths: &[PathBuf]) -> Retained<NSArray<NSURL>> {
+pub(crate) fn urls(paths: &[PathBuf]) -> Retained<NSArray<NSURL>> {
     let urls: Vec<Retained<NSURL>> = paths
         .iter()
         .map(|path| NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy())))
         .collect();
     NSArray::from_retained_slice(&urls)
-}
-
-/// Shows `paths` selected in Finder.
-pub fn reveal(paths: &[PathBuf]) {
-    crate::finder::keep_reveals_in_finder();
-    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls(paths));
 }
 
 /// Asks for an app in an open panel on /Applications, without blocking, and
@@ -114,5 +107,43 @@ mod tests {
         assert!(!is_package(Path::new("/x/docs")));
         assert!(!is_package(Path::new("/x/release.v2")));
         assert!(!is_package(Path::new("/x/notes.md")));
+    }
+}
+
+/// The terminal Open in Terminal uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Terminal {
+    #[serde(rename = "terminal")]
+    Apple,
+    Iterm,
+    Ghostty,
+    Warp,
+}
+
+impl Terminal {
+    pub const ALL: [Terminal; 4] = [
+        Terminal::Apple,
+        Terminal::Iterm,
+        Terminal::Ghostty,
+        Terminal::Warp,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Terminal::Apple => "Terminal",
+            Terminal::Iterm => "iTerm",
+            Terminal::Ghostty => "Ghostty",
+            Terminal::Warp => "Warp",
+        }
+    }
+
+    pub fn bundle_id(&self) -> &'static str {
+        match self {
+            Terminal::Apple => "com.apple.Terminal",
+            Terminal::Iterm => "com.googlecode.iterm2",
+            Terminal::Ghostty => "com.mitchellh.ghostty",
+            Terminal::Warp => "dev.warp.Warp-Stable",
+        }
     }
 }

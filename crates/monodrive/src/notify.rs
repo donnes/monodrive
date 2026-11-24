@@ -2,11 +2,9 @@
 //! switch in Settings › Notifications. The window says the same in toasts and
 //! pages, so nothing posts while it's in front, nor while an agent runs it.
 
-use crate::browser::{self, Browser};
+use crate::format::format_bytes;
 use crate::frame;
-use crate::localsend;
 use crate::preferences::Preferences;
-use crate::session::Shows;
 use gpui::{App, SystemNotification, SystemNotificationAction};
 use monodrive_core::overview::{Headline, Suggestion};
 use objc2_foundation::NSBundle;
@@ -28,8 +26,8 @@ pub enum Kind {
 /// A storage notice says so once, then keeps quiet this long.
 const QUIET: u64 = 7 * 24 * 60 * 60;
 
-const LOW_DISK: &str = "low-disk";
-const WORKTREES: &str = "worktrees";
+pub(crate) const LOW_DISK: &str = "low-disk";
+pub(crate) const WORKTREES: &str = "worktrees";
 
 /// Settings want this kind said, and no agent is running the app.
 pub fn wanted(kind: Kind, cx: &App) -> bool {
@@ -66,37 +64,6 @@ pub fn post(kind: Kind, tag: String, body: String, actions: &[(&str, &str)], cx:
             .collect(),
     });
     true
-}
-
-/// Sends a press on a notification where it belongs. GPUI takes one handler
-/// for the whole app.
-pub fn start(cx: &mut App) {
-    cx.on_system_notification_response(|response, cx| {
-        let action = response.action_id.as_deref();
-        match response.tag.as_ref() {
-            LOW_DISK => show(Shows::Overview, cx),
-            WORKTREES => show(Shows::Worktrees, cx),
-            tag => {
-                if !localsend::respond(tag, action, cx) {
-                    frame::bring_forward(cx);
-                }
-            }
-        }
-    });
-}
-
-/// Brings the window in front forward, showing `page`.
-fn show(page: Shows, cx: &mut App) {
-    let front = cx
-        .window_stack()
-        .into_iter()
-        .flatten()
-        .chain(cx.windows())
-        .find_map(|window| window.downcast::<Browser>());
-    if let Some(window) = front {
-        let _ = window.update(cx, |browser, window, cx| browser.show(page, window, cx));
-    }
-    frame::bring_forward(cx);
 }
 
 /// What the storage watch found, off the main thread.
@@ -196,13 +163,13 @@ fn notices(found: &Storage, over_gb: u32, said: &Said, now: u64) -> Vec<Notice> 
     if let Some((disk, freeable)) = &found.low
         && !quiet(said.low_disk)
     {
-        let free = browser::format_bytes(disk.free);
+        let free = format_bytes(disk.free);
         let body = match freeable {
             0 => format!("{} has {free} free.", disk.name),
             bytes => format!(
                 "{} has {free} free. Monodrive found {} you can free in Overview.",
                 disk.name,
-                browser::format_bytes(*bytes)
+                format_bytes(*bytes)
             ),
         };
         notices.push(Notice {
@@ -215,7 +182,7 @@ fn notices(found: &Storage, over_gb: u32, said: &Said, now: u64) -> Vec<Notice> 
         && worktrees.size.unshared >= u64::from(over_gb) * 1_000_000_000
         && !quiet(said.worktrees)
     {
-        let size = browser::format_bytes(worktrees.size.unshared);
+        let size = format_bytes(worktrees.size.unshared);
         let size = if worktrees.size.complete {
             size
         } else {
@@ -226,7 +193,7 @@ fn notices(found: &Storage, over_gb: u32, said: &Said, now: u64) -> Vec<Notice> 
             tag: WORKTREES,
             body: format!(
                 "{} take {size}. Git says they hold nothing their repositories don't.",
-                localsend::count(worktrees.worktrees().len(), "clean worktree"),
+                crate::format::count(worktrees.worktrees().len(), "clean worktree"),
             ),
         });
     }

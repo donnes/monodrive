@@ -11,7 +11,7 @@ mod zoom;
 
 pub use tools::Saved;
 
-use crate::browser::{ClearSearch, OpenSelected};
+use crate::commands::{ClearSearch, OpenSelected};
 use crate::downloads::{self, Changed, State};
 use crate::native_view::Host;
 use crate::theme::{self, ButtonLook, content, danger, text_button};
@@ -1260,7 +1260,7 @@ fn modified(path: &Path) -> u64 {
 fn zip_rows(path: &Path) -> Body {
     match cloud::without_downloads(|| Archive::open(path)) {
         Ok(archive) => {
-            let names: Vec<String> = archive.entries.iter().map(|e| e.name.clone()).collect();
+            let names: Vec<String> = archive.names().map(String::from).collect();
             let said = format!(
                 "{} {}",
                 archive.total,

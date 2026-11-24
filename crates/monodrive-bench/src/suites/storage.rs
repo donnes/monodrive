@@ -61,7 +61,7 @@ pub fn round(fixture: &Path) -> Result<Vec<Measured>, String> {
         .iter()
         .filter(|group| group.matched == Match::Content)
         .count();
-    let read = progress.read.load(std::sync::atomic::Ordering::Relaxed);
+    let read = progress.read();
     let compared = measured(
         "duplicates/downloads",
         "Find duplicates among 48 files",

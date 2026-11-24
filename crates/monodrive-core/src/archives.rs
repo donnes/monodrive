@@ -50,7 +50,7 @@ const TIMESTAMP: u16 = 0x5455;
 pub struct Archive {
     pub path: PathBuf,
     /// In the order the archive lists them, at most `MAX_ENTRIES`.
-    pub entries: Vec<Entry>,
+    entries: Vec<Entry>,
     /// How many entries the archive says it has: more than `entries` holds
     /// when it has more than Monodrive reads.
     pub total: u64,
@@ -204,6 +204,17 @@ impl Archive {
             total: end.entries,
             len,
         })
+    }
+
+    /// How many entries Monodrive read: fewer than `total` when the archive
+    /// has more than `MAX_ENTRIES`.
+    pub fn listed(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// The entries' names as the archive stores them, in its order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|entry| entry.name.as_str())
     }
 
     /// The entries inside `folder`, a folder in the archive; all of them

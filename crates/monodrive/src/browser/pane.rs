@@ -3,68 +3,85 @@
 //! What's window-wide (toasts, sheets, the jobs ring, the sidebar) belongs to
 //! `Browser`, which a pane reaches through `PaneEvent`.
 
-use super::archive;
-use super::batch_rename::BatchRename;
-use super::columns::{COLUMN_WIDTH, Columns, chevron};
-use super::drag::{Drag, Spot, Target, offers};
-use super::duplicates::DuplicatesPage;
-use super::localsend::LocalSendPage;
-use super::organize::Review;
-use super::overview::OverviewPage;
-use super::remote::RemotePage;
-use super::searches::{CONTENT_SETTLE, Completing, Matches};
-use super::worktrees::WorktreesPage;
+mod commands;
+pub(super) mod rename;
+pub(super) mod rows;
+use rows::*;
+pub(super) mod view;
+use rename::Renaming;
+use rows::Marquee;
+use view::Address;
+pub(super) mod airdrop;
+pub(super) mod archive;
+pub(super) mod columns;
+pub(super) mod drag;
+pub(super) mod duplicates;
+pub(super) mod localsend;
+pub(super) mod overview;
+pub(super) mod remote;
+pub(super) mod searches;
+pub(super) mod trash;
+pub(super) mod worktrees;
+
 use super::{
-    Back, CancelRename, ClearRecents, CommitRename, Compress, CopyPath, DeselectAll, Download,
-    Duplicate, EditPreview, Eject, EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext,
-    ExtendPrevious, ExtendRight, Extract, FindDuplicates, FocusSearch, Forward, GoAirDrop,
-    GoApplications, GoComputer, GoDesktop, GoDocuments, GoDownloads, GoHome, GoLocalSend,
-    GoOverview, GoRecents, GoToFolder, GoTrash, GoWorktrees, MoveHere, MoveToTrash, NewFile,
-    NewFolder, NewFolderWithSelection, Offer, OpenInTerminal, OpenSelected, OrganizeFolder,
-    PageDown, PageUp, Places, PutBack, QuickLook, Redo, RemoveDownload, Rename, RevealInFinder,
-    ReverseSort, ScrollToBottom, ScrollToTop, SearchContents, SearchThisFolder, SelectFirst,
-    SelectLast, SelectNext, SelectPrevious, SendWithLocalSend, Share, ShowContextMenu,
-    ShowInEnclosingFolder, ShowPackageContents, SortByKind, SortByModified, SortByName, SortBySize,
-    SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, home, short_reason, sidebar, trash,
-    with_owner,
+    Back, ClearRecents, Compress, CopyPath, DeselectAll, Download, Duplicate, EditPreview,
+    EnclosingFolder, ExpandFolder, ExtendLeft, ExtendNext, ExtendPrevious, ExtendRight, Extract,
+    FindDuplicates, FocusSearch, Forward, GoAirDrop, GoApplications, GoComputer, GoDesktop,
+    GoDocuments, GoDownloads, GoHome, GoLocalSend, GoOverview, GoRecents, GoToFolder, GoTrash,
+    GoWorktrees, MoveHere, MoveToTrash, NewFile, NewFolder, NewFolderWithSelection, OpenInTerminal,
+    OpenSelected, OrganizeFolder, PageDown, PageUp, PutBack, QuickLook, Redo, RemoveDownload,
+    Rename, RevealInFinder, ReverseSort, ScrollToBottom, ScrollToTop, SearchContents,
+    SearchThisFolder, SelectFirst, SelectLast, SelectNext, SelectPrevious, SendWithLocalSend,
+    Share, ShowContextMenu, ShowInEnclosingFolder, ShowPackageContents, SortByKind, SortByModified,
+    SortByName, SortBySize, SuggestNames, Undo, ViewAsColumns, ViewAsGrid, ViewAsList, with_owner,
 };
-use crate::background::{Backdrop, Look};
+use crate::background::Backdrop;
 use crate::commands::Scope;
 use crate::downloads::Downloads;
 use crate::feedback::{self, Sound};
-use crate::file_icons;
-use crate::goto::{GotoEvent, GotoView};
+use crate::format::short_reason;
 use crate::jobs;
 use crate::onboarding::IndexGate;
-use crate::pasteboard::Pasteboard;
-use crate::preferences::{self, Preferences, View, WorkspaceStyle};
+use crate::preferences::{self, Preferences, View};
+use crate::quick_look::Preview;
 use crate::selection::Selection;
 use crate::session::{PaneState, RemoteAt, Shows, StopState};
+use crate::system::Places;
 use crate::text_field::{self, TextField};
-use crate::theme::{self, ButtonLook, accent, content, danger, icon, on_accent, text_button};
+use crate::theme::{self};
 use crate::thumbnails::{self, Thumb};
 use crate::workspace;
-use chrono::{DateTime, Local};
+use columns::Columns;
+use drag::Drag;
+use duplicates::DuplicatesPage;
 use gpui::{
-    AnyWindowHandle, App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, Keystroke, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
-    ScrollHandle, ScrollStrategy, ScrollWheelEvent, Subscription, Task, TextOverflow,
-    UniformListScrollHandle, Window, canvas, div, point, prelude::*, px, uniform_list,
+    App, Bounds, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
+    Pixels, Point, RenderImage, ScrollHandle, ScrollStrategy, Task, UniformListScrollHandle,
+    Window, prelude::*, px,
 };
-use monodrive_core::cloud::{self, CloudFolder};
+use gpui::{MouseButton, MouseDownEvent, point};
+use localsend::LocalSendPage;
+use monodrive_core::Origin;
+use monodrive_core::cloud::{self as icloud};
 use monodrive_core::entries::{self, Entry, Kind, Sort, SortBy};
 use monodrive_core::index::Index;
-use monodrive_core::info;
-use monodrive_core::ops::{self, Conflict, Origin, Outcome, Request};
-use monodrive_core::places::{self, Availability, Favorite};
+use monodrive_core::ops::{Outcome, Request};
+use monodrive_core::places::Favorite;
+use monodrive_core::places::{self, Availability};
 use monodrive_core::search::{Looks, Query, Scope as SearchScope};
+use overview::OverviewPage;
+use remote::RemotePage;
+use rename::BatchRename;
+use rename::Review;
+use searches::CONTENT_SETTLE;
+use searches::{Completing, Matches};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use worktrees::WorktreesPage;
 
 const SEARCH_LIMIT: usize = 200;
 /// How long the disk must settle before a changed folder lists again.
@@ -107,6 +124,18 @@ pub(super) enum PaneEvent {
     },
     /// What should be there on the next launch changed.
     Moved,
+}
+
+/// What a toast's button does.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Offer {
+    /// Undo of this operation, which the owner refuses once anything else
+    /// has changed files since.
+    Undo(u64),
+    /// Downloads these, under this label: Download, or Try Again.
+    Download(&'static str, Vec<PathBuf>),
+    /// Shows this in its folder, selected.
+    Show(PathBuf),
 }
 
 /// Where a pane was before a drag opened folders in it.
@@ -375,14 +404,14 @@ impl Pane {
                 thumbnails::release(&thumb, image, None, cx);
             }
             if this.localsend.looking() {
-                super::localsend::stop_looking(cx);
+                super::pane::localsend::stop_looking(cx);
             }
         })
         .detach();
         // Whatever moves the selection repaints, so the Trash's bar follows it.
         cx.observe_self(|this, cx| this.follow_trash_selection(cx))
             .detach();
-        let downloads = super::cloud::follow(cx);
+        let downloads = Self::follow_downloads(cx);
         let prefs = cx.global::<Preferences>();
         let (grid_icon, show_hidden) = (prefs.grid_icon, prefs.show_hidden);
         let Opening {
@@ -574,74 +603,6 @@ impl Pane {
         })
     }
 
-    /// Preferences changed: lists again if the hidden files did. With `adopt`,
-    /// Settings chose them for this pane, so it takes their view and sort.
-    pub(super) fn preferences_changed(&mut self, adopt: bool, cx: &mut Context<Self>) {
-        if self.showing_localsend() {
-            match cx.global::<Preferences>().localsend {
-                true => self.enter_localsend(cx),
-                false => self.leave_localsend(cx),
-            }
-        }
-        let prefs = cx.global::<Preferences>();
-        let (view, sort, show_hidden) = (prefs.view, prefs.sort, prefs.show_hidden);
-        self.grid_icon = prefs.grid_icon;
-        let sorted = adopt && sort != self.sort;
-        if adopt {
-            self.sort = sort;
-            self.set_view(view);
-            cx.emit(PaneEvent::Moved);
-        }
-        if (sorted || show_hidden != self.show_hidden) && self.query.is_empty() {
-            self.reload(cx);
-        }
-        cx.notify();
-    }
-
-    fn set_view(&mut self, view: View) {
-        if view != self.view {
-            self.view = view;
-            // The chain starts at the folder it's switched in.
-            self.columns.root = None;
-            self.rebuild();
-            // The other layout put it somewhere else; the grid shows it
-            // once it knows how many fit across.
-            self.reveal_pending = self.selection.cursor().is_some();
-        }
-    }
-
-    /// ⌥⌘1 and ⌥⌘2: this pane's view, and where the next tab starts.
-    fn choose_view(&mut self, view: View, cx: &mut Context<Self>) {
-        self.set_view(view);
-        preferences::update(cx, |p| p.view = view);
-        cx.emit(PaneEvent::Moved);
-        cx.notify();
-    }
-
-    /// A Sort by command or a column title: this pane's order, and where the
-    /// next tab starts.
-    fn choose_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
-        if sort != self.sort && !self.batch_sending() {
-            self.sort = sort;
-            preferences::update(cx, |p| p.sort = sort);
-            cx.emit(PaneEvent::Moved);
-            if self.showing_remote() {
-                self.resort_remote(cx);
-            } else if self.query.is_empty() {
-                self.reload(cx);
-            }
-        }
-    }
-
-    /// A Sort by command picks a column in its natural direction; choosing the
-    /// sort in use again leaves it, as a checked menu item should. Reverse
-    /// Sort Order flips it.
-    fn sort_by(&mut self, by: SortBy, cx: &mut Context<Self>) {
-        if self.sort.by != by {
-            self.choose_sort(sorted_by(self.sort, by), cx);
-        }
-    }
-
     pub(super) fn tidy_folders(&self, cx: &App) -> Vec<PathBuf> {
         cx.try_global::<Places>()
             .map_or_else(Vec::new, Places::tidy_folders)
@@ -784,15 +745,7 @@ impl Pane {
     /// Leaves search, if any, and lists the current folder.
     pub(super) fn show_folder(&mut self, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::Moved);
-        // A path typed for the folder being left would lead back to it.
-        if let Some(address) = self.address.take() {
-            let list = self.list_focus.clone();
-            cx.defer(move |cx| {
-                let _ = address
-                    .window
-                    .update(cx, |_, window, cx| window.focus(&list, cx));
-            });
-        }
+        self.close_address(cx);
         self.query.clear();
         self.filters = Query::default();
         (self.chip, self.chip_menu) = (None, None);
@@ -801,30 +754,626 @@ impl Pane {
         self.reload(cx);
     }
 
-    pub(super) fn collapse_all(&mut self) {
-        self.opening = Task::ready(());
-        self.peek_hidden = false;
-        // A refresh due for the folder being left has nothing to refresh.
-        self.refresh = None;
-        self.held.clear();
-        self.expanded.clear();
-        self.expanding.clear();
-        if self.layout() == View::Columns {
-            // The folder being left may become a column; the next listing
-            // replaces what it keeps.
-            self.children
-                .insert(self.folder().to_path_buf(), self.root.clone());
-        } else {
-            self.children.clear();
-        }
-    }
-
     /// Lists the folder and every folder expanded in it, or runs the search
     /// when there is a query, off the UI thread.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
         self.list(false, cx);
     }
 
+    /// The layout on screen: a content search's lines and a batch's new
+    /// names only fit the list.
+    /// Search results, Recents and the Trash have no folders to chain, so
+    /// column view shows them as a list.
+    pub(super) fn layout(&self) -> View {
+        match self.view {
+            _ if !self.matches.is_empty() || self.batch.is_some() => View::List,
+            // An archive's rows stay a list until the folder's listing
+            // replaces them.
+            View::Columns
+                if !self.showing_folder() || self.trash_here || self.showing_archive() =>
+            {
+                View::List
+            }
+            view => view,
+        }
+    }
+
+    /// What a listing that's just landed selects. Search selects its best hit
+    /// so Enter opens it. A folder selects the one just left, else keeps its
+    /// selection. Put back after a cancelled drag, the selection stays.
+    pub(super) fn pick_selection(&mut self, left: Option<PathBuf>) {
+        let enter_first = std::mem::take(&mut self.columns.enter_first);
+        let first = if std::mem::take(&mut self.keep_selection) {
+            None
+        } else if self.query.is_empty() && !enter_first {
+            left.and_then(|path| self.entries.iter().position(|e| e.path == path))
+        } else {
+            (!self.entries.is_empty()).then_some(0)
+        };
+        let made = std::mem::take(&mut self.select_after);
+        if self.entries.iter().any(|e| made.contains(&e.path)) {
+            self.selection.clear();
+            for entry in self.entries.iter().filter(|e| made.contains(&e.path)) {
+                self.selection.toggle(entry);
+            }
+        } else if let Some(ix) = first {
+            self.selection.select(&self.entries[ix]);
+        }
+    }
+
+    /// The row the keys move from.
+    pub(super) fn cursor_ix(&self) -> Option<usize> {
+        self.selection.cursor_ix(&self.entries)
+    }
+
+    /// Lays the tree out as rows, keeping the selection on the same entry.
+    pub(super) fn rebuild(&mut self) {
+        self.relayout(true);
+    }
+
+    /// Whether row `ix` is a folder, and whether it's open. Links aren't
+    /// opened in place: telling where they lead would read the disk here.
+    /// Packages aren't either, which their extension says without a read.
+    pub(super) fn is_open_folder(&self, ix: usize) -> Option<bool> {
+        let entry = self.entries.get(ix)?;
+        (entry.kind == Kind::Dir && !workspace::is_package(&entry.path))
+            .then(|| self.expanded.contains(&entry.path))
+    }
+
+    /// Scrolls entry `ix` into view: in the grid, its row of the grid.
+    pub(super) fn reveal(&self, ix: usize, strategy: ScrollStrategy) {
+        let item = match self.layout() {
+            View::Grid => ix / self.grid_columns(),
+            // Going down brings a file's lines in with it; its own row stays
+            // the one to show when it's above the view.
+            View::List if !self.matches.is_empty() => {
+                let first = self.matches.row_of(ix);
+                let offset = self.scroll.0.borrow().base_handle.offset().y.as_f32();
+                let above = first as f32 * self.list_row_height < -offset;
+                if above || !matches!(strategy, ScrollStrategy::Nearest) {
+                    first
+                } else {
+                    self.matches.last_row_of(ix)
+                }
+            }
+            View::List | View::Columns => ix,
+        };
+        self.scroll.scroll_to_item(item, strategy);
+    }
+
+    /// A click on row `ix`: ⌘ toggles it, ⇧ selects the range from the
+    /// anchor, and a plain click selects it alone. A double click opens.
+    pub(super) fn click_entry(
+        &mut self,
+        ix: usize,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The end of a dragged rectangle, whichever GPUI reports first.
+        if std::mem::take(&mut self.swept) || self.marquee.as_ref().is_some_and(|m| m.dragging) {
+            return;
+        }
+        let Some(entry) = self.entries.get(ix) else {
+            return;
+        };
+        self.focus_list(window, cx);
+        let modifiers = event.modifiers();
+        if modifiers.platform {
+            self.selection.toggle(entry);
+        } else if modifiers.shift {
+            self.selection.extend(&self.entries, ix);
+        } else {
+            self.selection.select(entry);
+            if event.click_count() == 2 && self.batch.is_none() {
+                self.open_selection(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// What's selected, as far as an Open waiting on the disk cares.
+    fn selected_now(&self) -> (Option<PathBuf>, usize) {
+        (
+            self.selection.only().map(Path::to_path_buf),
+            self.selection.len(),
+        )
+    }
+
+    /// Moves the cursor a `step`, selecting what it lands on, or with ⇧
+    /// (`extend`) the range from the anchor to it.
+    pub(super) fn select(&mut self, step: Move, extend: bool, cx: &mut Context<Self>) {
+        let cursor = self.cursor_ix();
+        let Some(next) = moved(cursor, self.entries.len(), step) else {
+            return;
+        };
+        // A held arrow at either end repaints nothing, once the entry there
+        // is all that's selected.
+        let alone = self.selection.len() == 1 && self.selection.contains(&self.entries[next].path);
+        if !extend && Some(next) == cursor && alone {
+            return;
+        }
+        if extend {
+            self.selection.extend(&self.entries, next);
+        } else {
+            self.selection.select(&self.entries[next]);
+        }
+        self.reveal(next, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    pub(super) fn focus_list(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.list_focus, cx);
+    }
+
+    /// Opens a place and moves focus to its files. Column view's chain starts
+    /// again there.
+    pub(super) fn go(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.columns.root = None;
+        self.navigate(path, cx);
+        self.focus_list(window, cx);
+    }
+
+    /// Shows `folder` with `select` selected, the way Go to Folder, a pasted
+    /// path and another app's Show in Finder land.
+    pub(super) fn go_to(
+        &mut self,
+        folder: PathBuf,
+        select: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A hidden file asked for by name shows, though hidden files are off.
+        let hidden = select
+            .iter()
+            .filter_map(|path| path.file_name())
+            .any(|name| name.to_string_lossy().starts_with('.'));
+        // Asked after any navigation, which clears the last folder's peek.
+        let needs_peek = |this: &Self| hidden && !this.show_hidden && !this.peek_hidden;
+        if folder == self.folder() && self.showing_folder() {
+            let found: Vec<usize> = if self.listing {
+                Vec::new()
+            } else {
+                select
+                    .iter()
+                    .filter_map(|path| self.entries.iter().position(|e| &e.path == path))
+                    .collect()
+            };
+            match found.as_slice() {
+                [] if !select.is_empty() => {
+                    self.select_when_listed(select);
+                    if needs_peek(self) {
+                        self.peek_hidden = true;
+                        self.reload(cx);
+                    }
+                }
+                [] => {}
+                [ix] => self.select_row(*ix, cx),
+                [first, ..] => {
+                    self.selection.clear();
+                    for &ix in &found {
+                        self.selection.toggle(&self.entries[ix]);
+                    }
+                    self.reveal(*first, ScrollStrategy::Nearest);
+                    cx.notify();
+                }
+            }
+        } else {
+            // Column view's chain starts again at what was asked for.
+            self.columns.root = None;
+            self.navigate(folder, cx);
+            self.select_when_listed(select);
+            if needs_peek(self) {
+                self.peek_hidden = true;
+                self.reload(cx);
+            }
+        }
+        self.focus_list(window, cx);
+    }
+
+    /// Selects `paths` once the listing that has them lands, the first with
+    /// the cursor on it. Nothing asked keeps the selection the listing picks.
+    fn select_when_listed(&mut self, mut paths: Vec<PathBuf>) {
+        match paths.len() {
+            0 => {}
+            1 => self.reselect = paths.pop(),
+            _ => {
+                self.reselect = paths.first().cloned();
+                self.select_after = paths;
+            }
+        }
+    }
+
+    /// Asks the owner for a change, shared with agents' history.
+    pub(super) fn submit(&mut self, request: Request, window: &Window, cx: &mut Context<Self>) {
+        // What these put somewhere is selected once it lists.
+        let select = matches!(
+            request,
+            Request::NewFolder { .. }
+                | Request::NewFile { .. }
+                | Request::Duplicate { .. }
+                | Request::Undo
+                | Request::UndoOf { .. }
+                | Request::Redo
+        );
+        with_owner(
+            window,
+            cx,
+            move |owner| {
+                let outcome = owner.submit(Origin::Window, request.clone())?;
+                Ok((request, outcome))
+            },
+            move |this, done, _, cx| this.settle(done, select, cx),
+        );
+    }
+
+    /// Shows how a change went: what it did, or why anything didn't happen,
+    /// in a toast, and the folder as it is now, with what the change put
+    /// here selected (`select`) or what it moved still selected where it
+    /// went. The disk's own events would refresh it too, but only once the
+    /// index runs.
+    pub(super) fn settle(
+        &mut self,
+        done: Result<(Request, Outcome), String>,
+        select: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (request, outcome) = match done {
+            Ok(done) => done,
+            Err(e) => return self.toast(e, true, None, cx),
+        };
+        // Many items to the Trash: Activity follows the job, and its end
+        // says how it went.
+        if outcome.job {
+            return cx.emit(PaneEvent::Follow(outcome.op));
+        }
+        if let Some(why) = outcome.failures().next() {
+            // A copy of what isn't downloaded is refused: offer to download it.
+            let download = icloud::refused(why).map(|path| Offer::Download("Download", vec![path]));
+            let why = short_reason(why, [self.folder()]);
+            let renamed = outcome.items.iter().filter(|i| i.result.is_ok()).count();
+            if matches!(request, Request::RenameMany { .. }) && renamed > 0 {
+                // A batch isn't atomic: what it did rename can still go back.
+                let of = outcome.items.len();
+                let said = format!("Renamed {renamed} of {of} items. {why}");
+                self.toast(said, true, Some(Offer::Undo(outcome.op)), cx);
+            } else {
+                self.toast(why, true, download, cx);
+            }
+        } else if let Some(said) = said(&request, &outcome) {
+            // Undo from the toast undoes this change or nothing. An undo or
+            // redo leaves the rest to ⌘Z and ⌘⇧Z.
+            let changed = !outcome.items.is_empty();
+            let undoable = !matches!(
+                request,
+                Request::Undo | Request::UndoOf { .. } | Request::Redo
+            );
+            let undo = (changed && undoable).then_some(Offer::Undo(outcome.op));
+            self.toast(said, false, undo, cx);
+            if changed && matches!(request, Request::Trash { .. }) {
+                feedback::sound(Sound::MoveToTrash, cx);
+            }
+        } else {
+            // Whatever the last toast offered may be stale now.
+            cx.emit(PaneEvent::ClearToast);
+        }
+        let landed = outcome
+            .items
+            .iter()
+            .filter_map(|item| Some((&item.path, item.result.as_ref().ok()?)));
+        if select {
+            self.select_after = landed.map(|(_, to)| to.clone()).collect();
+        } else {
+            for (from, to) in landed {
+                self.selection.rename(from, to);
+            }
+        }
+        self.list(!select, cx);
+    }
+
+    /// The selected paths, in the order shown.
+    pub(super) fn chosen(&self) -> Vec<PathBuf> {
+        self.chosen_entries()
+            .into_iter()
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    /// The selected entries that are listed, in the order shown.
+    pub(super) fn chosen_entries(&self) -> Vec<&Entry> {
+        self.selection.in_order(&self.entries)
+    }
+}
+
+/// What a toast says once `request` has changed what `outcome` lists.
+pub(super) fn said(request: &Request, outcome: &Outcome) -> Option<String> {
+    let asked: Vec<&Path> = outcome
+        .items
+        .iter()
+        .map(|item| item.path.as_path())
+        .collect();
+    let what = match asked.as_slice() {
+        [one] => jobs::quoted(one),
+        many => format!("{} items", many.len()),
+    };
+    Some(match request {
+        Request::Trash { .. } => format!("Moved {what} to the Trash"),
+        Request::Duplicate { .. } => format!("Duplicated {what}"),
+        Request::Rename { name, .. } => format!("Renamed to \"{name}\""),
+        Request::RenameMany { .. } => format!("Renamed {what}"),
+        Request::NewFolder { path } | Request::NewFile { path } => {
+            format!("Made {}", jobs::quoted(path))
+        }
+        Request::NewFolderWith { path, items } => {
+            let what = match items.as_slice() {
+                [one] => jobs::quoted(one),
+                many => format!("{} items", many.len()),
+            };
+            format!("Moved {what} into {}", jobs::quoted(path))
+        }
+        Request::SaveEdit { .. } => {
+            let saved = outcome
+                .items
+                .iter()
+                .rev()
+                .find_map(|item| item.result.as_ref().ok());
+            match saved {
+                Some(path) => format!("Saved {}", jobs::quoted(path)),
+                None => "Saved".to_string(),
+            }
+        }
+        Request::Organize { groups } => {
+            let files: usize = groups.iter().map(|group| group.items.len()).sum();
+            format!(
+                "Organized {files} {}",
+                if files == 1 { "file" } else { "files" }
+            )
+        }
+        Request::PutBack { .. } => format!("Put back {what}"),
+        // Its folder first, unless only Git's registration of it was left.
+        Request::RemoveWorktree { path, .. } if asked.first() == Some(&path.as_path()) => {
+            format!("Moved {} to the Trash", jobs::quoted(path))
+        }
+        Request::RemoveWorktree { path, .. } => format!("Forgot {}", jobs::quoted(path)),
+        // The owner titles these "Undo Rename", from the change they reverse.
+        Request::Undo | Request::UndoOf { .. } | Request::Redo => {
+            let of = outcome.title.strip_prefix(request.title()).unwrap_or("");
+            let verb = match request {
+                Request::Redo => "Redid",
+                _ => "Undid",
+            };
+            format!("{verb}{of}")
+        }
+        _ => return None,
+    })
+}
+
+/// A place in the history: a folder, or a page in front of one.
+#[derive(Clone)]
+pub(super) struct Stop {
+    /// Inside an archive, the archive's path joined with the folder's
+    /// names in it, which isn't on the disk.
+    pub(super) folder: PathBuf,
+    pub(super) shows: Shows,
+    /// The ZIP archive `folder` is in, for `Shows::Archive`.
+    pub(super) archive: Option<PathBuf>,
+    /// The server folder a `Shows::Remote` stop shows in front of `folder`.
+    pub(super) remote: Option<RemoteAt>,
+    /// How it's saved, from the first save on.
+    place: Option<Favorite>,
+    /// It came from a saved session and hasn't been checked since: its drive
+    /// may be gone, or another may have taken its path.
+    unverified: bool,
+}
+
+impl Stop {
+    pub(super) fn folder(folder: PathBuf) -> Self {
+        Self {
+            folder,
+            shows: Shows::Folder,
+            archive: None,
+            remote: None,
+            place: None,
+            unverified: false,
+        }
+    }
+
+    /// `folder`, inside `archive` or the archive itself.
+    pub(super) fn inside(archive: PathBuf, folder: PathBuf) -> Self {
+        Self {
+            folder,
+            shows: Shows::Archive,
+            archive: Some(archive),
+            remote: None,
+            place: None,
+            unverified: false,
+        }
+    }
+
+    pub(super) fn restored(state: StopState) -> Self {
+        Self {
+            folder: state.place.path.clone(),
+            shows: state.shows,
+            archive: None,
+            remote: state.remote,
+            place: Some(state.place),
+            unverified: true,
+        }
+    }
+
+    /// The folder on the disk it's saved as: the one holding its archive.
+    pub(super) fn saved_folder(&self) -> &Path {
+        match &self.archive {
+            Some(archive) => archive.parent().unwrap_or(archive),
+            None => &self.folder,
+        }
+    }
+}
+
+/// Choosing the column already sorted by reverses it; another column starts
+/// in its natural direction: newest and largest first, names and kinds A to Z.
+pub fn sorted_by(current: Sort, by: SortBy) -> Sort {
+    Sort {
+        by,
+        descending: if current.by == by {
+            !current.descending
+        } else {
+            matches!(by, SortBy::Modified | SortBy::Size)
+        },
+        ..current
+    }
+}
+
+/// `dir` as FSEvents names it: links resolved (/var is /private/var).
+/// Reads the disk.
+/// Whether listing `dir` includes hidden files when the setting says `wanted`.
+/// The Trash and Applications don't, wherever a link to them is opened from;
+/// their subfolders do. Reads the disk, so call it off the UI thread.
+pub(super) fn lists_hidden(dir: &Path, wanted: bool, tidy: &[PathBuf]) -> bool {
+    wanted && {
+        let dir = real(dir);
+        !tidy.iter().any(|folder| real(folder) == dir)
+    }
+}
+
+pub(super) fn real(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// More files than this at once ask before opening.
+pub(super) const OPEN_WITHOUT_ASKING: usize = 20;
+
+impl Pane {
+    pub(super) fn showing_recents(&self) -> bool {
+        self.history[self.at].shows == Shows::Recents
+    }
+    /// Whether the Overview is on screen: a search in front of it isn't.
+    pub(super) fn showing_overview(&self) -> bool {
+        self.query.is_empty() && self.history[self.at].shows == Shows::Overview
+    }
+    /// Whether the Worktrees page is on screen: a search in front of it isn't.
+    pub(super) fn showing_worktrees(&self) -> bool {
+        self.query.is_empty() && self.history[self.at].shows == Shows::Worktrees
+    }
+    /// Whether a page that isn't a listing, the Overview, Worktrees, AirDrop
+    /// or Find Duplicates, is on screen.
+    pub(super) fn showing_page(&self) -> bool {
+        self.showing_overview()
+            || self.showing_worktrees()
+            || self.showing_airdrop()
+            || self.showing_localsend()
+            || self.showing_duplicates()
+    }
+    /// Whether the rows are a folder's, rather than search results or Recents.
+    pub(super) fn showing_folder(&self) -> bool {
+        self.query.is_empty() && self.history[self.at].shows == Shows::Folder
+    }
+    pub(super) fn in_trash(&self, cx: &gpui::App) -> bool {
+        self.showing_folder()
+            && cx
+                .try_global::<Places>()
+                .is_some_and(|places| places.trash == self.folder())
+    }
+    /// Opens the Trash in the list, so Back returns from it.
+    pub(super) fn open_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(trash) = cx.try_global::<Places>().map(|places| places.trash.clone()) {
+            self.go(trash, window, cx);
+        }
+    }
+    /// Opens the list of recently opened files, so Back returns from it. The
+    /// folder behind it stays what Go to Folder and Open in Terminal start at.
+    pub(super) fn open_recents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(Shows::Recents, window, cx);
+    }
+    /// A page in front of the folder, as a place in the history.
+    pub(super) fn open_page(&mut self, shows: Shows, window: &mut Window, cx: &mut Context<Self>) {
+        self.worktrees.suggested.clear();
+        if self.stop().shows != shows {
+            self.collapse_all();
+            self.history.truncate(self.at + 1);
+            let mut stop = Stop::folder(self.disk_folder().to_path_buf());
+            stop.shows = shows;
+            self.history.push(stop);
+            self.at = self.history.len() - 1;
+        }
+        self.show_folder(cx);
+        self.focus_list(window, cx);
+    }
+    pub(super) fn showing_airdrop(&self) -> bool {
+        self.query.is_empty() && self.stop().shows == Shows::AirDrop
+    }
+    pub(super) fn showing_localsend(&self) -> bool {
+        self.query.is_empty() && self.stop().shows == Shows::LocalSend
+    }
+    /// Whether the page is on screen: a search in front of it isn't.
+    pub(super) fn showing_duplicates(&self) -> bool {
+        self.query.is_empty() && self.stop().shows == crate::session::Shows::Duplicates
+    }
+    /// Whether the rows on screen are an archive's. That follows the rows,
+    /// not where the pane is going, so they stay read only until the
+    /// listing that replaces them lands.
+    pub(super) fn showing_archive(&self) -> bool {
+        self.archived.is_some()
+    }
+    /// Whether a server folder is on screen: a search in front of it isn't.
+    pub(super) fn showing_remote(&self) -> bool {
+        self.query.is_empty() && self.stop().shows == Shows::Remote
+    }
+}
+
+/// What on disk the listing follows, in FSEvents' real paths.
+#[derive(Default)]
+pub(super) struct Watch {
+    /// The folder and each open folder in it, by the path shown.
+    pub(super) folders: HashMap<PathBuf, PathBuf>,
+    /// The folder's parent: renaming or deleting the folder changes it.
+    parent: Option<PathBuf>,
+}
+impl Watch {
+    pub(super) fn touches(&self, changed: &Path, below: bool) -> bool {
+        self.parent.as_deref() == Some(changed) || touches(changed, below, self.folders.values())
+    }
+}
+/// Whether FSEvents reporting `changed` (and everything below it, if
+/// `below`) touches one of the `shown` folders.
+pub(super) fn touches<'a>(
+    changed: &Path,
+    below: bool,
+    shown: impl IntoIterator<Item = &'a PathBuf>,
+) -> bool {
+    shown
+        .into_iter()
+        .any(|dir| dir == changed || (below && dir.starts_with(changed)))
+}
+/// The rows a folder shows: each entry, with the contents of each expanded
+/// folder right under it, one level deeper.
+pub(super) fn flatten(
+    root: &[Entry],
+    children: &HashMap<PathBuf, Vec<Entry>>,
+    expanded: &HashSet<PathBuf>,
+) -> Vec<(Entry, usize)> {
+    pub(super) fn walk(
+        entries: &[Entry],
+        depth: usize,
+        children: &HashMap<PathBuf, Vec<Entry>>,
+        expanded: &HashSet<PathBuf>,
+        rows: &mut Vec<(Entry, usize)>,
+    ) {
+        for entry in entries {
+            rows.push((entry.clone(), depth));
+            if expanded.contains(&entry.path)
+                && let Some(inside) = children.get(&entry.path)
+            {
+                walk(inside, depth + 1, children, expanded, rows);
+            }
+        }
+    }
+    let mut rows = Vec::with_capacity(root.len());
+    walk(root, 0, children, expanded, &mut rows);
+    rows
+}
+
+impl Pane {
     /// `reload`, but `quiet` keeps the view where it is: a refresh after the
     /// disk changed mustn't scroll.
     pub(super) fn list(&mut self, quiet: bool, cx: &mut Context<Self>) {
@@ -900,9 +1449,9 @@ impl Pane {
         let drives = cx
             .try_global::<Places>()
             .map(|places| places.drives.clone());
-        let searcher: Arc<dyn sidebar::Drives> = match &drives {
+        let searcher: Arc<dyn crate::system::Drives> = match &drives {
             Some(drives) => drives.clone(),
-            None => Arc::new(sidebar::System),
+            None => Arc::new(crate::system::System),
         };
         let consented = std::mem::take(&mut self.consented);
         self.trash_here = self.in_trash(cx);
@@ -1015,7 +1564,8 @@ impl Pane {
                 ));
             }
             if let Some(store) = recents {
-                let (rows, missing) = trash::recent_entries(trash::read_recents(store.as_ref())?);
+                let (rows, missing) =
+                    crate::system::recent_entries(trash::read_recents(store.as_ref())?);
                 return Ok((
                     rows,
                     HashMap::new(),
@@ -1049,7 +1599,7 @@ impl Pane {
                 }
                 verified = Some(folder.clone());
             }
-            let hidden = |dir: &Path| sidebar::lists_hidden(dir, show_hidden || peek, &tidy);
+            let hidden = |dir: &Path| lists_hidden(dir, show_hidden || peek, &tidy);
             let root = entries::list_dir(&folder, hidden(&folder), sort)
                 .map_err(|e| format!("{}: {e}", folder.display()))?;
             let real_folder = real(&folder);
@@ -1145,7 +1695,6 @@ impl Pane {
             });
         });
     }
-
     /// Asks macOS, off the UI thread, which folders in `listed` hold
     /// something not downloaded, and badges them when it answers. An answer
     /// replaces only what it was asked, so a folder opened in place while a
@@ -1161,7 +1710,7 @@ impl Pane {
             .cloned()
             .collect();
         let answer = cx.background_executor().spawn(async move {
-            let partly = cloud::partly_downloaded(&folders);
+            let partly = entries::partly_downloaded(&folders);
             (folders, partly)
         });
         self.asking.push(cx.spawn(async move |this, cx| {
@@ -1175,55 +1724,12 @@ impl Pane {
             });
         }));
     }
-
     /// Whether `entry` gets the cloud badge: it, or something in it, isn't
     /// downloaded.
     pub(super) fn in_cloud(&self, entry: &Entry) -> bool {
-        entry.availability == cloud::Availability::Placeholder
+        entry.availability == icloud::Availability::Placeholder
             || self.partly_downloaded.contains(&entry.path)
     }
-
-    /// The layout on screen: a content search's lines and a batch's new
-    /// names only fit the list.
-    /// Search results, Recents and the Trash have no folders to chain, so
-    /// column view shows them as a list.
-    pub(super) fn layout(&self) -> View {
-        match self.view {
-            _ if !self.matches.is_empty() || self.batch.is_some() => View::List,
-            // An archive's rows stay a list until the folder's listing
-            // replaces them.
-            View::Columns
-                if !self.showing_folder() || self.trash_here || self.showing_archive() =>
-            {
-                View::List
-            }
-            view => view,
-        }
-    }
-
-    /// What a listing that's just landed selects. Search selects its best hit
-    /// so Enter opens it. A folder selects the one just left, else keeps its
-    /// selection. Put back after a cancelled drag, the selection stays.
-    pub(super) fn pick_selection(&mut self, left: Option<PathBuf>) {
-        let enter_first = std::mem::take(&mut self.columns.enter_first);
-        let first = if std::mem::take(&mut self.keep_selection) {
-            None
-        } else if self.query.is_empty() && !enter_first {
-            left.and_then(|path| self.entries.iter().position(|e| e.path == path))
-        } else {
-            (!self.entries.is_empty()).then_some(0)
-        };
-        let made = std::mem::take(&mut self.select_after);
-        if self.entries.iter().any(|e| made.contains(&e.path)) {
-            self.selection.clear();
-            for entry in self.entries.iter().filter(|e| made.contains(&e.path)) {
-                self.selection.toggle(entry);
-            }
-        } else if let Some(ix) = first {
-            self.selection.select(&self.entries[ix]);
-        }
-    }
-
     /// Refreshes the listing shortly after the disk changes under a folder on
     /// screen, and runs a search again after a change beside one of its
     /// results.
@@ -1244,16 +1750,14 @@ impl Pane {
             self.schedule_refresh(cx);
         }
     }
-
     /// Whether the rows on screen are read from the disk or the index, and
     /// so go stale when the disk changes.
-    fn follows_disk(&self) -> bool {
+    pub(super) fn follows_disk(&self) -> bool {
         self.showing_folder() || self.wants_archive() || !self.query.is_empty()
     }
-
     /// Whether any of `batch` changed a folder on screen, or the folder of
     /// one of a search's results.
-    fn touched(&self, batch: &[(PathBuf, bool)]) -> bool {
+    pub(super) fn touched(&self, batch: &[(PathBuf, bool)]) -> bool {
         let beside_results: HashSet<&Path> = if self.query.is_empty() {
             HashSet::new()
         } else {
@@ -1268,7 +1772,6 @@ impl Pane {
                 || (*below && beside_results.iter().any(|dir| dir.starts_with(changed)))
         })
     }
-
     /// Checks the changes held during a listing against what it watches.
     pub(super) fn recheck_held(&mut self, cx: &mut Context<Self>) {
         if self.listing || !self.expanding.is_empty() {
@@ -1279,10 +1782,9 @@ impl Pane {
             self.schedule_refresh(cx);
         }
     }
-
     /// One refresh `REFRESH_DELAY` after the first change of a burst, or
     /// `SEARCH_REFRESH_DELAY` for a search; changes meanwhile fold into it.
-    fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh.is_some() {
             return;
         }
@@ -1307,288 +1809,9 @@ impl Pane {
             });
         }));
     }
+}
 
-    /// The row the keys move from.
-    pub(super) fn cursor_ix(&self) -> Option<usize> {
-        self.selection.cursor_ix(&self.entries)
-    }
-
-    /// Lays the tree out as rows, keeping the selection on the same entry.
-    pub(super) fn rebuild(&mut self) {
-        self.relayout(true);
-    }
-
-    /// `rebuild`; `follow` scrolls to the selection if rows moved it.
-    fn relayout(&mut self, follow: bool) {
-        let before = self.cursor_ix();
-        let rows = if self.showing_folder() && self.view == View::List {
-            flatten(&self.root, &self.children, &self.expanded)
-        } else {
-            self.root.iter().cloned().map(|entry| (entry, 0)).collect()
-        };
-        (self.entries, self.depths) = rows.into_iter().unzip();
-        self.selection.retain(&self.entries);
-        // Rows opening above the selection push it down; keep it in view.
-        if let Some(ix) = self.cursor_ix().filter(|ix| follow && Some(*ix) != before) {
-            self.reveal(ix, ScrollStrategy::Nearest);
-        }
-    }
-
-    /// Opens or closes a folder in place. Opening lists it off the UI thread.
-    pub(super) fn toggle_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.listing {
-            return;
-        }
-        if self.expanded.remove(&path) {
-            self.expanding.remove(&path);
-            self.watch.folders.remove(&path);
-            // A selection inside the closed folder moves to it, as in Finder.
-            if let Some(folder) = self.entries.iter().find(|e| e.path == path) {
-                self.selection.fold(folder);
-            }
-            self.rebuild();
-            cx.notify();
-            return;
-        }
-        self.expanded.insert(path.clone());
-        let key = path.clone();
-        let (show_hidden, peek, sort) = (self.show_hidden, self.peek_hidden, self.sort);
-        let tidy = self.tidy_folders(cx);
-        let dir = path.clone();
-        let list = cx.background_executor().spawn(async move {
-            let hidden = sidebar::lists_hidden(&dir, show_hidden || peek, &tidy);
-            let list = entries::list_dir(&dir, hidden, sort).unwrap_or_default();
-            (list, real(&dir))
-        });
-        let task = cx.spawn(async move |this, cx| {
-            let (list, watched) = list.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.expanding.remove(&path).is_some() && this.expanded.contains(&path) {
-                    this.ask_downloads(&list, cx);
-                    // Watched from now on, not just from the next listing.
-                    this.watch.folders.insert(path.clone(), watched);
-                    this.children.insert(path, list);
-                    this.rebuild();
-                    this.recheck_held(cx);
-                    cx.notify();
-                }
-            });
-        });
-        self.expanding.insert(key, task);
-        self.rebuild();
-        cx.notify();
-    }
-
-    /// → opens the selected folder in place, or steps into it if it's open.
-    fn expand(&mut self, cx: &mut Context<Self>) {
-        if self.showing_duplicates() {
-            return self.open_duplicate_group(cx);
-        }
-        match self.layout() {
-            View::Grid => return self.select(Move::By(1), false, cx),
-            View::Columns => return self.enter_column(cx),
-            View::List => {}
-        }
-        if !self.showing_folder() || self.listing {
-            return;
-        }
-        let Some(ix) = self.cursor_ix() else { return };
-        match tree_step(&self.depths, ix, Arrow::Right, self.is_open_folder(ix)) {
-            TreeStep::Toggle => self.toggle_folder(self.entries[ix].path.clone(), cx),
-            TreeStep::Select(to) => self.select_row(to, cx),
-            TreeStep::Up | TreeStep::Stay => {}
-        }
-    }
-
-    /// ← closes the selected folder, steps out to its parent row, or at the
-    /// top goes up to the enclosing folder. Going up takes a fresh press, so
-    /// holding ← to fold a tree stops at its top instead of climbing on.
-    fn collapse(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let keystroke = &event.keystroke;
-        if keystroke.key != "left" || keystroke.modifiers.modified() || self.renaming.is_some() {
-            return;
-        }
-        cx.stop_propagation();
-        match self.layout() {
-            View::Grid => return self.select(Move::By(-1), false, cx),
-            View::Columns => return self.leave_column(event.is_held, cx),
-            View::List => {}
-        }
-        if !self.showing_folder() || self.listing {
-            return;
-        }
-        let cursor = self.cursor_ix();
-        let step = match cursor {
-            Some(ix) => tree_step(&self.depths, ix, Arrow::Left, self.is_open_folder(ix)),
-            None => TreeStep::Up,
-        };
-        match step {
-            TreeStep::Toggle => {
-                if let Some(ix) = cursor {
-                    self.toggle_folder(self.entries[ix].path.clone(), cx)
-                }
-            }
-            TreeStep::Select(to) => self.select_row(to, cx),
-            TreeStep::Up if event.is_held => {}
-            TreeStep::Up => {
-                if let Some(parent) = self.folder().parent().map(Path::to_path_buf) {
-                    self.navigate(parent, cx);
-                }
-            }
-            TreeStep::Stay => {}
-        }
-    }
-
-    /// Whether row `ix` is a folder, and whether it's open. Links aren't
-    /// opened in place: telling where they lead would read the disk here.
-    /// Packages aren't either, which their extension says without a read.
-    pub(super) fn is_open_folder(&self, ix: usize) -> Option<bool> {
-        let entry = self.entries.get(ix)?;
-        (entry.kind == Kind::Dir && !workspace::is_package(&entry.path))
-            .then(|| self.expanded.contains(&entry.path))
-    }
-
-    /// The indent for a row's depth, then its disclosure triangle if it's a
-    /// folder: pressing it opens or closes the folder in place.
-    fn disclosure(
-        &self,
-        ix: usize,
-        depth: usize,
-        open: Option<bool>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        div()
-            .id(("disclosure", ix))
-            .ml(px(depth as f32 * 16.))
-            .size(px(14.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .when_some(open, |d, open| {
-                d.cursor_pointer()
-                    .child(
-                        icon("chevron-right", 12.)
-                            .text_color(content(0.65))
-                            .when(open, |i| {
-                                i.with_transformation(gpui::Transformation::rotate(
-                                    gpui::percentage(0.25),
-                                ))
-                            }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.focus_list(window, cx);
-                            if let Some(entry) = this.entries.get(ix) {
-                                this.toggle_folder(entry.path.clone(), cx);
-                            }
-                        }),
-                    )
-            })
-    }
-
-    /// Scrolls entry `ix` into view: in the grid, its row of the grid.
-    pub(super) fn reveal(&self, ix: usize, strategy: ScrollStrategy) {
-        let item = match self.layout() {
-            View::Grid => ix / self.grid_columns(),
-            // Going down brings a file's lines in with it; its own row stays
-            // the one to show when it's above the view.
-            View::List if !self.matches.is_empty() => {
-                let first = self.matches.row_of(ix);
-                let offset = self.scroll.0.borrow().base_handle.offset().y.as_f32();
-                let above = first as f32 * self.list_row_height < -offset;
-                if above || !matches!(strategy, ScrollStrategy::Nearest) {
-                    first
-                } else {
-                    self.matches.last_row_of(ix)
-                }
-            }
-            View::List | View::Columns => ix,
-        };
-        self.scroll.scroll_to_item(item, strategy);
-    }
-
-    fn take_pending_reveal(&mut self) {
-        if std::mem::take(&mut self.reveal_pending)
-            && let Some(ix) = self.cursor_ix()
-        {
-            self.reveal(ix, ScrollStrategy::Center);
-        }
-    }
-
-    /// How many grid cells fit across, as last laid out.
-    fn grid_columns(&self) -> usize {
-        self.across
-    }
-
-    pub(super) fn select_row(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(entry) = self.entries.get(ix) else {
-            return;
-        };
-        self.selection.select(entry);
-        self.reveal(ix, ScrollStrategy::Nearest);
-        cx.notify();
-    }
-
-    /// A click on row `ix`: ⌘ toggles it, ⇧ selects the range from the
-    /// anchor, and a plain click selects it alone. A double click opens.
-    pub(super) fn click_entry(
-        &mut self,
-        ix: usize,
-        event: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // The end of a dragged rectangle, whichever GPUI reports first.
-        if std::mem::take(&mut self.swept) || self.marquee.as_ref().is_some_and(|m| m.dragging) {
-            return;
-        }
-        let Some(entry) = self.entries.get(ix) else {
-            return;
-        };
-        self.focus_list(window, cx);
-        let modifiers = event.modifiers();
-        if modifiers.platform {
-            self.selection.toggle(entry);
-        } else if modifiers.shift {
-            self.selection.extend(&self.entries, ix);
-        } else {
-            self.selection.select(entry);
-            if event.click_count() == 2 && self.batch.is_none() {
-                self.open_selection(window, cx);
-            }
-        }
-        cx.notify();
-    }
-
-    /// A right-click on row `ix`, or on no row; GPUI delivers ⌃-click as
-    /// one. An entry outside
-    /// the selection becomes the selection first, as in Finder, and no row
-    /// lets go of it, so the menu is on the folder.
-    fn context_click(
-        &mut self,
-        ix: Option<usize>,
-        at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.stop_propagation();
-        window.prevent_default();
-        if self.batch.is_some() {
-            return;
-        }
-        self.focus_list(window, cx);
-        match ix.and_then(|ix| self.entries.get(ix)) {
-            Some(entry) if !self.selection.contains(&entry.path) => self.selection.select(entry),
-            Some(_) => {}
-            None => self.selection.clear(),
-        }
-        let scopes = self.scopes();
-        cx.emit(PaneEvent::Menu { scopes, at });
-    }
-
+impl Pane {
     /// What a context menu on the listing is on: the selection, how many,
     /// and whether it's a lone package, or else the folder.
     pub(super) fn scopes(&mut self) -> Vec<Scope> {
@@ -1602,7 +1825,6 @@ impl Pane {
         }
         scopes
     }
-
     /// The lone selected entry, if it's a folder or link named as an app or
     /// another package: what Show Package Contents goes into. Each frame
     /// asks, so the answer is kept for the entry it was worked out for.
@@ -1621,7 +1843,6 @@ impl Pane {
             .filter(|(_, is)| *is)
             .map(|(path, _)| path.clone())
     }
-
     /// The lone selected entry, if it's a folder or a link that may lead to
     /// one: what Add to Sidebar pins. Each frame asks, so the answer is kept
     /// for the entry it was worked out for.
@@ -1643,7 +1864,6 @@ impl Pane {
             .filter(|(_, is)| *is)
             .map(|(path, _)| path.clone())
     }
-
     /// Where ⇧F10 opens the menu: under the cursor's entry if it's in view,
     /// else in the listing's corner.
     pub(super) fn menu_point(&self, cx: &App) -> Point<Pixels> {
@@ -1668,7 +1888,6 @@ impl Pane {
         let at = bounds.origin + self.scroll.0.borrow().base_handle.offset() + below;
         if bounds.contains(&at) { at } else { corner }
     }
-
     /// A right-click on `element` opens the context menu on row `ix`.
     pub(super) fn context_target<E: InteractiveElement>(
         element: E,
@@ -1682,3247 +1901,99 @@ impl Pane {
             }),
         )
     }
-
-    /// Open in Terminal: at each selected folder and the folder holding
-    /// each other item, or here with nothing selected.
-    pub(super) fn open_in_terminal(&mut self, cx: &mut Context<Self>) {
-        let mut folders: Vec<PathBuf> = Vec::new();
-        for entry in self.selection.in_order(&self.entries) {
-            let folder = match entry.kind {
-                Kind::Dir => Some(entry.path.as_path()),
-                _ => entry.path.parent(),
-            };
-            if let Some(folder) = folder.filter(|f| !folders.iter().any(|seen| seen == f)) {
-                folders.push(folder.to_path_buf());
-            }
+    /// Opens a file in its app and remembers that, or says it's gone.
+    pub(super) fn open_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if self.missing.contains(path) {
+            let said = format!("{} is no longer there.", crate::jobs::quoted(path));
+            return self.toast(said, true, None, cx);
         }
-        if folders.is_empty() {
-            folders.push(self.disk_folder().to_path_buf());
-        }
-        let terminal = cx.global::<Preferences>().terminal;
-        if let Err(e) = workspace::open_in_terminal(&folders, &terminal) {
-            self.toast(e, true, None, cx);
-        }
-    }
-
-    /// Show Package Contents: goes inside the selected package, which Open
-    /// launches instead. A link goes in only if it leads to a folder, which is
-    /// on the disk, maybe a slow volume.
-    pub(super) fn show_package_contents(&mut self, cx: &mut Context<Self>) {
-        let Some(package) = self.package() else {
-            return;
+        let Some(places) = cx.try_global::<Places>().cloned() else {
+            return cx.open_with_system(path);
         };
-        let target = package.clone();
-        let is_dir = cx
+        places.drives.open(path, cx);
+        let path = path.to_path_buf();
+        let remembered = cx
             .background_executor()
-            .spawn(async move { target.is_dir() });
-        let asked_on = self.selected_now();
-        self.opening = cx.spawn(async move |this, cx| {
-            let is_dir = is_dir.await;
-            let _ = this.update(cx, |this, cx| {
-                if is_dir && this.selected_now() == asked_on {
-                    this.navigate(package, cx);
-                }
-            });
-        });
+            .spawn(async move { places.store.opened(&path) });
+        cx.spawn(async move |this, cx| {
+            if let Err(why) = remembered.await {
+                let _ = this.update(cx, |this, cx| this.toast(why, true, None, cx));
+            }
+        })
+        .detach();
     }
-
-    /// Whether the keys go to the list, the search over it, or a context
-    /// menu opened on it, which leaves the selection looking as it was.
-    fn list_active(&self, window: &Window, cx: &App) -> bool {
-        // A batch's rows stay grey, where its problems read in red.
-        self.batch.is_none()
-            && (self.list_focus.contains_focused(window, cx)
-                || self.search.focus_handle(cx).is_focused(window)
-                || self.chrome.menu_here)
-    }
-
     /// From one list row's top to the next. Column view's rows have the gap
     /// stacked rows elsewhere do; the list's touch, as in Finder.
-    fn row_pitch(&self, cx: &App) -> f32 {
+    pub(super) fn row_pitch(&self, cx: &App) -> f32 {
         let height = cx.global::<Preferences>().row_size.metrics().0;
         match self.layout() {
             View::Columns => height + theme::ROW_GAP,
             _ => height,
         }
     }
-
-    /// A point in the window as a point in the listing, measured from the
-    /// top left of all its rows, scrolled or not.
-    pub(super) fn listing_point(&self, point: Point<Pixels>) -> Point<Pixels> {
-        let offset = self.scroll.0.borrow().base_handle.offset();
-        point - self.list_bounds.get().origin - offset
-    }
-
-    /// The rows a rectangle in listing coordinates touches, in order.
-    fn rows_in(&self, rect: Bounds<Pixels>, cx: &App) -> Vec<usize> {
-        let len = self.entries.len();
-        // The list's padding, then in the grid each row's too.
-        let pad = match self.layout() {
-            View::List | View::Columns => theme::CARD_PADDING,
-            View::Grid => 4.,
-        };
-        let (top, bottom) = (rect.top().as_f32() - pad, rect.bottom().as_f32() - pad);
-        match self.layout() {
-            View::List | View::Columns => {
-                let height = self.row_pitch(cx);
-                let rows = span(top, bottom, height, self.matches.row_count(len));
-                self.matches.entries_in(rows)
-            }
-            View::Grid => {
-                let across = self.across;
-                let height = grid_cell(self.grid_icon).1;
-                let (left, right) = (rect.left().as_f32() - 8., rect.right().as_f32() - 8.);
-                let columns = span(left, right, self.cell_width, across);
-                span(top, bottom, height, len.div_ceil(across))
-                    .flat_map(|row| columns.clone().map(move |column| row * across + column))
-                    .filter(|ix| *ix < len)
-                    .collect()
-            }
-        }
-    }
-
-    /// Follows the pointer while a rectangle is dragged. A move with the
-    /// button up means its release went unseen, so the press ends there.
-    fn drag_marquee(
-        &mut self,
-        event: &MouseMoveEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.end_marquee(event.position, event.modifiers, cx);
-            return;
-        }
-        let Some(marquee) = self.marquee.as_mut() else {
-            return;
-        };
-        marquee.pointer = event.position;
-        self.sweep_marquee(cx);
-        self.auto_scroll(window, cx);
-    }
-
-    /// Selects what the rectangle covers, from where it began to the
-    /// pointer, once the pointer has travelled a few points.
-    fn sweep_marquee(&mut self, cx: &mut Context<Self>) {
-        let Some(pointer) = self.marquee.as_ref().map(|m| m.pointer) else {
-            return;
-        };
-        let at = self.listing_point(pointer);
-        let Some(marquee) = self.marquee.as_mut() else {
-            return;
-        };
-        marquee.end = at;
-        let travel = at - marquee.start;
-        if !marquee.dragging && travel.x.abs().max(travel.y.abs()) > px(3.) {
-            marquee.dragging = true;
-            self.selection.begin_sweep(marquee.additive);
-        }
-        if !marquee.dragging {
-            return;
-        }
-        let rect = Bounds::from_corners(marquee.start.min(&at), marquee.start.max(&at));
-        let hit = self.rows_in(rect, cx);
-        self.selection.sweep(&self.entries, &hit);
-        cx.notify();
-    }
-
-    /// Past the listing's top or bottom, a drag scrolls it a step a frame,
-    /// faster the further out the pointer is, until the pointer comes back,
-    /// the listing can't go further, or the button comes up.
-    fn auto_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(marquee) = self.marquee.as_mut().filter(|m| m.dragging && !m.scrolling) else {
-            return;
-        };
-        let bounds = self.list_bounds.get();
-        let y = marquee.pointer.y;
-        let over = if y < bounds.top() {
-            y - bounds.top()
-        } else if y > bounds.bottom() {
-            y - bounds.bottom()
-        } else {
-            return;
-        };
-        let step = px((over.as_f32() / 4.).clamp(-40., 40.));
-        {
-            let scroll = &self.scroll.0.borrow().base_handle;
-            let before = scroll.offset();
-            // Offsets run negative as the list scrolls down.
-            let mut offset = before;
-            offset.y = (offset.y - step).clamp(-scroll.max_offset().y, px(0.));
-            if offset == before {
-                return;
-            }
-            scroll.set_offset(offset);
-        }
-        marquee.scrolling = true;
-        let this = cx.weak_entity();
-        window.on_next_frame(move |window, cx| {
-            let _ = this.update(cx, |this, cx| this.scroll_tick(window, cx));
-        });
-        cx.notify();
-    }
-
-    /// The frame an auto-scroll step waited on: the rows under the
-    /// rectangle have moved, so sweep again, then take the next step.
-    fn scroll_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(marquee) = self.marquee.as_mut() {
-            marquee.scrolling = false;
-        }
-        self.sweep_marquee(cx);
-        self.auto_scroll(window, cx);
-    }
-
-    /// The button's up: a drag keeps what it covered, and a click on no
-    /// entry, without ⌘ or ⇧, lets go of the selection, as in Finder.
-    /// Clicks on entries select through `click_entry`.
-    fn end_marquee(
-        &mut self,
-        position: Point<Pixels>,
-        modifiers: Modifiers,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(marquee) = self.marquee.take() else {
-            return;
-        };
-        self.swept = marquee.dragging;
-        if marquee.dragging {
-            self.selection.end_sweep();
-        } else {
-            let at = self.listing_point(position);
-            let on_entry = !self.rows_in(Bounds::from_corners(at, at), cx).is_empty();
-            if !on_entry && !(modifiers.platform || modifiers.shift) {
-                self.selection.clear();
-            }
-        }
-        cx.notify();
-    }
-
-    /// The rectangle, drawn over the listing where it is now.
-    pub(super) fn marquee_overlay(&self) -> Option<impl IntoElement + use<>> {
-        let marquee = self.marquee.as_ref().filter(|m| m.dragging)?;
-        let offset = self.scroll.0.borrow().base_handle.offset();
-        let corner = marquee.start.min(&marquee.end) + offset;
-        let size = marquee.end - marquee.start;
-        Some(
-            div()
-                .absolute()
-                .left(corner.x)
-                .top(corner.y)
-                .w(size.x.abs())
-                .h(size.y.abs())
-                .bg(accent().opacity(0.15))
-                .border_1()
-                .border_color(accent().opacity(0.6)),
-        )
-    }
-
-    /// Follows a rectangle's drag through the window, as `sidebar_drag`
-    /// does, so it keeps up when the pointer leaves the listing.
-    fn marquee_drag(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let this = cx.weak_entity();
-        canvas(
-            |_, _, _| {},
-            move |_, _, window, _| {
-                let moved = this.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                    if phase == DispatchPhase::Bubble {
-                        let _ = moved.update(cx, |this, cx| this.drag_marquee(event, window, cx));
-                    }
-                });
-                // A trackpad scroll mid-drag moves the rows under the
-                // rectangle; sweep again once the list has scrolled.
-                let scrolled = this.clone();
-                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, window, _| {
-                    if phase == DispatchPhase::Bubble {
-                        let scrolled = scrolled.clone();
-                        window.on_next_frame(move |_, cx| {
-                            let _ = scrolled.update(cx, |this, cx| this.sweep_marquee(cx));
-                        });
-                    }
-                });
-                let released = this.clone();
-                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
-                        let _ = released.update(cx, |this, cx| {
-                            this.end_marquee(event.position, event.modifiers, cx)
-                        });
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_0()
-    }
-
-    /// Opens what's selected: a lone folder goes in, and files and packages
-    /// open in their apps. Several folders at once would need tabs or windows. Past
-    /// `OPEN_WITHOUT_ASKING` files it asks first, as Finder does, so ⌘A then
-    /// ↩ can't launch a whole folder.
-    pub(super) fn open_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.showing_worktrees() {
-            return self.open_worktree(window, cx);
-        }
-        if self.showing_duplicates() {
-            return self.open_duplicate(window, cx);
-        }
-        if self.batch.is_some() {
-            return;
-        }
-        let chosen = self.selection.in_order(&self.entries);
-        if let [only] = chosen.as_slice() {
-            let ix = self.entries.iter().position(|e| e.path == only.path);
-            if let Some(ix) = ix {
-                self.open(ix, cx);
-            }
-            return;
-        }
-        if self.showing_archive() {
-            let said = "Extract them to open them.".to_string();
-            return self.toast(said, false, None, cx);
-        }
-        // An archive opens here, and only one at a time: in its app it
-        // would be extracted outside the owner, with no Undo.
-        let zips = chosen.iter().any(|entry| archive::opens_here(entry));
-        let files: Vec<PathBuf> = chosen
-            .into_iter()
-            .filter(|entry| entry.kind != Kind::Dir || workspace::is_package(&entry.path))
-            .filter(|entry| !archive::opens_here(entry))
-            .map(|entry| entry.path.clone())
-            .collect();
-        if zips {
-            let said = "Archives open one at a time.".to_string();
-            self.toast(said, false, None, cx);
-        }
-        if files.len() <= OPEN_WITHOUT_ASKING {
-            for file in files {
-                self.open_or_download(file, cx);
-            }
-            return;
-        }
-        let answer = window.prompt(
-            gpui::PromptLevel::Warning,
-            &format!("Open {} files?", files.len()),
-            Some("Each opens in its app."),
-            &["Open", "Cancel"],
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            if answer.await == Ok(0) {
-                let _ = this.update(cx, |this, cx| {
-                    for file in files {
-                        this.open_or_download(file, cx);
-                    }
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Opens the file or package `path` in its app, once it's downloaded if
-    /// it's a placeholder or holds one. What the listing can't say, such as a
-    /// search result's or where a link leads, the disk says off the UI
-    /// thread, and a link's target is what downloads.
-    fn open_or_download(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let listed = self.entries.iter().find(|entry| entry.path == path);
-        let needs = match listed.map(|entry| (entry.kind, entry.availability)) {
-            Some((Kind::Link, _)) | Some((_, cloud::Availability::Unknown)) | None => {
-                let asked = path.clone();
-                let target = cx.background_executor().spawn(async move {
-                    let target = std::fs::canonicalize(&asked).unwrap_or(asked);
-                    cloud::needs_download(&target).then_some(target)
-                });
-                return cx
-                    .spawn(async move |this, cx| {
-                        let target = target.await;
-                        let _ = this.update(cx, |this, cx| match target {
-                            Some(target) => this.download_and_open(target, cx),
-                            None => this.open_file(&path, cx),
-                        });
-                    })
-                    .detach();
-            }
-            Some((_, cloud::Availability::Placeholder)) => true,
-            _ => self.partly_downloaded.contains(&path),
-        };
-        match needs {
-            true => self.download_and_open(path, cx),
-            false => self.open_file(&path, cx),
-        }
-    }
-
-    pub(super) fn open(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(entry) = self.entries.get(ix) else {
-            return;
-        };
-        let path = entry.path.clone();
-        let kind = entry.kind;
-        if self.showing_archive() {
-            return match kind {
-                // Only within the archive asked for: on the way out, or to
-                // another archive, the folder would be looked for on the disk.
-                Kind::Dir
-                    if self.wants_archive()
-                        && self
-                            .stop()
-                            .archive
-                            .as_ref()
-                            .is_some_and(|archive| path.starts_with(archive)) =>
-                {
-                    self.navigate(path, cx)
-                }
-                Kind::Dir => {}
-                _ => {
-                    let said = format!("Extract {} to open it.", jobs::quoted(&path));
-                    self.toast(said, false, None, cx)
-                }
-            };
-        }
-        if archive::opens_here(entry) {
-            return self.open_archive(path, cx);
-        }
-        if !matches!(kind, Kind::Dir | Kind::Link) {
-            return self.open_or_download(path, cx);
-        }
-        // Whether it's a package, or where a link leads, is on the disk, maybe
-        // a slow volume. A package launches its handler, as in Finder.
-        let target = path.clone();
-        let goes_in = cx.background_executor().spawn(async move {
-            match kind {
-                Kind::Dir => !info::is_package(&target),
-                _ => target.is_dir() && !info::is_package(&real(&target)),
-            }
-        });
-        let asked_on = self.selected_now();
-        self.opening = cx.spawn(async move |this, cx| {
-            let goes_in = goes_in.await;
-            let _ = this.update(cx, |this, cx| {
-                // The selection moved while the disk answered: what was asked
-                // for isn't what's wanted now.
-                if this.selected_now() != asked_on {
-                    return;
-                }
-                if goes_in {
-                    this.navigate(path, cx);
-                } else {
-                    this.open_or_download(path, cx);
-                }
-            });
-        });
-    }
-
-    /// What's selected, as far as an Open waiting on the disk cares.
-    fn selected_now(&self) -> (Option<PathBuf>, usize) {
-        (
-            self.selection.only().map(Path::to_path_buf),
-            self.selection.len(),
-        )
-    }
-
-    /// Moves the cursor a `step`, selecting what it lands on, or with ⇧
-    /// (`extend`) the range from the anchor to it.
-    pub(super) fn select(&mut self, step: Move, extend: bool, cx: &mut Context<Self>) {
-        let cursor = self.cursor_ix();
-        let Some(next) = moved(cursor, self.entries.len(), step) else {
-            return;
-        };
-        // A held arrow at either end repaints nothing, once the entry there
-        // is all that's selected.
-        let alone = self.selection.len() == 1 && self.selection.contains(&self.entries[next].path);
-        if !extend && Some(next) == cursor && alone {
-            return;
-        }
-        if extend {
-            self.selection.extend(&self.entries, next);
-        } else {
-            self.selection.select(&self.entries[next]);
-        }
-        self.reveal(next, ScrollStrategy::Nearest);
-        cx.notify();
-    }
-
-    /// ↑ and ↓: a row of the list, or of the grid.
-    pub(super) fn select_vertically(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
-        if self.showing_overview() {
-            return self.step_overview(down, cx);
-        }
-        if self.showing_worktrees() {
-            return self.step_worktree(down, cx);
-        }
-        if self.showing_duplicates() {
-            return self.step_duplicates(down, cx);
-        }
-        let step = match (self.layout(), down) {
-            (View::List | View::Columns, true) => Move::Next,
-            (View::List | View::Columns, false) => Move::Previous,
-            (View::Grid, _) => {
-                let across = self.grid_columns() as isize;
-                Move::By(if down { across } else { -across })
-            }
-        };
-        self.select(step, extend, cx);
-    }
-
-    /// Scrolls a page, leaving the selection where it is.
-    fn page(&mut self, down: bool, cx: &mut Context<Self>) {
-        let scroll = &self.scroll.0.borrow().base_handle;
-        // A page less one row, so the row at the edge stays in view.
-        let page = scroll.bounds().size.height - px(self.row_pitch(cx));
-        let mut offset = scroll.offset();
-        // Offsets run negative as the list scrolls down.
-        offset.y = if down {
-            (offset.y - page).max(-scroll.max_offset().y)
-        } else {
-            (offset.y + page).min(px(0.))
-        };
-        scroll.set_offset(offset);
-        cx.notify();
-    }
-
-    pub(super) fn focus_list(&self, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.list_focus, cx);
-    }
-
-    /// Opens a place and moves focus to its files. Column view's chain starts
-    /// again there.
-    pub(super) fn go(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.columns.root = None;
-        self.navigate(path, cx);
-        self.focus_list(window, cx);
-    }
-
-    /// Typing in the list or sidebar searches: the first character moves
-    /// focus to the search field and types there. Finder selects by name
-    /// instead; search is Monodrive's way in.
-    /// E in a preview, or its command: the tools.
-    fn edit_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = &self.preview {
-            view.update(cx, |view, cx| view.toggle_edit(window, cx));
-        }
-    }
-
-    pub(super) fn type_to_search(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Delete takes a picked-up mark off the picture, not the file.
-        let modifiers = event.keystroke.modifiers;
-        if matches!(event.keystroke.key.as_str(), "backspace" | "delete")
-            && !modifiers.modified()
-            && !self.changing_names()
-            && let Some(view) = &self.preview
-            && view.update(cx, |view, cx| view.delete_mark(window, cx))
-        {
-            return cx.stop_propagation();
-        }
-        // A name being edited takes its own typing.
-        let Some(text) = typed(&event.keystroke).filter(|_| !self.changing_names()) else {
-            return;
-        };
-        let text = text.to_owned();
-        if let Some(view) = &self.preview {
-            let editing = view.read(cx).editing();
-            if text == "e" {
-                self.edit_preview(window, cx);
-                return cx.stop_propagation();
-            }
-            // A stray letter mustn't start a search and lose an edit.
-            if editing {
-                return cx.stop_propagation();
-            }
-        }
-        self.search.update(cx, |field, cx| {
-            window.focus(&field.focus_handle(cx), cx);
-            field.insert(&text, cx);
-        });
-        cx.stop_propagation();
-    }
-
-    /// Shows `folder` with `select` selected, the way Go to Folder, a pasted
-    /// path and another app's Show in Finder land.
-    pub(super) fn go_to(
-        &mut self,
-        folder: PathBuf,
-        select: Vec<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // A hidden file asked for by name shows, though hidden files are off.
-        let hidden = select
-            .iter()
-            .filter_map(|path| path.file_name())
-            .any(|name| name.to_string_lossy().starts_with('.'));
-        // Asked after any navigation, which clears the last folder's peek.
-        let needs_peek = |this: &Self| hidden && !this.show_hidden && !this.peek_hidden;
-        if folder == self.folder() && self.showing_folder() {
-            let found: Vec<usize> = if self.listing {
-                Vec::new()
-            } else {
-                select
-                    .iter()
-                    .filter_map(|path| self.entries.iter().position(|e| &e.path == path))
-                    .collect()
-            };
-            match found.as_slice() {
-                [] if !select.is_empty() => {
-                    self.select_when_listed(select);
-                    if needs_peek(self) {
-                        self.peek_hidden = true;
-                        self.reload(cx);
-                    }
-                }
-                [] => {}
-                [ix] => self.select_row(*ix, cx),
-                [first, ..] => {
-                    self.selection.clear();
-                    for &ix in &found {
-                        self.selection.toggle(&self.entries[ix]);
-                    }
-                    self.reveal(*first, ScrollStrategy::Nearest);
-                    cx.notify();
-                }
-            }
-        } else {
-            // Column view's chain starts again at what was asked for.
-            self.columns.root = None;
-            self.navigate(folder, cx);
-            self.select_when_listed(select);
-            if needs_peek(self) {
-                self.peek_hidden = true;
-                self.reload(cx);
-            }
-        }
-        self.focus_list(window, cx);
-    }
-
-    /// Search results and Recents come from anywhere: shows the folder holding
-    /// the first selected, with what's selected in it still selected.
-    fn show_in_enclosing_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let chosen = self.chosen();
-        let Some(folder) = chosen.first().and_then(|path| path.parent()) else {
-            return;
-        };
-        let folder = folder.to_path_buf();
-        let select = chosen
-            .into_iter()
-            .filter(|path| path.parent() == Some(folder.as_path()))
-            .collect();
-        self.go_to(folder, select, window, cx);
-    }
-
-    /// Selects `paths` once the listing that has them lands, the first with
-    /// the cursor on it. Nothing asked keeps the selection the listing picks.
-    fn select_when_listed(&mut self, mut paths: Vec<PathBuf>) {
-        match paths.len() {
-            0 => {}
-            1 => self.reselect = paths.pop(),
-            _ => {
-                self.reselect = paths.first().cloned();
-                self.select_after = paths;
-            }
-        }
-    }
-
-    /// Asks the owner for a change, shared with agents' history.
-    pub(super) fn submit(&mut self, request: Request, window: &Window, cx: &mut Context<Self>) {
-        // What these put somewhere is selected once it lists.
-        let select = matches!(
-            request,
-            Request::NewFolder { .. }
-                | Request::NewFile { .. }
-                | Request::Duplicate { .. }
-                | Request::Undo
-                | Request::UndoOf { .. }
-                | Request::Redo
-        );
-        with_owner(
-            window,
-            cx,
-            move |owner| {
-                let outcome = owner.submit(Origin::Window, request.clone())?;
-                Ok((request, outcome))
-            },
-            move |this, done, _, cx| this.settle(done, select, cx),
-        );
-    }
-
-    /// Shows how a change went: what it did, or why anything didn't happen,
-    /// in a toast, and the folder as it is now, with what the change put
-    /// here selected (`select`) or what it moved still selected where it
-    /// went. The disk's own events would refresh it too, but only once the
-    /// index runs.
-    pub(super) fn settle(
-        &mut self,
-        done: Result<(Request, Outcome), String>,
-        select: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let (request, outcome) = match done {
-            Ok(done) => done,
-            Err(e) => return self.toast(e, true, None, cx),
-        };
-        // Many items to the Trash: Activity follows the job, and its end
-        // says how it went.
-        if outcome.job {
-            return cx.emit(PaneEvent::Follow(outcome.op));
-        }
-        if let Some(why) = outcome.failures().next() {
-            // A copy of what isn't downloaded is refused: offer to download it.
-            let download = cloud::refused(why).map(|path| Offer::Download("Download", vec![path]));
-            let why = short_reason(why, [self.folder()]);
-            let renamed = outcome.items.iter().filter(|i| i.result.is_ok()).count();
-            if matches!(request, Request::RenameMany { .. }) && renamed > 0 {
-                // A batch isn't atomic: what it did rename can still go back.
-                let of = outcome.items.len();
-                let said = format!("Renamed {renamed} of {of} items. {why}");
-                self.toast(said, true, Some(Offer::Undo(outcome.op)), cx);
-            } else {
-                self.toast(why, true, download, cx);
-            }
-        } else if let Some(said) = said(&request, &outcome) {
-            // Undo from the toast undoes this change or nothing. An undo or
-            // redo leaves the rest to ⌘Z and ⌘⇧Z.
-            let changed = !outcome.items.is_empty();
-            let undoable = !matches!(
-                request,
-                Request::Undo | Request::UndoOf { .. } | Request::Redo
-            );
-            let undo = (changed && undoable).then_some(Offer::Undo(outcome.op));
-            self.toast(said, false, undo, cx);
-            if changed && matches!(request, Request::Trash { .. }) {
-                feedback::sound(Sound::MoveToTrash, cx);
-            }
-        } else {
-            // Whatever the last toast offered may be stale now.
-            cx.emit(PaneEvent::ClearToast);
-        }
-        let landed = outcome
-            .items
-            .iter()
-            .filter_map(|item| Some((&item.path, item.result.as_ref().ok()?)));
-        if select {
-            self.select_after = landed.map(|(_, to)| to.clone()).collect();
-        } else {
-            for (from, to) in landed {
-                self.selection.rename(from, to);
-            }
-        }
-        self.list(!select, cx);
-    }
-
-    /// Whether the selection is on this Mac's disk for macOS to share.
-    pub(super) fn shareable(&self) -> bool {
-        !self.selection.is_empty() && !self.showing_remote() && !self.showing_archive()
-    }
-
-    /// macOS's share menu on the selection, under `at` in the window.
-    /// Share…, with LocalSend among the services while it's on: picking it
-    /// opens the LocalSend page holding what was shared.
-    pub(super) fn share(&mut self, window: &mut Window, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let paths = self.chosen();
-        let localsend = cx.global::<Preferences>().localsend.then(|| {
-            let (pick, picked) = async_channel::bounded(1);
-            let held = paths.clone();
-            self.localsend.sharing = cx.spawn_in(window, async move |this, cx| {
-                if picked.recv().await.is_ok() {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.send_with_localsend(held, window, cx)
-                    });
-                }
-            });
-            Box::new(move || {
-                let _ = pick.try_send(());
-            }) as Box<dyn Fn()>
-        });
-        crate::sharing::share(&paths, window, at, localsend);
-    }
-
-    /// The selected paths, in the order shown.
-    pub(super) fn chosen(&self) -> Vec<PathBuf> {
-        self.selection
-            .in_order(&self.entries)
-            .into_iter()
-            .map(|entry| entry.path.clone())
-            .collect()
-    }
-
-    /// New Folder and New File: an untitled one here, its name ready to
-    /// edit.
-    pub(super) fn new_item(&mut self, folder: bool, window: &Window, cx: &mut Context<Self>) {
-        let here = self.folder().to_path_buf();
-        with_owner(
-            window,
-            cx,
-            move |owner| {
-                let name = if folder {
-                    "untitled folder"
-                } else {
-                    "untitled"
-                };
-                let path = ops::free_name(&here.join(name));
-                let request = if folder {
-                    Request::NewFolder { path }
-                } else {
-                    Request::NewFile { path }
-                };
-                let outcome = owner.submit(Origin::Window, request.clone())?;
-                Ok((request, outcome))
-            },
-            move |this, outcome, window, cx| this.rename_made(outcome, folder, window, cx),
-        );
-    }
-
-    /// Makes a folder beside the selection and moves the selection into it,
-    /// one change to undo, then edits the folder's name.
-    fn new_folder_with_selection(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let chosen = self.chosen();
-        let Some(here) = chosen.first().and_then(|path| path.parent()) else {
-            return;
-        };
-        let here = here.to_path_buf();
-        if chosen
-            .iter()
-            .any(|path| path.parent() != Some(here.as_path()))
-        {
-            let why = "A new folder can only take items from one folder.".to_string();
-            return self.toast(why, true, None, cx);
-        }
-        with_owner(
-            window,
-            cx,
-            move |owner| {
-                let path = ops::free_name(&here.join("New Folder With Items"));
-                let request = Request::NewFolderWith {
-                    path,
-                    items: chosen,
-                };
-                let outcome = owner.submit(Origin::Window, request.clone())?;
-                Ok((request, outcome))
-            },
-            |this, outcome, window, cx| this.rename_made(outcome, true, window, cx),
-        );
-    }
-
-    /// Selects what a New Folder or New File made and edits its name.
-    fn rename_made(
-        &mut self,
-        done: Result<(Request, Outcome), String>,
-        folder: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let made = done
-            .as_ref()
-            .ok()
-            .and_then(|(_, outcome)| outcome.items.first())
-            .and_then(|item| item.result.clone().ok());
-        self.settle(done, true, cx);
-        if let Some(path) = made.filter(|_| self.has_the_window()) {
-            self.start_rename(path, folder, window, cx);
-        }
-    }
-
-    /// Copy: the selected files on the pasteboard, for any app to paste.
-    fn copy_files(&mut self, cx: &mut Context<Self>) {
-        let chosen = self.chosen();
-        let Some(board) = cx.try_global::<Pasteboard>().filter(|_| !chosen.is_empty()) else {
-            return;
-        };
-        board.write_files(&chosen);
-        let what = match chosen.as_slice() {
-            [one] => jobs::quoted(one),
-            many => format!("{} items", many.len()),
-        };
-        self.toast(format!("Copied {what} to the clipboard"), false, None, cx);
-    }
-
-    /// Paste, or with `moving` Move Here: the files on the pasteboard, from
-    /// any app, into this folder as one job, followed until it ends.
-    pub(super) fn paste(&mut self, moving: bool, window: &Window, cx: &mut Context<Self>) {
-        let Some(board) = cx.try_global::<Pasteboard>() else {
-            return;
-        };
-        let paths = board.files();
-        let into = self.folder().to_path_buf();
-        self.send(paths, into, moving, window, cx);
-    }
-
-    /// Copies or moves `paths` into `into` as one job, followed until it ends.
-    pub(super) fn send(
-        &mut self,
-        paths: Vec<PathBuf>,
-        into: PathBuf,
-        moving: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        if paths.is_empty() {
-            return;
-        }
-        // Pasted where they already are, they're duplicated, as in Finder;
-        // moved there, nothing changes.
-        if paths
-            .iter()
-            .all(|path| path.parent() == Some(into.as_path()))
-        {
-            if !moving {
-                self.submit(Request::Duplicate { paths }, window, cx);
-            }
-            return;
-        }
-        let conflict = Conflict::Stop;
-        let request = if moving {
-            Request::Move {
-                paths,
-                into,
-                conflict,
-            }
-        } else {
-            Request::Copy {
-                paths,
-                into,
-                conflict,
-            }
-        };
-        with_owner(
-            window,
-            cx,
-            move |owner| owner.submit(Origin::Window, request),
-            |this, outcome, _, cx| match outcome {
-                Ok(outcome) => cx.emit(PaneEvent::Follow(outcome.op)),
-                Err(e) => this.toast(e, true, None, cx),
-            },
-        );
-    }
-
-    /// ↩: edits the selected item's name in place, or with several selected
-    /// opens the bar. From the list while it's open, the keys go back to it.
-    pub(super) fn rename_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Return applies a crop or trim in the preview, as nothing there is renamed.
-        if let Some(view) = self.preview.clone().filter(|view| view.read(cx).cropping()) {
-            return view.update(cx, |view, cx| view.apply_crop(window, cx));
-        }
-        if let Some(view) = self.preview.clone().filter(|view| view.read(cx).trimming()) {
-            return view.update(cx, |view, cx| view.apply_trim(cx));
-        }
-        if self.batch.is_some() {
-            return self.take_keys(window, cx);
-        }
-        if self.selection.len() > 1 {
-            return self.start_batch(window, cx);
-        }
-        let chosen = self.selection.in_order(&self.entries);
-        let [only] = chosen.as_slice() else {
-            return;
-        };
-        let (path, folder) = (only.path.clone(), only.kind == Kind::Dir);
-        if let Some(ix) = self.entries.iter().position(|e| e.path == path) {
-            self.reveal(ix, ScrollStrategy::Nearest);
-        }
-        self.start_rename(path, folder, window, cx);
-    }
-
-    /// The lone selected item's name, edited where the inspector shows it
-    /// and not in its row. Its field can draw in one place at a time.
-    pub(super) fn rename_in_inspector(
-        &mut self,
-        path: &Path,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // The panel can still show the last item while the selection has moved.
-        if self.selection.only() != Some(path) {
-            return;
-        }
-        self.rename_selected(window, cx);
-        if let Some(renaming) = &mut self.renaming {
-            renaming.in_inspector = true;
-        }
-    }
-
-    /// Edits `path`'s name in place, selected up to its extension as in
-    /// Finder, or whole for a folder. It needn't be listed yet.
-    pub(super) fn start_rename(
-        &mut self,
-        path: PathBuf,
-        folder: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let stem = name
-            .rfind('.')
-            .filter(|dot| *dot > 0 && !folder)
-            .unwrap_or(name.len());
-        let prefs = cx.global::<Preferences>();
-        let size = match self.layout() {
-            View::List | View::Columns => prefs.row_size.metrics().2,
-            View::Grid => prefs.grid_label.metrics().2,
-        };
-        let field = cx.new(|cx| {
-            let mut field = TextField::new("Name", "", cx).with_font_size(size);
-            field.set_text(&name, 0..stem, cx);
-            field
-        });
-        let focus = field.focus_handle(cx);
-        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            this.commit_rename(window, cx)
-        });
-        window.focus(&focus, cx);
-        self.renaming = Some(Renaming {
-            path,
-            field,
-            error: None,
-            sending: false,
-            in_inspector: false,
-            _blur: blur,
-        });
-        cx.notify();
-    }
-
-    /// ↩, or clicking away: renames through the owner. A name that can't be
-    /// used keeps the field open with the reason; the same name just closes
-    /// it.
-    pub(super) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(renaming) = self.renaming.as_ref().filter(|r| !r.sending) else {
-            return;
-        };
-        let path = renaming.path.clone();
-        let name = renaming.field.read(cx).text().to_string();
-        if path.file_name() == Some(name.as_ref()) {
-            return self.end_rename(window, cx);
-        }
-        let request = Request::Rename {
-            path: path.clone(),
-            name,
-        };
-        let sent = with_owner(
-            window,
-            cx,
-            move |owner| {
-                let outcome = owner.submit(Origin::Window, request.clone())?;
-                Ok((request, outcome))
-            },
-            move |this, done, window, cx| {
-                let failure = match &done {
-                    Ok((_, outcome)) => outcome.failures().next().map(str::to_owned),
-                    Err(e) => Some(e.clone()),
-                };
-                let failure = failure.map(|why| rename_reason(&why, &path));
-                let has_the_window = this.has_the_window();
-                let still = this.renaming.as_mut().filter(|r| r.path == path);
-                match (failure, still) {
-                    (Some(why), Some(renaming)) => {
-                        renaming.sending = false;
-                        renaming.error = Some(why);
-                        if has_the_window {
-                            window.focus(&renaming.field.focus_handle(cx), cx);
-                        }
-                    }
-                    (Some(why), None) => this.toast(why, true, None, cx),
-                    (None, still) => {
-                        if still.is_some() {
-                            this.end_rename(window, cx);
-                        }
-                        this.settle(done, false, cx);
-                    }
-                }
-            },
-        );
-        match self.renaming.as_mut() {
-            Some(renaming) if sent => renaming.sending = true,
-            _ => self.end_rename(window, cx),
-        }
-    }
-
-    /// Closes the name being edited; the list takes the keys back unless
-    /// a click already sent them elsewhere.
-    fn end_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(renaming) = self.renaming.take()
-            && renaming.field.focus_handle(cx).is_focused(window)
-        {
-            self.focus_list(window, cx);
-        }
-        cx.notify();
-    }
-
-    /// The name being edited in place, if it's `path`'s, outlined in red
-    /// while the last name tried can't be used. The title bar says why.
-    fn rename_field(&self, path: &Path, width: f32, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        let renaming = self.renaming.as_ref().filter(|r| r.path == path)?;
-        if renaming.in_inspector {
-            return None;
-        }
-        self.name_field(renaming, width, cx)
-    }
-
-    /// The name being edited in the inspector, if it's `path`'s.
-    pub(super) fn inspector_rename_field(
-        &self,
-        path: &Path,
-        width: f32,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
-        let renaming = self
-            .renaming
-            .as_ref()
-            .filter(|r| r.in_inspector && r.path == path)?;
-        self.name_field(renaming, width, cx)
-    }
-
-    fn name_field(
-        &self,
-        renaming: &Renaming,
-        width: f32,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
-        let covered = self.chrome.covered;
-        // Solid over the selection's accent, whatever the pane's glass.
-        let mut fill = theme::pane_fill();
-        fill.a = 1.;
-        Some(
-            theme::field(if renaming.error.is_some() {
-                danger()
-            } else {
-                accent()
-            })
-            .debug_selector(|| "rename-field".into())
-            .key_context("Rename")
-            .on_action(
-                cx.listener(|this, _: &CommitRename, window, cx| this.commit_rename(window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &CancelRename, window, cx| this.end_rename(window, cx)),
-            )
-            // A click in the name places the caret; it isn't a click on
-            // the row or the list.
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .w(px(width))
-            .flex_shrink_0()
-            .px(px(6.))
-            .bg(fill)
-            .text_color(content(1.))
-            .child(renaming.field.clone())
-            .children(renaming.error.clone().filter(|_| !covered).map(|why| {
-                // Over the row below, so no row moves, and kept in the window.
-                // It would draw over a sheet or a menu too, so it waits for them.
-                div().absolute().left_0().top(gpui::relative(1.)).child(
-                    gpui::deferred(
-                        gpui::anchored()
-                            .anchor(gpui::Anchor::TopLeft)
-                            .offset(gpui::point(px(0.), px(2.)))
-                            .snap_to_window_with_margin(px(8.))
-                            .child(
-                                div()
-                                    .debug_selector(|| "rename-error".into())
-                                    .max_w(px(360.))
-                                    .px_2()
-                                    .rounded_full()
-                                    .bg(fill)
-                                    .border_1()
-                                    .border_color(content(0.12))
-                                    .text_size(px(theme::TEXT_SMALL))
-                                    .text_color(danger())
-                                    .truncate()
-                                    .child(why),
-                            ),
-                    )
-                    .with_priority(1),
-                )
-            })),
-        )
-    }
-
-    /// Copies the selected paths, one per line in the order shown, or the
-    /// folder's, ready to paste into an agent's prompt or a terminal.
-    pub(super) fn copy_path(&mut self, cx: &mut Context<Self>) {
-        if let Some(worktree) = self
-            .worktrees
-            .selected()
-            .filter(|_| self.showing_worktrees())
-        {
-            let text = worktree.display().to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            let said = format!("Copied the path of {}", jobs::quoted(worktree));
-            return self.toast(said, false, None, cx);
-        }
-        let mut paths = self.chosen();
-        if paths.is_empty() {
-            paths.push(self.disk_folder().to_path_buf());
-        }
-        let text: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-        cx.write_to_clipboard(ClipboardItem::new_string(text.join("\n")));
-        let said = match paths.as_slice() {
-            [one] => format!("Copied the path of {}", jobs::quoted(one)),
-            many => format!("Copied {} paths", many.len()),
-        };
-        self.toast(said, false, None, cx);
-    }
-
-    /// Turns the path bar into the folder's path, selected, to type over.
-    /// Only a folder on this Mac has one; elsewhere it says no.
-    pub(super) fn edit_path(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.showing_folder() || self.unavailable.is_some() {
-            return false;
-        }
-        if let Some(address) = &self.address {
-            window.focus(&address.view.focus_handle(cx), cx);
-            return true;
-        }
-        let folder = self.folder().to_path_buf();
-        let view = cx.new(|cx| GotoView::in_bar(folder, cx));
-        let focus = view.focus_handle(cx);
-        let went = cx.subscribe_in(&view, window, |this, _, event: &GotoEvent, window, cx| {
-            this.address = None;
-            this.focus_list(window, cx);
-            if let GotoEvent::Go(destination) = event {
-                let select = destination.select.iter().cloned().collect();
-                this.go_to(destination.folder.clone(), select, window, cx);
-            }
-            cx.notify();
-        });
-        let blur = cx.on_blur(&focus, window, |this, _, cx| {
-            this.address = None;
-            cx.notify();
-        });
-        window.focus(&focus, cx);
-        self.address = Some(Address {
-            view,
-            window: window.window_handle(),
-            _closes: [went, blur],
-        });
-        cx.notify();
-        true
-    }
-
-    /// The folder's path as clickable steps, from the disk to here.
-    fn crumbs(
-        &self,
-        room: f32,
-        most: f32,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let current = self.folder().to_path_buf();
-        let steps: Vec<PathBuf> = current.ancestors().map(Path::to_path_buf).collect();
-        let last = steps.len().saturating_sub(1);
-        let widths: Vec<f32> = steps
-            .iter()
-            .rev()
-            .enumerate()
-            .map(|(ix, path)| {
-                let weight = if ix == last {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                };
-                let text = text_width(&level_name(path), theme::TEXT_SMALL, weight, window);
-                text + CRUMB_PADDING + if ix > 0 { CRUMB_CHEVRON } else { 0. }
-            })
-            .collect();
-        let ellipsis =
-            text_width(COLLAPSED, theme::TEXT_SMALL, FontWeight::NORMAL, window) + CRUMB_PADDING;
-        let hidden = hidden_levels(&widths, ellipsis, room);
-        // The folder itself has its pane's say on whether files land in it.
-        let takes_here = self.takes_files(cx);
-        let dragging = self.drag.active();
-        let id = cx.entity_id();
-        div()
-            .flex_shrink_0()
-            .max_w(px(most))
-            .flex()
-            .items_center()
-            .gap(px(CRUMB_GAP))
-            .text_size(px(theme::TEXT_SMALL))
-            .overflow_hidden()
-            .when(hidden > 0, |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .px(px(theme::CRUMB_INSET))
-                        .text_color(content(0.65))
-                        .child(COLLAPSED),
-                )
-            })
-            .children(
-                steps
-                    .iter()
-                    .rev()
-                    .cloned()
-                    .enumerate()
-                    .skip(hidden)
-                    .map(|(ix, path)| {
-                        let name = level_name(&path);
-                        let here = ix == last;
-                        let spot = Spot::Crumb(id, ix);
-                        let outlined = self.drag.outlines(&spot);
-                        let in_archive = self
-                            .stop()
-                            .archive
-                            .as_ref()
-                            .is_some_and(|archive| path.starts_with(archive));
-                        let drops = dragging && !in_archive && (!here || takes_here);
-                        let target = drops.then(|| Target::Folder {
-                            spot,
-                            path: path.clone(),
-                            name: name.clone(),
-                        });
-                        // Clicking an ancestor selects the folder on the way back down.
-                        let child = current
-                            .ancestors()
-                            .find(|step| step.parent() == Some(path.as_path()))
-                            .map(Path::to_path_buf);
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(CRUMB_GAP))
-                            .min_w_0()
-                            .when(ix > 0, |d| {
-                                d.child(icon("chevron-right", 12.).text_color(content(0.3)))
-                            })
-                            .child(
-                                div()
-                                    .id(("path-step", ix))
-                                    .debug_selector(move || format!("crumb-{ix}"))
-                                    .role(gpui::Role::Link)
-                                    .aria_label(name.clone())
-                                    .px(px(theme::CRUMB_INSET))
-                                    .rounded_full()
-                                    .line_height(px(18.))
-                                    .truncate()
-                                    .map(|d| {
-                                        if here {
-                                            d.font_weight(FontWeight::SEMIBOLD)
-                                        } else {
-                                            d.text_color(content(0.65))
-                                                .cursor_pointer()
-                                                .hover(|s| {
-                                                    s.bg(content(0.08)).text_color(content(1.))
-                                                })
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.go_to(
-                                                            path.clone(),
-                                                            child.iter().cloned().collect(),
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    },
-                                                ))
-                                        }
-                                    })
-                                    .when_some(target, |d, target| {
-                                        let drag = self.drag.clone();
-                                        offers(d, move |_| drag.offer(target.clone()))
-                                    })
-                                    .child(name)
-                                    .when(outlined, |d| {
-                                        d.relative().child(theme::drop_outline().rounded_full())
-                                    }),
-                            )
-                    }),
-            )
-    }
-
-    /// The thin bar under the files: the path on the left, what's selected
-    /// and the free space on the right. It belongs to the pane, so each pane
-    /// gets its own. The path has what the status leaves, and only when the
-    /// folder's own name won't fit in that does the status give way.
-    fn path_bar(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
-        if let Some(address) = &self.address {
-            return Some(
-                theme::pane_bar(theme::PATH_BAR_HEIGHT)
-                    .debug_selector(|| "path-bar".into())
-                    .border_t_1()
-                    .border_color(content(0.06))
-                    .child(address.view.clone()),
-            );
-        }
-        if !cx.global::<Preferences>().show_path_bar
-            || self.unavailable.is_some()
-            || self.showing_page()
-        {
-            return None;
-        }
-        if self.showing_remote() {
-            let status = self.remote_status();
-            let most = (self.chrome.width - PATH_BAR_CHROME).max(0.);
-            let taken =
-                text_width(&status, theme::TEXT_SMALL, FontWeight::NORMAL, window) + 2. * 12.;
-            return Some(
-                theme::pane_bar(theme::PATH_BAR_HEIGHT)
-                    .debug_selector(|| "path-bar".into())
-                    .pl(px(theme::PANE_INSET - theme::CRUMB_INSET))
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(content(0.06))
-                    .text_size(px(theme::TEXT_SMALL))
-                    .child(self.remote_crumbs(most - taken, window, cx))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(content(0.65))
-                            .child(status),
-                    ),
-            );
-        }
-        // As Finder's status bar: what's selected and the size of its files.
-        let count = match (self.selection.len(), self.entries.len()) {
-            (0, 1) => "1 item".to_string(),
-            (0, n) => format!("{n} items"),
-            (chosen, _) => match self.selection.size() {
-                0 => format!("{chosen} of {} selected", self.entries.len()),
-                size => format!(
-                    "{chosen} of {} selected, {}",
-                    self.entries.len(),
-                    format_bytes(size)
-                ),
-            },
-        };
-        let count = if self.matches.cut {
-            format!("{count}, more not shown")
-        } else {
-            count
-        };
-        let status = match self.chrome.space.clone() {
-            Some(space) => format!("{count} · {space}"),
-            None => count,
-        };
-        let width = self.chrome.width - PATH_BAR_CHROME;
-        let most = width.max(0.);
-        let taken = text_width(&status, theme::TEXT_SMALL, FontWeight::NORMAL, window) + 2. * 12.;
-        let crumbs = self.showing_folder() || self.showing_archive();
-        Some(
-            theme::pane_bar(theme::PATH_BAR_HEIGHT)
-                .debug_selector(|| "path-bar".into())
-                // The first crumb's padding is part of the inset, so its text
-                // lines up with the bars above.
-                .when(crumbs, |d| d.pl(px(theme::PANE_INSET - theme::CRUMB_INSET)))
-                .gap_3()
-                .border_t_1()
-                .border_color(content(0.06))
-                .text_size(px(theme::TEXT_SMALL))
-                .when(crumbs, |d| {
-                    d.child(self.crumbs(most - taken, most, window, cx))
-                })
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(content(0.65))
-                        .child(status),
-                ),
-        )
-    }
-
-    /// The grid's rows of cells: an icon or picture over the name.
-    pub(super) fn grid_rows(
-        &mut self,
-        range: std::ops::Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let prefs = cx.global::<Preferences>();
-        let side = prefs.grid_icon as f32;
-        // An archive's entries have no file on the disk to picture or drag.
-        let archive = self.showing_archive();
-        let label = prefs.grid_label.metrics().2;
-        let (cell, height) = (self.cell_width, grid_cell(prefs.grid_icon).1);
-        let across = self.across;
-        let active = self.list_active(window, cx);
-        let drops = self.drag.active() && !self.in_trash(cx) && !archive;
-        let id = cx.entity_id();
-        // Sharp on Retina screens.
-        let pixels = (side * window.scale_factor()).ceil() as u32;
-        let shown = range.clone();
-        let rows = range
-            .map(|row| {
-                let cells =
-                    (row * across..((row + 1) * across).min(self.entries.len())).map(|ix| {
-                        let entry = &self.entries[ix];
-                        let selected = self.selection.contains(&entry.path);
-                        let missing = self.missing.contains(&entry.path);
-                        let picture = if archive {
-                            None
-                        } else {
-                            thumbnail(
-                                (&mut self.thumbs, &mut self.drawn),
-                                entry,
-                                pixels,
-                                window,
-                                cx,
-                            )
-                        };
-                        let art = match picture {
-                            // A square box: without one, `img` takes the
-                            // picture's own shape, and a tall one spills
-                            // onto its name.
-                            Some(image) => gpui::img(image)
-                                .size(px(side))
-                                .aspect_square()
-                                .object_fit(gpui::ObjectFit::Contain)
-                                .rounded(px(theme::RADIUS_THUMB))
-                                .into_any_element(),
-                            None if archive => {
-                                file_icons::kind_icon(entry.kind, &entry.path, side, window, cx)
-                            }
-                            None => file_icons::icon(entry, side, window, cx),
-                        };
-                        let rename = self.rename_field(&entry.path, cell - 8., cx);
-                        let grabs = !missing && rename.is_none() && !archive;
-                        let badge = self.cloud_badge(
-                            entry,
-                            ix,
-                            GRID_BADGE,
-                            match (selected, active) {
-                                (true, true) => on_accent(),
-                                (true, false) => content(1.),
-                                (false, _) => content(0.55),
-                            },
-                            cx,
-                        );
-                        div()
-                            .id(ix)
-                            .role(gpui::Role::ListItem)
-                            .aria_label(entry.name.clone())
-                            .aria_selected(selected)
-                            .w(px(cell))
-                            .h(px(height))
-                            .when(missing, |d| d.opacity(0.5))
-                            .flex_shrink_0()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap(px(6.))
-                            .pt(px(8.))
-                            .child(
-                                div()
-                                    .id(("grab-art", ix))
-                                    .p_1()
-                                    .rounded(px(theme::RADIUS_ROW))
-                                    .when(selected, |d| d.bg(content(0.14)))
-                                    .when(grabs, |d| Self::grab(d, ix, cx))
-                                    .child(art),
-                            )
-                            .child(match rename {
-                                Some(field) => field.text_size(px(label)).into_any_element(),
-                                None => div()
-                                    .id(("grab-name", ix))
-                                    .when(grabs, |d| Self::grab(d, ix, cx))
-                                    .max_w(px(cell - 8.))
-                                    .px(px(6.))
-                                    .rounded(px(theme::RADIUS_ROW))
-                                    .text_size(px(label))
-                                    .text_center()
-                                    .map(|d| {
-                                        if selected {
-                                            d.bg(if active { accent() } else { content(0.14) })
-                                                .text_color(if active {
-                                                    on_accent()
-                                                } else {
-                                                    content(1.)
-                                                })
-                                        } else {
-                                            d
-                                        }
-                                    })
-                                    .children(grid_name(
-                                        &entry.name,
-                                        px(cell - 18.),
-                                        px(label),
-                                        badge,
-                                        window,
-                                    ))
-                                    .into_any_element(),
-                            })
-                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                this.click_entry(ix, event, window, cx)
-                            }))
-                            .map(|d| Self::context_target(d, ix, cx))
-                            .when(drops, |d| Self::takes_drops(d, ix, cx))
-                            .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
-                                d.relative().child(
-                                    self.drag.pulsed(
-                                        theme::drop_outline().rounded(px(theme::RADIUS_ROW)),
-                                    ),
-                                )
-                            })
-                    });
-                div().flex().px_1().children(cells).into_any_element()
-            })
-            .collect();
-        // After the cells on screen, so their pictures decode first.
-        if !archive {
-            self.prefetch_pictures(shown, pixels, window, cx);
-        }
-        rows
-    }
-
-    /// Starts the pictures of the grid's rows a screen above and below
-    /// `shown`, so scrolling finds them decoded rather than as icons.
-    fn prefetch_pictures(
-        &mut self,
-        shown: std::ops::Range<usize>,
-        pixels: u32,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let (across, len) = (self.across.max(1), self.entries.len());
-        let near = shown.start.saturating_sub(shown.len())..shown.end + shown.len();
-        let cells = |rows: std::ops::Range<usize>| {
-            (rows.start * across).min(len)..(rows.end * across).min(len)
-        };
-        let (above, below) = (cells(near.start..shown.start), cells(shown.end..near.end));
-        for ix in above.chain(below) {
-            let entry = &self.entries[ix];
-            thumbnail(
-                (&mut self.thumbs, &mut self.drawn),
-                entry,
-                pixels,
-                window,
-                cx,
-            );
-        }
-    }
-
-    pub(super) fn rows(
-        &mut self,
-        range: std::ops::Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let archived = self.archived.as_ref();
-        let searching = !self.showing_folder() && archived.is_none();
-        // A grid pane's batch shows its rows as they are, flat. An archive's
-        // folders open as Back can leave them, not in place.
-        let tree = self.showing_folder() && self.view == View::List;
-        let in_columns = self.layout() == View::Columns;
-        let today = Local::now().date_naive();
-        let (date, size, kind) = if in_columns {
-            (false, false, false)
-        } else {
-            columns(self.chrome.width)
-        };
-        let name_room = if in_columns { COLUMN_WIDTH - 64. } else { 260. };
-        let (row_height, icon_size, text_size) = cx.global::<Preferences>().row_size.metrics();
-        self.list_row_height = row_height;
-        // Finder greys the selection when the list isn't where keys go.
-        let active = self.list_active(window, cx);
-        let drops = self.drag.active() && !self.in_trash(cx) && archived.is_none();
-        let id = cx.entity_id();
-        range
-            .filter_map(|row| {
-                let (ix, line) = self.matches.at(row);
-                let entry = self.entries.get(ix)?;
-                let selected = self.selection.contains(&entry.path);
-                if let Some(line) = line {
-                    return self
-                        .line_row(row, ix, line, selected, active, row_height, icon_size, cx)
-                        .map(IntoElement::into_any_element);
-                }
-                let has_lines = self.matches.last_row_of(ix) != row;
-                let missing = self.missing.contains(&entry.path);
-                let depth = self.depths.get(ix).copied().unwrap_or(0);
-                let open = self.is_open_folder(ix);
-                let parent = searching
-                    .then(|| entry.path.parent().map(|p| p.display().to_string()))
-                    .flatten();
-                // Finder's list: alternate rows striped, the selection in the
-                // accent with its ink.
-                let selected_ink = if active { on_accent() } else { content(1.) };
-                let muted = if selected {
-                    selected_ink
-                } else {
-                    content(0.65)
-                };
-                let rename = self
-                    .rename_field(&entry.path, name_room, cx)
-                    .or_else(|| self.suggestion_field(&entry.path, name_room, cx));
-                let chevron_here = in_columns && open.is_some();
-                let grabs =
-                    !missing && rename.is_none() && self.batch.is_none() && archived.is_none();
-                let problem = archived.and_then(|archived| archived.problems.get(&entry.path));
-                let new = self
-                    .batch
-                    .as_ref()
-                    .filter(|_| selected)
-                    .and_then(|batch| batch.row(&entry.path, &entry.name, self.folder()));
-                let fill = div()
-                    .id(("fill", row))
-                    .w_full()
-                    .h(px(row_height))
-                    // The text stays on the bars' inset.
-                    .px(px(theme::PANE_INSET - theme::CARD_PADDING))
-                    // A file and its lines read as one block, and so do
-                    // selected files next to each other, as in Finder.
-                    // Column view's rows stand apart, as the sidebar's do.
-                    .when(in_columns || !self.selected_beside(ix, -1), |d| {
-                        // design: the row radius, on the block's top corners.
-                        d.rounded_t(px(theme::RADIUS_ROW))
-                    })
-                    .when(
-                        in_columns || !has_lines && !self.selected_beside(ix, 1),
-                        |d| {
-                            // design: the row radius, on the block's bottom corners.
-                            d.rounded_b(px(theme::RADIUS_ROW))
-                        },
-                    )
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_size(px(text_size))
-                    .map(|d| self.row_fill(d, ix, selected, active))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .when(tree, |d| d.child(self.disclosure(ix, depth, open, cx)))
-                            // As in Finder, the rest of a row that isn't
-                            // selected starts a rectangle. The name gives
-                            // way only once its note or parent has none
-                            // left, since those two have no width of their own.
-                            .child(
-                                div()
-                                    .id(("grab", ix))
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .when(grabs && !selected, |d| Self::grab(d, ix, cx))
-                                    .child(if archived.is_some() {
-                                        file_icons::kind_icon(
-                                            entry.kind,
-                                            &entry.path,
-                                            icon_size,
-                                            window,
-                                            cx,
-                                        )
-                                    } else {
-                                        file_icons::icon(entry, icon_size, window, cx)
-                                    })
-                                    // The badge sits closer to the name than the
-                                    // name to its icon.
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(match rename {
-                                                // The name stays put; its outline grows around it.
-                                                Some(field) => field.ml(px(-7.)).into_any_element(),
-                                                None => {
-                                                    let name = new
-                                                        .as_ref()
-                                                        .map_or(&entry.name, |new| &new.name);
-                                                    div()
-                                                        .min_w_0()
-                                                        .max_w(px(360.))
-                                                        .overflow_hidden()
-                                                        .whitespace_nowrap()
-                                                        .text_overflow(name_overflow(name))
-                                                        .map(|d| match &new {
-                                                            Some(new) if new.problem => {
-                                                                d.text_color(danger())
-                                                            }
-                                                            Some(new) if new.renamed => {
-                                                                d.font_weight(FontWeight::MEDIUM)
-                                                            }
-                                                            _ => d,
-                                                        })
-                                                        .child(name.clone())
-                                                        .map(|d| match selected && new.is_some() {
-                                                            true => self.suggested_name(
-                                                                d,
-                                                                &entry.path,
-                                                                name,
-                                                                cx,
-                                                            ),
-                                                            false => d,
-                                                        })
-                                                        .into_any_element()
-                                                }
-                                            })
-                                            .children(self.cloud_badge(
-                                                entry,
-                                                ix,
-                                                LIST_BADGE,
-                                                if selected {
-                                                    selected_ink
-                                                } else {
-                                                    content(0.55)
-                                                },
-                                                cx,
-                                            )),
-                                    ),
-                            )
-                            .children(new.and_then(|new| {
-                                let ink = if new.problem { danger() } else { content(0.65) };
-                                let note = new.note?;
-                                Some(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(ink)
-                                        .child(note),
-                                )
-                            }))
-                            .children(parent.map(|parent| {
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(muted)
-                                    .child(parent)
-                            })),
-                    )
-                    .when(chevron_here, |d| {
-                        d.child(chevron(if selected {
-                            selected_ink
-                        } else {
-                            content(0.55)
-                        }))
-                    })
-                    .when(date, |d| {
-                        d.child(column(180., false).text_color(muted).child(if missing {
-                            "--".to_string()
-                        } else {
-                            format_date(entry.modified, today)
-                        }))
-                    })
-                    .when(size, |d| {
-                        d.child(
-                            column(80., true)
-                                .text_color(muted)
-                                .child(format_size(entry)),
-                        )
-                    })
-                    .when(kind, |d| {
-                        d.child(match problem {
-                            // Selecting it shows why in the archive's bar.
-                            Some(_) => column(110., false)
-                                .text_color(if selected { selected_ink } else { danger() })
-                                .child("Can't extract"),
-                            None => column(110., false).text_color(muted).child(if missing {
-                                "Missing".to_string()
-                            } else {
-                                entry.kind_label()
-                            }),
-                        })
-                    })
-                    .when(missing, |d| d.opacity(0.5))
-                    .when(self.drag.outlines(&Spot::Row(id, ix)), |d| {
-                        d.relative().child(
-                            self.drag
-                                .pulsed(theme::drop_outline().rounded(px(theme::RADIUS_ROW))),
-                        )
-                    });
-                // The row's handlers take its gap too, so a press or a drop
-                // there lands on it.
-                Some(
-                    div()
-                        .id(row)
-                        .role(gpui::Role::ListItem)
-                        .aria_label(entry.name.clone())
-                        .aria_selected(selected)
-                        .w_full()
-                        .when(in_columns, |d| d.pb(px(theme::ROW_GAP)))
-                        .child(fill)
-                        .when(grabs && selected, |d| Self::grab(d, ix, cx))
-                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            this.click_entry(ix, event, window, cx)
-                        }))
-                        .map(|d| Self::context_target(d, ix, cx))
-                        .when(drops, |d| Self::takes_drops(d, ix, cx))
-                        .into_any_element(),
-                )
-            })
-            .collect()
-    }
-}
-
-/// `entry`'s picture at `pixels`, if it has one and it's ready. A pane's
-/// `thumbs` hold it while each frame draws it, which `drawn` records, and give
-/// it back once a frame doesn't.
-pub(super) fn thumbnail(
-    (thumbs, drawn): (
-        &mut HashMap<Thumb, Option<Arc<RenderImage>>>,
-        &mut HashSet<Thumb>,
-    ),
-    entry: &Entry,
-    pixels: u32,
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<Arc<RenderImage>> {
-    if !(cx.global::<Preferences>().thumbnails && thumbnails::wanted(entry)) {
-        return None;
-    }
-    let thumb = Thumb {
-        path: entry.path.clone(),
-        side: pixels,
-        modified: entry.modified,
-    };
-    if !thumbs.contains_key(&thumb) {
-        thumbnails::hold(&thumb, cx);
-    }
-    let image = thumbnails::get(&thumb, window, cx);
-    drawn.insert(thumb.clone());
-    thumbs.insert(thumb, image.clone());
-    image
-}
-
-/// What a toast says once `request` has changed what `outcome` lists.
-pub(super) fn said(request: &Request, outcome: &Outcome) -> Option<String> {
-    let asked: Vec<&Path> = outcome
-        .items
-        .iter()
-        .map(|item| item.path.as_path())
-        .collect();
-    let what = match asked.as_slice() {
-        [one] => jobs::quoted(one),
-        many => format!("{} items", many.len()),
-    };
-    Some(match request {
-        Request::Trash { .. } => format!("Moved {what} to the Trash"),
-        Request::Duplicate { .. } => format!("Duplicated {what}"),
-        Request::Rename { name, .. } => format!("Renamed to \"{name}\""),
-        Request::RenameMany { .. } => format!("Renamed {what}"),
-        Request::NewFolder { path } | Request::NewFile { path } => {
-            format!("Made {}", jobs::quoted(path))
-        }
-        Request::NewFolderWith { path, items } => {
-            let what = match items.as_slice() {
-                [one] => jobs::quoted(one),
-                many => format!("{} items", many.len()),
-            };
-            format!("Moved {what} into {}", jobs::quoted(path))
-        }
-        Request::SaveEdit { .. } => {
-            let saved = outcome
-                .items
-                .iter()
-                .rev()
-                .find_map(|item| item.result.as_ref().ok());
-            match saved {
-                Some(path) => format!("Saved {}", jobs::quoted(path)),
-                None => "Saved".to_string(),
-            }
-        }
-        Request::Organize { groups } => {
-            let files: usize = groups.iter().map(|group| group.items.len()).sum();
-            format!(
-                "Organized {files} {}",
-                if files == 1 { "file" } else { "files" }
-            )
-        }
-        Request::PutBack { .. } => format!("Put back {what}"),
-        // Its folder first, unless only Git's registration of it was left.
-        Request::RemoveWorktree { path, .. } if asked.first() == Some(&path.as_path()) => {
-            format!("Moved {} to the Trash", jobs::quoted(path))
-        }
-        Request::RemoveWorktree { path, .. } => format!("Forgot {}", jobs::quoted(path)),
-        // The owner titles these "Undo Rename", from the change they reverse.
-        Request::Undo | Request::UndoOf { .. } | Request::Redo => {
-            let of = outcome.title.strip_prefix(request.title()).unwrap_or("");
-            let verb = match request {
-                Request::Redo => "Redid",
-                _ => "Undid",
-            };
-            format!("{verb}{of}")
-        }
-        _ => return None,
-    })
-}
-
-/// Why `path` couldn't take a name, short enough for the title bar:
-/// "\"draft.txt\" is already taken."
-pub(super) fn rename_reason(why: &str, path: &Path) -> String {
-    let why = short_reason(why, path.parent());
-    match why.strip_suffix(" already exists.") {
-        Some(name) => format!("\"{name}\" is already taken."),
-        None => why,
-    }
-}
-
-/// A name being edited in place.
-pub(super) struct Address {
-    pub(super) view: Entity<GotoView>,
-    /// Where the list takes the keys back when the pane goes elsewhere.
-    window: AnyWindowHandle,
-    /// Going, Esc and clicking away close it.
-    _closes: [Subscription; 2],
-}
-
-pub(super) struct Renaming {
-    pub(super) path: PathBuf,
-    pub(super) field: Entity<TextField>,
-    /// Why the last name didn't take, shown in the title bar.
-    pub(super) error: Option<String>,
-    /// Sent to the owner and not yet answered, so a blur meanwhile doesn't
-    /// send it again.
-    sending: bool,
-    /// Its field is in the inspector, so the row shows the name as usual.
-    pub(super) in_inspector: bool,
-    /// Clicking away commits.
-    _blur: Subscription,
-}
-
-/// A place in the history: a folder, or a page in front of one.
-#[derive(Clone)]
-pub(super) struct Stop {
-    /// Inside an archive, the archive's path joined with the folder's
-    /// names in it, which isn't on the disk.
-    pub(super) folder: PathBuf,
-    pub(super) shows: Shows,
-    /// The ZIP archive `folder` is in, for `Shows::Archive`.
-    pub(super) archive: Option<PathBuf>,
-    /// The server folder a `Shows::Remote` stop shows in front of `folder`.
-    pub(super) remote: Option<RemoteAt>,
-    /// How it's saved, from the first save on.
-    place: Option<Favorite>,
-    /// It came from a saved session and hasn't been checked since: its drive
-    /// may be gone, or another may have taken its path.
-    unverified: bool,
-}
-
-impl Stop {
-    pub(super) fn folder(folder: PathBuf) -> Self {
-        Self {
-            folder,
-            shows: Shows::Folder,
-            archive: None,
-            remote: None,
-            place: None,
-            unverified: false,
-        }
-    }
-
-    /// `folder`, inside `archive` or the archive itself.
-    pub(super) fn inside(archive: PathBuf, folder: PathBuf) -> Self {
-        Self {
-            folder,
-            shows: Shows::Archive,
-            archive: Some(archive),
-            remote: None,
-            place: None,
-            unverified: false,
-        }
-    }
-
-    pub(super) fn restored(state: StopState) -> Self {
-        Self {
-            folder: state.place.path.clone(),
-            shows: state.shows,
-            archive: None,
-            remote: state.remote,
-            place: Some(state.place),
-            unverified: true,
-        }
-    }
-
-    /// The folder on the disk it's saved as: the one holding its archive.
-    pub(super) fn saved_folder(&self) -> &Path {
-        match &self.archive {
-            Some(archive) => archive.parent().unwrap_or(archive),
-            None => &self.folder,
-        }
-    }
-}
-
-/// A grid cell's name in at most two lines, as Finder sets it: the first
-/// breaks where it would wrap, at a word when it can, and the rest is cut
-/// in the middle, so the start and the extension both show.
-pub(super) fn grid_name(
-    name: &str,
-    width: gpui::Pixels,
-    size: gpui::Pixels,
-    badge: Option<gpui::AnyElement>,
-    window: &Window,
-) -> Vec<gpui::Div> {
-    let line = |text: &str| {
-        div()
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .child(text.to_owned())
-    };
-    let mut wrapper = window
-        .text_system()
-        .line_wrapper(gpui::font(theme::UI_FONT), size);
-    // Where the name's first line ends, if it needs a second.
-    let mut wraps_at = |width| {
-        wrapper
-            .wrap_line(
-                &[gpui::LineFragment::text(name)],
-                width,
-                gpui::IndentAdjustment::NoIndent,
-            )
-            .next()
-            .map(|boundary| boundary.ix)
-            .filter(|ix| *ix < name.len())
-    };
-    let Some(badge) = badge else {
-        return match wraps_at(width) {
-            Some(ix) => vec![
-                line(name[..ix].trim_end()),
-                line(&name[ix..]).text_ellipsis_middle(),
-            ],
-            None => vec![line(name)],
-        };
-    };
-    // The badge always ends the name's last line. A one-line name with no
-    // room for it breaks before its extension, so no part of the name hides.
-    let with_badge = |text: gpui::Div| {
-        div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .child(text.min_w_0())
-            .child(badge)
-    };
-    let room = width - px(GRID_BADGE + 4.);
-    if wraps_at(room).is_none() {
-        return vec![with_badge(line(name))];
-    }
-    let ix = wraps_at(width).or_else(|| {
-        kept_extension(name)
-            .map(|extension| name.len() - extension.len())
-            .or_else(|| wraps_at(room))
-    });
-    match ix {
-        Some(ix) => vec![
-            line(name[..ix].trim_end()),
-            with_badge(line(&name[ix..]).text_ellipsis_middle()),
-        ],
-        None => vec![with_badge(line(name).text_ellipsis_middle())],
-    }
-}
-
-/// How wide the cloud badge is beside a grid label, and beside a list row's
-/// name.
-const GRID_BADGE: f32 = 12.;
-pub(super) const LIST_BADGE: f32 = 14.;
-
-/// The extension a cut name still shows. Past this many characters, or with
-/// a space, what follows the last dot is just more name, as in
-/// `Report v1.2 for the board`.
-pub(super) fn kept_extension(name: &str) -> Option<&str> {
-    const LONGEST: usize = 16;
-    let dot = name.rfind('.').filter(|dot| *dot > 0)?;
-    let extension = &name[dot..];
-    (extension.chars().count() <= LONGEST && !extension.contains(' ')).then_some(extension)
-}
-
-/// Cuts a name before its extension: `file-with-a-big-n….pdf`.
-fn name_overflow(name: &str) -> TextOverflow {
-    TextOverflow::Truncate(match kept_extension(name) {
-        Some(extension) => format!("…{extension}").into(),
-        None => "…".into(),
-    })
-}
-
-/// The grid's padding across: the list's and each row's, both sides.
-const GRID_PADDING: f32 = 16.;
-
-/// How many cells fit across a grid `width` wide, and how wide each is. The
-/// room left over is shared out, as in Finder, rather than left at the right.
-pub(super) fn grid_layout(width: f32, icon: u32) -> (usize, f32) {
-    let least = grid_cell(icon).0;
-    let room = (width - GRID_PADDING).max(0.);
-    let across = (room / least).floor().max(1.) as usize;
-    (across, (room / across as f32).max(least))
-}
-
-/// A grid cell's width and height for icons `icon` points across: room for
-/// the icon and two lines of name.
-pub(super) fn grid_cell(icon: u32) -> (f32, f32) {
-    let icon = icon as f32;
-    (icon + 48., icon + 60.)
 }
 
 /// What a level of a path is called.
-pub(super) fn level_name(path: &Path) -> String {
+pub(in crate::browser) fn level_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || "Macintosh HD".to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
 }
 
-pub(super) fn text_width(text: &str, size: f32, weight: FontWeight, window: &Window) -> f32 {
-    let run = gpui::TextRun {
-        len: text.len(),
-        font: gpui::Font {
-            weight,
-            ..gpui::font(theme::UI_FONT)
-        },
-        color: content(1.),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let text = gpui::SharedString::from(text.to_owned());
-    window
-        .text_system()
-        .shape_line(text, px(size), &[run], None)
-        .width
-        .as_f32()
-}
-
-/// How many of the path's leading levels collapse into one "…" crumb. `widths`
-/// runs from the disk to the current folder, each with its chevron. Levels
-/// are kept from the right at full width while they fit in `room`; the current
-/// folder is always kept.
-pub(super) fn hidden_levels(widths: &[f32], ellipsis: f32, room: f32) -> usize {
-    if widths.iter().sum::<f32>() <= room {
-        return 0;
-    }
-    let mut used = ellipsis;
-    let mut shown = 0;
-    for width in widths.iter().rev() {
-        if shown > 0 && used + width > room {
-            break;
-        }
-        used += width;
-        shown += 1;
-    }
-    widths.len().saturating_sub(shown.max(1))
-}
-
-/// A column title that sorts by its column; the sorted one shows which way.
-fn sort_header(
-    by: SortBy,
-    title: &'static str,
-    sort: Option<Sort>,
-    cx: &mut Context<Pane>,
-) -> gpui::Stateful<gpui::Div> {
-    let active = sort.filter(|sort| sort.by == by);
-    div()
-        .id(title)
-        .role(gpui::Role::ColumnHeader)
-        .aria_label(title)
-        .flex_shrink_0()
-        .h_full()
-        .flex()
-        .items_center()
-        .gap_1()
-        .when(active.is_some(), |d| d.text_color(content(1.)))
-        // During a search the order is relevance, so the titles don't sort.
-        .when(sort.is_some(), |d| {
-            d.cursor_pointer()
-                .hover(|s| s.text_color(content(1.)))
-                .on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.choose_sort(sorted_by(this.sort, by), cx)
-                    }),
-                )
-        })
-        .child(div().truncate().child(title))
-        .children(active.map(|sort| {
-            icon("chevron-down-hi", 12.)
-                .text_color(content(0.65))
-                .when(!sort.descending, |i| {
-                    i.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))
-                })
-        }))
-}
-
-/// Choosing the column already sorted by reverses it; another column starts
-/// in its natural direction: newest and largest first, names and kinds A to Z.
-pub fn sorted_by(current: Sort, by: SortBy) -> Sort {
-    Sort {
-        by,
-        descending: if current.by == by {
-            !current.descending
-        } else {
-            matches!(by, SortBy::Modified | SortBy::Size)
-        },
-        ..current
-    }
-}
-
-/// Which of Date Modified, Size and Kind a list `width` wide shows. Names keep
-/// at least 160 pt: Kind goes first, then the date, then the size.
-pub(super) fn columns(width: f32) -> (bool, bool, bool) {
-    // Each column with its gap, after the list's and the row's padding.
-    let (name, date, size, kind) = (32. + 160., 192., 92., 122.);
-    (
-        width >= name + size + date,
-        width >= name + size,
-        width >= name + size + date + kind,
-    )
-}
-
-pub(super) fn column(width: f32, right: bool) -> gpui::Div {
-    div()
-        .w(px(width))
-        .flex_shrink_0()
-        .truncate()
-        .text_color(content(0.65))
-        .when(right, |d| d.text_right())
-}
-
-/// `dir` as FSEvents names it: links resolved (/var is /private/var).
-/// Reads the disk.
-pub(super) fn real(dir: &Path) -> PathBuf {
-    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
-}
-
-/// More files than this at once ask before opening.
-pub(super) const OPEN_WITHOUT_ASKING: usize = 20;
-
-/// A rectangle dragged over the listing to select what it touches. Its
-/// corners are in listing coordinates, so scrolling mid-drag keeps the
-/// start where it was.
-pub(super) struct Marquee {
-    start: Point<Pixels>,
-    end: Point<Pixels>,
-    /// The pointer in the window, to sweep again when the listing scrolls.
-    pointer: Point<Pixels>,
-    /// ⌘ or ⇧ was held: the drag adds to what's selected.
-    additive: bool,
-    /// Past a few points of travel; a click until then.
-    dragging: bool,
-    /// An auto-scroll step waits on the next frame.
-    scrolling: bool,
-}
-
-/// The cells `step` apart from 0, of `count`, that `from..=to` overlaps.
-pub(super) fn span(from: f32, to: f32, step: f32, count: usize) -> std::ops::Range<usize> {
-    if to < 0. || count == 0 || step <= 0. {
-        return 0..0;
-    }
-    let first = ((from.max(0.) / step) as usize).min(count);
-    let last = ((to / step) as usize).min(count - 1);
-    first..(last + 1).max(first)
-}
-
-/// What on disk the listing follows, in FSEvents' real paths.
-#[derive(Default)]
-pub(super) struct Watch {
-    /// The folder and each open folder in it, by the path shown.
-    pub(super) folders: HashMap<PathBuf, PathBuf>,
-    /// The folder's parent: renaming or deleting the folder changes it.
-    parent: Option<PathBuf>,
-}
-
-impl Watch {
-    fn touches(&self, changed: &Path, below: bool) -> bool {
-        self.parent.as_deref() == Some(changed) || touches(changed, below, self.folders.values())
-    }
-}
-
-/// Whether FSEvents reporting `changed` (and everything below it, if
-/// `below`) touches one of the `shown` folders.
-pub(super) fn touches<'a>(
-    changed: &Path,
-    below: bool,
-    shown: impl IntoIterator<Item = &'a PathBuf>,
-) -> bool {
-    shown
-        .into_iter()
-        .any(|dir| dir == changed || (below && dir.starts_with(changed)))
-}
-
-/// The rows a folder shows: each entry, with the contents of each expanded
-/// folder right under it, one level deeper.
-pub(super) fn flatten(
-    root: &[Entry],
-    children: &HashMap<PathBuf, Vec<Entry>>,
-    expanded: &HashSet<PathBuf>,
-) -> Vec<(Entry, usize)> {
-    fn walk(
-        entries: &[Entry],
-        depth: usize,
-        children: &HashMap<PathBuf, Vec<Entry>>,
-        expanded: &HashSet<PathBuf>,
-        rows: &mut Vec<(Entry, usize)>,
-    ) {
-        for entry in entries {
-            rows.push((entry.clone(), depth));
-            if expanded.contains(&entry.path)
-                && let Some(inside) = children.get(&entry.path)
-            {
-                walk(inside, depth + 1, children, expanded, rows);
-            }
-        }
-    }
-    let mut rows = Vec::with_capacity(root.len());
-    walk(root, 0, children, expanded, &mut rows);
-    rows
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Arrow {
-    Left,
-    Right,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum TreeStep {
-    /// Open or close the folder in place.
-    Toggle,
-    Select(usize),
-    /// Go up to the enclosing folder.
-    Up,
-    Stay,
-}
-
-/// What ← or → does on row `ix` of a tree whose rows have `depths`. `open`
-/// is `None` for a file, else whether the folder is open.
-pub(super) fn tree_step(depths: &[usize], ix: usize, arrow: Arrow, open: Option<bool>) -> TreeStep {
-    let depth = depths.get(ix).copied().unwrap_or(0);
-    match (arrow, open) {
-        (Arrow::Right, Some(false)) | (Arrow::Left, Some(true)) => TreeStep::Toggle,
-        (Arrow::Right, Some(true)) if depths.get(ix + 1) == Some(&(depth + 1)) => {
-            TreeStep::Select(ix + 1)
-        }
-        (Arrow::Right, _) => TreeStep::Stay,
-        (Arrow::Left, _) if depth == 0 => TreeStep::Up,
-        (Arrow::Left, _) => depths[..ix]
-            .iter()
-            .rposition(|d| *d + 1 == depth)
-            .map_or(TreeStep::Stay, TreeStep::Select),
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Move {
-    Previous,
-    Next,
-    First,
-    Last,
-    /// So many entries on: a row of the grid, or one across.
-    By(isize),
-}
-
-/// Where a key moves the selection in a list of `len`. With nothing
-/// selected, ↓ starts at the top and ↑ at the bottom, as in Finder.
-pub(super) fn moved(selected: Option<usize>, len: usize, step: Move) -> Option<usize> {
-    let last = len.checked_sub(1)?;
-    Some(match (step, selected) {
-        (Move::First, _) | (Move::Next, None) => 0,
-        (Move::Last, _) | (Move::Previous, None) => last,
-        (Move::Previous, Some(ix)) => ix.min(last).saturating_sub(1),
-        (Move::Next, Some(ix)) => (ix + 1).min(last),
-        (Move::By(step), None) => {
-            if step > 0 {
-                0
-            } else {
-                last
-            }
-        }
-        (Move::By(step), Some(ix)) => ix.min(last).saturating_add_signed(step).min(last),
-    })
-}
-
-/// The text a key types, when it's one that should start a search: no ⌘,
-/// ⌃ or fn, and not space (kept for Quick Look) or a control key. Option
-/// and Shift characters count. A dead key or IME composition has no text
-/// yet, so its first character is lost.
-pub(super) fn typed(keystroke: &Keystroke) -> Option<&str> {
-    let modifiers = keystroke.modifiers;
-    if modifiers.platform || modifiers.control || modifiers.function {
-        return None;
-    }
-    keystroke.key_char.as_deref().filter(|text| {
-        !text.is_empty() && !text.chars().any(|c| c.is_control() || c.is_whitespace())
-    })
-}
-
-pub(super) fn format_date(secs: u64, today: chrono::NaiveDate) -> String {
-    let Some(time) = i64::try_from(secs)
-        .ok()
-        .and_then(|s| DateTime::from_timestamp(s, 0))
-    else {
-        return "--".into();
-    };
-    let time = time.with_timezone(&Local);
-    if time.date_naive() == today {
-        time.format("Today at %H:%M").to_string()
-    } else {
-        time.format("%-d %b %Y at %H:%M").to_string()
-    }
-}
-
-/// Finder's decimal units: 1 KB is 1,000 bytes.
-pub(super) fn format_size(entry: &Entry) -> String {
-    if entry.kind != Kind::File {
-        return "--".into();
-    }
-    format_bytes(entry.size)
-}
-
-/// Finder's decimal units.
-pub fn format_bytes(size: u64) -> String {
-    let bytes = size as f64;
-    match size {
-        0..1_000 => format!("{size} bytes"),
-        1_000..1_000_000 => format!("{:.0} KB", bytes / 1e3),
-        1_000_000..1_000_000_000 => format!("{:.1} MB", bytes / 1e6),
-        _ => format!("{:.2} GB", bytes / 1e9),
-    }
-}
-
 impl Pane {
-    /// Esc: leaves search, or else lets go of the selection.
-    pub(super) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.batch.is_some() {
-            return self.end_batch(window, cx);
-        }
-        if self.organizing.is_some() {
-            return self.end_organize(window, cx);
-        }
-        if self.showing_duplicates() && self.stop_duplicates(cx) {
+    /// Opens or closes a folder in place. Opening lists it off the UI thread.
+    pub(in crate::browser) fn toggle_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.listing {
             return;
         }
-        if self.showing_localsend() && self.localsend.history {
-            self.localsend.history = false;
-            return cx.notify();
-        }
-        if self.showing_localsend() && self.localsend.sending.take().is_some() {
-            return cx.notify();
-        }
-        if self.query.is_empty() {
-            if self.search_mode_is_plain() {
-                self.selection.clear();
-            } else {
-                self.reset_search_mode(cx);
+        if self.expanded.remove(&path) {
+            self.expanding.remove(&path);
+            self.watch.folders.remove(&path);
+            // A selection inside the closed folder moves to it, as in Finder.
+            if let Some(folder) = self.entries.iter().find(|e| e.path == path) {
+                self.selection.fold(folder);
             }
+            self.rebuild();
             cx.notify();
-        } else {
-            self.show_folder(cx);
+            return;
         }
-        self.focus_list(window, cx);
-    }
-
-    /// The commands that act on this pane wherever the keys are in the window,
-    /// so the window puts them on its root for the pane they're meant for.
-    pub(super) fn commands(
-        &mut self,
-        root: Div,
-        sheet: bool,
-        cloud: &[CloudFolder],
-        cx: &mut Context<Self>,
-    ) -> Div {
-        if self.showing_remote() {
-            return self.remote_commands(root, sheet, cx);
-        }
-        // What's in an archive isn't on the disk for macOS or other apps to
-        // reach.
-        let on_disk = !self.showing_archive();
-        let package = self.package().is_some();
-        let download = on_disk && self.can_download(cx);
-        let remove_download = on_disk && !self.removable(cloud).is_empty();
-        // Nothing new goes in search results, Recents or the Trash.
-        let can_make_here = self.takes_files(cx);
-        let put_back = !self.put_back().0.is_empty() && self.in_trash(cx);
-        let selected = !self.selection.is_empty();
-        let localsend = cx.global::<Preferences>().localsend;
-        let scattered = self.showing_recents() || !self.query.is_empty();
-        let renaming = self.changing_names();
-        let can_extract = self.can_extract(cx);
-        let can_compress = self.can_compress(cx);
-        // While a sheet is open, its commands (from the menu bar too) wait.
-        root.when(!sheet, |d| {
-            d.on_action(cx.listener(|this, _: &Back, window, cx| this.go_back(window, cx)))
-                .on_action(cx.listener(|this, _: &Forward, _, cx| this.step_history(1, cx)))
-                .on_action(cx.listener(|this, _: &EnclosingFolder, _, cx| {
-                    if let Some(parent) = this.folder().parent().map(Path::to_path_buf) {
-                        this.navigate(parent, cx);
-                    }
-                }))
-                .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| {
-                    this.select_vertically(false, false, cx)
-                }))
-                .on_action(cx.listener(|this, _: &SelectNext, _, cx| {
-                    this.select_vertically(true, false, cx)
-                }))
-                .on_action(
-                    cx.listener(|this, _: &SelectFirst, _, cx| this.select(Move::First, false, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &SelectLast, _, cx| this.select(Move::Last, false, cx)),
-                )
-                .on_action(cx.listener(|this, _: &GoHome, window, cx| this.go(home(), window, cx)))
-                .on_action(
-                    cx.listener(|this, _: &GoRecents, window, cx| this.open_recents(window, cx)),
-                )
-                .on_action(cx.listener(|this, _: &GoOverview, window, cx| {
-                    this.open_page(Shows::Overview, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GoWorktrees, window, cx| {
-                    this.open_page(Shows::Worktrees, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GoAirDrop, window, cx| {
-                    this.open_page(Shows::AirDrop, window, cx)
-                }))
-                .when(localsend, |d| {
-                    d.on_action(cx.listener(|this, _: &GoLocalSend, window, cx| {
-                        this.open_page(Shows::LocalSend, window, cx)
-                    }))
-                })
-                .when(self.showing_folder(), |d| {
-                    d.on_action(cx.listener(|this, _: &FindDuplicates, window, cx| {
-                        this.find_duplicates(window, cx)
-                    }))
-                })
-                .on_action(cx.listener(|this, _: &GoTrash, window, cx| this.open_trash(window, cx)))
-                .on_action(cx.listener(|this, _: &GoDesktop, window, cx| {
-                    this.go(home().join("Desktop"), window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GoDocuments, window, cx| {
-                    this.go(home().join("Documents"), window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GoDownloads, window, cx| {
-                    this.go(home().join("Downloads"), window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &GoApplications, window, cx| {
-                    this.go("/Applications".into(), window, cx)
-                }))
-                .on_action(
-                    cx.listener(|this, _: &GoComputer, window, cx| this.go("/".into(), window, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &OpenSelected, window, cx| {
-                        this.open_selection(window, cx)
-                    }),
-                )
-                .on_action(
-                    cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
-                )
-                .on_action(cx.listener(|this, _: &SearchContents, window, cx| {
-                    this.toggle_contents(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &DeselectAll, _, cx| {
-                    this.selection.clear();
-                    cx.notify();
-                }))
-                .when(on_disk, |d| {
-                    d.on_action(cx.listener(|this, _: &SearchThisFolder, window, cx| {
-                        this.toggle_this_folder(window, cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &CopyPath, _, cx| this.copy_path(cx)))
-                    .on_action(
-                        cx.listener(|this, _: &OpenInTerminal, _, cx| this.open_in_terminal(cx)),
-                    )
-                })
-                .when(selected && on_disk, |d| {
-                    d.on_action(cx.listener(|this, _: &RevealInFinder, _, _| {
-                        workspace::reveal(&this.chosen())
-                    }))
-                    .on_action(cx.listener(|this, _: &Share, window, cx| {
-                        let at = this.menu_point(cx);
-                        this.share(window, at, cx)
-                    }))
-                    .when(localsend, |d| {
-                        d.on_action(cx.listener(|this, _: &SendWithLocalSend, window, cx| {
-                            let chosen = this.chosen();
-                            this.send_with_localsend(chosen, window, cx)
-                        }))
-                    })
-                })
-                .when(selected && on_disk && scattered, |d| {
-                    d.on_action(cx.listener(|this, _: &ShowInEnclosingFolder, window, cx| {
-                        this.show_in_enclosing_folder(window, cx)
-                    }))
-                })
-                .when(package, |d| {
-                    d.on_action(cx.listener(|this, _: &ShowPackageContents, _, cx| {
-                        this.show_package_contents(cx)
-                    }))
-                })
-                .when(download, |d| {
-                    d.on_action(cx.listener(|this, _: &Download, _, cx| this.download_selected(cx)))
-                })
-                .when(remove_download, |d| {
-                    let cloud = cloud.to_vec();
-                    d.on_action(cx.listener(move |this, _: &RemoveDownload, _, cx| {
-                        let paths = this.removable(&cloud);
-                        this.remove_downloads_of(paths, cx)
-                    }))
-                })
-        })
-        .on_action(cx.listener(|this, _: &ViewAsList, _, cx| this.choose_view(View::List, cx)))
-        .on_action(cx.listener(|this, _: &ViewAsGrid, _, cx| this.choose_view(View::Grid, cx)))
-        .on_action(
-            cx.listener(|this, _: &ViewAsColumns, _, cx| this.choose_view(View::Columns, cx)),
-        )
-        .on_action(cx.listener(|this, _: &SortByName, _, cx| this.sort_by(SortBy::Name, cx)))
-        .on_action(
-            cx.listener(|this, _: &SortByModified, _, cx| this.sort_by(SortBy::Modified, cx)),
-        )
-        .on_action(cx.listener(|this, _: &SortBySize, _, cx| this.sort_by(SortBy::Size, cx)))
-        .on_action(cx.listener(|this, _: &SortByKind, _, cx| this.sort_by(SortBy::Kind, cx)))
-        .on_action(cx.listener(|this, _: &ReverseSort, _, cx| {
-            let sort = Sort {
-                descending: !this.sort.descending,
-                ..this.sort
-            };
-            this.choose_sort(sort, cx);
-        }))
-        // While a name is edited, its field has the keys, and nothing else
-        // changes files.
-        .when(!sheet && !renaming, |d| {
-            d.on_action(
-                cx.listener(|this, _: &Undo, window, cx| this.submit(Request::Undo, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &Redo, window, cx| this.submit(Request::Redo, window, cx)),
-            )
-            .when(can_extract, |d| {
-                d.on_action(cx.listener(|this, _: &Extract, window, cx| this.extract(window, cx)))
-            })
-            .when(can_compress, |d| {
-                d.on_action(cx.listener(|this, _: &Compress, window, cx| this.compress(window, cx)))
-            })
-            .when(can_make_here, |d| {
-                d.on_action(
-                    cx.listener(|this, _: &NewFolder, window, cx| this.new_item(true, window, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &NewFile, window, cx| this.new_item(false, window, cx)),
-                )
-            })
-            .when(put_back, |d| {
-                d.on_action(
-                    cx.listener(|this, _: &PutBack, window, cx| this.put_back_selected(window, cx)),
-                )
-            })
-        })
-    }
-
-    /// A restored location that can't open: why, and the ways out.
-    fn unavailable_view(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let name = level_name(self.folder());
-        let (title, about) = match &self.unavailable {
-            Some(Unavailable::Gone(why)) => (format!("{name} is unavailable"), why.clone()),
-            _ => (
-                format!("Open {name}?"),
-                "macOS may ask for permission, so it waits until you open it.".to_string(),
-            ),
-        };
-        let consent = self.unavailable == Some(Unavailable::NeedsConsent);
-        div()
-            .debug_selector(|| "unavailable".into())
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .px_6()
-            .child(
-                div()
-                    .text_size(px(theme::TEXT_TITLE))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_size(px(theme::TEXT_BODY))
-                    .text_color(content(0.65))
-                    .child(about),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        text_button(
-                            "unavailable-back",
-                            "Back",
-                            if self.at > 0 {
-                                ButtonLook::Secondary
-                            } else {
-                                ButtonLook::Disabled
-                            },
-                        )
-                        .when(self.at > 0, |d| {
-                            d.on_click(cx.listener(|this, _, _, cx| this.step_history(-1, cx)))
-                        }),
-                    )
-                    .child(
-                        text_button(
-                            "unavailable-choose",
-                            "Go to Folder…",
-                            if consent {
-                                ButtonLook::Secondary
-                            } else {
-                                ButtonLook::Primary
-                            },
-                        )
-                        .debug_selector(|| "unavailable-choose".into())
-                        .on_click(|_, window, cx| window.dispatch_action(Box::new(GoToFolder), cx)),
-                    )
-                    .when(consent, |d| {
-                        d.child(
-                            text_button("unavailable-open", "Open", ButtonLook::Primary)
-                                .debug_selector(|| "unavailable-open".into())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.consented = true;
-                                    this.reload(cx);
-                                })),
-                        )
-                    }),
-            )
-    }
-
-    /// The list or grid, with its keys, its menus and its marquee.
-    fn file_list(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        // The list's rows don't depend on its width, so it shows at once.
-        if matches!(self.layout(), View::List | View::Columns) {
-            self.take_pending_reveal();
-        }
-        // Column view draws its own bounds and rectangle in the keys' column.
-        let in_columns = self.layout() == View::Columns
-            && self.error.is_none()
-            && self.unavailable.is_none()
-            && self.organizing.is_none()
-            && !self.showing_overview()
-            && self.preview.is_none();
-        let list = match &self.error {
-            _ if self.unavailable.is_some() => self.unavailable_view(cx).into_any_element(),
-            Some(error) => div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .px_6()
-                .text_size(px(theme::TEXT_BODY))
-                .text_color(content(0.65))
-                .child(error.clone())
-                .into_any_element(),
-            None if self.layout() == View::Grid => {
-                let icon = self.grid_icon;
-                let inset = self.grid_inset.clone();
-                // The grid's width this frame, from the window's, so a resize
-                // lays out the right columns now rather than a frame late. What
-                // the estimate last missed by, the interface zoomed, is as
-                // last measured.
-                let room = self.chrome.width;
-                let wide = room - inset.get();
-                (self.across, self.cell_width) = grid_layout(wide, icon);
-                self.take_pending_reveal();
-                let rows = self.entries.len().div_ceil(self.across);
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        canvas(
-                            move |bounds, window, _| {
-                                let measured = bounds.size.width.as_f32();
-                                // A width the estimate missed lays out again.
-                                // GPUI ignores a refresh while drawing, so it
-                                // waits for the next frame.
-                                if (wide - measured).abs() > 0.5 {
-                                    window.on_next_frame(|window, _| window.refresh());
-                                }
-                                inset.set(room - measured);
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
-                    .child(
-                        uniform_list("grid", rows, cx.processor(Self::grid_rows))
-                            .track_scroll(&self.scroll)
-                            .flex_1()
-                            .p_1(),
-                    )
-                    .into_any_element()
-            }
-            None if in_columns => self.columns_view(window, cx),
-            None => uniform_list(
-                "entries",
-                self.matches.row_count(self.entries.len()),
-                cx.processor(Self::rows),
-            )
-            .track_scroll(&self.scroll)
-            .flex_1()
-            // Rows' corners run parallel to the pane's.
-            .p(px(theme::CARD_PADDING))
-            .into_any_element(),
-        };
-        // Thumbnails the last frame didn't draw (scrolled away, another folder,
-        // another size, the list view) are given back, loaded or not.
-        let drawn = std::mem::take(&mut self.drawn);
-        let gone: Vec<Thumb> = self
-            .thumbs
-            .keys()
-            .filter(|t| !drawn.contains(*t))
-            .cloned()
-            .collect();
-        for thumb in gone {
-            let image = self.thumbs.remove(&thumb).flatten();
-            thumbnails::release(&thumb, image, Some(&mut *window), cx);
-        }
-        let can_make_here = self.takes_files(cx);
-        let pastes_to_localsend = self.showing_localsend() && cx.global::<Preferences>().localsend;
-        // Nothing in an archive changes, and its rows aren't files to copy.
-        let writable = !self.showing_archive();
-        div()
-            .id("file-list")
-            .key_context("FileList")
-            .track_focus(&self.list_focus)
-            .on_key_down(cx.listener(Self::type_to_search))
-            .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| {
-                this.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| {
-                if let Some(last) = this.matches.row_count(this.entries.len()).checked_sub(1) {
-                    this.scroll
-                        .scroll_to_item_strict(last, ScrollStrategy::Bottom);
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ExpandFolder, _, cx| this.expand(cx)))
-            .on_key_down(cx.listener(Self::collapse))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.page(false, cx)))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.page(true, cx)))
-            .on_action(cx.listener(|this, _: &ExtendPrevious, _, cx| {
-                this.select_vertically(false, true, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &ExtendNext, _, cx| this.select_vertically(true, true, cx)),
-            )
-            .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| {
-                if this.layout() == View::Grid {
-                    this.select(Move::By(-1), true, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ExtendRight, _, cx| {
-                if this.layout() == View::Grid {
-                    this.select(Move::By(1), true, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &text_field::SelectAll, _, cx| {
-                this.selection.select_all(&this.entries);
-                cx.notify();
-            }))
-            // Copy and Paste are AppKit's actions, as Select All is: here
-            // they're files. Leaving one out turns its menu item off.
-            .when(!self.selection.is_empty() && writable, |d| {
-                d.on_action(cx.listener(|this, _: &text_field::Copy, _, cx| this.copy_files(cx)))
-            })
-            .when(can_make_here, |d| {
-                d.on_action(cx.listener(|this, _: &text_field::Paste, window, cx| {
-                    this.paste(false, window, cx)
-                }))
-                .on_action(
-                    cx.listener(|this, _: &MoveHere, window, cx| this.paste(true, window, cx)),
-                )
-            })
-            .when(pastes_to_localsend, |d| {
-                d.on_action(cx.listener(|this, _: &text_field::Paste, window, cx| {
-                    this.paste_into_localsend(window, cx)
-                }))
-            })
-            // Only here, so the menu bar's items are off and can't change the
-            // selection's files while the keys are somewhere else, such as the
-            // sidebar.
-            .when(
-                self.showing_worktrees() && self.worktrees.selected().is_some(),
-                |d| {
-                    d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
-                        this.ask_remove_worktree(window, cx)
-                    }))
-                },
-            )
-            // Move to Trash lists the chosen copies first; Space chooses one.
-            .when(self.showing_duplicates(), |d| {
-                d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
-                    this.review_duplicates(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &QuickLook, _, cx| this.choose_duplicate(cx)))
-            })
-            .when(
-                writable && !self.changing_names() && !self.selection.is_empty(),
-                |d| {
-                    d.on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
-                        let paths = this.chosen();
-                        this.submit(Request::Trash { paths }, window, cx)
-                    }))
-                    .on_action(cx.listener(|this, _: &Duplicate, window, cx| {
-                        let paths = this.chosen();
-                        this.submit(Request::Duplicate { paths }, window, cx)
-                    }))
-                    .on_action(cx.listener(
-                        |this, _: &NewFolderWithSelection, window, cx| {
-                            this.new_folder_with_selection(window, cx)
-                        },
-                    ))
-                },
-            )
-            .when(
-                writable && self.renaming.is_none() && !self.selection.is_empty(),
-                |d| {
-                    d.on_action(
-                        cx.listener(|this, _: &Rename, window, cx| {
-                            this.rename_selected(window, cx)
-                        }),
-                    )
-                    .on_action(cx.listener(
-                        |this, _: &SuggestNames, window, cx| this.suggest_names(window, cx),
-                    ))
-                },
-            )
-            .when(writable, |d| {
-                d.on_action(cx.listener(|this, _: &OrganizeFolder, window, cx| {
-                    this.start_organize(window, cx)
-                }))
-            })
-            .when(self.preview.is_some(), |d| {
-                d.on_action(
-                    cx.listener(|this, _: &EditPreview, window, cx| this.edit_preview(window, cx)),
-                )
-            })
-            .when(self.showing_recents(), |d| {
-                d.on_action(cx.listener(|this, _: &ClearRecents, _, cx| this.clear_recents(cx)))
-            })
-            .when_some(self.chrome.ejectable.clone(), |d, mount| {
-                d.on_action(
-                    cx.listener(move |_, _: &Eject, _, cx| {
-                        cx.emit(PaneEvent::Eject(mount.clone()))
-                    }),
-                )
-            })
-            .on_action(cx.listener(|this, _: &ShowContextMenu, _, cx| {
-                if !this.changing_names() && !this.showing_page() {
-                    let at = this.menu_point(cx);
-                    let scopes = this.scopes();
-                    cx.emit(PaneEvent::Menu { scopes, at });
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.context_click(None, event.position, window, cx)
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.focus_list(window, cx);
-                    this.swept = false;
-                    if std::mem::take(&mut this.grabbed) {
-                        return;
-                    }
-                    // In column view a rectangle selects in the keys' column.
-                    let elsewhere = this.layout() == View::Columns
-                        && !this.list_bounds.get().contains(&event.position);
-                    if elsewhere {
-                        return;
-                    }
-                    let at = this.listing_point(event.position);
-                    this.marquee = Some(Marquee {
-                        start: at,
-                        end: at,
-                        pointer: event.position,
-                        additive: event.modifiers.platform || event.modifiers.shift,
-                        dragging: false,
-                        scrolling: false,
-                    });
-                    cx.notify();
-                }),
-            )
-            // `marquee_drag` hears releases only from the frame after the
-            // press, and a quick tap releases sooner.
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                    this.end_marquee(event.position, event.modifiers, cx)
-                }),
-            )
-            .relative()
-            // The rectangle stays inside the listing.
-            .overflow_hidden()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(
-                self.organize_page(cx)
-                    .or_else(|| self.overview_page(cx))
-                    .or_else(|| self.worktrees_page(cx))
-                    .or_else(|| self.airdrop_page(cx))
-                    .or_else(|| self.localsend_page(cx))
-                    .or_else(|| self.duplicates_page(cx))
-                    .or_else(|| {
-                        // Until it has something to show, so it never
-                        // appears in pieces.
-                        self.preview
-                            .clone()
-                            .filter(|view| view.read(cx).ready())
-                            .map(gpui::IntoElement::into_any_element)
-                    })
-                    .unwrap_or(list),
-            )
-            .when(!in_columns, |d| {
-                let bounds = self.list_bounds.clone();
-                d.child(
-                    canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
-                        .absolute()
-                        .size_full(),
-                )
-                .children(self.marquee_overlay())
-            })
-            .when(self.marquee.is_some(), |d| d.child(self.marquee_drag(cx)))
-    }
-}
-
-impl Focusable for Pane {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.list_focus.clone()
-    }
-}
-
-impl Render for Pane {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.follow_batch(window, cx);
-        self.follow_organize(window, cx);
-        self.follow_columns(cx);
-        self.preview_typing = false;
-        if let Some(preview) = &self.preview {
-            let covered = self.chrome.covered;
-            preview.update(cx, |preview, cx| preview.set_covered(covered, cx));
-            self.preview_typing = preview.read(cx).typing();
-        }
-        let prefs = cx.global::<Preferences>();
-        let boxy = prefs.workspace_style == WorkspaceStyle::Boxy;
-        // Search results stay in relevance order, so no column shows a sort.
-        let remote = self.showing_remote();
-        let sort_shown =
-            (self.showing_folder() || self.showing_archive() || remote).then_some(self.sort);
-        // The Overview and Worktrees list no entries but are full of text.
-        let empty = self.root.is_empty() && self.error.is_none() && !self.showing_page();
-        let look = prefs.background.clone().map(|path| Look {
-            path,
-            effect: prefs.background_effect,
-            opacity: prefs.background_opacity(empty),
-            empty,
-            preview: false,
-            // The card's corners inside its border.
-            radius: if boxy { 0. } else { theme::RADIUS_CARD - 1. },
+        self.expanded.insert(path.clone());
+        let key = path.clone();
+        let (show_hidden, peek, sort) = (self.show_hidden, self.peek_hidden, self.sort);
+        let tidy = self.tidy_folders(cx);
+        let dir = path.clone();
+        let list = cx.background_executor().spawn(async move {
+            let hidden = lists_hidden(&dir, show_hidden || peek, &tidy);
+            let list = entries::list_dir(&dir, hidden, sort).unwrap_or_default();
+            (list, real(&dir))
         });
-        self.backdrop
-            .update(cx, |backdrop, cx| backdrop.set(look, cx));
-        let list = if remote {
-            self.remote_list(window, cx)
-        } else {
-            self.file_list(window, cx).into_any_element()
-        };
-        let (date, size, kind) = columns(self.chrome.width);
-        // A server folder is always a list, with titles once it's listed.
-        let titled = if remote {
-            self.remote.listing == super::remote::Listing::Listed
-        } else {
-            self.layout() == View::List
-        };
-        let id = cx.entity_id();
-        let dropping_here = self.drag.active() && self.takes_files(cx);
-        let outlined = self.drag.outlines(&Spot::Pane(id));
-        div()
-            .relative()
-            .size_full()
-            // A press anywhere in the other pane moves the commands here.
-            .when(!self.chrome.focused, |d| {
-                d.capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                    this.focus_list(window, cx);
-                }))
-            })
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(self.backdrop.clone())
-            .children(self.trash_bar(cx))
-            .children(self.recents_bar(cx))
-            .children(self.archive_bar(cx))
-            .children(self.batch_bar(window, cx))
-            // The grid sorts from the View menu and Settings.
-            .when(
-                titled
-                    && self.unavailable.is_none()
-                    && self.organizing.is_none()
-                    && self.preview.is_none()
-                    && !self.showing_page(),
-                |d| {
-                    d.child(
-                        theme::pane_bar(theme::ROW_HEIGHT)
-                            .gap_3()
-                            .border_b_1()
-                            .border_color(content(0.06))
-                            .text_size(px(theme::TEXT_SMALL))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(content(0.65))
-                            .child(sort_header(SortBy::Name, "Name", sort_shown, cx).flex_1())
-                            .when(date, |d| {
-                                d.child(
-                                    sort_header(SortBy::Modified, "Date Modified", sort_shown, cx)
-                                        .w(px(180.)),
-                                )
-                            })
-                            .when(size, |d| {
-                                d.child(
-                                    sort_header(SortBy::Size, "Size", sort_shown, cx)
-                                        .w(px(80.))
-                                        .justify_end(),
-                                )
-                            })
-                            .when(kind, |d| {
-                                d.child(
-                                    sort_header(SortBy::Kind, "Kind", sort_shown, cx).w(px(110.)),
-                                )
-                            }),
-                    )
-                },
-            )
-            .child(list)
-            .children(self.path_bar(window, cx))
-            .when(dropping_here, |d| {
-                let drag = self.drag.clone();
-                let target = Target::Folder {
-                    spot: Spot::Pane(id),
-                    path: self.folder().to_path_buf(),
-                    name: level_name(self.folder()),
-                };
-                offers(d, move |_| drag.offer(target.clone()))
-            })
-            .when(outlined, |d| {
-                d.child(theme::drop_outline().when(!boxy, |d| {
-                    // The card's corners inside its border.
-                    d.rounded(px(theme::RADIUS_CARD - 1.))
-                }))
-            })
-            // No press reaches the rows, titles or crumbs under a running Apply.
-            .when(self.batch_sending(), |d| {
-                d.child(div().absolute().size_full().occlude())
-            })
+        let task = cx.spawn(async move |this, cx| {
+            let (list, watched) = list.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.expanding.remove(&path).is_some() && this.expanded.contains(&path) {
+                    this.ask_downloads(&list, cx);
+                    // Watched from now on, not just from the next listing.
+                    this.watch.folders.insert(path.clone(), watched);
+                    this.children.insert(path, list);
+                    this.rebuild();
+                    this.recheck_held(cx);
+                    cx.notify();
+                }
+            });
+        });
+        self.expanding.insert(key, task);
+        self.rebuild();
+        cx.notify();
+    }
+
+    /// Asks for `paths`, and says why any fails, with Try Again.
+    pub(in crate::browser) fn download(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        let then = Self::download_ended(cx);
+        self.downloads
+            .update(cx, |downloads, cx| downloads.download(paths, then, cx));
     }
 }

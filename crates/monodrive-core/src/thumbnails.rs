@@ -4,12 +4,16 @@
 use block2::RcBlock;
 use objc2::AnyThread;
 use objc2::rc::Retained;
-use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
+use objc2::runtime::AnyObject;
+use objc2_core_foundation::{CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
 };
-use objc2_foundation::{NSError, NSString, NSURL};
-use objc2_image_io::CGImageSource;
+use objc2_foundation::{NSError, NSMutableDictionary, NSNumber, NSString, NSURL};
+use objc2_image_io::{
+    CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways,
+    kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceThumbnailMaxPixelSize,
+};
 use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes,
     QLThumbnailGenerator, QLThumbnailRepresentation,
@@ -43,7 +47,7 @@ pub fn picture(path: &Path, side: u32) -> Result<Bitmap, String> {
     // SAFETY: NSURL and CFURL are the same object, and `url` outlives the call.
     let source = unsafe { CGImageSource::with_url(&*Retained::as_ptr(&url).cast(), None) }
         .ok_or_else(cannot)?;
-    let image = crate::edits::upright(&source, side as i32).ok_or_else(cannot)?;
+    let image = upright(&source, side as i32).ok_or_else(cannot)?;
     bitmap(&image)
 }
 
@@ -165,6 +169,29 @@ pub fn jpeg(bitmap: &Bitmap) -> Result<Vec<u8>, String> {
         )
         .map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+/// The source's first picture the right way up, `side` pixels on its longer
+/// edge at most, and never enlarged.
+pub(crate) fn upright(source: &CGImageSource, side: i32) -> Option<CFRetained<CGImage>> {
+    let options: Retained<NSMutableDictionary<NSString, AnyObject>> = NSMutableDictionary::new();
+    let yes = NSNumber::numberWithBool(true);
+    // SAFETY: the option keys are the framework's constants, and NSString and
+    // CFString, like NSDictionary and CFDictionary, are the same objects.
+    unsafe {
+        let insert = |name: &CFString, value: &AnyObject| {
+            let name: *const NSString = std::ptr::from_ref(name).cast();
+            options.insert(&*name, value);
+        };
+        insert(kCGImageSourceCreateThumbnailFromImageAlways, yes.as_ref());
+        insert(kCGImageSourceCreateThumbnailWithTransform, yes.as_ref());
+        insert(
+            kCGImageSourceThumbnailMaxPixelSize,
+            NSNumber::numberWithInt(side).as_ref(),
+        );
+        let dictionary: &CFDictionary = &*Retained::as_ptr(&options).cast();
+        source.thumbnail_at_index(0, Some(dictionary))
+    }
 }
 
 #[cfg(test)]

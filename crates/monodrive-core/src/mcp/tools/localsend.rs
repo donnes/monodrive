@@ -5,7 +5,7 @@
 use super::{Call, local};
 use crate::localsend::{self, Cancel, Device, Outgoing, SendError};
 use crate::mcp::contract::{Code, Reply, ToolError};
-use crate::mcp::server::Server;
+use crate::mcp::session::Session;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -30,24 +30,11 @@ pub struct Devices {
 impl Call for LocalsendDevices {
     type Out = Devices;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Devices>, ToolError> {
-        let identity = server.localsend()?;
+    fn run(self, session: &mut Session) -> Result<Reply<Devices>, ToolError> {
+        let identity = session.localsend()?;
         let wait = Duration::from_secs(self.wait_seconds.clamp(1, 10));
         let devices = localsend::look(identity, wait);
-        for device in &devices {
-            match server
-                .nearby
-                .iter_mut()
-                .find(|known| known.fingerprint == device.fingerprint)
-            {
-                Some(known) => {
-                    if let Some(merged) = localsend::merged(known, device.clone()) {
-                        *known = merged;
-                    }
-                }
-                None => server.nearby.push(device.clone()),
-            }
-        }
+        session.heard(&devices);
         let text = if devices.is_empty() {
             "No LocalSend device answered. A device needs LocalSend open on this network. If \
              one has, macOS may be blocking Local Network access for the app that started this \
@@ -101,22 +88,17 @@ pub struct Sent {
 impl Call for LocalsendSend {
     type Out = Sent;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Sent>, ToolError> {
-        let device = server
-            .nearby
-            .iter()
-            .find(|device| device.fingerprint.eq_ignore_ascii_case(&self.fingerprint))
-            .cloned()
-            .ok_or_else(|| {
-                ToolError::new(
-                    Code::NotFound,
-                    format!(
-                        "No device with fingerprint {} was listed in this session. \
+    fn run(self, session: &mut Session) -> Result<Reply<Sent>, ToolError> {
+        let device = session.nearby(&self.fingerprint).ok_or_else(|| {
+            ToolError::new(
+                Code::NotFound,
+                format!(
+                    "No device with fingerprint {} was listed in this session. \
                          localsend_devices lists them.",
-                        self.fingerprint
-                    ),
-                )
-            })?;
+                    self.fingerprint
+                ),
+            )
+        })?;
         let outgoing = match (self.paths, self.text) {
             (Some(paths), None) => Outgoing::Files(local(&paths, "localsend_send")?),
             (None, Some(text)) => Outgoing::Text(text),
@@ -127,7 +109,7 @@ impl Call for LocalsendSend {
                 ));
             }
         };
-        let identity = server.localsend()?;
+        let identity = session.localsend()?;
         let sent = localsend::send(
             &identity,
             &device,

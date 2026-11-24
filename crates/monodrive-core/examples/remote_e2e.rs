@@ -8,10 +8,12 @@
 //! is connected to. A cancelled download's partial copy goes to the real Trash,
 //! as any does, and this takes it back out by the path the job reports.
 
+use monodrive_core::Origin;
 use monodrive_core::entries::Kind;
-use monodrive_core::ops::{self, Conflict, Origin, Request, State};
+use monodrive_core::ops::{self, Conflict, Request, State};
 use monodrive_core::places;
-use monodrive_core::remote::{Connections, Connector, RemoteError, RemotePath, Source, ssh};
+use monodrive_core::places::Source;
+use monodrive_core::remote::{Connections, Connector, RemoteError, RemotePath, ssh};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;

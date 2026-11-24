@@ -2,7 +2,8 @@
 //! worktree's changes, read from Git itself. Git stays the authority; Monodrive
 //! keeps only the repositories the user registered, in places.json.
 
-use crate::places::{self, Availability};
+use crate::disk::{executable, exited};
+use crate::places::{self, Registration};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
@@ -152,14 +153,6 @@ pub struct Found {
     pub problems: Vec<String>,
 }
 
-/// A repository the user asked Monodrive to remember.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Registration {
-    pub common_dir: PathBuf,
-    /// Its main worktree, or the bare repository, as shown.
-    pub path: PathBuf,
-}
-
 impl Status {
     pub fn is_clean(&self) -> bool {
         self.staged + self.unstaged + self.conflicted + self.untracked == 0
@@ -170,23 +163,6 @@ impl Risk {
     /// Nothing that only this worktree holds.
     pub fn is_empty(&self) -> bool {
         self.paths == 0 && self.unpushed == 0
-    }
-}
-
-impl Registration {
-    /// Whether the repository is still there, without running git.
-    pub fn resolve(&self) -> Availability {
-        let shown = self.path.display();
-        match std::fs::metadata(&self.common_dir) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                Availability::Unavailable(format!("{shown} no longer exists."))
-            }
-            Err(e) => Availability::Unavailable(format!("{shown}: {e}")),
-            Ok(_) if self.common_dir.join("HEAD").is_file() => {
-                Availability::Available(self.path.clone())
-            }
-            Ok(_) => Availability::Unavailable(format!("{shown} is no longer a Git repository.")),
-        }
     }
 }
 
@@ -325,26 +301,6 @@ fn stop(child: &mut Child, why: String) -> String {
     let _ = child.kill();
     let _ = child.wait();
     why
-}
-
-/// Waits for the child `pid` to exit without reaping it, so its pid can't
-/// be reused before `stop` or `wait` reaps it.
-pub(crate) fn exited(pid: libc::id_t) {
-    loop {
-        // SAFETY: `info` is a valid siginfo_t for waitid to fill.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        // SAFETY: waits on our own child; WNOWAIT leaves it to be reaped.
-        let r = unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
-        if r == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            return;
-        }
-    }
-}
-
-pub(crate) fn executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 /// Whether Xcode or the Command Line Tools are installed, asked of

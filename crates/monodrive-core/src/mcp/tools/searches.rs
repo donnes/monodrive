@@ -3,7 +3,7 @@
 
 use super::{Call, local_one};
 use crate::mcp::contract::{Reply, ToolError, shown};
-use crate::mcp::server::Server;
+use crate::mcp::session::Session;
 use crate::places::SavedSearch;
 use crate::search::Scope;
 use schemars::JsonSchema;
@@ -52,8 +52,8 @@ pub struct Searches {
 impl Call for ListSearches {
     type Out = Searches;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Searches>, ToolError> {
-        let searches: Vec<Search> = server.places.searches()?.iter().map(Search::of).collect();
+    fn run(self, session: &mut Session) -> Result<Reply<Searches>, ToolError> {
+        let searches: Vec<Search> = session.places.searches()?.iter().map(Search::of).collect();
         let text: String = if searches.is_empty() {
             "No saved searches.\n".into()
         } else {
@@ -77,7 +77,7 @@ pub struct SaveSearch {
 impl Call for SaveSearch {
     type Out = Search;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Search>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Search>, ToolError> {
         let scope = match &self.path {
             Some(path) => Scope::Folder(local_one(path, "save_search")?),
             None => Scope::Everywhere,
@@ -87,7 +87,7 @@ impl Call for SaveSearch {
             query: self.query,
             scope,
         };
-        let saved = Search::of(&server.places.save_search(search, self.at)?);
+        let saved = Search::of(&session.places.save_search(search, self.at)?);
         Ok(Reply::new(saved.line(), saved))
     }
 }
@@ -107,8 +107,8 @@ pub struct Named {
 impl Call for RenameSearch {
     type Out = Named;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Named>, ToolError> {
-        server.places.rename_search(&self.name, &self.to)?;
+    fn run(self, session: &mut Session) -> Result<Reply<Named>, ToolError> {
+        session.places.rename_search(&self.name, &self.to)?;
         let to = self.to.trim().to_owned();
         Ok(Reply::new(
             format!("Renamed {} to {to}.\n", self.name),
@@ -126,8 +126,8 @@ pub struct RemoveSearch {
 impl Call for RemoveSearch {
     type Out = Named;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Named>, ToolError> {
-        server.places.remove_search(&self.name)?;
+    fn run(self, session: &mut Session) -> Result<Reply<Named>, ToolError> {
+        session.places.remove_search(&self.name)?;
         Ok(Reply::new(
             format!("Removed the saved search {}.\n", self.name),
             Named { name: self.name },

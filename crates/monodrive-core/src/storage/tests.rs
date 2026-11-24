@@ -164,7 +164,7 @@ fn a_cancelled_scan_or_search_says_so_and_keeps_its_candidates_unverified() {
     write(&root.join("a.txt"), b"same");
     write(&root.join("b.txt"), b"same");
     let cancelled = Progress::default();
-    cancelled.cancel.store(true, Ordering::Relaxed);
+    cancelled.cancel();
     let report = scan(&root, &cancelled, None).unwrap();
     assert_eq!(report.stopped, Some(Stop::Cancelled));
     assert_eq!(report.root().usage, Usage::default());

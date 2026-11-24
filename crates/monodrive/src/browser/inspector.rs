@@ -5,11 +5,17 @@
 //! known and fills in the rest. A read or folder total for what's no longer
 //! selected is dropped. While it's closed, nothing here reads or runs.
 
-use super::pane::{Pane, format_date, format_size, level_name, real};
+use super::facts::{READ_DELAY, fact, fact_ink, fact_row, header, kinds_summary};
+use super::pane::rows::{format_date, format_size};
+use super::pane::view::Shown;
+use super::pane::{Pane, real};
 use super::tabs::{CARD_GAP, NARROWEST_PANE};
-use super::{Browser, GetInfo, HideInspector, OpenWith, format_bytes};
+use super::{Browser, GetInfo, HideInspector};
+use crate::browser::pane::level_name;
+use crate::commands::OpenWith;
 use crate::downloads::{self, Changed, State};
 use crate::file_icons;
+use crate::format::format_bytes;
 use crate::native::native;
 use crate::preferences::{self, Preferences};
 use crate::theme::{self, ButtonLook, content, danger, icon, icon_button};
@@ -24,16 +30,12 @@ use monodrive_core::entries::{Entry, Kind};
 use monodrive_core::info::Info;
 use monodrive_core::paths;
 use monodrive_core::sizes::FolderSize;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How wide it is.
 pub(super) const WIDTH: f32 = 260.;
-/// How long the selection must rest before the disk is read, so arrowing
-/// through a list asks nothing about the rows it passes.
-pub(super) const READ_DELAY: Duration = Duration::from_millis(100);
 /// How long the disk must settle before what's shown is read again.
 pub(super) const REFRESH_DELAY: Duration = Duration::from_millis(250);
 /// How long a selection waits for its read and picture before showing anyway,
@@ -43,47 +45,23 @@ pub(super) const PATIENCE: Duration = Duration::from_millis(250);
 const ICON_SIDE: f32 = 96.;
 /// The file list keeps at least this much of the room, or it stays closed.
 const LEAST_LIST: f32 = 200.;
-/// How much of a value's row its label takes.
-const LABEL_WIDTH: f32 = 84.;
-/// How many kinds the summary of several items names.
-const KINDS_NAMED: usize = 3;
 
 /// What's selected, as last drawn.
 struct Key {
     pane: EntityId,
-    folder: PathBuf,
-    showing_folder: bool,
-    /// The rows are an archive's, about which nothing is read.
-    archive: bool,
-    only: Option<PathBuf>,
-    count: usize,
-    bytes: u64,
-    cursor: Option<PathBuf>,
+    shown: Shown,
 }
 
 impl Key {
     fn of(id: EntityId, pane: &Pane) -> Self {
         Self {
             pane: id,
-            folder: pane.folder().to_path_buf(),
-            showing_folder: pane.shows_a_real_folder(),
-            archive: pane.showing_archive(),
-            only: pane.selection.only().map(Path::to_path_buf),
-            count: pane.selection.len(),
-            bytes: pane.selection.size(),
-            cursor: pane.selection.cursor().map(Path::to_path_buf),
+            shown: pane.shown(),
         }
     }
 
     fn matches(&self, id: EntityId, pane: &Pane) -> bool {
-        self.pane == id
-            && self.folder == pane.folder()
-            && self.showing_folder == pane.shows_a_real_folder()
-            && self.archive == pane.showing_archive()
-            && self.only.as_deref() == pane.selection.only()
-            && self.count == pane.selection.len()
-            && self.bytes == pane.selection.size()
-            && self.cursor.as_deref() == pane.selection.cursor()
+        self.pane == id && pane.still_shows(&self.shown)
     }
 }
 
@@ -229,39 +207,6 @@ pub(super) fn room(room: f32, split: bool, cx: &App) -> f32 {
     if room - taken >= least { taken } else { 0. }
 }
 
-/// `2 folders, 3 PNG files, 1 more`: the commonest kinds first.
-pub(super) fn kinds_summary(entries: &[&Entry]) -> String {
-    let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-    for entry in entries {
-        *kinds.entry(entry.kind_label()).or_default() += 1;
-    }
-    let mut kinds: Vec<(String, usize)> = kinds.into_iter().collect();
-    kinds.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-    let others: usize = kinds.iter().skip(KINDS_NAMED).map(|(_, count)| count).sum();
-    let mut named: Vec<String> = kinds
-        .into_iter()
-        .take(KINDS_NAMED)
-        .map(|(kind, count)| {
-            let word = match kind.as_str() {
-                "Folder" => "folder",
-                "Alias" => "alias",
-                "--" => "item",
-                other => other,
-            };
-            let plural = match (count, word) {
-                (1, _) => "",
-                (_, "alias") => "es",
-                _ => "s",
-            };
-            format!("{count} {word}{plural}")
-        })
-        .collect();
-    if others > 0 {
-        named.push(format!("{others} more"));
-    }
-    named.join(", ")
-}
-
 /// Whether a change FSEvents reports at `changed`, and below it if `below`,
 /// touches what's at `real`: inside it, in the folder holding it, or at it.
 pub(super) fn touches(real: &Path, changed: &Path, below: bool) -> bool {
@@ -270,15 +215,15 @@ pub(super) fn touches(real: &Path, changed: &Path, below: bool) -> bool {
         || (below && real.starts_with(changed))
 }
 
-fn subject_of(pane: &Pane) -> Subject {
+fn subject_of(pane: &Pane, shown: &Shown) -> Subject {
     // An archive's entries aren't on the disk to read.
-    if pane.showing_archive() || (!pane.shows_a_real_folder() && pane.selection.is_empty()) {
+    if shown.archive || (!shown.real_folder && shown.count == 0) {
         return Subject::Nothing;
     }
-    let chosen = pane.selection.in_order(&pane.entries);
+    let chosen = pane.chosen_entries();
     match chosen.as_slice() {
         [] => {
-            let folder = pane.folder().to_path_buf();
+            let folder = shown.folder.clone();
             Subject::One {
                 entry: Entry {
                     name: level_name(&folder),
@@ -300,7 +245,7 @@ fn subject_of(pane: &Pane) -> Subject {
             let shared = many.iter().all(|e| e.path.parent() == parent.as_deref());
             Subject::Several {
                 count: many.len(),
-                bytes: pane.selection.size(),
+                bytes: shown.bytes,
                 first: many[0].clone(),
                 kinds: kinds_summary(many),
                 folders: many.iter().filter(|e| e.kind == Kind::Dir).count(),
@@ -342,27 +287,26 @@ impl Browser {
         }
         // What a rename or a job selected isn't listed yet; its listing is on
         // its way, and this asks again until it lands.
-        if !pane.selection.is_empty() && pane.selection.in_order(&pane.entries).is_empty() {
+        if pane.selection_unlisted() {
             return;
         }
         let opening = self.inspector.key.is_none();
         let key = Key::of(id, pane);
-        let subject = subject_of(pane);
+        let subject = subject_of(pane, &key.shown);
         if opening {
             native(cx).forget_sizes();
         }
         // What's shown stays only while it's still there to show. A rename or
         // a move in this folder has taken it away.
-        let same_folder = self
-            .inspector
-            .key
-            .as_ref()
-            .is_some_and(|shown| shown.pane == key.pane && shown.folder == key.folder);
+        let same_folder =
+            self.inspector.key.as_ref().is_some_and(|shown| {
+                shown.pane == key.pane && shown.shown.folder == key.shown.folder
+            });
         let gone = same_folder
             && matches!(
                 &self.inspector.subject,
                 Subject::One { entry, selected: true }
-                    if !pane.entries.iter().any(|e| e.path == entry.path)
+                    if !pane.lists(&entry.path)
             );
         let was_waiting = self.inspector.pending.is_some();
         self.inspector.drop_pending(Some(window), cx);
@@ -649,11 +593,8 @@ impl Browser {
     /// takes what's typed so far.
     fn set_inspector(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !on {
-            self.pane().update(cx, |pane, cx| {
-                if pane.renaming.as_ref().is_some_and(|r| r.in_inspector) {
-                    pane.commit_rename(window, cx);
-                }
-            });
+            self.pane()
+                .update(cx, |pane, cx| pane.commit_inspector_rename(window, cx));
         }
         preferences::update(cx, |p| p.show_inspector = on);
     }
@@ -705,7 +646,12 @@ impl Browser {
                     .text_size(px(theme::TEXT_BODY))
                     .text_color(content(0.65))
                     .child(
-                        if pane.read(cx).showing_archive() && !pane.read(cx).selection.is_empty() {
+                        if self
+                            .inspector
+                            .key
+                            .as_ref()
+                            .is_some_and(|key| key.shown.archive && key.shown.count > 0)
+                        {
                             "Extract it to see more."
                         } else {
                             "Nothing selected."
@@ -1041,7 +987,7 @@ impl Browser {
             return None;
         }
         let path = info.path.clone();
-        let state = pane.read(cx).downloads.read(cx).state(&path).cloned();
+        let state = downloads::get(cx).read(cx).state(&path).cloned();
         let (glyph, said, look, does): (_, _, _, Option<(&'static str, bool)>) =
             match (&state, info.availability) {
                 (Some(State::Running), _) | (None, Availability::Downloading) => (
@@ -1143,51 +1089,6 @@ impl Browser {
     }
 }
 
-/// The picture, the name and the kind, centered at the top, and the cloud
-/// chip after the kind.
-pub(super) fn header(
-    art: AnyElement,
-    name: AnyElement,
-    kind: String,
-    chip: Option<AnyElement>,
-) -> AnyElement {
-    div()
-        .w_full()
-        .pt(px(24.))
-        .pb(px(8.))
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(6.))
-        .child(art)
-        .child(
-            div()
-                .mt(px(8.))
-                .max_w_full()
-                .text_size(px(theme::TEXT_TITLE))
-                .font_weight(FontWeight::MEDIUM)
-                .child(name),
-        )
-        .child(
-            div()
-                .max_w_full()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .text_center()
-                        .text_size(px(theme::TEXT_SMALL))
-                        .text_color(content(0.65))
-                        .child(kind),
-                )
-                .children(chip),
-        )
-        .into_any_element()
-}
-
 /// A section's small icon and label.
 fn section(glyph: &'static str, label: &'static str) -> AnyElement {
     div()
@@ -1202,34 +1103,6 @@ fn section(glyph: &'static str, label: &'static str) -> AnyElement {
         .text_color(content(0.65))
         .child(icon(glyph, 14.).text_color(content(0.55)))
         .child(label)
-        .into_any_element()
-}
-
-fn fact_row(label: &'static str) -> Div {
-    div()
-        .min_h(px(24.))
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(
-            div()
-                .w(px(LABEL_WIDTH))
-                .flex_shrink_0()
-                .truncate()
-                .text_color(content(0.65))
-                .child(label),
-        )
-}
-
-pub(super) fn fact(label: &'static str, value: String) -> AnyElement {
-    fact_ink(label, value, content(1.))
-}
-
-fn fact_ink(label: &'static str, value: String, ink: gpui::Hsla) -> AnyElement {
-    fact_row(label)
-        .child(div().min_w_0().text_right().text_color(ink).child(value))
         .into_any_element()
 }
 

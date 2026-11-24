@@ -15,7 +15,8 @@ use gpui::{
     BenchAppContext, Focusable, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px,
 };
-use monodrive::browser::{Browser, SelectNext, ToggleSidebar};
+use monodrive::browser::Browser;
+use monodrive::commands::{SelectNext, ToggleSidebar};
 use monodrive::preferences::{Preferences, View};
 use std::path::Path;
 use std::sync::Arc;

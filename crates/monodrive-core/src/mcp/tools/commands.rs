@@ -1,9 +1,9 @@
 //! The user's saved commands: list_commands and run_command. Only the user
 //! saves them; agents run what's saved, never a shell string.
 
-use super::{Call, Preview, local};
+use super::{Call, local};
 use crate::mcp::contract::{JobView, Planned, Reply, ToolError, argv, shown};
-use crate::mcp::server::Server;
+use crate::mcp::session::{Preview, Session};
 use crate::user_commands::{self, Cwd, Definition, Sources};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -34,8 +34,8 @@ pub struct Commands {
 impl Call for ListCommands {
     type Out = Commands;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Commands>, ToolError> {
-        let saved = server.places.commands()?;
+    fn run(self, session: &mut Session) -> Result<Reply<Commands>, ToolError> {
+        let saved = session.places.commands()?;
         let text: String = saved.iter().map(command_line).collect();
         let commands = saved
             .iter()
@@ -106,10 +106,10 @@ pub struct Invocation {
 impl Call for RunCommand {
     type Out = Planned<Vec<Invocation>, JobView>;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Self::Out>, ToolError> {
         let (name, paths, token) = match &self.confirm {
             Some(token) => {
-                let Preview::Command { name, paths } = server.kept(token, None)? else {
+                let Preview::Command { name, paths } = session.kept(token, None)? else {
                     return Err(ToolError::invalid("That token is another tool's plan."));
                 };
                 (name, paths, Some(token.clone()))
@@ -122,7 +122,7 @@ impl Call for RunCommand {
             }
         };
         if self.dry_run {
-            let command = server.places.command(&name)?;
+            let command = session.places.command(&name)?;
             let plan = user_commands::preview(&command, &paths)?;
             let invocations: Vec<Invocation> = plan
                 .invocations
@@ -156,17 +156,15 @@ impl Call for RunCommand {
                 let env = serde_json::to_string(&plan.env).unwrap_or_default();
                 let _ = writeln!(text, "env adds {env}");
             }
-            let token = server.keep(Preview::Command { name, paths });
+            let token = session.keep(Preview::Command { name, paths });
             let _ = writeln!(text, "token: {token}");
             return Ok(Reply::new(text, invocations).planned(Some(token)));
         }
-        let origin = server.origin();
-        let run = server.ops.run_command(origin, &name, paths)?;
+        let run = session.run_command(&name, paths)?;
         if let Some(token) = &token {
-            server.spent(token, None);
+            session.spent(token, None);
         }
-        let started = server
-            .ops
+        let started = session
             .runs()?
             .into_iter()
             .find(|started| started.id == run)

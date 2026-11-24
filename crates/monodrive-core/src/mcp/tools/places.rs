@@ -6,9 +6,9 @@ use super::{Call, local_one};
 use crate::cloud;
 use crate::expand_home;
 use crate::mcp::contract::{Code, Reply, ToolError, shown};
-use crate::mcp::server::Server;
+use crate::mcp::session::Session;
 use crate::places::Availability;
-use crate::remote::Source;
+use crate::places::Source;
 use crate::servers::{self, Prompt};
 use crate::volumes::{self, VolumeId};
 use schemars::JsonSchema;
@@ -80,9 +80,9 @@ pub struct Places {
 impl Call for ListPlaces {
     type Out = Places;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Places>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Places>, ToolError> {
         let mounted = volumes::list();
-        let favorites: Vec<Favorite> = server
+        let favorites: Vec<Favorite> = session
             .places
             .places(&mounted)?
             .iter()
@@ -125,7 +125,7 @@ impl Call for ListPlaces {
                 },
             })
             .collect();
-        let mut servers: Vec<Saved> = server
+        let mut servers: Vec<Saved> = session
             .places
             .servers()?
             .into_iter()
@@ -141,11 +141,11 @@ impl Call for ListPlaces {
             })
             .collect();
         servers.extend(
-            server
+            session
                 .places
                 .remotes()?
                 .into_iter()
-                .map(|source| ssh(server, source)),
+                .map(|source| ssh(session, source)),
         );
         let text = places_text(&favorites, &volumes, &cloud, &servers);
         Ok(Reply::new(
@@ -160,9 +160,9 @@ impl Call for ListPlaces {
     }
 }
 
-fn ssh(server: &Server, source: Source) -> Saved {
+fn ssh(session: &Session, source: Source) -> Saved {
     Saved {
-        connected: server.remote.is_connected(&source.id),
+        connected: session.remote.is_connected(&source.id),
         at: source.start,
         host: Some(source.host),
         name: source.id,
@@ -267,9 +267,9 @@ pub struct Done {
 impl Call for Pin {
     type Out = Done;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Done>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Done>, ToolError> {
         let path = local_one(&self.path, "pin")?;
-        let pinned = server.places.pin(&path, self.at, &volumes::list())?;
+        let pinned = session.places.pin(&path, self.at, &volumes::list())?;
         Ok(Reply::new(
             format!("{}\n", pinned.display()),
             Done {
@@ -288,9 +288,9 @@ pub struct Unpin {
 impl Call for Unpin {
     type Out = Done;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Done>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Done>, ToolError> {
         let path = local_one(&self.path, "unpin")?;
-        server.places.unpin(&path, &volumes::list())?;
+        session.places.unpin(&path, &volumes::list())?;
         Ok(Reply::new(
             format!("Unpinned {}; the folder is untouched.\n", path.display()),
             Done { name: shown(&path) },
@@ -308,10 +308,9 @@ pub struct Eject {
 impl Call for Eject {
     type Out = Done;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Done>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Done>, ToolError> {
         let path = local_one(&self.path, "eject")?;
-        let origin = server.origin();
-        let done = volumes::eject(&path, &origin, &mut server.ops)?;
+        let done = session.eject(&path)?;
         Ok(Reply::new(done + "\n", Done { name: shown(&path) }))
     }
 }
@@ -335,19 +334,14 @@ pub struct Connected {
 impl Call for Connect {
     type Out = Connected;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Connected>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Connected>, ToolError> {
         let typed = servers::server(&self.address)?;
-        if !server.ops.agents_change_files() {
-            return Err(ToolError::new(
-                Code::AgentsDisabled,
-                "Agents can't connect to servers: Let agents change files is off in Monodrive's Agents settings.",
-            ));
-        }
+        session.may("connect to servers")?;
         match typed {
             servers::Server::Smb(address) => {
                 let cancel = Arc::default();
                 let (address, at) =
-                    servers::connect(&server.places, &address, &cancel, |address| {
+                    servers::connect(&session.places, &address, &cancel, |address| {
                         servers::mount(address, Prompt::Never, &cancel)
                     })?;
                 Ok(Reply::new(
@@ -359,7 +353,7 @@ impl Call for Connect {
                 ))
             }
             servers::Server::Sftp { host, start } => {
-                let source = server.remote.add(&host, start.as_deref(), || false)?;
+                let source = session.remote.add(&host, start.as_deref(), || false)?;
                 let starts = source.start.as_deref().unwrap_or("its default folder");
                 Ok(Reply::new(
                     format!(
@@ -377,8 +371,8 @@ impl Call for Connect {
 }
 
 /// Whether `name` is a saved SSH server's id rather than an smb:// address.
-fn is_ssh(server: &Server, name: &str) -> Result<bool, ToolError> {
-    Ok(server
+fn is_ssh(session: &Session, name: &str) -> Result<bool, ToolError> {
+    Ok(session
         .places
         .remotes()?
         .iter()
@@ -395,9 +389,9 @@ pub struct Disconnect {
 impl Call for Disconnect {
     type Out = Done;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Done>, ToolError> {
-        if is_ssh(server, &self.server)? {
-            let text = if server.remote.disconnect(&self.server) {
+    fn run(self, session: &mut Session) -> Result<Reply<Done>, ToolError> {
+        if is_ssh(session, &self.server)? {
+            let text = if session.remote.disconnect(&self.server) {
                 format!(
                     "Disconnected from {}. Its jobs on the owner keep their own connection.\n",
                     self.server
@@ -408,11 +402,10 @@ impl Call for Disconnect {
             return Ok(Reply::new(text, Done { name: self.server }));
         }
         let address = servers::address(&self.server)?;
-        let origin = server.origin();
         let volumes = volumes::list();
         let volume = servers::mounted(&address, &volumes)
             .ok_or_else(|| ToolError::new(Code::NotFound, format!("{address} isn't connected.")))?;
-        let done = volumes::eject(&volume.mount, &origin, &mut server.ops)?;
+        let done = session.eject(&volume.mount)?;
         Ok(Reply::new(done + "\n", Done { name: address }))
     }
 }
@@ -439,10 +432,10 @@ pub struct Added {
 impl Call for AddServer {
     type Out = Added;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Added>, ToolError> {
-        server.can_change()?;
+    fn run(self, session: &mut Session) -> Result<Reply<Added>, ToolError> {
+        session.can_change()?;
         let source =
-            server
+            session
                 .places
                 .add_remote(&self.host, self.id.as_deref(), self.path.as_deref())?;
         let start = source
@@ -474,17 +467,17 @@ pub struct ForgetServer {
 impl Call for ForgetServer {
     type Out = Done;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Done>, ToolError> {
-        if is_ssh(server, &self.server)? {
-            let source = server.places.forget_remote(&self.server)?;
-            server.remote.disconnect(&source.id);
+    fn run(self, session: &mut Session) -> Result<Reply<Done>, ToolError> {
+        if is_ssh(session, &self.server)? {
+            let source = session.places.forget_remote(&self.server)?;
+            session.remote.disconnect(&source.id);
             return Ok(Reply::new(
                 format!("Forgot {}; nothing on the server changed.\n", source.id),
                 Done { name: source.id },
             ));
         }
         let address = servers::address(&self.server)?;
-        server.places.forget_server(&address)?;
+        session.places.forget_server(&address)?;
         Ok(Reply::new(
             format!("Forgot {address}; a share it mounted stays mounted.\n"),
             Done { name: address },

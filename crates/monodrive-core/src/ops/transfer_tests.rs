@@ -1,7 +1,8 @@
 use super::tests::{untrash, untrash_unfinished};
 use super::*;
+use crate::places::Source;
 use crate::remote::fixture::{self, frame, status, version};
-use crate::remote::{Connector, RemoteError, Source, Transport};
+use crate::remote::{Connector, RemoteError, Transport};
 use std::collections::VecDeque;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::Ordering;
@@ -134,7 +135,7 @@ impl Bench {
     /// Runs the job to its end here, as a job thread would.
     fn work(&self, op: u64) -> Job {
         jobs::run(&self.shared, op);
-        self.shared.remote.release_idle();
+        self.shared.ended();
         self.status(op)
     }
 
@@ -613,7 +614,7 @@ fn a_crash_leaves_an_uploads_temp_named_and_continuing_removes_only_that() {
 fn a_discard_refuses_any_name_that_isnt_a_temps() {
     let b = bench();
     std::fs::write(b.server.join("precious"), "x").unwrap();
-    let connection = b.shared.remote.connect("box").unwrap();
+    let connection = b.shared.connect("box").unwrap();
     let refused = connection.discard(&remote(&b.server.join("precious")));
     assert!(
         matches!(refused, Err(RemoteError::BadPath(_))),

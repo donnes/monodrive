@@ -5,9 +5,11 @@
 use super::contract::{self, Profile};
 use super::server::Server;
 use super::tools::TOOLS;
-use crate::ops::{self, Origin};
+use crate::Origin;
+use crate::ops;
 use crate::places;
-use crate::remote::{self, Connections, RemoteError, Source};
+use crate::places::Source;
+use crate::remote::{self, Connections, RemoteError};
 use crate::user_commands::{self, Cwd, Definition, Ended, Run, Sources};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -232,7 +234,7 @@ fn bad_arguments_are_tool_errors_the_agent_can_fix() {
         .handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "index_status"}}))
         .unwrap();
     assert_eq!(bare["result"]["isError"], false, "{bare}");
-    assert!(server.started_index().is_none());
+    assert!(server.session.started_index().is_none());
 }
 
 #[test]
@@ -254,7 +256,7 @@ fn a_bad_filter_is_a_tool_error_that_never_starts_the_index() {
         assert_eq!(code(&result), "invalid_argument");
         assert!(text(&result).starts_with(error), "{result}");
     }
-    assert!(server.started_index().is_none());
+    assert!(server.session.started_index().is_none());
 }
 
 #[test]
@@ -266,7 +268,7 @@ fn index_status_reports_without_starting_the_index() {
         "{result}"
     );
     assert_eq!(data(&result)["state"], "not_started");
-    assert!(server.started_index().is_none());
+    assert!(server.session.started_index().is_none());
 }
 
 #[test]
@@ -300,7 +302,7 @@ fn list_dir_lists_folders_first_a_page_at_a_time() {
     );
     assert_eq!(text(&rest), "b.txt\n");
     assert!(data(&rest).get("next_cursor").is_none());
-    assert!(server.started_index().is_none());
+    assert!(server.session.started_index().is_none());
 }
 
 #[test]
@@ -957,7 +959,7 @@ fn overview_says_what_is_measured_and_what_is_not() {
         ..paths(&home)
     };
     let mut server = Server::new(ops::Client::new(paths, None), places(&home), Profile::All);
-    server.root = home.join("disk");
+    server.session.root = home.join("disk");
     let timed_out = call(&mut server, "overview", json!({"timeout_seconds": 0}));
     assert!(
         text(&timed_out).contains(&format!("{}/Documents/", home.display()))
@@ -986,7 +988,7 @@ fn place_tools_pin_list_and_unpin_favorites_and_eject_refuses_without_ejecting()
     std::fs::create_dir(&work).unwrap();
     std::fs::create_dir(&gone).unwrap();
     let mut server = server();
-    server.places = places(dir.path());
+    server.session.places = places(dir.path());
     for (path, at) in [(&gone, json!(null)), (&work, json!(0))] {
         let result = call(&mut server, "pin", json!({"path": path, "at": at}));
         assert_eq!(text(&result), format!("{}\n", path.display()));
@@ -1013,6 +1015,7 @@ fn place_tools_pin_list_and_unpin_favorites_and_eject_refuses_without_ejecting()
         format!("Unpinned {}; the folder is untouched.\n", gone.display())
     );
     server
+        .session
         .places
         .save_server("smb://nas.invalid/media")
         .unwrap();
@@ -1070,7 +1073,7 @@ fn place_tools_pin_list_and_unpin_favorites_and_eject_refuses_without_ejecting()
 fn search_tools_save_list_rename_and_remove_without_searching() {
     let dir = tempfile::tempdir().unwrap();
     let mut server = server();
-    server.places = places(dir.path());
+    server.session.places = places(dir.path());
     let home = std::env::var("HOME").unwrap();
     let result = call(&mut server, "list_searches", json!({}));
     assert_eq!(text(&result), "No saved searches.\n");
@@ -1106,7 +1109,7 @@ fn search_tools_save_list_rename_and_remove_without_searching() {
         text(&result).starts_with("Photos isn't a saved search."),
         "{result}"
     );
-    assert!(server.started_index().is_none());
+    assert!(server.session.started_index().is_none());
 }
 
 #[test]
@@ -1128,7 +1131,7 @@ fn worktree_tools_list_and_inspect_worktrees_and_register_and_forget_repositorie
     let head = fixture(&main, &["rev-parse", "--short=7", "HEAD"]);
     let head = head.trim();
     let mut server = server();
-    server.places = places(&root.join("state"));
+    server.session.places = places(&root.join("state"));
     let mut tool = |name: &str, path: &Path| call(&mut server, name, json!({"path": path}));
 
     let listed = format!(
@@ -1329,7 +1332,7 @@ fn remote_paths_browse_read_and_copy_both_ways_through_the_same_tools() {
         store.clone(),
         Profile::All,
     );
-    server.remote = Connections::new(store, connector());
+    server.session.remote = Connections::new(store, connector());
 
     let (far, near) = (root.join("far"), root.join("near"));
     std::fs::create_dir(&far).unwrap();
@@ -1369,7 +1372,7 @@ fn remote_paths_browse_read_and_copy_both_ways_through_the_same_tools() {
             near.display()
         )
     );
-    assert!(server.places.remote("spare").is_ok());
+    assert!(server.session.places.remote("spare").is_ok());
     let qualified = |name: &str| format!("box:{}", far.join(name).display());
     let result = call(&mut server, "list_dir", json!({"path": "box:"}));
     let mut names: Vec<&str> = text(&result).lines().collect();
@@ -1499,8 +1502,8 @@ fn a_server_that_needs_a_password_says_auth_required() {
     let store = places(dir.path());
     store.add_remote("nas", None, None).unwrap();
     let mut server = server();
-    server.places = store.clone();
-    server.remote = Connections::new(
+    server.session.places = store.clone();
+    server.session.remote = Connections::new(
         store,
         Arc::new(|source: &Source| Err(RemoteError::InteractiveAuth(source.host.clone()))),
     );

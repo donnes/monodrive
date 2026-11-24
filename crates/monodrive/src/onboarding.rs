@@ -5,10 +5,11 @@
 //! run without the access and again after it. Show Welcome and the sidebar's
 //! notice open it later.
 
+use crate::SharedIndex;
 use crate::agents::{self, Action, Harness};
 use crate::assets::LOGO;
-use crate::browser::{self, QuickLook, SharedIndex};
 use crate::commands::{self, OpenPalette};
+use crate::commands::{NewTab, QuickLook};
 use crate::finder::{self, Viewer};
 use crate::preferences::{self, Preferences};
 use crate::theme::{self, ButtonLook, content, icon, text_button};
@@ -338,7 +339,7 @@ pub fn closed(window: WindowId, cx: &mut App) {
     open_gate(cx);
     if let Some(then) = then {
         then(cx);
-    } else if !browser::any_window(cx)
+    } else if !crate::any_window(cx)
         && let Some(reopen) = cx.try_global::<Reopen>().map(|reopen| reopen.0.clone())
     {
         reopen(cx);
@@ -692,7 +693,7 @@ impl Onboarding {
         let keys = [
             (first(OpenPalette.name()), "Command palette"),
             (quick_look, "Quick Look"),
-            (first(browser::NewTab.name()), "New tab"),
+            (first(NewTab.name()), "New tab"),
         ];
         div()
             .flex_1()
@@ -1170,7 +1171,7 @@ impl Render for Onboarding {
                     .flex()
                     .flex_col()
                     .bg(theme::pane_fill())
-                    .child(browser::drag_area().h(px(theme::TITLE_BAR_HEIGHT)).w_full())
+                    .child(theme::drag_area().h(px(theme::TITLE_BAR_HEIGHT)).w_full())
                     .child(
                         div()
                             .flex_1()

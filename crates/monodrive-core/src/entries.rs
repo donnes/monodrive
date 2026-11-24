@@ -1,5 +1,6 @@
-use crate::cloud::Availability;
+use crate::cloud::{self, Availability};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -493,6 +494,28 @@ fn entry(path: PathBuf, name: String, meta: &std::fs::Metadata) -> Entry {
     }
 }
 
+/// The folders in `listed` that hold something not downloaded, for the badge
+/// Finder gives them. Placeholder folders aren't asked, since their flag says
+/// so already, and only folders whose parent is in the cloud are, so a
+/// listing anywhere else costs one quick answer of `None`.
+pub fn partly_downloaded(listed: &[Entry]) -> HashSet<PathBuf> {
+    let mut parents: HashMap<&Path, bool> = HashMap::new();
+    listed
+        .iter()
+        .filter(|entry| entry.kind == Kind::Dir && entry.availability.is_local())
+        .filter(|entry| {
+            let Some(parent) = entry.path.parent() else {
+                return false;
+            };
+            *parents
+                .entry(parent)
+                .or_insert_with(|| cloud::fully_downloaded(parent).is_some())
+                && cloud::fully_downloaded(&entry.path) == Some(false)
+        })
+        .map(|entry| entry.path.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +585,8 @@ mod tests {
         assert_eq!(kind("to folder"), Kind::Link);
         assert_eq!(kind("broken"), Kind::Link);
         assert_eq!(kind("pipe"), Kind::Other);
+        // Outside the cloud, fileproviderd has nothing to say about a folder.
+        assert_eq!(partly_downloaded(&listed), HashSet::new());
     }
 
     #[test]

@@ -2,10 +2,10 @@
 //! and cleanup_duplicates. Each stops at its timeout and says when its
 //! answer is partial.
 
-use super::{Call, Preview, local, local_one, scan_timeout, short_timeout};
+use super::{Call, local, local_one, scan_timeout, short_timeout};
 use crate::cloud;
 use crate::mcp::contract::{Planned, Reply, ToolError, shown};
-use crate::mcp::server::Server;
+use crate::mcp::session::{Preview, Session};
 use crate::overview::{self, LocationKind};
 use crate::sizes;
 use crate::storage::{self, Cleanup, Duplicates as Found, Match, Report, Stop, Usage};
@@ -48,7 +48,7 @@ pub struct Size {
 impl Call for FolderSize {
     type Out = Size;
 
-    fn run(self, _: &mut Server) -> Result<Reply<Size>, ToolError> {
+    fn run(self, _: &mut Session) -> Result<Reply<Size>, ToolError> {
         let folder = local_one(&self.path, "folder_size")?;
         let size = sizes::measure(
             &folder,
@@ -186,18 +186,18 @@ pub struct Overviewed {
 impl Call for Overview {
     type Out = Overviewed;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Overviewed>, ToolError> {
-        let env = server.overview_env();
+    fn run(self, session: &mut Session) -> Result<Reply<Overviewed>, ToolError> {
+        let env = session.overview_env();
         let end = deadline(self.timeout_seconds);
         let progress = storage::Progress::default();
         let volumes = volumes::list();
         let read = |now| {
-            let connected = |id: &str| server.remote.is_connected(id);
+            let connected = |id: &str| session.remote.is_connected(id);
             overview::read(&env, &volumes, &cloud::folders(&env.home), &connected, now)
         };
         // Only an index this session already started: looking at the
         // Overview must never start one.
-        let index = server.started_index();
+        let index = session.started_index();
         let git = Git::find().ok();
         if let Some(index) = index {
             let _ = overview::discover(&env, git.as_ref(), |name, limit| index.find(name, limit));
@@ -485,7 +485,7 @@ fn used(path: &std::path::Path, usage: &Usage) -> Used {
 impl Call for StorageScan {
     type Out = Scanned;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Scanned>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Scanned>, ToolError> {
         let folder = local_one(&self.path, "storage_scan")?;
         let report = storage::scan(
             &folder,
@@ -495,7 +495,8 @@ impl Call for StorageScan {
         // A whole drive's scan is what the Overview shows for it.
         let volumes = volumes::list();
         if let Some(volume) = overview::volume_at(&volumes, &report.root().path) {
-            let _ = overview::record_scan(&server.overview_env(), volume, &report, overview::now());
+            let _ =
+                overview::record_scan(&session.overview_env(), volume, &report, overview::now());
         }
         let root = report.root();
         let mut folders = Vec::new();
@@ -709,7 +710,7 @@ pub struct Duplicated {
 impl Call for Duplicates {
     type Out = Duplicated;
 
-    fn run(self, _: &mut Server) -> Result<Reply<Duplicated>, ToolError> {
+    fn run(self, _: &mut Session) -> Result<Reply<Duplicated>, ToolError> {
         let folder = local_one(&self.path, "duplicates")?;
         let end = deadline(self.timeout_seconds);
         let progress = storage::Progress::default();
@@ -859,15 +860,15 @@ pub struct CleanupPlan {
 impl Call for CleanupDuplicates {
     type Out = Planned<CleanupPlan>;
 
-    fn run(self, server: &mut Server) -> Result<Reply<Self::Out>, ToolError> {
+    fn run(self, session: &mut Session) -> Result<Reply<Self::Out>, ToolError> {
         if let Some(token) = &self.confirm {
-            let Preview::Cleanup(plan) = server.kept(token, self.request_id.as_deref())? else {
+            let Preview::Cleanup(plan) = session.kept(token, self.request_id.as_deref())? else {
                 return Err(ToolError::invalid("That token is another tool's plan."));
             };
             // Kept when the owner refuses it whole, such as while agents
             // may not change files, so it can be confirmed again.
-            let done = server.change(plan.request(), self.request_id.as_deref())?;
-            server.spent(token, self.request_id.as_deref());
+            let done = session.change(plan.request(), self.request_id.as_deref())?;
+            session.spent(token, self.request_id.as_deref());
             return Ok(done.ran());
         }
         let (Some(path), true) = (&self.path, self.dry_run) else {
@@ -890,7 +891,7 @@ impl Call for CleanupDuplicates {
                 .collect(),
             frees: plan.frees,
         };
-        let token = server.keep(Preview::Cleanup(plan));
+        let token = session.keep(Preview::Cleanup(plan));
         Ok(Reply::new(format!("{text}token: {token}\n"), data).planned(Some(token)))
     }
 }

@@ -2,7 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// An engine on a temp state folder, and a temp folder to change.
-fn engine() -> (tempfile::TempDir, PathBuf, Engine) {
+pub(super) fn engine() -> (tempfile::TempDir, PathBuf, Engine) {
     let dir = tempfile::tempdir().unwrap();
     let files = dir.path().join("files");
     std::fs::create_dir(&files).unwrap();
@@ -10,7 +10,7 @@ fn engine() -> (tempfile::TempDir, PathBuf, Engine) {
     (dir, files, engine)
 }
 
-fn paths(dir: &Path) -> Paths {
+pub(super) fn paths(dir: &Path) -> Paths {
     let state = dir.join("state");
     std::fs::create_dir_all(&state).unwrap();
     Paths {
@@ -20,7 +20,7 @@ fn paths(dir: &Path) -> Paths {
     }
 }
 
-fn submission(origin: Origin, request: Request) -> Submission {
+pub(super) fn submission(origin: Origin, request: Request) -> Submission {
     static SENT: AtomicU64 = AtomicU64::new(0);
     Submission {
         id: format!("test-{}", SENT.fetch_add(1, Ordering::Relaxed)),
@@ -29,12 +29,12 @@ fn submission(origin: Origin, request: Request) -> Submission {
     }
 }
 
-fn run(engine: &mut Engine, request: Request) -> Result<Outcome, String> {
+pub(super) fn run(engine: &mut Engine, request: Request) -> Result<Outcome, String> {
     engine.submit(submission(Origin::Window, request))
 }
 
 /// Where each item went, failing the test if any didn't.
-fn moved(outcome: Result<Outcome, String>) -> Vec<PathBuf> {
+pub(super) fn moved(outcome: Result<Outcome, String>) -> Vec<PathBuf> {
     let outcome = outcome.unwrap();
     outcome
         .items
@@ -43,7 +43,7 @@ fn moved(outcome: Result<Outcome, String>) -> Vec<PathBuf> {
         .collect()
 }
 
-fn rename(path: &Path, name: &str) -> Request {
+pub(super) fn rename(path: &Path, name: &str) -> Request {
     Request::Rename {
         path: path.into(),
         name: name.into(),
@@ -156,7 +156,7 @@ fn trash_puts_back_and_undoing_a_new_folder_trashes_it_until_redo() {
 }
 
 /// A storage scan's cleanup of `files`, trashing the copies `trash` names.
-fn cleanup(files: &Path, trash: &[&str]) -> Request {
+pub(super) fn cleanup(files: &Path, trash: &[&str]) -> Request {
     use crate::storage::{self, Progress};
     let report = storage::scan(files, &Progress::default(), None).unwrap();
     let found = report.duplicates(&|_| true, &Progress::default(), None);
@@ -165,7 +165,7 @@ fn cleanup(files: &Path, trash: &[&str]) -> Request {
 }
 
 /// Real paths, as a scan reports them, holding `names`, each with `text`.
-fn copies(names: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, Engine) {
+pub(super) fn copies(names: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, Engine) {
     let (dir, files, engine) = engine();
     let files = files.canonicalize().unwrap();
     for (name, text) in names {
@@ -613,7 +613,7 @@ fn empty_trash_erases_only_what_was_listed_in_the_trash_and_only_for_the_window(
 }
 
 /// A temp Trash holding `old.txt` and `old folder/x.txt`, counted.
-fn counted_trash(dir: &Path) -> (PathBuf, Vec<TrashItem>) {
+pub(super) fn counted_trash(dir: &Path) -> (PathBuf, Vec<TrashItem>) {
     let trash = dir.join("Trash");
     std::fs::create_dir_all(trash.join("old folder")).unwrap();
     std::fs::write(trash.join("old folder/x.txt"), "x").unwrap();
@@ -721,7 +721,7 @@ fn a_cancelled_or_interrupted_empty_trash_keeps_the_rest_until_a_person_continue
 
 /// `count` files in `files`, `000.txt` on, and a Trash of their own beside
 /// them (see `disk::trash`), so nothing reaches the user's.
-fn trash_fixture(dir: &Path, files: &Path, count: usize) -> (PathBuf, Vec<PathBuf>) {
+pub(super) fn trash_fixture(dir: &Path, files: &Path, count: usize) -> (PathBuf, Vec<PathBuf>) {
     // SAFETY: geteuid has no preconditions.
     let trash = dir
         .join(".Trashes")
@@ -737,7 +737,7 @@ fn trash_fixture(dir: &Path, files: &Path, count: usize) -> (PathBuf, Vec<PathBu
     (trash, paths)
 }
 
-fn trash(paths: &[PathBuf]) -> Request {
+pub(super) fn trash(paths: &[PathBuf]) -> Request {
     Request::Trash {
         paths: paths.to_vec(),
     }
@@ -809,7 +809,7 @@ fn many_items_go_to_the_trash_as_a_job_that_reports_each_and_undoes_whole() {
     assert_eq!(std::fs::read_dir(&own_trash).unwrap().count(), 0);
 }
 
-fn paths_of(shared: &jobs::Shared) -> Paths {
+pub(super) fn paths_of(shared: &jobs::Shared) -> Paths {
     shared.lock().paths.clone()
 }
 
@@ -952,7 +952,7 @@ fn a_torn_last_line_is_cut_before_the_journal_grows() {
 
 /// `src/` holding `a.txt`, `b/inner.md` and `c.txt`, and `dest/` holding
 /// its own `a.txt` and `c.txt`.
-fn transfer_fixture(files: &Path) -> (PathBuf, PathBuf) {
+pub(super) fn transfer_fixture(files: &Path) -> (PathBuf, PathBuf) {
     let (src, dest) = (files.join("src"), files.join("dest"));
     std::fs::create_dir_all(src.join("b")).unwrap();
     std::fs::create_dir(&dest).unwrap();
@@ -969,13 +969,13 @@ fn transfer_fixture(files: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// Queues a copy or move and runs it here to the end, as a job thread would.
-fn job(shared: &jobs::Shared, request: Request) -> Job {
+pub(super) fn job(shared: &jobs::Shared, request: Request) -> Job {
     let op = run(&mut shared.lock(), request).unwrap().op;
     jobs::run(shared, op);
     status(shared, op)
 }
 
-fn status(shared: &jobs::Shared, op: u64) -> Job {
+pub(super) fn status(shared: &jobs::Shared, op: u64) -> Job {
     let engine = shared.lock();
     let jobs = engine.jobs();
     jobs.into_iter().find(|job| job.id == op).unwrap()
@@ -983,7 +983,7 @@ fn status(shared: &jobs::Shared, op: u64) -> Job {
 
 /// Continues a stopped job and runs it here to the end, checking it stays
 /// the same job.
-fn continued(shared: &jobs::Shared, job: u64, conflict: Option<Conflict>) -> Job {
+pub(super) fn continued(shared: &jobs::Shared, job: u64, conflict: Option<Conflict>) -> Job {
     let count = shared.lock().jobs().len();
     let op = run(&mut shared.lock(), Request::Retry { job, conflict })
         .unwrap()
@@ -994,7 +994,7 @@ fn continued(shared: &jobs::Shared, job: u64, conflict: Option<Conflict>) -> Job
     status(shared, op)
 }
 
-fn copy(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
+pub(super) fn copy(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
     Request::Copy {
         paths: paths.iter().map(|p| p.to_path_buf()).collect(),
         into: into.into(),
@@ -1002,7 +1002,7 @@ fn copy(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
     }
 }
 
-fn transfer(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
+pub(super) fn transfer(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
     Request::Move {
         paths: paths.iter().map(|p| p.to_path_buf()).collect(),
         into: into.into(),
@@ -1010,13 +1010,13 @@ fn transfer(paths: &[&Path], into: &Path, conflict: Conflict) -> Request {
     }
 }
 
-fn read(path: &Path) -> String {
+pub(super) fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
 /// Takes what a test sent to the Trash back out, so the Trash ends as it was.
 pub(super) fn untrash(trashed: &Path, into: &Path) {
-    std::fs::rename(trashed, free_name(&into.join("untrashed"))).unwrap();
+    std::fs::rename(trashed, disk::free_name(&into.join("untrashed"))).unwrap();
 }
 
 #[test]
@@ -1490,1296 +1490,6 @@ fn trimming_keeps_an_old_job_that_was_continued_lately() {
     assert!(!dest.join("a 2.txt").exists());
 }
 
-fn rename_many(paths: &[&Path], rule: rename::Rule) -> Request {
-    Request::RenameMany {
-        paths: paths.iter().map(|path| path.to_path_buf()).collect(),
-        rule,
-        preview: None,
-        skip_problems: false,
-    }
-}
-
-fn numbered(name: &str, digits: usize) -> rename::Rule {
-    rename::Rule::Format {
-        name: name.into(),
-        start: 1,
-        digits,
-        place: rename::Place::After,
-    }
-}
-
-fn replacing(find: &str, with: &str, extension: bool) -> rename::Rule {
-    rename::Rule::Replace {
-        find: find.into(),
-        with: with.into(),
-        case_sensitive: false,
-        extension,
-    }
-}
-
-/// What's in `folder`, by name, as the disk spells them.
-fn names(folder: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(folder)
-        .unwrap()
-        .map(|item| item.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
-}
-
-fn touch(folder: &Path, names: &[&str]) -> Vec<PathBuf> {
-    names
-        .iter()
-        .map(|name| {
-            let path = folder.join(name);
-            std::fs::write(&path, name).unwrap();
-            path
-        })
-        .collect()
-}
-
-fn prepared_edit(folder: &Path, text: &str) -> PathBuf {
-    let prepared = crate::edits::prepared_path(folder, "txt");
-    std::fs::write(&prepared, text).unwrap();
-    prepared
-}
-
-#[test]
-fn a_saved_edit_numbers_around_a_taken_name_and_undoes_to_the_trash() {
-    let (_dir, files, mut engine) = engine();
-    let [photo, taken] = touch(&files, &["photo.txt", "photo edited.txt"])
-        .try_into()
-        .unwrap();
-    let source = Opened::read(&photo).unwrap();
-    let save = |prepared: PathBuf, save: SaveTo| Request::SaveEdit {
-        source: source.clone(),
-        prepared,
-        save,
-    };
-    let made = moved(run(
-        &mut engine,
-        save(prepared_edit(&files, "new"), SaveTo::Copy),
-    ));
-    let numbered = files.join("photo edited 2.txt");
-    assert_eq!(made, std::slice::from_ref(&numbered));
-    assert_eq!(read(&numbered), "new");
-    assert_eq!(
-        read(&taken),
-        "photo edited.txt",
-        "a taken name stays as it was"
-    );
-    assert_eq!(read(&photo), "photo.txt");
-    moved(run(&mut engine, Request::Undo));
-    assert!(!numbered.exists());
-    // Nothing's left beside the file, and Redo finds it in the Trash.
-    assert_eq!(names(&files), ["photo edited.txt", "photo.txt"]);
-    moved(run(&mut engine, Request::Redo));
-    assert_eq!(read(&numbered), "new");
-    moved(run(&mut engine, Request::Undo));
-
-    // Save As only takes a free name.
-    let refused = run(
-        &mut engine,
-        save(
-            prepared_edit(&files, "x"),
-            SaveTo::As {
-                path: taken.clone(),
-            },
-        ),
-    );
-    assert!(refused.is_err());
-    assert_eq!(read(&taken), "photo edited.txt");
-}
-
-#[test]
-fn replacing_keeps_the_original_in_the_trash_and_undo_restores_that_same_file() {
-    let (_dir, files, mut engine) = engine();
-    let [photo] = touch(&files, &["photo.txt"]).try_into().unwrap();
-    let inode = disk::id(&photo).unwrap();
-    let request = Request::SaveEdit {
-        source: Opened::read(&photo).unwrap(),
-        prepared: prepared_edit(&files, "edited"),
-        save: SaveTo::Replace,
-    };
-    moved(run(&mut engine, request));
-    assert_eq!(read(&photo), "edited");
-    assert_ne!(disk::id(&photo), Some(inode));
-    moved(run(&mut engine, Request::Undo));
-    assert_eq!(read(&photo), "photo.txt");
-    assert_eq!(disk::id(&photo), Some(inode), "the same file, not a copy");
-    moved(run(&mut engine, Request::Redo));
-    assert_eq!(read(&photo), "edited");
-}
-
-#[test]
-fn a_replace_cut_short_by_a_crash_can_still_be_undone() {
-    let (dir, files, mut engine) = engine();
-    let [photo] = touch(&files, &["photo.txt"]).try_into().unwrap();
-    let source = Opened::read(&photo).unwrap();
-    let prepared = prepared_edit(&files, "edited");
-    let steps: Vec<Step> = plan_save_edit(&source, &prepared, &SaveTo::Replace)
-        .into_iter()
-        .map(|(_, plan)| match plan.unwrap() {
-            Plan::Move(step) => step,
-            _ => panic!("every part of a replace is a move"),
-        })
-        .collect();
-    let submitted = submission(
-        Origin::Window,
-        Request::SaveEdit {
-            source,
-            prepared: prepared.clone(),
-            save: SaveTo::Replace,
-        },
-    );
-    engine
-        .begin(&submitted, None, steps, Vec::new(), Vec::new())
-        .unwrap();
-    // Both happened, and the owner died before recording the end.
-    disk::trash(&photo).unwrap();
-    disk::rename_new(&prepared, &photo).unwrap();
-    drop(engine);
-
-    let mut engine = Engine::open(paths(dir.path())).unwrap();
-    assert!(engine.submit(submitted).unwrap().interrupted);
-    assert_eq!(read(&photo), "edited");
-    moved(run(&mut engine, Request::Undo));
-    assert_eq!(read(&photo), "photo.txt");
-}
-
-#[test]
-fn a_replace_that_would_change_the_format_is_refused() {
-    let (_dir, files, mut engine) = engine();
-    let [photo] = touch(&files, &["photo.webp"]).try_into().unwrap();
-    let prepared = crate::edits::prepared_path(&files, "png");
-    std::fs::write(&prepared, "x").unwrap();
-    let refused = run(
-        &mut engine,
-        Request::SaveEdit {
-            source: Opened::read(&photo).unwrap(),
-            prepared: prepared.clone(),
-            save: SaveTo::Replace,
-        },
-    );
-    assert!(refused.unwrap_err().contains("own format"));
-    assert_eq!(read(&photo), "photo.webp");
-    // A copy takes the format it was written in.
-    let made = moved(run(
-        &mut engine,
-        Request::SaveEdit {
-            source: Opened::read(&photo).unwrap(),
-            prepared,
-            save: SaveTo::Copy,
-        },
-    ));
-    assert_eq!(made, [files.join("photo edited.png")]);
-}
-
-#[test]
-fn a_file_changed_since_it_opened_refuses_the_save_and_only_prepared_files_move() {
-    let (_dir, files, mut engine) = engine();
-    let [photo, other] = touch(&files, &["photo.txt", "other.txt"])
-        .try_into()
-        .unwrap();
-    let source = Opened::read(&photo).unwrap();
-    std::fs::write(&photo, "changed underneath").unwrap();
-    let prepared = prepared_edit(&files, "edited");
-    let refused = run(
-        &mut engine,
-        Request::SaveEdit {
-            source,
-            prepared: prepared.clone(),
-            save: SaveTo::Replace,
-        },
-    );
-    assert!(refused.unwrap_err().contains("changed since"));
-    assert_eq!(read(&photo), "changed underneath");
-    // A file that isn't a prepared edit can't be moved this way.
-    let refused = run(
-        &mut engine,
-        Request::SaveEdit {
-            source: Opened::read(&photo).unwrap(),
-            prepared: other.clone(),
-            save: SaveTo::Copy,
-        },
-    );
-    assert!(refused.unwrap_err().contains("isn't a prepared edit"));
-    assert!(other.exists());
-}
-
-#[test]
-fn organize_moves_as_one_undo_never_overwrites_and_refuses_a_stale_plan() {
-    let (_dir, files, mut engine) = engine();
-    let folder = files.canonicalize().unwrap();
-    touch(&folder, &["a.png", "b.png", "c.pdf"]);
-    std::fs::create_dir(folder.join("Documents")).unwrap();
-    let plan = organize::propose(&folder).unwrap();
-    let groups = plan.groups.clone();
-
-    // A file changed since the review refuses it all.
-    std::fs::write(folder.join("b.png"), "changed").unwrap();
-    let refused = run(
-        &mut engine,
-        Request::Organize {
-            groups: groups.clone(),
-        },
-    );
-    assert!(refused.unwrap_err().contains("changed since"));
-    assert!(folder.join("a.png").exists() && !folder.join("Images").exists());
-
-    let groups = organize::propose(&folder).unwrap().groups;
-    // A name taken at the destination refuses it all too.
-    std::fs::write(folder.join("Documents/c.pdf"), "other").unwrap();
-    let taken = run(
-        &mut engine,
-        Request::Organize {
-            groups: groups.clone(),
-        },
-    );
-    assert!(taken.is_err());
-    assert!(folder.join("c.pdf").exists());
-    assert_eq!(read(&folder.join("Documents/c.pdf")), "other");
-    std::fs::rename(
-        folder.join("Documents/c.pdf"),
-        folder.join("Documents/d.pdf"),
-    )
-    .unwrap();
-
-    let groups = organize::propose(&folder).unwrap().groups;
-    moved(run(&mut engine, Request::Organize { groups }));
-    assert!(folder.join("Images/a.png").exists() && folder.join("Documents/c.pdf").exists());
-    moved(run(&mut engine, Request::Undo));
-    assert!(folder.join("a.png").exists() && folder.join("c.pdf").exists());
-    assert!(!folder.join("Images").exists(), "the folder it made goes");
-    assert!(
-        folder.join("Documents/d.pdf").exists(),
-        "one already there stays"
-    );
-    moved(run(&mut engine, Request::Redo));
-    assert!(folder.join("Images/b.png").exists());
-}
-
-#[test]
-fn a_group_cannot_reach_outside_its_folder() {
-    let (_dir, files, mut engine) = engine();
-    let folder = files.canonicalize().unwrap();
-    touch(&folder, &["a.png"]);
-    let mut groups = organize::propose(&folder).unwrap().groups;
-    groups[0].folder = folder.parent().unwrap().join("Elsewhere");
-    let refused = run(&mut engine, Request::Organize { groups });
-    assert!(refused.unwrap_err().contains("isn't beside"));
-    assert!(folder.join("a.png").exists());
-}
-
-#[test]
-fn a_names_rule_collides_swaps_refuses_stale_previews_and_undoes_whole() {
-    let (_dir, files, mut engine) = engine();
-    let [a, b, c] = touch(&files, &["a.txt", "b.txt", "c.txt"])
-        .try_into()
-        .unwrap();
-    let names = |names: [&str; 3]| rename::Rule::Names {
-        names: names.map(String::from).to_vec(),
-    };
-    let batch = [a.as_path(), &b, &c];
-    let paths = batch.map(Path::to_path_buf);
-    let plan = rename::Plan::new(&paths, &names(["same.txt", "same.txt", ""]));
-    assert!(matches!(plan.rows[1].status, rename::Status::Collision(_)));
-    assert_eq!(plan.rows[2].status, rename::Status::Unchanged);
-
-    let stale = rename::Plan::new(&paths, &names(["x.txt", "y.txt", ""])).fingerprint();
-    std::fs::write(&b, "changed since").unwrap();
-    let refused = run(
-        &mut engine,
-        Request::RenameMany {
-            paths: paths.to_vec(),
-            rule: names(["x.txt", "y.txt", ""]),
-            preview: Some(stale),
-            skip_problems: false,
-        },
-    );
-    assert!(refused.is_err());
-
-    // A swap, which needs a hidden name on the way, and one Undo reverses all.
-    let swapped = names(["b.txt", "a.txt", "d.txt"]);
-    assert_eq!(
-        moved(run(&mut engine, rename_many(&batch, swapped))).len(),
-        3
-    );
-    assert_eq!(read(&files.join("a.txt")), "changed since");
-    moved(run(&mut engine, Request::Undo));
-    assert_eq!(read(&files.join("b.txt")), "changed since");
-    assert!(files.join("c.txt").exists() && !files.join("d.txt").exists());
-}
-
-#[test]
-fn a_batch_rename_numbers_in_the_order_given_keeps_extensions_and_undoes_whole() {
-    let (_dir, files, mut engine) = engine();
-    let [c, a, b, notes] = touch(&files, &["c.jpg", "a.png", "b.jpg", "txt notes.txt"])
-        .try_into()
-        .unwrap();
-    let folder = files.join("v1.2");
-    std::fs::create_dir(&folder).unwrap();
-    let batch = [c.as_path(), &a, &folder, &b];
-    let plan = rename::Plan::new(&batch.map(Path::to_path_buf), &numbered("Trip", 3));
-    let shown: Vec<&str> = plan.rows.iter().map(|row| row.name.as_str()).collect();
-    assert_eq!(
-        shown,
-        ["Trip 001.jpg", "Trip 002.png", "Trip 003", "Trip 004.jpg"]
-    );
-    assert!(plan.rows.iter().all(|row| row.status == rename::Status::Ok));
-    assert!(c.exists(), "a preview changes nothing");
-    let renamed = moved(run(&mut engine, rename_many(&batch, numbered("Trip", 3))));
-    assert_eq!(renamed[0], files.join("Trip 001.jpg"));
-    assert_eq!(read(&files.join("Trip 002.png")), "a.png");
-
-    let only_stem = replacing("TXT", "md", false);
-    assert_eq!(
-        moved(run(&mut engine, rename_many(&[&notes], only_stem))),
-        [files.join("md notes.txt")]
-    );
-    let whole = replacing("txt", "md", true);
-    let plan = rename::Plan::new(&[files.join("md notes.txt")], &whole);
-    assert_eq!(plan.rows[0].name, "md notes.md");
-
-    moved(run(&mut engine, Request::Undo));
-    let undone = moved(run(&mut engine, Request::Undo));
-    assert_eq!(undone.len(), 4);
-    assert_eq!(
-        names(&files),
-        ["a.png", "b.jpg", "c.jpg", "txt notes.txt", "v1.2"]
-    );
-}
-
-#[test]
-fn a_batch_rename_shows_invalid_names_and_collisions_and_runs_only_when_asked_to_skip() {
-    let (_dir, files, mut engine) = engine();
-    let paths = touch(
-        &files,
-        &[
-            "x.txt",
-            "taken.txt",
-            "x-1.txt",
-            "x1-.txt",
-            "ab-.txt",
-            "a-B.txt",
-            "k-.txt",
-            "k.txt",
-        ],
-    );
-    let plan = rename::Plan::new(&paths, &replacing("-", "", false));
-    let status = |name: &str| {
-        let row = plan.rows.iter().find(|row| row.path == files.join(name));
-        row.unwrap().status.clone()
-    };
-    let collision = |why: &str| rename::Status::Collision(why.into());
-    assert_eq!(status("x.txt"), rename::Status::Unchanged);
-    assert_eq!(status("x-1.txt"), rename::Status::Ok);
-    let first = files.join("x-1.txt").display().to_string();
-    assert_eq!(
-        status("x1-.txt"),
-        collision(&format!("x1.txt is also the new name of {first}."))
-    );
-    // aB.txt and ab.txt are one name on a volume that ignores case.
-    assert_eq!(status("ab-.txt"), rename::Status::Ok);
-    assert!(matches!(status("a-B.txt"), rename::Status::Collision(_)));
-    // k.txt is in the batch but keeps its name, so k-.txt can't take it.
-    assert_eq!(status("k-.txt"), collision("k.txt already exists."));
-    // One é composed and one decomposed: the same name to APFS.
-    let accents = files.join("accents");
-    std::fs::create_dir(&accents).unwrap();
-    let pair = touch(&accents, &["\u{e9}-.txt", "e-\u{301}.txt"]);
-    let plan = rename::Plan::new(&pair, &replacing("-", "", false));
-    assert_eq!(plan.rows[0].status, rename::Status::Ok);
-    assert!(
-        matches!(plan.rows[1].status, rename::Status::Collision(_)),
-        "{:?}",
-        plan.rows[1]
-    );
-    let outside = rename::Plan::new(&paths[..1], &replacing("x", "taken", false));
-    assert_eq!(
-        outside.rows[0].status,
-        collision("taken.txt already exists.")
-    );
-
-    let invalid = |rule: rename::Rule, path: &Path| {
-        let plan = rename::Plan::new(&[path.to_path_buf()], &rule);
-        match &plan.rows[0].status {
-            rename::Status::Invalid(why) => why.clone(),
-            other => panic!("{other:?}"),
-        }
-    };
-    let x = files.join("x.txt");
-    assert!(invalid(replacing("x", "a/b", false), &x).contains("can't be a name"));
-    assert!(invalid(replacing("x.txt", "", true), &x).contains("can't be a name"));
-    assert!(invalid(numbered("x", 300), &x).contains("at most 255"));
-    assert!(invalid(numbered("x", 1), &files.join("gone")).contains("No such file"));
-
-    let refused = run(
-        &mut engine,
-        rename_many(&[&paths[2], &paths[3]], replacing("-", "", false)),
-    );
-    assert!(refused.unwrap_err().starts_with("Nothing was renamed:\n"));
-    assert!(files.join("x-1.txt").exists());
-    let skipping = Request::RenameMany {
-        paths: paths.clone(),
-        rule: replacing("-", "", false),
-        preview: None,
-        skip_problems: true,
-    };
-    assert_eq!(
-        moved(run(&mut engine, skipping)),
-        [files.join("x1.txt"), files.join("ab.txt")]
-    );
-    assert!(files.join("x1-.txt").exists() && files.join("k-.txt").exists());
-}
-
-#[test]
-fn a_batch_rename_untangles_cycles_and_case_changes_through_hidden_names() {
-    let (_dir, files, mut engine) = engine();
-    let [one, two] = touch(&files, &["1.txt", "2.txt"]).try_into().unwrap();
-    let three = files.join("three");
-    std::fs::create_dir(&three).unwrap();
-    let [t1, t2, t3] = touch(&three, &["1", "2", "3"]).try_into().unwrap();
-    let photo = touch(&files, &["photo.JPG"]).remove(0);
-    let swap = || rename_many(&[&two, &one], numbered("", 0));
-    let rotate = || rename_many(&[&t3, &t1, &t2], numbered("", 0));
-    let case = || rename_many(&[&photo], replacing("jpg", "jpg", true));
-    for request in [swap(), rotate(), case()] {
-        moved(run(&mut engine, request));
-    }
-    assert_eq!((read(&one), read(&two)), ("2.txt".into(), "1.txt".into()));
-    assert_eq!(
-        [&t1, &t2, &t3].map(|path| read(path)),
-        ["3", "1", "2"].map(String::from)
-    );
-    assert_eq!(names(&files), ["1.txt", "2.txt", "photo.jpg", "three"]);
-    assert_eq!(names(&three), ["1", "2", "3"]);
-
-    for _ in 0..3 {
-        moved(run(&mut engine, Request::Undo));
-    }
-    assert_eq!((read(&one), read(&two)), ("1.txt".into(), "2.txt".into()));
-    assert_eq!(
-        [&t1, &t2, &t3].map(|path| read(path)),
-        ["1", "2", "3"].map(String::from)
-    );
-    assert_eq!(names(&files), ["1.txt", "2.txt", "photo.JPG", "three"]);
-    moved(run(&mut engine, Request::Redo));
-    assert_eq!(read(&one), "2.txt");
-    assert_eq!(names(&files), ["1.txt", "2.txt", "photo.JPG", "three"]);
-}
-
-#[test]
-fn a_batch_rename_refuses_once_its_preview_is_out_of_date() {
-    let (_dir, files, mut engine) = engine();
-    let paths = touch(&files, &["a.txt", "b.txt"]);
-    let rule = numbered("n", 0);
-    let previewed = |paths: &[PathBuf], skip_problems: bool| Request::RenameMany {
-        paths: paths.to_vec(),
-        rule: rule.clone(),
-        preview: Some(rename::Plan::new(paths, &rule).fingerprint()),
-        skip_problems,
-    };
-    let edited = previewed(&paths, false);
-    std::fs::write(&paths[0], "edited").unwrap();
-    let refused = run(&mut engine, edited).unwrap_err();
-    assert!(
-        refused.contains("a.txt: changed since the preview"),
-        "{refused}"
-    );
-
-    let collided = previewed(&paths, true);
-    std::fs::write(files.join("n 2.txt"), "").unwrap();
-    let refused = run(&mut engine, collided).unwrap_err();
-    assert!(
-        refused.contains("b.txt: n 2.txt already exists."),
-        "{refused}"
-    );
-
-    let mut reordered = previewed(&paths, true);
-    if let Request::RenameMany { paths, .. } = &mut reordered {
-        paths.reverse();
-    }
-    let refused = run(&mut engine, reordered).unwrap_err();
-    assert!(refused.contains("aren't the items previewed"), "{refused}");
-
-    let mut renumbered = previewed(&paths[..1], false);
-    if let Request::RenameMany { rule, .. } = &mut renumbered {
-        *rule = numbered("other", 0);
-    }
-    let refused = run(&mut engine, renumbered).unwrap_err();
-    assert!(
-        refused.contains("a.txt: would be named other 1.txt, not n 1.txt"),
-        "{refused}"
-    );
-    assert_eq!(names(&files), ["a.txt", "b.txt", "n 2.txt"]);
-
-    assert_eq!(
-        moved(run(&mut engine, previewed(&paths[..1], false))),
-        [files.join("n 1.txt")]
-    );
-}
-
-#[test]
-fn a_batch_rename_reports_each_item_and_undoes_only_those_it_renamed() {
-    use std::os::unix::fs::PermissionsExt;
-    let (_dir, files, mut engine) = engine();
-    let locked = files.join("locked");
-    std::fs::create_dir(&locked).unwrap();
-    let free = touch(&files, &["a-1.txt"]).remove(0);
-    let stuck = touch(&locked, &["b-1.txt"]).remove(0);
-    let mode = |mode| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(mode));
-    mode(0o555).unwrap();
-    let outcome = run(
-        &mut engine,
-        rename_many(&[&free, &stuck], replacing("-1", "-2", false)),
-    );
-    mode(0o755).unwrap();
-    let outcome = outcome.unwrap();
-    assert_eq!(outcome.items[0].result, Ok(files.join("a-2.txt")));
-    let why = outcome.items[1].result.as_ref().unwrap_err();
-    assert!(
-        why.contains("b-1.txt") && why.contains("ermission"),
-        "{why}"
-    );
-    assert_eq!(
-        moved(run(&mut engine, Request::Undo)),
-        [files.join("a-1.txt")]
-    );
-    assert!(free.exists() && stuck.exists());
-}
-
-#[test]
-fn a_batch_cut_short_by_a_crash_leaves_no_hidden_names_and_undoes() {
-    // How far it got: parked the first of the cycle, then also moved the
-    // second into its place.
-    for far in [1, 2] {
-        let (dir, files, mut engine) = engine();
-        let [one, two, c] = touch(&files, &["1.txt", "2.txt", "c.txt"])
-            .try_into()
-            .unwrap();
-        let request = rename_many(&[&two, &one, &c], numbered("", 0));
-        let steps = vec![
-            renaming(&two, "1.txt"),
-            renaming(&one, "2.txt"),
-            renaming(&c, "3.txt"),
-        ];
-        let (order, temps) = route(&steps, &[0, 1, 2], true, engine.next);
-        assert_eq!(order, [1, 0, 2]);
-        let [temp] = temps.try_into().unwrap();
-        let submitted = submission(Origin::Window, request);
-        engine
-            .begin(&submitted, None, steps, Vec::new(), vec![temp.clone()])
-            .unwrap();
-        disk::rename_new(&two, &temp.path).unwrap();
-        if far == 2 {
-            disk::rename_new(&one, &two).unwrap();
-        }
-        drop(engine);
-
-        let mut engine = Engine::open(paths(dir.path())).unwrap();
-        let settled = engine.submit(submitted).unwrap();
-        assert!(settled.interrupted);
-        assert_eq!(names(&files), ["1.txt", "2.txt", "c.txt"]);
-        assert!(settled.items[2].result.is_err());
-        if far == 1 {
-            assert_eq!(read(&two), "2.txt");
-            assert!(run(&mut engine, Request::Undo).is_err());
-        } else {
-            assert_eq!(settled.items[0].result, Ok(one.clone()));
-            assert_eq!(settled.items[1].result, Ok(two.clone()));
-            assert_eq!((read(&one), read(&two)), ("2.txt".into(), "1.txt".into()));
-            moved(run(&mut engine, Request::Undo));
-            assert_eq!((read(&one), read(&two)), ("1.txt".into(), "2.txt".into()));
-            assert_eq!(names(&files), ["1.txt", "2.txt", "c.txt"]);
-        }
-    }
-}
-
-/// A batch's step renaming `from` to `to` beside it, not yet made.
-fn renaming(from: &Path, to: &str) -> Step {
-    let (id, stamp) = disk::stamp(from).unwrap();
-    Step {
-        id,
-        undone: Spot::Path(from.to_path_buf()),
-        done: Spot::Path(from.with_file_name(to)),
-        applied: false,
-        stamp,
-        keep: None,
-    }
-}
-
-#[test]
-fn a_crash_partway_round_a_three_item_cycle_puts_every_item_back() {
-    // Without and with something else taking 2's old name meanwhile.
-    for outsider in [false, true] {
-        let (dir, files, mut engine) = engine();
-        let [one, two, three] = touch(&files, &["1", "2", "3"]).try_into().unwrap();
-        // 3 to 1, 1 to 2, 2 to 3.
-        let request = rename_many(&[&three, &one, &two], numbered("", 0));
-        let steps = vec![
-            renaming(&three, "1"),
-            renaming(&one, "2"),
-            renaming(&two, "3"),
-        ];
-        let (order, temps) = route(&steps, &[0, 1, 2], true, engine.next);
-        assert_eq!(order, [2, 1, 0]);
-        let [temp] = temps.try_into().unwrap();
-        let submitted = submission(Origin::Window, request);
-        engine
-            .begin(&submitted, None, steps, Vec::new(), vec![temp.clone()])
-            .unwrap();
-        // Parked 3, then moved 2 into its place: 3's old and new names are
-        // both taken now.
-        disk::rename_new(&three, &temp.path).unwrap();
-        disk::rename_new(&two, &three).unwrap();
-        if outsider {
-            std::fs::write(&two, "outsider").unwrap();
-        }
-        drop(engine);
-
-        let mut engine = Engine::open(paths(dir.path())).unwrap();
-        let settled = engine.submit(submitted).unwrap();
-        assert!(settled.interrupted);
-        if outsider {
-            // It stays parked, but undo knows where, and finishes once 2 is
-            // free again.
-            let why = settled.items[0].result.as_ref().unwrap_err();
-            assert!(why.contains("undo puts it back"), "{why}");
-            assert!(run(&mut engine, Request::Undo).is_err());
-            std::fs::rename(&two, dir.path().join("outsider")).unwrap();
-            moved(run(&mut engine, Request::Undo));
-        }
-        assert_eq!(names(&files), ["1", "2", "3"]);
-        assert_eq!([&one, &two, &three].map(|path| read(path)), ["1", "2", "3"]);
-        assert_eq!(
-            run(&mut engine, Request::Undo).unwrap_err(),
-            "Nothing to undo."
-        );
-    }
-}
-
-/// Makes `path` immutable, so nothing can rename it, or lets it be again.
-fn immutable(path: &Path, on: bool) {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-    let flags = if on { libc::UF_IMMUTABLE } else { 0 };
-    // SAFETY: a NUL-terminated path that outlives the call.
-    assert_eq!(unsafe { libc::chflags(path.as_ptr(), flags) }, 0);
-}
-
-#[test]
-fn a_failure_partway_round_a_cycle_puts_its_items_back() {
-    let (_dir, files, mut engine) = engine();
-    let [one, two, three] = touch(&files, &["1", "2", "3"]).try_into().unwrap();
-    // 3 parks and 2 takes its name, then 1 can't move, so 3 can't go on.
-    immutable(&one, true);
-    let outcome = run(
-        &mut engine,
-        rename_many(&[&three, &one, &two], numbered("", 0)),
-    );
-    immutable(&one, false);
-    let outcome = outcome.unwrap();
-    assert!(
-        outcome.items.iter().all(|item| item.result.is_err()),
-        "{outcome:?}"
-    );
-    assert_eq!(names(&files), ["1", "2", "3"]);
-    assert_eq!([&one, &two, &three].map(|path| read(path)), ["1", "2", "3"]);
-    assert_eq!(
-        run(&mut engine, Request::Undo).unwrap_err(),
-        "Nothing to undo."
-    );
-}
-
-fn compress(paths: &[&Path]) -> Request {
-    Request::Compress {
-        paths: paths.iter().map(|path| path.to_path_buf()).collect(),
-    }
-}
-
-fn extract(archive: &Path, entries: &[&str], into: &Path, conflict: Conflict) -> Request {
-    Request::Extract {
-        archive: archive.into(),
-        entries: entries.iter().map(|entry| entry.to_string()).collect(),
-        into: into.into(),
-        conflict,
-    }
-}
-
-/// Each item under `root` in name order: its path inside, what it is, its
-/// permissions and modification time to the second, and what it holds or
-/// points to.
-fn tree(root: &Path) -> Vec<String> {
-    use std::os::unix::fs::MetadataExt;
-    let mut lines = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        let meta = std::fs::symlink_metadata(&path).unwrap();
-        let inside = path.strip_prefix(root).unwrap().display().to_string();
-        let mode = meta.mode() & 0o777;
-        lines.push(if meta.is_symlink() {
-            format!(
-                "{inside} -> {}",
-                std::fs::read_link(&path).unwrap().display()
-            )
-        } else if meta.is_dir() {
-            let mut items: Vec<PathBuf> = std::fs::read_dir(&path)
-                .unwrap()
-                .map(|item| item.unwrap().path())
-                .collect();
-            items.sort_by(|a, b| b.cmp(a));
-            pending.extend(items);
-            format!("{inside}/ {mode:o} {}", meta.mtime())
-        } else {
-            format!("{inside} {mode:o} {} {}", meta.mtime(), read(&path))
-        });
-    }
-    lines
-}
-
-/// Sets the modification time of the file or folder at `path`.
-fn modified(path: &Path, seconds: u64) {
-    File::open(path)
-        .unwrap()
-        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
-        .unwrap();
-}
-
-/// Takes the unfinished item a failure names back out of the Trash.
-pub(super) fn untrash_unfinished(why: &str, into: &Path) {
-    let (_, rest) = why
-        .split_once("went to the Trash at ")
-        .unwrap_or_else(|| panic!("{why}"));
-    untrash(Path::new(rest.trim_end_matches('.')), into);
-}
-
-#[test]
-fn a_compressed_folder_extracts_as_it_was_and_undo_trashes_each_archive_and_extraction() {
-    use std::os::unix::fs::PermissionsExt;
-    let (_dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let (src, out) = (files.join("src"), files.join("out"));
-    let proj = src.join("proj");
-    std::fs::create_dir_all(proj.join("sub")).unwrap();
-    std::fs::create_dir_all(proj.join("empty")).unwrap();
-    std::fs::create_dir(&out).unwrap();
-    for (name, text, mode) in [
-        ("a.txt", "alpha", 0o644),
-        ("run.sh", "#!/bin/sh", 0o755),
-        ("secret", "shh", 0o600),
-        ("sub/deep.txt", "deep", 0o640),
-    ] {
-        let path = proj.join(name);
-        std::fs::write(&path, text).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-        modified(&path, 1_000_000_000);
-    }
-    std::os::unix::fs::symlink("a.txt", proj.join("link")).unwrap();
-    std::fs::set_permissions(proj.join("sub"), std::fs::Permissions::from_mode(0o750)).unwrap();
-    for (folder, seconds) in [
-        ("sub", 1_100_000_000),
-        ("empty", 1_200_000_000),
-        ("", 1_300_000_000),
-    ] {
-        modified(&proj.join(folder), seconds);
-    }
-    std::fs::write(src.join("notes.md"), "notes").unwrap();
-
-    let zipped = job(&shared, compress(&[&proj]));
-    assert_eq!(zipped.state, State::Completed, "{zipped:?}");
-    let archive = src.join("proj.zip");
-    assert_eq!(zipped.tasks[0].done, Some(Done::To(archive.clone())));
-    let both = job(&shared, compress(&[&proj, &src.join("notes.md")]));
-    assert_eq!(both.tasks[0].done, Some(Done::To(src.join("Archive.zip"))));
-    let again = job(&shared, compress(&[&proj, &src.join("notes.md")]));
-    assert_eq!(
-        again.tasks[0].done,
-        Some(Done::To(src.join("Archive 2.zip")))
-    );
-    let listed: Vec<String> = crate::archives::Archive::open(&archive)
-        .unwrap()
-        .entries
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect();
-    assert_eq!(
-        listed,
-        [
-            "proj/",
-            "proj/a.txt",
-            "proj/empty/",
-            "proj/link",
-            "proj/run.sh",
-            "proj/secret",
-            "proj/sub/",
-            "proj/sub/deep.txt"
-        ]
-    );
-
-    let unpacked = job(&shared, extract(&archive, &[], &out, Conflict::Stop));
-    assert_eq!(unpacked.state, State::Completed, "{unpacked:?}");
-    assert_eq!(unpacked.tasks[0].done, Some(Done::To(out.join("proj"))));
-    assert_eq!(tree(&out.join("proj")), tree(&proj));
-    // An entry inside comes out on its own.
-    let one = job(
-        &shared,
-        extract(&archive, &["proj/sub/"], &out, Conflict::Stop),
-    );
-    assert_eq!(one.tasks[0].done, Some(Done::To(out.join("sub"))));
-    assert_eq!(tree(&out.join("sub")), tree(&proj.join("sub")));
-    assert!(!out.join("sub/../a.txt").exists());
-
-    for made in [out.join("sub"), out.join("proj")] {
-        let undone = run(&mut shared.lock(), Request::Undo).unwrap();
-        assert!(!made.exists());
-        untrash(&undone.items[0].result.clone().unwrap(), &files);
-    }
-    for _ in 0..3 {
-        let undone = run(&mut shared.lock(), Request::Undo).unwrap();
-        untrash(&undone.items[0].result.clone().unwrap(), &files);
-    }
-    assert!(!archive.exists() && !src.join("Archive.zip").exists());
-    assert_eq!(names(&src), ["notes.md", "proj"]);
-    assert_eq!(names(&out), Vec::<String>::new());
-}
-
-#[test]
-fn extracting_follows_each_conflict_choice_and_never_replaces_the_archive() {
-    let (_dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let (archive, dest) = (files.join("a.zip"), files.join("dest"));
-    crate::archives::tests::zip(
-        &archive,
-        &[
-            ("proj/", crate::archives::tests::Item::Dir),
-            ("proj/new.txt", crate::archives::tests::Item::File(b"new")),
-            ("a.zip", crate::archives::tests::Item::File(b"inner")),
-        ],
-    );
-    std::fs::create_dir_all(dest.join("proj")).unwrap();
-    std::fs::write(dest.join("proj/old.txt"), "old").unwrap();
-
-    let waiting = job(&shared, extract(&archive, &["proj"], &dest, Conflict::Stop));
-    assert_eq!(waiting.state, State::Waiting);
-    let skipped = continued(&shared, waiting.id, Some(Conflict::Skip));
-    assert!(matches!(skipped.tasks[0].done, Some(Done::Skipped(_))));
-    let both = job(
-        &shared,
-        extract(&archive, &["proj"], &dest, Conflict::KeepBoth),
-    );
-    assert_eq!(both.tasks[0].done, Some(Done::To(dest.join("proj 2"))));
-    assert_eq!(read(&dest.join("proj 2/new.txt")), "new");
-    let replaced = job(
-        &shared,
-        extract(&archive, &["proj"], &dest, Conflict::Replace),
-    );
-    assert_eq!(replaced.state, State::Completed, "{replaced:?}");
-    assert_eq!(names(&dest.join("proj")), ["new.txt"]);
-    // Undo trashes what replaced it and puts the old one back.
-    let undone = run(&mut shared.lock(), Request::Undo).unwrap();
-    assert_eq!(read(&dest.join("proj/old.txt")), "old");
-    untrash(&undone.items[0].result.clone().unwrap(), &files);
-    // An item named as the archive never replaces it.
-    let refused = job(
-        &shared,
-        extract(&archive, &["a.zip"], &files, Conflict::Replace),
-    );
-    assert!(
-        matches!(&refused.tasks[0].done, Some(Done::Failed(why)) if why.contains("can't be replaced")),
-        "{refused:?}"
-    );
-    assert!(crate::archives::Archive::open(&archive).is_ok());
-    // All of it holds two items, so they come out in one folder named for
-    // the archive, which takes a conflict choice as any item does.
-    let all = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
-    assert_eq!(all.tasks.len(), 1);
-    assert_eq!(all.tasks[0].name.as_deref(), Some("a"));
-    assert_eq!(all.tasks[0].done, Some(Done::To(dest.join("a"))));
-    assert_eq!(names(&dest.join("a")), ["a.zip", "proj"]);
-    assert_eq!(read(&dest.join("a/proj/new.txt")), "new");
-    let again = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
-    assert_eq!(again.state, State::Waiting);
-    let both = continued(&shared, again.id, Some(Conflict::KeepBoth));
-    assert_eq!(both.tasks[0].done, Some(Done::To(dest.join("a 2"))));
-    run(&mut shared.lock(), Request::Undo).unwrap();
-    assert!(!dest.join("a 2").exists() && dest.join("a").exists());
-}
-
-#[test]
-fn extracting_refuses_paths_out_of_the_destination_and_never_writes_through_a_link() {
-    use crate::archives::tests::{Item, zip};
-    let (dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let dest = files.join("dest");
-    std::fs::create_dir(&dest).unwrap();
-    for (name, why) in [("../up.txt", "climbs out"), ("/abs.txt", "absolute")] {
-        let archive = files.join("bad.zip");
-        zip(
-            &archive,
-            &[("ok.txt", Item::File(b"ok")), (name, Item::File(b"bad"))],
-        );
-        let refused = run(
-            &mut shared.lock(),
-            extract(&archive, &[], &dest, Conflict::Stop),
-        )
-        .unwrap_err();
-        assert!(refused.contains(why), "{refused}");
-        // Leaving that entry out, the rest extracts.
-        let ok = job(
-            &shared,
-            extract(&archive, &["ok.txt"], &dest, Conflict::Replace),
-        );
-        assert_eq!(ok.state, State::Completed, "{ok:?}");
-        let undone = run(&mut shared.lock(), Request::Undo).unwrap();
-        untrash(&undone.items[0].result.clone().unwrap(), &files);
-    }
-    assert!(!files.join("up.txt").exists());
-
-    // A link already in the destination leads outside; the archive makes
-    // a link to it, then writes through that.
-    let outside = dir.path().join("outside");
-    std::fs::create_dir(&outside).unwrap();
-    std::os::unix::fs::symlink(&outside, dest.join("x")).unwrap();
-    let through = files.join("through.zip");
-    zip(
-        &through,
-        &[
-            ("item/sub/l", Item::Link("../../x")),
-            ("item/sub/l/evil.txt", Item::File(b"evil")),
-        ],
-    );
-    let failed = job(&shared, extract(&through, &[], &dest, Conflict::Stop));
-    let Some(Done::Failed(why)) = &failed.tasks[0].done else {
-        panic!("{failed:?}")
-    };
-    assert!(why.contains("item/sub/l is a link that leads out"), "{why}");
-    untrash_unfinished(why, &files);
-    assert_eq!(names(&outside), Vec::<String>::new());
-    assert_eq!(names(&dest), ["x"]);
-    // A link that stays inside is made, but nothing is written through it.
-    let inside = files.join("inside.zip");
-    zip(
-        &inside,
-        &[
-            ("item/sub/", Item::Dir),
-            ("item/l", Item::Link("sub")),
-            ("item/l/evil.txt", Item::File(b"evil")),
-        ],
-    );
-    let failed = job(&shared, extract(&inside, &[], &dest, Conflict::Stop));
-    let Some(Done::Failed(why)) = &failed.tasks[0].done else {
-        panic!("{failed:?}")
-    };
-    assert!(why.contains("item/l/evil.txt goes through a link"), "{why}");
-    untrash_unfinished(why, &files);
-    assert_eq!(names(&dest), ["x"]);
-
-    let away = files.join("away.zip");
-    zip(&away, &[("item/etc", Item::Link("/etc"))]);
-    let failed = job(&shared, extract(&away, &[], &dest, Conflict::Stop));
-    let Some(Done::Failed(why)) = &failed.tasks[0].done else {
-        panic!("{failed:?}")
-    };
-    assert!(why.contains("item/etc is a link that leads out"), "{why}");
-    untrash_unfinished(why, &files);
-    assert_eq!(names(&dest), ["x"]);
-}
-
-#[test]
-fn extracting_refuses_zip_bombs_entries_it_cant_read_and_more_than_fits() {
-    use crate::archives::tests::{Item, patch, set, zip};
-    let (_dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let dest = files.join("dest");
-    std::fs::create_dir(&dest).unwrap();
-    let refused = |archive: &Path, entries: &[&str]| {
-        run(
-            &mut shared.lock(),
-            extract(archive, entries, &dest, Conflict::Stop),
-        )
-        .unwrap_err()
-    };
-
-    let bomb = files.join("bomb.zip");
-    zip(&bomb, &[("zeros", Item::File(&[0; 100]))]);
-    patch(&bomb, "zeros", |fixed, _| set(fixed, 24, 50_000_000, 4));
-    assert!(refused(&bomb, &[]).contains("as zip bombs do"));
-
-    // An entry that holds more than it says stops once it's written that.
-    let liar = files.join("liar.zip");
-    zip(&liar, &[("text", Item::File(b"hello hello hello hello"))]);
-    patch(&liar, "text", |fixed, _| set(fixed, 24, 5, 4));
-    let failed = job(&shared, extract(&liar, &[], &dest, Conflict::Stop));
-    let Some(Done::Failed(why)) = &failed.tasks[0].done else {
-        panic!("{failed:?}")
-    };
-    assert!(
-        why.contains("text holds more than the archive says"),
-        "{why}"
-    );
-    untrash_unfinished(why, &files);
-
-    let huge = files.join("huge.zip");
-    let mut writer = zip::ZipWriter::new(File::create(&huge).unwrap());
-    let options = zip::write::SimpleFileOptions::default().large_file(true);
-    writer.start_file("huge", options).unwrap();
-    writer.write_all(b"small").unwrap();
-    writer.finish().unwrap();
-    patch(&huge, "huge", |_, extra| {
-        assert_eq!(&extra[..2], &[1, 0], "the ZIP64 field comes first");
-        set(extra, 4, 1 << 60, 8);
-    });
-    let why = refused(&huge, &[]);
-    assert!(
-        why.contains("more than the") && why.contains("free there"),
-        "{why}"
-    );
-
-    let locked = files.join("locked.zip");
-    zip(
-        &locked,
-        &[
-            ("ok.txt", Item::File(b"ok")),
-            ("secret.txt", Item::File(b"secret")),
-            ("packed.txt", Item::File(b"packed")),
-        ],
-    );
-    patch(&locked, "secret.txt", |fixed, _| fixed[8] |= 1);
-    patch(&locked, "packed.txt", |fixed, _| set(fixed, 10, 14, 2));
-    let why = refused(&locked, &[]);
-    assert!(why.starts_with("Nothing was extracted from"), "{why}");
-    assert!(why.contains("secret.txt is encrypted"), "{why}");
-    assert!(why.contains("packed.txt is compressed with LZMA"), "{why}");
-    assert!(refused(&locked, &["secret.txt"]).contains("encrypted"));
-    assert!(refused(&locked, &["missing"]).contains("has no entry missing"));
-    let ok = job(
-        &shared,
-        extract(&locked, &["ok.txt"], &dest, Conflict::Stop),
-    );
-    assert_eq!(ok.tasks[0].done, Some(Done::To(dest.join("ok.txt"))));
-    assert_eq!(names(&dest), ["ok.txt"]);
-}
-
-#[test]
-fn an_extraction_cut_short_by_a_crash_trashes_what_it_left_unfinished() {
-    use crate::archives::tests::{Item, zip};
-    let (dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let (archive, dest) = (files.join("a.zip"), files.join("dest"));
-    std::fs::create_dir(&dest).unwrap();
-    zip(
-        &archive,
-        &[
-            ("proj/a.txt", Item::File(b"a")),
-            ("proj/b.txt", Item::File(b"b")),
-        ],
-    );
-    let op = run(
-        &mut shared.lock(),
-        extract(&archive, &[], &dest, Conflict::Stop),
-    )
-    .unwrap()
-    .op;
-    // The owner records the hidden folder, writes one entry into it, and
-    // dies.
-    let temp = dest.join(format!(".monodrive-{op}-0"));
-    let mut work = shared.lock().job_mut(op).unwrap().work[0].clone();
-    work.to = Some(dest.join("proj"));
-    work.temp = Some(temp.clone());
-    shared
-        .lock()
-        .write(&Record::Work { op, index: 0, work })
-        .unwrap();
-    std::fs::create_dir(&temp).unwrap();
-    std::fs::write(temp.join("a.txt"), "a").unwrap();
-    drop(shared);
-
-    let shared = jobs::Shared::new(Engine::open(paths(dir.path())).unwrap(), None);
-    let settled = status(&shared, op);
-    assert_eq!(settled.state, State::Interrupted);
-    let Some(Done::Failed(why)) = &settled.tasks[0].done else {
-        panic!("{settled:?}")
-    };
-    assert!(
-        why.contains("The unfinished extraction went to the Trash"),
-        "{why}"
-    );
-    untrash_unfinished(why, &files);
-    assert_eq!(names(&dest), Vec::<String>::new());
-    // Continued, it extracts again from the start.
-    let done = continued(&shared, op, None);
-    assert_eq!(done.tasks[0].done, Some(Done::To(dest.join("proj"))));
-    assert_eq!(names(&dest.join("proj")), ["a.txt", "b.txt"]);
-}
-
-#[test]
-fn replace_never_trashes_a_folder_holding_the_source_through_an_alias_or_a_change_of_case() {
-    use crate::archives::tests::{Item, zip};
-    let (_dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let real = files.join("real");
-    std::fs::create_dir_all(real.join("sub")).unwrap();
-    std::fs::create_dir_all(real.join("a")).unwrap();
-    let archive = real.join("sub/input.zip");
-    zip(
-        &archive,
-        &[("sub/", Item::Dir), ("sub/x.txt", Item::File(b"x"))],
-    );
-    let source = real.join("a/a");
-    std::fs::write(&source, "a").unwrap();
-    std::os::unix::fs::symlink(&real, files.join("alias")).unwrap();
-    // An alias of real, and real spelled in another case on a volume that
-    // ignores case: sub there holds the archive, and a holds a/a.
-    for into in [files.join("alias"), files.join("REAL")] {
-        for request in [
-            extract(&archive, &["sub"], &into, Conflict::Replace),
-            copy(&[&source], &into, Conflict::Replace),
-            transfer(&[&source], &into, Conflict::Replace),
-        ] {
-            let refused = job(&shared, request);
-            assert!(
-                matches!(&refused.tasks[0].done, Some(Done::Failed(why)) if why.contains("can't be replaced")),
-                "{refused:?}"
-            );
-        }
-        assert_eq!(read(&source), "a");
-        assert!(crate::archives::Archive::open(&archive).is_ok());
-    }
-    // The archive named through a link of its own: its real folder is still
-    // spared.
-    let link = files.join("alias.zip");
-    std::os::unix::fs::symlink(&archive, &link).unwrap();
-    let refused = job(&shared, extract(&link, &["sub"], &real, Conflict::Replace));
-    assert!(
-        matches!(&refused.tasks[0].done, Some(Done::Failed(why)) if why.contains("can't be replaced")),
-        "{refused:?}"
-    );
-    assert!(crate::archives::Archive::open(&archive).is_ok());
-}
-
-#[test]
-fn an_extracted_link_never_climbs_so_no_chain_of_links_leads_out() {
-    use crate::archives::tests::{Item, zip};
-    let (_dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let dest = files.join("dest");
-    std::fs::create_dir(&dest).unwrap();
-    for (links, refused) in [
-        // root/b goes through root/a, which leads to dest.
-        (&[("root/a", ".."), ("root/b", "a/..")][..], "root/a"),
-        (
-            &[("root/sub/a", ".."), ("root/sub/b", "a/../..")][..],
-            "root/sub/a",
-        ),
-        (
-            &[("root/sub/A", ".."), ("root/sub/b", "a/../..")][..],
-            "root/sub/A",
-        ),
-        // σ and ς are one name where case is ignored, which lowercasing
-        // can't tell: root/l climbs through root/sub/σ.
-        (
-            &[("root/sub/σ", ".."), ("root/l", "sub/ς/../..")][..],
-            "root/sub/σ",
-        ),
-        (
-            &[("root/l", "sub/ς/../.."), ("root/sub/σ", "..")][..],
-            "root/l",
-        ),
-        (
-            &[("root/c", "sub/a/x"), ("root/sub/a", "..")][..],
-            "root/sub/a",
-        ),
-        // Stays inside as written, but climbs all the same.
-        (&[("root/x", "sub/../y")][..], "root/x"),
-        // Beside dest's other items, where the archive doesn't decide what's there.
-        (&[("top", "x")][..], "top"),
-    ] {
-        let archive = files.join("links.zip");
-        let items: Vec<(&str, Item)> = links
-            .iter()
-            .map(|(name, to)| (*name, Item::Link(to)))
-            .collect();
-        zip(&archive, &items);
-        let failed = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
-        let Some(Done::Failed(why)) = &failed.tasks[0].done else {
-            panic!("{links:?}: {failed:?}")
-        };
-        assert!(
-            why.contains(&format!("{refused} is a link that leads out")),
-            "{why}"
-        );
-        if why.contains("went to the Trash") {
-            untrash_unfinished(why, &files);
-        }
-        assert_eq!(names(&dest), Vec::<String>::new());
-    }
-    // Pointing down into the link's own folder is fine, through another
-    // link too.
-    let archive = files.join("fine.zip");
-    zip(
-        &archive,
-        &[
-            ("root/sub/f.txt", Item::File(b"f")),
-            ("root/l", Item::Link("sub/f.txt")),
-            ("root/m", Item::Link("./l")),
-        ],
-    );
-    let done = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
-    assert_eq!(done.state, State::Completed, "{done:?}");
-    assert_eq!(read(&dest.join("root/m")), "f");
-}
-
-#[test]
-fn entries_that_are_one_path_once_extracted_refuse_the_item_before_anything_is_written() {
-    use crate::archives::tests::{Item, zip};
-    let (_dir, files, engine) = engine();
-    let shared = jobs::Shared::new(engine, None);
-    let dest = files.join("dest");
-    std::fs::create_dir(&dest).unwrap();
-    for (entries, named) in [
-        (&[("a", "one"), ("./a", "two")][..], "a and ./a"),
-        (
-            &[("d/B.txt", "one"), ("d//b.txt", "two")][..],
-            "d/B.txt and d//b.txt",
-        ),
-        // One name to a volume that ignores case: lowercasing misses σ and ς.
-        (
-            &[("d/σ.txt", "one"), ("d/ς.txt", "two")][..],
-            "d/σ.txt and d/ς.txt",
-        ),
-        (
-            &[("d/\u{c4}.txt", "one"), ("d/a\u{308}.txt", "two")][..],
-            "d/\u{c4}.txt and d/a\u{308}.txt",
-        ),
-        (
-            &[("d/\u{212a}.txt", "one"), ("d/k.txt", "two")][..],
-            "d/\u{212a}.txt and d/k.txt",
-        ),
-        (
-            &[("d/\u{1e9e}.txt", "one"), ("d/\u{df}.txt", "two")][..],
-            "d/\u{1e9e}.txt and d/\u{df}.txt",
-        ),
-    ] {
-        let archive = files.join("twice.zip");
-        let items: Vec<(&str, Item)> = entries
-            .iter()
-            .map(|(name, text)| (*name, Item::File(text.as_bytes())))
-            .collect();
-        zip(&archive, &items);
-        let failed = job(&shared, extract(&archive, &[], &dest, Conflict::Stop));
-        let Some(Done::Failed(why)) = &failed.tasks[0].done else {
-            panic!("{entries:?}: {failed:?}")
-        };
-        if why.contains("went to the Trash") {
-            untrash_unfinished(why, &files);
-        }
-        assert!(why.contains(named), "{why}");
-        assert!(!why.contains("Trash"), "nothing was written: {why}");
-        assert_eq!(names(&dest), Vec::<String>::new());
-    }
-}
-
 #[test]
 fn agent_changes_say_who_changed_what_lately_and_need_no_owner() {
     let dir = tempfile::tempdir().unwrap();
@@ -2934,7 +1644,7 @@ fn removing_a_worktree_trashes_it_and_its_registration_and_undo_brings_it_back()
 }
 
 /// What a copy should keep of an item: everything but its name.
-fn about(path: &Path, with_time: bool) -> String {
+pub(super) fn about(path: &Path, with_time: bool) -> String {
     use std::os::darwin::fs::MetadataExt as _;
     use std::os::unix::fs::MetadataExt as _;
     let meta = std::fs::symlink_metadata(path).unwrap();
@@ -2979,7 +1689,7 @@ fn about(path: &Path, with_time: bool) -> String {
 
 /// What a copy should keep of the folder `root`, without its time, which
 /// copyfile doesn't keep, and of each item inside it, by path.
-fn kept(root: &Path) -> Vec<(PathBuf, String)> {
+pub(super) fn kept(root: &Path) -> Vec<(PathBuf, String)> {
     let mut out = vec![(PathBuf::from("."), about(root, false))];
     let mut folders = vec![root.to_path_buf()];
     while let Some(folder) = folders.pop() {
@@ -3099,4 +1809,30 @@ fn a_whole_folder_clone_keeps_what_copyfile_keeps() {
         std::os::unix::fs::PermissionsExt::from_mode(0o644),
     )
     .unwrap();
+}
+
+/// Takes the unfinished item a failure names back out of the Trash.
+pub(super) fn untrash_unfinished(why: &str, into: &Path) {
+    let (_, rest) = why
+        .split_once("went to the Trash at ")
+        .unwrap_or_else(|| panic!("{why}"));
+    untrash(Path::new(rest.trim_end_matches('.')), into);
+}
+
+/// Sets the modification time of the file or folder at `path`.
+pub(super) fn modified(path: &Path, seconds: u64) {
+    File::open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+        .unwrap();
+}
+
+/// What's in `folder`, by name, as the disk spells them.
+pub(super) fn names(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|item| item.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
