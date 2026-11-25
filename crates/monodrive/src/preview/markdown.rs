@@ -30,6 +30,20 @@ pub struct Inline {
     pub links: Vec<(Range<usize>, String)>,
 }
 
+impl Block {
+    /// The words it shows: none for a picture or a rule.
+    pub fn text(&self) -> &str {
+        match self {
+            Block::Heading(_, inline)
+            | Block::Paragraph(inline)
+            | Block::Item(_, _, inline)
+            | Block::Quote(inline) => &inline.text,
+            Block::Code(text, _) => text,
+            Block::Image(_) | Block::Rule => "",
+        }
+    }
+}
+
 /// Parses `source`; relative images resolve against `folder`.
 pub fn parse(source: &str, folder: &Path) -> Vec<Block> {
     let mut blocks = Vec::new();

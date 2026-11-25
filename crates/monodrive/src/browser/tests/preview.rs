@@ -115,15 +115,51 @@ fn the_preview_takes_the_panes_list_and_gives_it_back(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn text_dragged_over_or_selected_all_in_the_preview_copies(cx: &mut TestAppContext) {
+    let (_dir, project) = folder();
+    std::fs::write(project.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    let (browser, cx) = browse(&project, cx);
+    press(cx, "alt-down space");
+    assert!(drawn(cx, "preview-text"));
+    let copied = |cx: &mut VisualTestContext| {
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default()
+    };
+    press(cx, "cmd-a cmd-c");
+    assert_eq!(copied(cx), "one\ntwo\nthree");
+    // The keys stayed on the list, which still has its one file selected.
+    assert_eq!(shown(&browser, cx).1, ["a.txt"]);
+    // A drag from the start of the first line to past the end of the second,
+    // with the keys in the search field: the press brings them back. Rows
+    // start below the list's 12 pt of padding.
+    press(cx, "cmd-f");
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+    let text = cx.debug_bounds("preview-text").unwrap();
+    let row = |n: f32| text.top() + px(12. + (theme::ROW_HEIGHT - 8.) * (n + 0.5));
+    let from = gpui::point(text.left() + px(1.), row(0.));
+    let to = gpui::point(text.right() - px(1.), row(1.));
+    cx.simulate_mouse_down(from, MouseButton::Left, with(""));
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), with(""));
+    cx.simulate_mouse_up(to, MouseButton::Left, with(""));
+    press(cx, "cmd-c");
+    assert_eq!(copied(cx), "one\ntwo");
+}
+
+#[gpui::test]
 fn an_env_file_opens_with_its_values_blurred(cx: &mut TestAppContext) {
     let (_dir, project) = folder();
     std::fs::write(project.join("y.env"), "KEY=secret\n").unwrap();
-    std::fs::write(project.join("z.env"), "KEY=secret\n").unwrap();
+    std::fs::write(project.join("z.env"), "KEY=secret\n# note\n").unwrap();
     let (browser, cx) = browse(&project, cx);
     press(cx, "alt-down");
     assert_eq!(shown(&browser, cx).1, ["z.env"]);
     press(cx, "space");
     assert!(drawn(cx, "preview-secret"));
+    // What shows can be copied, and what's blurred can't.
+    press(cx, "cmd-a cmd-c");
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied.as_deref(), Some("KEY=\n# note"));
     let reveal = cx.debug_bounds("preview-reveal").unwrap().center();
     cx.simulate_click(reveal, with(""));
     assert!(!drawn(cx, "preview-secret"));
