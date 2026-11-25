@@ -50,7 +50,9 @@ fn by_extension(extension: &str) -> Kind {
         | "xml" | "ini" | "cfg" | "conf" | "env" | "rs" | "py" | "js" | "jsx" | "mjs" | "ts"
         | "tsx" | "go" | "c" | "h" | "cc" | "cpp" | "hpp" | "m" | "mm" | "swift" | "java"
         | "kt" | "rb" | "php" | "sh" | "bash" | "zsh" | "fish" | "css" | "scss" | "sql" | "lua"
-        | "pl" | "r" | "vue" | "svelte" | "gitignore" | "lock" => Kind::Text,
+        | "pl" | "r" | "vue" | "svelte" | "gitignore" | "gitattributes" | "gitmodules" | "lock" => {
+            Kind::Text
+        }
         _ => Kind::System,
     }
 }
@@ -340,6 +342,7 @@ mod tests {
         assert_eq!(kind("a.zip"), Kind::Zip);
         assert_eq!(kind("a.rs"), Kind::Text);
         assert_eq!(kind(".gitignore"), Kind::Text);
+        assert_eq!(kind(".gitattributes"), Kind::Text);
         assert_eq!(kind("Makefile"), Kind::Text);
         assert_eq!(kind(".env"), Kind::Env);
         assert_eq!(kind(".env.local"), Kind::Env);

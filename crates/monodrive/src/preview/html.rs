@@ -1,26 +1,20 @@
-//! An HTML file in a `WKWebView`, treated as untrusted input: JavaScript off, no
-//! website data kept, every request but `file:` blocked, read access limited to
-//! its own folder, and no navigation but the first load.
+//! An HTML file in a `WKWebView`, drawn as a browser would, scripts and remote
+//! styles included, but kept to itself: no website data kept, no new windows,
+//! file read access limited to its own folder, and no navigation but the first
+//! load.
 
 use crate::native_view::Host;
-use block2::RcBlock;
 use gpui::Window;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSRect, NSString, NSURL};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSRect, NSString, NSURL};
 use objc2_web_kit::{
-    WKContentRuleList, WKContentRuleListStore, WKNavigationAction, WKNavigationActionPolicy,
-    WKNavigationDelegate, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use std::cell::Cell;
 use std::path::Path;
-
-/// Blocks every request, then lets `file:` back in: read access limits those.
-const OFFLINE: &str = r#"[
-    {"trigger": {"url-filter": ".*"}, "action": {"type": "block"}},
-    {"trigger": {"url-filter": "^file:"}, "action": {"type": "ignore-previous-rules"}}
-]"#;
 
 /// The file allowed, and whether its one load has happened.
 struct GuardState {
@@ -85,8 +79,7 @@ pub struct Page {
 }
 
 impl Page {
-    /// `None` off the main thread, as in tests. The page loads once the rules
-    /// that keep it offline are in place, and never without them.
+    /// `None` off the main thread, as in tests.
     pub fn new(path: &Path, window: &Window) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let file = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
@@ -102,12 +95,9 @@ impl Page {
         });
         // SAFETY: NSObject's designated initializer.
         let guard: Retained<Guard> = unsafe { msg_send![super(guard), init] };
-        // SAFETY: on the main thread, and the block below keeps what it uses.
+        // SAFETY: on the main thread.
         unsafe {
             let config = WKWebViewConfiguration::new(mtm);
-            config
-                .defaultWebpagePreferences()
-                .setAllowsContentJavaScript(false);
             config
                 .preferences()
                 .setJavaScriptCanOpenWindowsAutomatically(false);
@@ -118,24 +108,7 @@ impl Page {
                 &config,
             );
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*guard)));
-            let loading = web.clone();
-            let compiled = RcBlock::new(move |rules: *mut WKContentRuleList, _: *mut NSError| {
-                // WebKit passes a valid list or null, on the main thread.
-                let Some(rules) = rules.as_ref() else {
-                    return;
-                };
-                loading
-                    .configuration()
-                    .userContentController()
-                    .addContentRuleList(rules);
-                loading.loadFileURL_allowingReadAccessToURL(&file, &folder);
-            });
-            WKContentRuleListStore::defaultStore(mtm)?
-                .compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
-                    Some(&NSString::from_str("monodrive-preview-offline")),
-                    Some(&NSString::from_str(OFFLINE)),
-                    Some(&compiled),
-                );
+            web.loadFileURL_allowingReadAccessToURL(&file, &folder);
             Some(Self {
                 host: Host::new(web, true, window)?,
                 _guard: guard,
@@ -164,12 +137,5 @@ mod tests {
         ] {
             assert!(!allowed(other, file, true, false), "{other}");
         }
-    }
-
-    #[test]
-    fn the_rules_are_json_that_ends_on_letting_files_through() {
-        let rules: serde_json::Value = serde_json::from_str(OFFLINE).unwrap();
-        assert_eq!(rules[0]["action"]["type"], "block");
-        assert_eq!(rules[1]["trigger"]["url-filter"], "^file:");
     }
 }
