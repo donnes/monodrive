@@ -34,7 +34,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSRect, NSString, NSURL};
 use objc2_quick_look_ui::QLPreviewView;
-use selection::{Caret, Selection, highlighted, word};
+use selection::{Caret, Selection, highlighted, line, word};
 use std::cell::{Cell, RefCell};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
@@ -333,13 +333,14 @@ impl PreviewView {
         cx.notify();
     }
 
-    /// The text shown, row by row, when there's text to select: values an env
-    /// file hides aren't.
+    /// The text shown, row by row, when there's text to select.
     fn shown_text(&self) -> Option<Shown> {
         match &self.body {
             Body::Text {
-                secrets: Some(_), ..
-            } if !self.revealed => None,
+                lines,
+                secrets: Some(secrets),
+                ..
+            } if !self.revealed => Some(Shown::Hiding(lines.clone(), secrets.clone())),
             Body::Text { lines, pretty, .. } => Some(Shown::Lines(match pretty {
                 Some(pretty) if self.prettified => pretty.clone(),
                 _ => lines.clone(),
@@ -353,7 +354,7 @@ impl PreviewView {
     }
 
     /// A press at `at`: a click places the start, a double click takes the
-    /// word and a triple click the row, and Shift extends what's selected.
+    /// word and a triple click the line, and Shift extends what's selected.
     fn press_text(&mut self, at: Caret, clicks: usize, extend: bool, cx: &mut Context<Self>) {
         let Some(shown) = self.shown_text() else {
             return;
@@ -378,7 +379,7 @@ impl PreviewView {
             }
             (1, _) => Selection::at(at),
             (2, _) => row(word(text, at.offset)),
-            _ => row(0..text.len()),
+            _ => row(line(text, at.offset)),
         });
         self.dragging_text = clicks == 1;
         cx.notify();
@@ -1403,13 +1404,15 @@ fn zip_rows(path: &Path) -> Body {
 /// Text a preview shows as rows, for selecting and copying.
 enum Shown {
     Lines(Arc<Vec<Line>>),
+    /// An env file's lines, each up to the value it hides.
+    Hiding(Arc<Vec<Line>>, Secrets),
     Blocks(Arc<Vec<Block>>),
 }
 
 impl Shown {
     fn len(&self) -> usize {
         match self {
-            Shown::Lines(lines) => lines.len(),
+            Shown::Lines(lines) | Shown::Hiding(lines, _) => lines.len(),
             Shown::Blocks(blocks) => blocks.len(),
         }
     }
@@ -1417,6 +1420,14 @@ impl Shown {
     fn text(&self, row: usize) -> &str {
         match self {
             Shown::Lines(lines) => lines.get(row).map_or("", |line| &line.text),
+            Shown::Hiding(lines, secrets) => {
+                lines
+                    .get(row)
+                    .map_or("", |line| match secrets.get(row).cloned().flatten() {
+                        Some(secret) => &line.text[..secret.start],
+                        None => &line.text,
+                    })
+            }
             Shown::Blocks(blocks) => blocks.get(row).map_or("", Block::text),
         }
     }
@@ -1497,43 +1508,41 @@ fn text_rows(
     let digits = lines.len().max(1).ilog10() as usize + 1;
     let rows = list(state, move |ix, _, _| {
         let line = &lines[ix];
-        let mut laid_out = None;
-        let text =
-            match hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone()) {
-                Some(secret) => {
-                    let key = &line.text[..secret.start];
-                    let mut seed = DefaultHasher::new();
-                    (ix, key).hash(&mut seed);
-                    let shown: Spans = line
-                        .spans
-                        .iter()
-                        .filter(|(range, _)| range.start < secret.start)
-                        .map(|(range, kind)| (range.start..range.end.min(secret.start), *kind))
-                        .collect();
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .child(div().max_w_full().child(
-                            StyledText::new(key.to_string()).with_highlights(colors(&shown)),
-                        ))
-                        .child(
-                            div()
-                                .h(px(theme::ROW_HEIGHT - 8.))
-                                .child(blurred(seed.finish())),
-                        )
-                        .into_any_element()
-                }
-                None => {
-                    let styles = colors(&line.spans);
-                    let styles = match &selecting {
-                        Some(selecting) => selecting.paint(ix, line.text.len(), styles),
-                        None => styles,
-                    };
-                    let text = StyledText::new(line.text.clone()).with_highlights(styles);
-                    laid_out = Some(text.layout().clone());
-                    text.into_any_element()
-                }
-            };
+        let secret = hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone());
+        // A hidden value's line shows up to the value, then a blur.
+        let end = secret
+            .as_ref()
+            .map_or(line.text.len(), |secret| secret.start);
+        let shown = &line.text[..end];
+        let spans: Spans = line
+            .spans
+            .iter()
+            .filter(|(range, _)| range.start < end)
+            .map(|(range, kind)| (range.start..range.end.min(end), *kind))
+            .collect();
+        let styles = match &selecting {
+            Some(selecting) => selecting.paint(ix, end, colors(&spans)),
+            None => colors(&spans),
+        };
+        let styled = StyledText::new(shown.to_string()).with_highlights(styles);
+        let layout = styled.layout().clone();
+        let text = match secret {
+            Some(_) => {
+                let mut seed = DefaultHasher::new();
+                (ix, shown).hash(&mut seed);
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .child(div().max_w_full().child(styled))
+                    .child(
+                        div()
+                            .h(px(theme::ROW_HEIGHT - 8.))
+                            .child(blurred(seed.finish())),
+                    )
+                    .into_any_element()
+            }
+            None => styled.into_any_element(),
+        };
         let row = div()
             .w_full()
             .px_3()
@@ -1547,9 +1556,9 @@ fn text_rows(
                     .child(format!("{:>digits$}", ix + 1)),
             )
             .child(div().flex_1().min_w_0().child(text));
-        match (&selecting, laid_out) {
-            (Some(selecting), Some(layout)) => selecting.row(ix, layout, row).into_any_element(),
-            _ => row.into_any_element(),
+        match &selecting {
+            Some(selecting) => selecting.row(ix, layout, row).into_any_element(),
+            None => row.into_any_element(),
         }
     })
     .size_full()
@@ -1600,11 +1609,12 @@ fn blurred(seed: u64) -> impl IntoElement {
 }
 
 /// `inline`'s text with its styles, and where it's laid out. `paint` adds to
-/// the styles.
+/// the styles. A link doesn't open from a press that selected text in `view`.
 fn inline_text(
     id: (&'static str, usize),
     inline: &Inline,
     paint: impl Fn(Spanned) -> Spanned,
+    view: Option<WeakEntity<PreviewView>>,
 ) -> (gpui::AnyElement, TextLayout) {
     let mut spans: Spanned = Vec::new();
     for range in &inline.bold {
@@ -1662,6 +1672,17 @@ fn inline_text(
     let ranges: Vec<_> = links.iter().map(|(range, _)| range.clone()).collect();
     let text = InteractiveText::new(id, styled)
         .on_click(ranges, move |ix, _, cx| {
+            let selecting = view
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
+                .is_some_and(|view| {
+                    view.read(cx)
+                        .selected
+                        .is_some_and(|selected| !selected.is_empty())
+                });
+            if selecting {
+                return;
+            }
             let url = &links[ix].1;
             // Only out to the browser, and only when clicked.
             if url.starts_with("https://") || url.starts_with("http://") {
@@ -1683,9 +1704,10 @@ fn block(
         Some(selecting) => selecting.paint(ix, block.text().len(), styles),
         None => styles,
     };
+    let view = || selecting.map(|selecting| selecting.view.clone());
     match block {
         Block::Heading(level, inline) => {
-            let (text, layout) = inline_text(id, inline, paint);
+            let (text, layout) = inline_text(id, inline, paint, view());
             let heading = div()
                 .pt_3()
                 .pb_1()
@@ -1699,11 +1721,11 @@ fn block(
             (heading.into_any_element(), Some(layout))
         }
         Block::Paragraph(inline) => {
-            let (text, layout) = inline_text(id, inline, paint);
+            let (text, layout) = inline_text(id, inline, paint, view());
             (div().pb_2().child(text).into_any_element(), Some(layout))
         }
         Block::Quote(inline) => {
-            let (text, layout) = inline_text(id, inline, paint);
+            let (text, layout) = inline_text(id, inline, paint, view());
             let quote = div()
                 .pb_2()
                 .pl_3()
@@ -1714,7 +1736,7 @@ fn block(
             (quote.into_any_element(), Some(layout))
         }
         Block::Item(marker, depth, inline) => {
-            let (text, layout) = inline_text(id, inline, paint);
+            let (text, layout) = inline_text(id, inline, paint, view());
             let item = div()
                 .pb_1()
                 .pl(px(16. * *depth as f32))
@@ -1933,6 +1955,10 @@ impl Render for PreviewView {
                     this.dragging_text = false;
                     cx.stop_propagation();
                 }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.dragging_text = false),
             )
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .flex_1()

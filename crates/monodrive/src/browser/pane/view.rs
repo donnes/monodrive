@@ -1478,6 +1478,13 @@ impl Pane {
                     this.context_click(None, event.position, window, cx)
                 }),
             )
+            // The preview keeps presses from the list, but the keys still come
+            // back to it, so ⌘C copies the text pressed on.
+            .when(self.preview.is_some() && !self.preview_typing, |d| {
+                d.capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                    this.focus_list(window, cx);
+                }))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {

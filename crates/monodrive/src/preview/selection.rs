@@ -100,6 +100,16 @@ pub fn word(text: &str, offset: usize) -> Range<usize> {
     start..end
 }
 
+/// The line around `offset`, for text that runs over several.
+pub fn line(text: &str, offset: usize) -> Range<usize> {
+    let offset = offset.min(text.len());
+    let start = text[..offset].rfind('\n').map_or(0, |ix| ix + 1);
+    let end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |ix| offset + ix);
+    start..end
+}
+
 /// `styles`, sorted and apart, with `selected` painted `background` over them.
 pub fn highlighted(
     styles: Vec<(Range<usize>, HighlightStyle)>,
@@ -164,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn a_word_is_letters_spaces_or_one_mark() {
+    fn a_word_is_letters_spaces_or_one_mark_and_a_line_ends_at_breaks() {
         let text = "let café = a.b;";
         assert_eq!(&text[word(text, 5)], "café");
         assert_eq!(&text[word(text, 3)], " ");
@@ -172,6 +182,9 @@ mod tests {
         // At the end, the word before.
         assert_eq!(&text[word(text, text.len())], ";");
         assert_eq!(word("", 0), 0..0);
+        let code = "fn a() {\n    b();\n}";
+        assert_eq!(&code[line(code, 12)], "    b();");
+        assert_eq!(&code[line(code, 0)], "fn a() {");
     }
 
     #[test]
