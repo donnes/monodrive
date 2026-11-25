@@ -28,10 +28,10 @@ use crate::thumbnails::{self, Thumb};
 use crate::{file_icons, home};
 use gpui::prelude::*;
 use gpui::{
-    AnyWindowHandle, App, Bounds, ClickEvent, Context, DispatchPhase, Div, Entity, FocusHandle,
-    Focusable, FontWeight, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, ScrollStrategy, ScrollWheelEvent, Subscription, Window, canvas, div, px,
-    uniform_list,
+    AnyWindowHandle, App, Bounds, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, Entity,
+    FocusHandle, Focusable, FontWeight, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollStrategy, ScrollWheelEvent, Subscription, Window, canvas,
+    div, px, uniform_list,
 };
 use monodrive_core::cloud::CloudFolder;
 use monodrive_core::entries::{Sort, SortBy};
@@ -1356,14 +1356,33 @@ impl Pane {
                 }
             }))
             .on_action(cx.listener(|this, _: &text_field::SelectAll, _, cx| {
+                if let Some(preview) = this.preview.clone()
+                    && preview.update(cx, |preview, cx| preview.select_all_text(cx))
+                {
+                    return;
+                }
                 this.selection.select_all(&this.entries);
                 cx.notify();
             }))
             // Copy and Paste are AppKit's actions, as Select All is: here
-            // they're files. Leaving one out turns its menu item off.
-            .when(!self.selection.is_empty() && writable, |d| {
-                d.on_action(cx.listener(|this, _: &text_field::Copy, _, cx| this.copy_files(cx)))
-            })
+            // they're files, or the text selected in the preview. Leaving one
+            // out turns its menu item off.
+            .when(
+                self.preview.is_some() || (!self.selection.is_empty() && writable),
+                |d| {
+                    d.on_action(cx.listener(move |this, _: &text_field::Copy, _, cx| {
+                        let text = this
+                            .preview
+                            .as_ref()
+                            .and_then(|p| p.read(cx).selected_text());
+                        match text {
+                            Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                            None if writable && !this.selection.is_empty() => this.copy_files(cx),
+                            None => {}
+                        }
+                    }))
+                },
+            )
             .when(can_make_here, |d| {
                 d.on_action(cx.listener(|this, _: &text_field::Paste, window, cx| {
                     this.paste(false, window, cx)

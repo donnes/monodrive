@@ -5,6 +5,7 @@
 mod html;
 mod markdown;
 mod media;
+mod selection;
 mod syntax;
 mod tools;
 mod zoom;
@@ -16,10 +17,10 @@ use crate::downloads::{self, Changed, State};
 use crate::native_view::Host;
 use crate::theme::{self, ButtonLook, content, danger, text_button};
 use gpui::{
-    App, Asset, Bounds, Context, FontWeight, HighlightStyle, InteractiveText, ListAlignment,
-    ListState, MouseButton, Pixels, RenderImage, Role, SharedString, StyledText, Subscription,
-    Task, Toggled, UniformListScrollHandle, Window, canvas, div, list, prelude::*, px,
-    uniform_list,
+    App, Asset, Bounds, Context, CursorStyle, Div, FontWeight, HighlightStyle, InteractiveText,
+    ListAlignment, ListState, MouseButton, Pixels, RenderImage, Role, SharedString, StyledText,
+    Subscription, Task, TextLayout, Toggled, UniformListScrollHandle, WeakEntity, Window, canvas,
+    div, list, prelude::*, px, uniform_list,
 };
 use html::Page;
 use markdown::{Block, Inline};
@@ -33,6 +34,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSRect, NSString, NSURL};
 use objc2_quick_look_ui::QLPreviewView;
+use selection::{Caret, Selection, highlighted, word};
 use std::cell::{Cell, RefCell};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
@@ -149,6 +151,10 @@ pub struct PreviewView {
     blocks: Option<ListState>,
     /// The text's or Markdown source's scrolling.
     lines: Option<ListState>,
+    /// What's selected of the text shown.
+    selected: Option<Selection>,
+    /// A press in the text is dragging out `selected`.
+    dragging_text: bool,
     /// The edit row's width, which decides what fits in it.
     row_width: Rc<Cell<f32>>,
     /// The system's view, and the file it's on.
@@ -197,6 +203,8 @@ impl PreviewView {
             scroll: UniformListScrollHandle::new(),
             blocks: None,
             lines: None,
+            selected: None,
+            dragging_text: false,
             row_width: Rc::new(Cell::new(0.)),
             native: Rc::new(RefCell::new(None)),
             player: Rc::new(RefCell::new(None)),
@@ -296,6 +304,7 @@ impl PreviewView {
         self.show_source = false;
         self.revealed = false;
         self.prettified = false;
+        self.selected = None;
         self.zoom = Zoom::default();
         self.want_actual = false;
         self.panning = None;
@@ -322,6 +331,90 @@ impl PreviewView {
             self.show(&path, folder, position, cx);
         }
         cx.notify();
+    }
+
+    /// The text shown, row by row, when there's text to select: values an env
+    /// file hides aren't.
+    fn shown_text(&self) -> Option<Shown> {
+        match &self.body {
+            Body::Text {
+                secrets: Some(_), ..
+            } if !self.revealed => None,
+            Body::Text { lines, pretty, .. } => Some(Shown::Lines(match pretty {
+                Some(pretty) if self.prettified => pretty.clone(),
+                _ => lines.clone(),
+            })),
+            Body::Markdown { source, .. } if self.show_source || self.blocks.is_none() => {
+                Some(Shown::Lines(source.clone()))
+            }
+            Body::Markdown { blocks, .. } => Some(Shown::Blocks(blocks.clone())),
+            _ => None,
+        }
+    }
+
+    /// A press at `at`: a click places the start, a double click takes the
+    /// word and a triple click the row, and Shift extends what's selected.
+    fn press_text(&mut self, at: Caret, clicks: usize, extend: bool, cx: &mut Context<Self>) {
+        let Some(shown) = self.shown_text() else {
+            return;
+        };
+        let text = shown.text(at.row);
+        let row = |range: Range<usize>| {
+            Selection::between(
+                Caret {
+                    row: at.row,
+                    offset: range.start,
+                },
+                Caret {
+                    row: at.row,
+                    offset: range.end,
+                },
+            )
+        };
+        self.selected = Some(match (clicks, self.selected) {
+            (1, Some(mut selected)) if extend => {
+                selected.head = at;
+                selected
+            }
+            (1, _) => Selection::at(at),
+            (2, _) => row(word(text, at.offset)),
+            _ => row(0..text.len()),
+        });
+        self.dragging_text = clicks == 1;
+        cx.notify();
+    }
+
+    fn drag_text(&mut self, to: Caret, cx: &mut Context<Self>) {
+        if let Some(selected) = self.selected.as_mut().filter(|_| self.dragging_text)
+            && selected.head != to
+        {
+            selected.head = to;
+            cx.notify();
+        }
+    }
+
+    /// Selects all the text shown. False when there's none to select.
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(shown) = self.shown_text() else {
+            return false;
+        };
+        let last = shown.len().saturating_sub(1);
+        self.selected = Some(Selection::between(
+            Caret::default(),
+            Caret {
+                row: last,
+                offset: shown.text(last).len(),
+            },
+        ));
+        cx.notify();
+        true
+    }
+
+    /// The text selected, if any is.
+    pub fn selected_text(&self) -> Option<String> {
+        let selected = self.selected.filter(|selected| !selected.is_empty())?;
+        let shown = self.shown_text()?;
+        Some(selected.text(|ix| shown.text(ix)))
     }
 
     /// A sheet or menu opened or closed over this.
@@ -468,6 +561,7 @@ impl PreviewView {
                         .debug_selector(|| "preview-source".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.show_source = !this.show_source;
+                            this.selected = None;
                             cx.notify();
                         })),
                 )
@@ -485,6 +579,7 @@ impl PreviewView {
                         .debug_selector(|| "preview-reveal".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.revealed = !this.revealed;
+                            this.selected = None;
                             cx.notify();
                         })),
                 )
@@ -506,6 +601,7 @@ impl PreviewView {
                         .child("Prettify")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.prettified = !this.prettified;
+                            this.selected = None;
                             let shown = if this.prettified { pretty } else { original };
                             this.lines = Some(ListState::new(shown, ListAlignment::Top, px(400.)));
                             cx.notify();
@@ -1304,8 +1400,78 @@ fn zip_rows(path: &Path) -> Body {
     }
 }
 
+/// Text a preview shows as rows, for selecting and copying.
+enum Shown {
+    Lines(Arc<Vec<Line>>),
+    Blocks(Arc<Vec<Block>>),
+}
+
+impl Shown {
+    fn len(&self) -> usize {
+        match self {
+            Shown::Lines(lines) => lines.len(),
+            Shown::Blocks(blocks) => blocks.len(),
+        }
+    }
+
+    fn text(&self, row: usize) -> &str {
+        match self {
+            Shown::Lines(lines) => lines.get(row).map_or("", |line| &line.text),
+            Shown::Blocks(blocks) => blocks.get(row).map_or("", Block::text),
+        }
+    }
+}
+
+/// What the rows of shown text need to be selected: the view to tell, and
+/// what's selected now.
+#[derive(Clone)]
+struct Selecting {
+    view: WeakEntity<PreviewView>,
+    selected: Option<Selection>,
+}
+
+impl Selecting {
+    /// `styles` for row `row`, `len` bytes long, with what's selected of it
+    /// painted over them.
+    fn paint(&self, row: usize, len: usize, styles: Spanned) -> Spanned {
+        let selected = self.selected.and_then(|selected| selected.in_row(row, len));
+        highlighted(styles, selected, theme::accent().opacity(0.35))
+    }
+
+    /// `element`, row `row`, selecting the text laid out in `layout` as it's
+    /// pressed and dragged.
+    fn row(&self, row: usize, layout: TextLayout, element: Div) -> Div {
+        let caret = move |layout: &TextLayout, at| Caret {
+            row,
+            offset: layout
+                .index_for_position(at)
+                .unwrap_or_else(|nearest| nearest),
+        };
+        let (pressed, dragged) = (self.view.clone(), self.view.clone());
+        let pressed_layout = layout.clone();
+        element
+            .cursor(CursorStyle::IBeam)
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                let at = caret(&pressed_layout, event.position);
+                let (clicks, extend) = (event.click_count, event.modifiers.shift);
+                pressed
+                    .update(cx, |this, cx| this.press_text(at, clicks, extend, cx))
+                    .ok();
+            })
+            .on_mouse_move(move |event, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    let at = caret(&layout, event.position);
+                    dragged.update(cx, |this, cx| this.drag_text(at, cx)).ok();
+                }
+            })
+    }
+}
+
+/// Styles over ranges of a text, sorted and apart.
+type Spanned = Vec<(Range<usize>, HighlightStyle)>;
+
 /// What `spans` say each piece of code is, in the palette's colors.
-fn colors(spans: &Spans) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+fn colors(spans: &Spans) -> Spanned {
     spans
         .iter()
         .map(|(range, kind)| {
@@ -1322,6 +1488,7 @@ fn colors(spans: &Spans) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
 fn text_rows(
     lines: Arc<Vec<Line>>,
     hidden: Option<Secrets>,
+    selecting: Option<Selecting>,
     state: Option<ListState>,
 ) -> gpui::AnyElement {
     let Some(state) = state else {
@@ -1330,6 +1497,7 @@ fn text_rows(
     let digits = lines.len().max(1).ilog10() as usize + 1;
     let rows = list(state, move |ix, _, _| {
         let line = &lines[ix];
+        let mut laid_out = None;
         let text =
             match hidden.as_ref().and_then(|hidden| hidden.get(ix)?.clone()) {
                 Some(secret) => {
@@ -1355,11 +1523,18 @@ fn text_rows(
                         )
                         .into_any_element()
                 }
-                None => StyledText::new(line.text.clone())
-                    .with_highlights(colors(&line.spans))
-                    .into_any_element(),
+                None => {
+                    let styles = colors(&line.spans);
+                    let styles = match &selecting {
+                        Some(selecting) => selecting.paint(ix, line.text.len(), styles),
+                        None => styles,
+                    };
+                    let text = StyledText::new(line.text.clone()).with_highlights(styles);
+                    laid_out = Some(text.layout().clone());
+                    text.into_any_element()
+                }
             };
-        div()
+        let row = div()
             .w_full()
             .px_3()
             .flex()
@@ -1371,8 +1546,11 @@ fn text_rows(
                     .text_color(content(0.65))
                     .child(format!("{:>digits$}", ix + 1)),
             )
-            .child(div().flex_1().min_w_0().child(text))
-            .into_any_element()
+            .child(div().flex_1().min_w_0().child(text));
+        match (&selecting, laid_out) {
+            (Some(selecting), Some(layout)) => selecting.row(ix, layout, row).into_any_element(),
+            _ => row.into_any_element(),
+        }
     })
     .size_full()
     .py_3();
@@ -1421,8 +1599,14 @@ fn blurred(seed: u64) -> impl IntoElement {
         }))
 }
 
-fn inline_text(id: (&'static str, usize), inline: &Inline) -> gpui::AnyElement {
-    let mut spans: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
+/// `inline`'s text with its styles, and where it's laid out. `paint` adds to
+/// the styles.
+fn inline_text(
+    id: (&'static str, usize),
+    inline: &Inline,
+    paint: impl Fn(Spanned) -> Spanned,
+) -> (gpui::AnyElement, TextLayout) {
+    let mut spans: Spanned = Vec::new();
     for range in &inline.bold {
         spans.push((
             range.clone(),
@@ -1470,12 +1654,13 @@ fn inline_text(id: (&'static str, usize), inline: &Inline) -> gpui::AnyElement {
         }
         keep
     });
-    let styled = StyledText::new(inline.text.clone()).with_highlights(spans);
+    let styled = StyledText::new(inline.text.clone()).with_highlights(paint(spans));
+    let layout = styled.layout().clone();
     if links.is_empty() {
-        return styled.into_any_element();
+        return (styled.into_any_element(), layout);
     }
     let ranges: Vec<_> = links.iter().map(|(range, _)| range.clone()).collect();
-    InteractiveText::new(id, styled)
+    let text = InteractiveText::new(id, styled)
         .on_click(ranges, move |ix, _, cx| {
             let url = &links[ix].1;
             // Only out to the browser, and only when clicked.
@@ -1483,67 +1668,93 @@ fn inline_text(id: (&'static str, usize), inline: &Inline) -> gpui::AnyElement {
                 cx.open_url(url);
             }
         })
-        .into_any_element()
+        .into_any_element();
+    (text, layout)
 }
 
-fn block(ix: usize, block: &Block) -> gpui::AnyElement {
+/// Block `ix` and, when it has text, where that's laid out.
+fn block(
+    ix: usize,
+    block: &Block,
+    selecting: Option<&Selecting>,
+) -> (gpui::AnyElement, Option<TextLayout>) {
     let id = ("markdown", ix);
+    let paint = |styles| match selecting {
+        Some(selecting) => selecting.paint(ix, block.text().len(), styles),
+        None => styles,
+    };
     match block {
-        Block::Heading(level, inline) => div()
-            .pt_3()
-            .pb_1()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_size(px(match level {
-                1 => theme::TEXT_TITLE + 4.,
-                2 => theme::TEXT_TITLE + 2.,
-                _ => theme::TEXT_TITLE,
-            }))
-            .child(inline_text(id, inline))
-            .into_any_element(),
-        Block::Paragraph(inline) => div()
-            .pb_2()
-            .child(inline_text(id, inline))
-            .into_any_element(),
-        Block::Quote(inline) => div()
-            .pb_2()
-            .pl_3()
-            .border_l_2()
-            .border_color(content(0.12))
-            .text_color(content(0.65))
-            .child(inline_text(id, inline))
-            .into_any_element(),
-        Block::Item(marker, depth, inline) => div()
-            .pb_1()
-            .pl(px(16. * *depth as f32))
-            .flex()
-            .gap_2()
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(content(0.65))
-                    .child(marker.clone()),
-            )
-            .child(div().min_w_0().child(inline_text(id, inline)))
-            .into_any_element(),
-        Block::Code(text, spans) => div()
-            .mb_2()
-            .p_2()
-            .rounded(px(theme::RADIUS_ROW))
-            .bg(content(0.06))
-            .font_family(theme::MONO_FONT)
-            .text_size(px(theme::TEXT_SMALL))
-            .child(StyledText::new(text.clone()).with_highlights(colors(spans)))
-            .into_any_element(),
-        Block::Image(path) => div()
-            .pb_2()
-            .child(
+        Block::Heading(level, inline) => {
+            let (text, layout) = inline_text(id, inline, paint);
+            let heading = div()
+                .pt_3()
+                .pb_1()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(match level {
+                    1 => theme::TEXT_TITLE + 4.,
+                    2 => theme::TEXT_TITLE + 2.,
+                    _ => theme::TEXT_TITLE,
+                }))
+                .child(text);
+            (heading.into_any_element(), Some(layout))
+        }
+        Block::Paragraph(inline) => {
+            let (text, layout) = inline_text(id, inline, paint);
+            (div().pb_2().child(text).into_any_element(), Some(layout))
+        }
+        Block::Quote(inline) => {
+            let (text, layout) = inline_text(id, inline, paint);
+            let quote = div()
+                .pb_2()
+                .pl_3()
+                .border_l_2()
+                .border_color(content(0.12))
+                .text_color(content(0.65))
+                .child(text);
+            (quote.into_any_element(), Some(layout))
+        }
+        Block::Item(marker, depth, inline) => {
+            let (text, layout) = inline_text(id, inline, paint);
+            let item = div()
+                .pb_1()
+                .pl(px(16. * *depth as f32))
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(content(0.65))
+                        .child(marker.clone()),
+                )
+                .child(div().min_w_0().child(text));
+            (item.into_any_element(), Some(layout))
+        }
+        Block::Code(text, spans) => {
+            let text = StyledText::new(text.clone()).with_highlights(paint(colors(spans)));
+            let layout = text.layout().clone();
+            let code = div()
+                .mb_2()
+                .p_2()
+                .rounded(px(theme::RADIUS_ROW))
+                .bg(content(0.06))
+                .font_family(theme::MONO_FONT)
+                .text_size(px(theme::TEXT_SMALL))
+                .child(text);
+            (code.into_any_element(), Some(layout))
+        }
+        Block::Image(path) => {
+            let image = div().pb_2().child(
                 gpui::img(path.clone())
                     .max_w_full()
                     .max_h(px(480.))
                     .object_fit(gpui::ObjectFit::ScaleDown),
-            )
-            .into_any_element(),
-        Block::Rule => div().my_2().h(px(1.)).bg(content(0.12)).into_any_element(),
+            );
+            (image.into_any_element(), None)
+        }
+        Block::Rule => (
+            div().my_2().h(px(1.)).bg(content(0.12)).into_any_element(),
+            None,
+        ),
     }
 }
 
@@ -1572,6 +1783,10 @@ impl Render for PreviewView {
         if !matches!(self.body, Body::Html) {
             self.page.borrow_mut().take();
         }
+        let selecting = self.shown_text().map(|_| Selecting {
+            view: cx.entity().downgrade(),
+            selected: self.selected,
+        });
         let content_view: gpui::AnyElement = match &self.body {
             Body::Loading => div().size_full().into_any_element(),
             Body::Notice(why) => notice(why.clone()),
@@ -1588,7 +1803,7 @@ impl Render for PreviewView {
                     Some(pretty) if self.prettified => pretty.clone(),
                     _ => lines.clone(),
                 };
-                let rows = text_rows(lines, hidden, self.lines.clone());
+                let rows = text_rows(lines, hidden, selecting, self.lines.clone());
                 div()
                     .debug_selector(|| "preview-text".into())
                     .size_full()
@@ -1611,7 +1826,7 @@ impl Render for PreviewView {
             }
             Body::Markdown { blocks, source } => {
                 if self.show_source || self.blocks.is_none() {
-                    text_rows(source.clone(), None, self.lines.clone())
+                    text_rows(source.clone(), None, selecting, self.lines.clone())
                 } else {
                     let blocks = blocks.clone();
                     let state = self
@@ -1624,10 +1839,14 @@ impl Render for PreviewView {
                         .text_size(px(theme::TEXT_BODY))
                         .child(
                             list(state, move |ix, _, _| {
-                                div()
-                                    .px_4()
-                                    .child(block(ix, &blocks[ix]))
-                                    .into_any_element()
+                                let (element, layout) = block(ix, &blocks[ix], selecting.as_ref());
+                                let row = div().px_4().child(element);
+                                match (&selecting, layout) {
+                                    (Some(selecting), Some(layout)) => {
+                                        selecting.row(ix, layout, row).into_any_element()
+                                    }
+                                    _ => row.into_any_element(),
+                                }
                             })
                             .size_full()
                             .py_2(),
@@ -1708,7 +1927,13 @@ impl Render for PreviewView {
             .debug_selector(|| "preview".into())
             // Not a press on the list, which would let go of the selection.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.dragging_text = false;
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .flex_1()
             .min_h_0()
